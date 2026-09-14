@@ -142,7 +142,7 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
 }
 
 StorageResult TableHeap::get_tuple(const RID& rid, Tuple& out_tuple) const noexcept {
-    if (!accessor_ || !rid.is_valid()) {
+    if (!accessor_ || !master_ptr_ || !rid.is_valid()) {
         return StorageResult::INVALID_ARGUMENT;
     }
 
@@ -152,8 +152,7 @@ StorageResult TableHeap::get_tuple(const RID& rid, Tuple& out_tuple) const noexc
         return fetch_res;
     }
 
-    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
-    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
     if (val_res != StorageResult::SUCCESS) {
         return val_res;
     }
@@ -177,8 +176,12 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     result.new_rid = rid;
     result.rid_changed = false;
 
-    if (!accessor_ || !rid.is_valid()) {
+    if (!accessor_ || !master_ptr_ || !rid.is_valid()) {
         result.status = StorageResult::INVALID_ARGUMENT;
+        return result;
+    }
+    if (new_tuple.size() > MAX_TUPLE_SIZE) {
+        result.status = StorageResult::TUPLE_TOO_LARGE;
         return result;
     }
 
@@ -189,8 +192,7 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
         return result;
     }
 
-    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
-    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
     if (val_res != StorageResult::SUCCESS) {
         result.status = val_res;
         return result;
@@ -234,7 +236,7 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
 }
 
 StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
-    if (!accessor_ || !rid.is_valid()) {
+    if (!accessor_ || !master_ptr_ || !rid.is_valid()) {
         return StorageResult::INVALID_ARGUMENT;
     }
 
@@ -244,8 +246,7 @@ StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
         return fetch_res;
     }
 
-    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
-    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
     if (val_res != StorageResult::SUCCESS) {
         return val_res;
     }

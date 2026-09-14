@@ -272,6 +272,11 @@ StorageResult TablePage::insert_tuple(const uint8_t* tuple_data, size_t tuple_si
 
     const uint16_t t_size = static_cast<uint16_t>(tuple_size);
     const uint16_t cur_slots = get_slot_count();
+    const uint16_t free_ptr = get_free_space_pointer();
+    const uint16_t dir_end = slot_dir_end();
+    if (free_ptr < dir_end || free_ptr > PAGE_SIZE || cur_slots > MAX_SLOT_COUNT) {
+        return StorageResult::CORRUPTED_PAGE;
+    }
 
     // 1. Check if we can reuse an internal DEAD slot
     uint16_t target_slot = cur_slots;
@@ -333,6 +338,10 @@ StorageResult TablePage::get_tuple(uint16_t slot_num, const uint8_t** out_tuple_
 
     const uint16_t offset = get_slot_offset(slot_num);
     const uint16_t len = get_slot_length(slot_num);
+    const uint16_t free_ptr = get_free_space_pointer();
+    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+        return StorageResult::CORRUPTED_PAGE;
+    }
 
     *out_tuple_data = data_ + offset;
     out_size = len;
@@ -356,6 +365,12 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
 
     const uint16_t old_offset = get_slot_offset(slot_num);
     const uint16_t old_size = get_slot_length(slot_num);
+    const uint16_t free_ptr = get_free_space_pointer();
+    if (old_offset < free_ptr || (static_cast<uint32_t>(old_offset) + old_size) > PAGE_SIZE) {
+        result.status = StorageResult::CORRUPTED_PAGE;
+        return result;
+    }
+
     const uint16_t n_size = static_cast<uint16_t>(new_size);
 
     // Case A: new_size <= old_size -> overwrite in-place
@@ -409,6 +424,13 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
 StorageResult TablePage::delete_tuple(uint16_t slot_num) noexcept {
     if (slot_num >= get_slot_count() || get_slot_state(slot_num) != SlotState::LIVE) {
         return StorageResult::SLOT_NOT_FOUND;
+    }
+
+    const uint16_t offset = get_slot_offset(slot_num);
+    const uint16_t len = get_slot_length(slot_num);
+    const uint16_t free_ptr = get_free_space_pointer();
+    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+        return StorageResult::CORRUPTED_PAGE;
     }
 
     set_slot(slot_num, SlotState::DEAD, 0, 0);

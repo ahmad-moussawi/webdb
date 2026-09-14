@@ -32,7 +32,7 @@ public:
     }
 
     StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) override {
-        if (pages_.contains(expected_page_id)) {
+        if (pages_.find(expected_page_id) != pages_.end()) {
             return StorageResult::INVALID_ARGUMENT;
         }
         pages_[expected_page_id] = std::vector<uint8_t>(PAGE_SIZE, 0);
@@ -42,14 +42,14 @@ public:
 
     StorageResult mark_dirty(page_id_t page_id) override {
         if (fail_mark_dirty) return StorageResult::IO_ERROR;
-        if (!pages_.contains(page_id)) return StorageResult::IO_ERROR;
+        if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
         dirty_pages_.insert(page_id);
         return StorageResult::SUCCESS;
     }
 
     StorageResult flush_page(page_id_t page_id) override {
         if (fail_flush) return StorageResult::IO_ERROR;
-        if (!pages_.contains(page_id)) return StorageResult::IO_ERROR;
+        if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
         dirty_pages_.erase(page_id);
         flush_history.push_back(page_id);
         return StorageResult::SUCCESS;
@@ -82,7 +82,7 @@ public:
     }
 
     bool has_page(page_id_t page_id) const {
-        return pages_.contains(page_id);
+        return pages_.find(page_id) != pages_.end();
     }
 
     uint8_t* raw_buffer(page_id_t page_id) {
@@ -300,6 +300,20 @@ void test_slotted_page() {
     TEST_ASSERT(!upd_res.rid_changed, "RID does not change on in-place shrink");
     get_res = page.get_tuple(slots[0], &out_p, out_len);
     TEST_ASSERT(out_len == 50 && out_p[0] == 0x33, "Shrunk tuple payload matches");
+
+    // 7. Corrupted slot offset protection in update_tuple, get_tuple, and delete_tuple
+    // Corrupt slot 0's offset in the slot directory to point below free_space_pointer
+    uint8_t* slot0_ptr = buffer.data() + PAGE_HEADER_SIZE;
+    endian::write_uint16(slot0_ptr, static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | 10u)); // offset = 10 (< free_space_pointer)
+
+    auto bad_upd = page.update_tuple(slots[0], smaller_t1.data(), smaller_t1.size());
+    TEST_ASSERT(bad_upd.status == StorageResult::CORRUPTED_PAGE, "update_tuple rejects corrupted slot offset");
+
+    auto bad_get = page.get_tuple(slots[0], &out_p, out_len);
+    TEST_ASSERT(bad_get == StorageResult::CORRUPTED_PAGE, "get_tuple rejects corrupted slot offset");
+
+    auto bad_del = page.delete_tuple(slots[0]);
+    TEST_ASSERT(bad_del == StorageResult::CORRUPTED_PAGE, "delete_tuple rejects corrupted slot offset");
 
     std::cout << "[PASSED] test_slotted_page" << std::endl;
 }

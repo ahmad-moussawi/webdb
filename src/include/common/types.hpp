@@ -53,6 +53,7 @@ struct RID {
     }
 
     constexpr bool operator==(const RID& other) const noexcept = default;
+    constexpr bool operator!=(const RID& other) const noexcept = default;
 };
 
 enum class StorageResult : uint8_t {
