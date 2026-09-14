@@ -1,191 +1,60 @@
-# Phase 1: Storage Format, Dual Master Pages & Slotted Pages (Detailed Technical Plan)
+# Phase 1: Storage Format, Dual Master Pages & Slotted Pages
 
-This document provides the exhaustive technical specification and implementation plan for **Phase 1** of WebDB.
-It resolves all checksum coverage rules, RID stability policies, size limits, dual-master crash recovery, and malformed page validation invariants prior to beginning code implementation.
+This document is the implementation specification for **Phase 1** of WebDB. It defines the persisted binary formats, validation rules, storage APIs, crash-consistency scope, tuple encoding, slotted-page behavior, table-heap behavior, and required tests.
 
----
-
-## 1. Architectural Decisions & Key Clarifications
-
-### 1.1 Universal Checksum Definition & Checksum Offset Rationale
-Every page uses **CRC-32 IEEE 802.3** (polynomial `0xEDB88320`, initial value `0xFFFFFFFF`, final XOR `0xFFFFFFFF`) calculated over the entire 4096 bytes with its 4-byte checksum field treated as `0x00000000`.
-
-- **Deliberate Checksum Field Placement Differences**:
-  - `MasterPage`: Checksum is at bytes `[32..35]` (`0x20..0x23`), following the fixed 32-byte database identity header.
-  - `TablePage`: Checksum is at bytes `[28..31]` (`0x1C..0x1F`), placed directly before the 4-byte reserved alignment padding field (`[32..35]`).
-  - Both headers total exactly 36 bytes.
-- **Evaluation Order on Page Read**:
-  1. Verify CRC32 checksum against computed value. If mismatched $\rightarrow$ return `StorageResult::CORRUPTED_PAGE` immediately.
-  2. Inspect format version and magic numbers.
-  3. Validate structural invariants (slot bounds, free-space pointer, non-overlapping payloads).
-
-### 1.2 Dual Master Pages for Crash-Resilient Commits (Page 0 & Page 1)
-To ensure atomic commits and crash safety across all backends:
-- **Page 0 (`Master A`)** and **Page 1 (`Master B`)** form an alternating **Dual Master Page** pair.
-- **`page_count` Semantics (Canonical Rule)**:
-  `page_count` represents the **total number of allocated pages in the database**, which also equals the **next unallocated page ID** (e.g. on init, `page_count = 2`, meaning pages 0 and 1 are allocated, and the next allocated user page ID will be 2).
-- **Initial Bootstrapping State (`init_new_database`)**:
-  - `system_tables_root = INVALID_PAGE_ID` (`-1`)
-  - `system_columns_root = INVALID_PAGE_ID` (`-1`)
-  - `system_indexes_root = INVALID_PAGE_ID` (`-1`)
-  - `page_count = 2` (pages 0 and 1 allocated; first user data page will be `page_id = 2`).
-  - Master A: `generation_id = 1`
-  - Master B: `generation_id = 0`
-- **Master Selection & Tie-Breaking Rule**:
-  1. Both valid, different generation: choose master with higher `generation_id`.
-  2. Both valid, **identical generation** (e.g. tie): **Master A (Page 0) is preferred as the canonical tie-breaker**.
-  3. One valid, one invalid: select the single valid master.
-  4. Both invalid: return `StorageResult::CORRUPTED_PAGE` (unrecoverable database error).
-- **Commit Sequence**:
-  1. Write and flush all dirty data pages to storage (`accessor.flush_page(id)`).
-  2. Issue a barrier sync (`accessor.sync()`).
-  3. Identify the inactive master slot, populate with `generation_id = active_gen + 1`, and calculate CRC32.
-  4. Write inactive master, flush (`accessor.flush_page(inactive_id)`), and issue `accessor.sync()`.
-- If a crash occurs during step 3 or 4, the active master remains intact and valid. User data pages start at `page_id >= 2`.
-
-### 1.3 RID Stability, Update Policy & Forwarding Resolution
-- **Physical RID**: `RID = { page_id_t page_id, uint16_t slot_num }`.
-- Compaction shifts tuple payloads inside the page but **never alters slot indices**. Thus, pure compaction does not change RIDs.
-- **Update Policy & Decision Order**:
-  1. **Case A (In-Place Immediate)**: If `new_tuple_size <= old_tuple_size`, overwrite payload in-place (reclaiming excess bytes as holes) without moving any other slots (`rid_changed = false`).
-  2. **Case B (Same Page In-Place via Contiguous Gap)**: If `new_tuple_size > old_tuple_size` and `new_tuple_size - old_tuple_size <= contiguous_free_space()`, allocate new payload space at `free_space_pointer - new_tuple_size`, copy new tuple, update existing slot offset and length, mark old payload area as a dead hole, and set `HAS_HOLES` flag (`rid_changed = false`).
-  3. **Case C (Same Page via Compaction)**: If `new_tuple_size - old_tuple_size > contiguous_free_space()`, but `new_tuple_size - old_tuple_size <= total_free_space_after_compaction()`, run `defragment()` on the page, then place the new payload (`rid_changed = false`).
-  4. **Case D (Relocation to Another Page)**: If total free space on current page is insufficient, mark current slot `SlotState::DEAD`, insert new tuple on `last_page_id`, and return `UpdateResult { success: true, old_rid, new_rid, rid_changed: true }`.
-- **`SlotState::FORWARDED` Scope**:
-  - `SlotState::FORWARDED` is **reserved for Phase 3** secondary index pointer stability.
-  - In Phase 1, `FORWARDED` is rejected by `TablePage::validate()` with `StorageResult::CORRUPTED_PAGE` if encountered on disk.
-
-### 1.4 Unaligned Memory Access & WebAssembly Portability
-- **Strict Rule**:
-  - `tuple.cpp`, `slotted_page.cpp`, and `master_page.cpp` **never perform raw pointer casts to multi-byte scalar types** (`reinterpret_cast<int64_t*>`).
-  - All multi-byte reads and writes must pass through canonical `std::memcpy`-based endianness helpers in `src/include/common/endian.hpp` (`read_int64`, `write_int64`, `read_double`, `write_double`). This prevents undefined behavior and hardware alignment faults on ARM64 and WebAssembly.
-
-### 1.5 Strict Size Limits, Safety Bounds & Invariants
-- `PAGE_SIZE = 4096` bytes.
-- `PAGE_HEADER_SIZE = 36` bytes.
-- `SLOT_ENTRY_SIZE = 4` bytes.
-- `MAX_SLOT_COUNT = 1005` ($ (4096 - 36) / 4 $).
-- **`MAX_TUPLE_SIZE = 4056` bytes** ($4096 - 36 - 4$).
-- **`MAX_COLUMNS = 256`**.
-- **`MAX_TEXT_SIZE = 4056` bytes**.
-- **`MAX_PAGES = 1048576`** (1 million pages = 4GB max supported table chain length, preventing infinite loop traversal on corrupted cycles).
-- `HAS_OVERFLOW` flag is **deferred** from Phase 1. Any tuple exceeding `MAX_TUPLE_SIZE` is strictly rejected with `StorageResult::TUPLE_TOO_LARGE`.
-- Deserialization and size calculation rules:
-  - All arithmetic `offset + length` is validated using `uint32_t` before bounds checking against `PAGE_SIZE` to prevent 16-bit wrap-around.
-
-### 1.6 Storage Growth Terminology & Explicit Free-Space Formulas
-- **Slot directory**: Starts at byte 36 and grows **upward** (toward higher byte addresses).
-- **Tuple payloads**: Placed at bottom of page and grow **downward** from byte 4096 (toward lower byte addresses).
-- **Free space**: The gap between end of slot directory and lowest tuple payload (`free_space_pointer`).
-
-#### Exact Mathematical Formulas:
-$$\text{slot\_dir\_end} = \text{PAGE\_HEADER\_SIZE} + (\text{slot\_count} \times \text{SLOT\_ENTRY\_SIZE})$$
-$$\text{AllocatedPayloadBytes} = \text{PAGE\_SIZE} - \text{free\_space\_pointer}$$
-$$\text{LivePayloadBytes} = \sum_{i \in \text{LIVE}} \text{slot}[i].\text{length}$$
-$$\text{contiguous\_free\_space}() = \begin{cases} \text{free\_space\_pointer} - \text{slot\_dir\_end} & \text{if } \text{free\_space\_pointer} \ge \text{slot\_dir\_end} \\ 0 & \text{otherwise} \end{cases}$$
-$$\text{reclaimable\_hole\_space}() = \text{AllocatedPayloadBytes} - \text{LivePayloadBytes}$$
-$$\text{total\_free\_space\_after\_compaction}() = \text{contiguous\_free\_space}() + \text{reclaimable\_hole\_space}()$$
-
-#### Compaction (Defragmentation) Ordering & Trailing Slot Pruning:
-- Compaction maintains **exact slot indices** for all live tuples.
-- **Payload physical order** is packed consecutively downward from byte 4096 in ascending slot index order ($i = 0, 1, 2 \dots$).
-- **Internal dead slots** remain at their existing index with `offset = 0`, `length = 0`, `state = DEAD`.
-- **Trailing dead slots** at the end of the slot array are pruned:
-  $$\text{new\_slot\_count} = \begin{cases} \max \big\{ i \mid \text{slot}[i].\text{state} == \text{LIVE} \big\} + 1 & \text{if any live slots exist} \\ 0 & \text{if all slots dead} \end{cases}$$
-
-### 1.7 Concurrency & Single-Threaded Core
-Phase 1 (and the core engine) is strictly **single-threaded**. No mutexes, condition variables, or atomic primitives are used in the storage layer. All concurrency protection is enforced at the Web Worker event loop boundary.
-
-### 1.8 `IPageAccessor` Lifecycle & Ownership Contract
-```cpp
-class IPageAccessor {
-public:
-    virtual ~IPageAccessor() = default;
-
-    // Returns a raw pointer to the 4096-byte memory buffer of the page.
-    // The pointer remains valid as long as the page is resident in memory.
-    // Throws or returns nullptr on fatal I/O failure.
-    virtual uint8_t* fetch_page(page_id_t page_id) = 0;
-
-    // Allocates a new append-only page ID (page_id = page_count++).
-    virtual page_id_t allocate_page() = 0;
-
-    // Caller MUST invoke mark_dirty() after modifying any bytes in the returned page buffer.
-    virtual void mark_dirty(page_id_t page_id) = 0;
-
-    // Flushes dirty page to storage backend.
-    virtual void flush_page(page_id_t page_id) = 0;
-
-    // Issues a durable storage barrier (e.g. sync/flush).
-    virtual void sync() = 0;
-};
-```
-- In Phase 1, page allocation is strictly **append-only** (`page_count++`). Page reuse via free-lists is deferred.
-- Memory ownership remains with the accessor implementation. Pointers returned by `fetch_page` remain valid until database shutdown or buffer eviction (which only occurs starting in Phase 2).
-
-### 1.9 Text Encoding, Overlaps & NULL Field Policy
-- **UTF-8 Validation**: Text fields are validated for well-formed UTF-8 **both** on input (when constructing `Value` or `Tuple`) and during `Tuple::deserialize()`. Malformed UTF-8 returns `StorageResult::INVALID_ARGUMENT`.
-- **Text Comparisons**: Strictly bytewise (`std::string_view::compare`), no normalization, case-sensitive identifiers.
-- **Empty Strings**: Fully supported (`var_length = 0`). For empty strings, `var_offset` points to the current payload position without consuming bytes.
-- **Text Payload Overlaps**: Overlapping variable-length text ranges within a tuple are **strictly forbidden** and rejected by `Tuple::deserialize` with `StorageResult::SCHEMA_MISMATCH`.
-- **NULL Field Determinism**: When a column is marked NULL in `NullBitmap`, its 8-byte fixed-width field and any corresponding text bytes must be **zeroed out** on serialization to guarantee deterministic binary page comparisons in tests.
-
-### 1.10 Error Handling & Status Codes
-All Phase 1 storage operations return structured error codes rather than throwing exceptions:
-```cpp
-enum class StorageResult : uint8_t {
-    SUCCESS = 0,
-    PAGE_FULL,
-    TUPLE_TOO_LARGE,
-    SLOT_NOT_FOUND,
-    CORRUPTED_PAGE,
-    VERSION_MISMATCH,
-    SCHEMA_MISMATCH,
-    INVALID_ARGUMENT,
-    CYCLE_DETECTED,
-    IO_ERROR
-};
-```
-If a validator encounters corrupted checksums, overlapping slots, or out-of-bounds pointers, it returns `StorageResult::CORRUPTED_PAGE`.
+Phase 1 supports fixed-size 4096-byte pages, append-only allocation, dual master pages, CRC-protected pages, slotted table pages, typed tuples, and synchronous single-threaded access.
 
 ---
 
-## 2. Directory & Header Layout
+## 1. Scope and Non-Goals
 
-```text
-src/
-├── include/
-│   ├── common/
-│   │   ├── types.hpp          # Primitives, RID, TypeId, StorageResult codes
-│   │   ├── endian.hpp         # Canonical Little-Endian memcpy-based helpers
-│   │   └── checksum.hpp       # CRC-32 IEEE 802.3 implementation
-│   └── storage/
-│       ├── page_accessor.hpp  # IPageAccessor interface
-│       ├── master_page.hpp    # Dual Master Page (Page 0 & Page 1) layout
-│       ├── slotted_page.hpp   # Slotted TablePage, compaction, slot state machine
-│       ├── tuple.hpp          # Schema, NullBitmap, binary tuple serialization
-│       ├── value.hpp          # Runtime Value variant & 3VL comparison rules
-│       └── table_heap.hpp     # Doubly-linked TablePage chain, cycle detection, iterator
-└── storage/
-    ├── master_page.cpp
-    ├── slotted_page.cpp
-    ├── tuple.cpp
-    ├── value.cpp
-    └── table_heap.cpp
-```
+### 1.1 Phase 1 Includes
+
+- 4096-byte fixed-size database pages.
+- CRC-32 IEEE 802.3 checksums on every persisted page.
+- Two alternating master pages at page IDs `0` and `1`.
+- Append-only allocation of data pages starting at page ID `2`.
+- Slotted pages with insertion, deletion, update, compaction, and trailing-slot pruning.
+- Tuple serialization for `INT`, `DOUBLE`, `TEXT`, and `NULL`.
+- UTF-8 validation for text values.
+- A synchronous, single-threaded `IPageAccessor` boundary.
+- A doubly-linked `TableHeap` and corruption-aware iterator.
+
+### 1.2 Explicit Non-Goals
+
+The following are deferred beyond Phase 1:
+
+- Transactions and concurrent writers.
+- Write-ahead logging (WAL).
+- Copy-on-write / shadow paging for data pages.
+- Recovery of torn or partially persisted data-page updates.
+- Free-page reuse.
+- Overflow pages for oversized tuples.
+- Forwarding records and stable secondary-index references.
+- Schema migrations and backward-compatible decoding of future tuple versions.
+
+### 1.3 Crash-Consistency Scope
+
+Dual master pages provide **atomic publication of master metadata**: root pointers and `page_count` are published together by alternating between Master A and Master B.
+
+Phase 1 data pages are modified in place. Therefore:
+
+- A crash during a data-page write may leave a page corrupted.
+- CRC validation detects that corruption when the page is subsequently read.
+- Phase 1 does **not** recover earlier data-page contents after a torn write.
+- “Crash-safe” in Phase 1 means master metadata selection is resilient; it does **not** mean fully transactional or recoverable atomic commits for data-page mutations.
+
+A future WAL or copy-on-write design is required before claiming recoverable atomic commits for table data.
 
 ---
 
-## 3. Component Deep Dive & Specifications
-
-### 3.1 Common Primitives & Types (`src/include/common/types.hpp`)
+## 2. Global Constants, Types, and Status Codes
 
 ```cpp
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
-#include <string_view>
+#include <cstdint>
 
 namespace webdb {
 
@@ -200,22 +69,32 @@ inline constexpr page_id_t FIRST_DATA_PAGE_ID = 2;
 inline constexpr size_t PAGE_SIZE = 4096;
 inline constexpr size_t PAGE_HEADER_SIZE = 36;
 inline constexpr size_t SLOT_ENTRY_SIZE = 4;
-inline constexpr size_t MAX_TUPLE_SIZE = PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056 bytes
+
+// floor((PAGE_SIZE - PAGE_HEADER_SIZE) / SLOT_ENTRY_SIZE) = 1015.
+inline constexpr uint16_t MAX_SLOT_COUNT = 1015;
+
+// One tuple plus one slot entry must fit in an otherwise empty TablePage.
+inline constexpr size_t MAX_TUPLE_SIZE =
+    PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056
+
 inline constexpr uint16_t MAX_COLUMNS = 256;
-inline constexpr size_t MAX_PAGES = 1048576; // 4GB max supported table chain length
+inline constexpr size_t MAX_TEXT_SIZE = MAX_TUPLE_SIZE;
+
+// Iterator corruption guard: 1,048,576 * 4096 = 4 GiB maximum chain traversal.
+inline constexpr size_t MAX_PAGES = 1'048'576;
 
 enum class TypeId : uint8_t {
     INVALID = 0,
-    INT = 1,      // 64-bit signed integer (int64_t)
-    DOUBLE = 2,   // 64-bit IEEE-754 double (double)
-    TEXT = 3      // UTF-8 string (byte-compared, no normalization)
+    INT = 1,
+    DOUBLE = 2,
+    TEXT = 3,
 };
 
 enum class SlotState : uint8_t {
-    EMPTY = 0,     // Slot unused (trailing directory space)
-    LIVE = 1,      // Active valid tuple
-    DEAD = 2,      // Deleted tuple; space reclaimable
-    FORWARDED = 3  // Reserved for Phase 3 secondary index relocation
+    EMPTY = 0,     // Never valid inside [0, slot_count) on disk in Phase 1.
+    LIVE = 1,      // Contains a readable tuple payload.
+    DEAD = 2,      // Deleted/replaced tuple; payload region is reclaimable.
+    FORWARDED = 3, // Reserved for Phase 3; invalid on disk in Phase 1.
 };
 
 struct RID {
@@ -229,13 +108,6 @@ struct RID {
     constexpr bool operator==(const RID& other) const noexcept = default;
 };
 
-struct UpdateResult {
-    bool success{false};
-    RID old_rid{};
-    RID new_rid{};
-    bool rid_changed{false};
-};
-
 enum class StorageResult : uint8_t {
     SUCCESS = 0,
     PAGE_FULL,
@@ -246,354 +118,835 @@ enum class StorageResult : uint8_t {
     SCHEMA_MISMATCH,
     INVALID_ARGUMENT,
     CYCLE_DETECTED,
-    IO_ERROR
+    IO_ERROR,
+};
+
+struct UpdateResult {
+    StorageResult status{StorageResult::INVALID_ARGUMENT};
+    RID old_rid{};
+    RID new_rid{};
+    bool rid_changed{false};
+
+    constexpr bool success() const noexcept {
+        return status == StorageResult::SUCCESS;
+    }
 };
 
 } // namespace webdb
 ```
 
+All Phase 1 public storage APIs return `StorageResult` or a structure containing a `StorageResult`. They do not use exceptions for expected storage, corruption, serialization, or I/O failures.
+
 ---
 
-### 3.2 Canonical Little-Endian Serialization (`src/include/common/endian.hpp`)
+## 3. Endianness and Unaligned Access Safety
 
-To ensure complete safety against unaligned memory access faults in WebAssembly and ARM:
+All persisted multi-byte values use **little-endian** byte order.
+
+The storage implementation must not dereference unaligned typed pointers. In particular, code in `tuple.cpp`, `slotted_page.cpp`, and `master_page.cpp` must not use raw casts such as:
+
+```cpp
+reinterpret_cast<const uint64_t*>(buffer)
+reinterpret_cast<int64_t*>(buffer)
+```
+
+All multi-byte reads and writes must use `std::memcpy`-based helpers.
+
 ```cpp
 #pragma once
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
-#include <bit>
+#include <type_traits>
 
 namespace webdb::endian {
 
 template <typename T>
 inline T read_le(const uint8_t* src) noexcept {
     static_assert(std::is_trivially_copyable_v<T>);
-    T val;
-    std::memcpy(&val, src, sizeof(T));
+
+    T value;
+    std::memcpy(&value, src, sizeof(T));
+
     if constexpr (std::endian::native == std::endian::big) {
         if constexpr (sizeof(T) == 2) {
-            auto v = std::bit_cast<uint16_t>(val);
-            v = __builtin_bswap16(v);
-            return std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint16_t>(value);
+            return std::bit_cast<T>(__builtin_bswap16(bits));
         } else if constexpr (sizeof(T) == 4) {
-            auto v = std::bit_cast<uint32_t>(val);
-            v = __builtin_bswap32(v);
-            return std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint32_t>(value);
+            return std::bit_cast<T>(__builtin_bswap32(bits));
         } else if constexpr (sizeof(T) == 8) {
-            auto v = std::bit_cast<uint64_t>(val);
-            v = __builtin_bswap64(v);
-            return std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint64_t>(value);
+            return std::bit_cast<T>(__builtin_bswap64(bits));
         }
     }
-    return val;
+
+    return value;
 }
 
 template <typename T>
-inline void write_le(uint8_t* dst, T val) noexcept {
+inline void write_le(uint8_t* dst, T value) noexcept {
     static_assert(std::is_trivially_copyable_v<T>);
+
     if constexpr (std::endian::native == std::endian::big) {
         if constexpr (sizeof(T) == 2) {
-            auto v = std::bit_cast<uint16_t>(val);
-            v = __builtin_bswap16(v);
-            val = std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint16_t>(value);
+            value = std::bit_cast<T>(__builtin_bswap16(bits));
         } else if constexpr (sizeof(T) == 4) {
-            auto v = std::bit_cast<uint32_t>(val);
-            v = __builtin_bswap32(v);
-            val = std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint32_t>(value);
+            value = std::bit_cast<T>(__builtin_bswap32(bits));
         } else if constexpr (sizeof(T) == 8) {
-            auto v = std::bit_cast<uint64_t>(val);
-            v = __builtin_bswap64(v);
-            val = std::bit_cast<T>(v);
+            auto bits = std::bit_cast<uint64_t>(value);
+            value = std::bit_cast<T>(__builtin_bswap64(bits));
         }
     }
-    std::memcpy(dst, &val, sizeof(T));
+
+    std::memcpy(dst, &value, sizeof(T));
 }
 
 inline uint16_t read_uint16(const uint8_t* p) noexcept { return read_le<uint16_t>(p); }
 inline uint32_t read_uint32(const uint8_t* p) noexcept { return read_le<uint32_t>(p); }
 inline uint64_t read_uint64(const uint8_t* p) noexcept { return read_le<uint64_t>(p); }
-inline int32_t  read_int32(const uint8_t* p) noexcept  { return read_le<int32_t>(p); }
-inline int64_t  read_int64(const uint8_t* p) noexcept  { return read_le<int64_t>(p); }
-inline double   read_double(const uint8_t* p) noexcept { return read_le<double>(p); }
+inline int32_t read_int32(const uint8_t* p) noexcept { return read_le<int32_t>(p); }
+inline int64_t read_int64(const uint8_t* p) noexcept { return read_le<int64_t>(p); }
+inline double read_double(const uint8_t* p) noexcept { return read_le<double>(p); }
 
 inline void write_uint16(uint8_t* p, uint16_t v) noexcept { write_le<uint16_t>(p, v); }
 inline void write_uint32(uint8_t* p, uint32_t v) noexcept { write_le<uint32_t>(p, v); }
 inline void write_uint64(uint8_t* p, uint64_t v) noexcept { write_le<uint64_t>(p, v); }
-inline void write_int32(uint8_t* p, int32_t v) noexcept   { write_le<int32_t>(p, v); }
-inline void write_int64(uint8_t* p, int64_t v) noexcept   { write_le<int64_t>(p, v); }
-inline void write_double(uint8_t* p, double v) noexcept   { write_le<double>(p, v); }
+inline void write_int32(uint8_t* p, int32_t v) noexcept { write_le<int32_t>(p, v); }
+inline void write_int64(uint8_t* p, int64_t v) noexcept { write_le<int64_t>(p, v); }
+inline void write_double(uint8_t* p, double v) noexcept { write_le<double>(p, v); }
 
 } // namespace webdb::endian
 ```
 
 ---
 
-### 3.3 Checksum Specification (`src/include/common/checksum.hpp`)
+## 4. Checksums
 
-```cpp
-#pragma once
+### 4.1 Algorithm
 
-#include <cstdint>
-#include <cstddef>
-#include <span>
+Every master and table page uses **CRC-32 IEEE 802.3**:
 
-namespace webdb::checksum {
+- Reflected polynomial: `0xEDB88320`
+- Initial value: `0xFFFFFFFF`
+- Final XOR: `0xFFFFFFFF`
 
-// Standard CRC-32 IEEE 802.3 implementation (polynomial 0xEDB88320)
-uint32_t crc32(const uint8_t* data, size_t length) noexcept;
+The checksum always covers all 4096 bytes of the page while treating the page’s checksum field as four zero bytes.
 
-// Computes 4096-byte page checksum with the 4-byte checksum field masked to zero
-uint32_t compute_page_checksum(const uint8_t* page_data, size_t checksum_field_offset) noexcept;
-
-} // namespace webdb::checksum
+```text
+CRC32(page) = CRC32(all 4096 page bytes, checksum bytes replaced by 0x00)
 ```
+
+### 4.2 Checksum Field Offsets
+
+| Page Type | Checksum Bytes | Offset |
+|---|---:|---:|
+| MasterPage | `[32..35]` | `0x20..0x23` |
+| TablePage | `[28..31]` | `0x1C..0x1F` |
+
+### 4.3 Validation Order
+
+Whenever a persisted page is read:
+
+1. Verify the page CRC.
+2. If it fails, return `StorageResult::CORRUPTED_PAGE`.
+3. Validate page magic/version/page size where applicable.
+4. Validate page-specific structural invariants.
+
+Checksum validation always precedes interpretation of variable offsets, tuple lengths, slot entries, or page links.
 
 ---
 
-### 3.4 Dual Master Pages Specification (`src/include/storage/master_page.hpp`)
+## 5. Page Accessor and Allocation Contract
 
-#### In-Memory Data Model:
+```cpp
+class IPageAccessor {
+public:
+    virtual ~IPageAccessor() = default;
+
+    // Retrieves a mutable pointer to exactly PAGE_SIZE bytes.
+    // The accessor owns the memory. The pointer remains valid until database
+    // shutdown in Phase 1; Phase 1 has no eviction.
+    virtual StorageResult fetch_page(
+        page_id_t page_id,
+        uint8_t** out_page) = 0;
+
+    // Allocates and zero-initializes the specified append-only page ID.
+    // The caller supplies the ID from its pending MasterData.page_count.
+    virtual StorageResult allocate_page(
+        page_id_t expected_page_id,
+        uint8_t** out_page) = 0;
+
+    // Marks a previously fetched or allocated page dirty after byte mutation.
+    virtual StorageResult mark_dirty(page_id_t page_id) = 0;
+
+    // Persists the dirty page to the underlying backend.
+    virtual StorageResult flush_page(page_id_t page_id) = 0;
+
+    // Requests a durability barrier from the backend.
+    virtual StorageResult sync() = 0;
+};
+```
+
+### 5.1 Ownership and Mutation Rules
+
+- The accessor owns page buffers.
+- A caller must invoke `mark_dirty(page_id)` after changing any page bytes.
+- A caller must not mutate a page buffer after a failed accessor operation.
+- A fetch of an unallocated page returns `StorageResult::IO_ERROR`.
+- `allocate_page()` must reject an ID that is not the next append-only physical page ID.
+
+### 5.2 Canonical Allocation Rule
+
+`MasterData.page_count` is the authoritative logical allocation cursor.
+
+```text
+page_count == total pages allocated == next unallocated page ID
+```
+
+To allocate a page during a pending metadata update:
+
+1. Let `new_page_id = pending_master.page_count`.
+2. Call `accessor.allocate_page(new_page_id, &buffer)`.
+3. Initialize the page and mark it dirty.
+4. Increment `pending_master.page_count`.
+5. Publish the new `page_count` only when `commit_master()` succeeds.
+
+No page IDs are reused in Phase 1.
+
+---
+
+## 6. Dual Master Pages
+
+### 6.1 Master Page IDs
+
+| Page ID | Meaning |
+|---:|---|
+| `0` | Master A |
+| `1` | Master B |
+| `>= 2` | Data pages |
+
+### 6.2 In-Memory Representation
+
 ```cpp
 struct MasterData {
     uint16_t version{1};
     uint16_t page_size{PAGE_SIZE};
     generation_id_t generation_id{0};
+
     page_id_t system_tables_root{INVALID_PAGE_ID};
     page_id_t system_columns_root{INVALID_PAGE_ID};
     page_id_t system_indexes_root{INVALID_PAGE_ID};
+
     uint32_t page_count{2};
 };
 ```
 
-#### Binary Layout (4096 bytes, Page 0 & Page 1):
-| Byte Offset | Field Name | Data Type | Description |
-| :--- | :--- | :--- | :--- |
-| `0x00 - 0x03` | `magic` | `uint32_t` | Constant `0x57454244` (`"WEBD"`) |
-| `0x04 - 0x05` | `version` | `uint16_t` | Engine format version (`1`) |
-| `0x06 - 0x07` | `page_size` | `uint16_t` | Canonical page size (`4096`) |
-| `0x08 - 0x0F` | `generation_id` | `uint64_t` | Monotonically increasing commit generation |
-| `0x10 - 0x13` | `system_tables_root` | `int32_t` | First page of `_system_tables` heap |
-| `0x14 - 0x17` | `system_columns_root`| `int32_t` | First page of `_system_columns` heap |
-| `0x18 - 0x1B` | `system_indexes_root`| `int32_t` | First page of `_system_indexes` heap |
-| `0x1C - 0x1F` | `page_count` | `uint32_t` | Total allocated pages / next unallocated page ID |
-| `0x20 - 0x23` | `checksum` | `uint32_t` | CRC32 of all 4096 bytes (bytes 0x20..0x23 zeroed during compute) |
-| `0x24 - 0xFFF` | `reserved` | `uint8_t[4060]`| Zero-filled reserved space |
+### 6.3 On-Disk Layout
 
-#### Master Page Manager Operations (`MasterPageManager`):
-- `init_new_database(IPageAccessor& accessor)`: Formats Master A with `generation = 1` and Master B with `generation = 0`.
-- `load_active_master(IPageAccessor& accessor, MasterData& out_data) -> StorageResult`:
-  - Reads Page 0 and Page 1, checks CRC32 and magic.
-  - If both valid with identical generation, selects Master A (tie-break).
-  - If both invalid, returns `StorageResult::CORRUPTED_PAGE`.
-- `commit_master(IPageAccessor& accessor, const MasterData& data) -> StorageResult`:
-  - Writes inactive master with `generation_id = active_gen + 1`, flushes, and syncs.
+| Byte Range | Field | Type | Rule |
+|---|---|---|---|
+| `0x00..0x03` | magic | `uint32_t` | `0x57454244` (`WEBD`) |
+| `0x04..0x05` | version | `uint16_t` | Must be `1` |
+| `0x06..0x07` | page_size | `uint16_t` | Must be `4096` |
+| `0x08..0x0F` | generation_id | `uint64_t` | Monotonic commit generation |
+| `0x10..0x13` | system_tables_root | `int32_t` | Valid data page ID or invalid |
+| `0x14..0x17` | system_columns_root | `int32_t` | Valid data page ID or invalid |
+| `0x18..0x1B` | system_indexes_root | `int32_t` | Valid data page ID or invalid |
+| `0x1C..0x1F` | page_count | `uint32_t` | At least `2` |
+| `0x20..0x23` | checksum | `uint32_t` | CRC field |
+| `0x24..0xFFF` | reserved | bytes | Must be all zero |
 
----
+### 6.4 Initialization
 
-### 3.5 Slotted TablePage Specification (`src/include/storage/slotted_page.hpp`)
+`init_new_database()` must create **two fully valid, checksummed master pages**:
 
-`TablePage` manages the physical storage of tuples within a single 4096-byte block.
+| Master | Generation | `page_count` |
+|---|---:|---:|
+| Master A | `1` | `2` |
+| Master B | `0` | `2` |
 
-#### 36-Byte Header Layout:
-| Offset | Name | Type | Invariant / Validation Rule |
-| :--- | :--- | :--- | :--- |
-| `0x00 - 0x03` | `page_id` | `int32_t` | Must match requested `page_id >= 2` |
-| `0x04 - 0x07` | `prev_page_id` | `int32_t` | Valid page ID or `INVALID_PAGE_ID` |
-| `0x08 - 0x0B` | `next_page_id` | `int32_t` | Valid page ID or `INVALID_PAGE_ID` |
-| `0x0C - 0x0D` | `slot_count` | `uint16_t` | $0 \le \text{slot\_count} \le \text{MAX\_SLOT\_COUNT}$ |
-| `0x0E - 0x0F` | `free_space_pointer` | `uint16_t` | $36 + (\text{slot\_count} \times 4) \le \text{ptr} \le 4096$ |
-| `0x10 - 0x17` | `generation_id` | `uint64_t` | Generation that created this immutable page state |
-| `0x18 - 0x1B` | `flags` | `uint32_t` | Bit 0: `HAS_HOLES`. Bits 1–31 must be 0 |
-| `0x1C - 0x1F` | `checksum` | `uint32_t` | CRC32 of all 4096 bytes (bytes 0x1C..0x1F zeroed during compute) |
-| `0x20 - 0x23` | `reserved` | `uint32_t` | Reserved alignment padding (must be 0) |
+Both masters have all system roots set to `INVALID_PAGE_ID`.
 
-#### 4-Byte Slot Entry Layout & Transitions:
+### 6.5 Master Validation
+
+A valid master requires:
+
+- Valid CRC.
+- Correct magic.
+- Version `1`.
+- Page size `4096`.
+- `page_count >= 2`.
+- All reserved bytes equal zero.
+- Each non-invalid root satisfies:
+
 ```text
-Bit 15-14: SlotState (EMPTY = 0, LIVE = 1, DEAD = 2, FORWARDED = 3)
-Bit 13:    Reserved (0)
-Bit 12-0:  Byte Offset within page (0..4095)
-Byte 2-3:  Payload Length (uint16_t, 1..4056 for LIVE; 0 for DEAD/EMPTY)
+FIRST_DATA_PAGE_ID <= root < page_count
 ```
 
-- **Allowed Slot State Transitions in Phase 1**:
-  - `EMPTY -> LIVE` (new tuple appended or slot initialized)
-  - `LIVE -> DEAD` (tuple deleted or relocated)
-  - `DEAD -> LIVE` (reusing internal dead slot for new tuple)
-  - Any other transition (or appearance of `FORWARDED` on disk) returns `StorageResult::CORRUPTED_PAGE`.
+### 6.6 Active Master Selection
 
-#### Structural Validation Rules (`validate()`):
-On reading a page, `validate()` enforces:
-1. CRC32 checksum matches.
-2. `page_id >= FIRST_DATA_PAGE_ID`.
-3. `prev_page_id != page_id` and `next_page_id != page_id`.
-4. `slot_dir_end() <= free_space_pointer_ <= PAGE_SIZE`.
-5. For every `LIVE` slot:
-   - `slot.offset >= free_space_pointer_`
-   - `slot.offset + slot.length <= PAGE_SIZE`
-   - `slot.length > 0` and `slot.length <= MAX_TUPLE_SIZE`
-   - Payloads do not overlap any other live slot payload.
-6. Unknown flag bits or `FORWARDED` slot states are not set.
+1. If both masters are valid and generations differ, choose the higher generation.
+2. If both are valid and generations are equal, choose Master A.
+3. If exactly one is valid, choose the valid master.
+4. If neither is valid, return `StorageResult::CORRUPTED_PAGE`.
+
+### 6.7 Master Commit Sequence
+
+Given the active master and a pending `MasterData`:
+
+1. Flush all dirty data pages.
+2. Call `sync()`.
+3. Serialize the pending metadata to the inactive master page with:
+   ```text
+   generation_id = active_generation_id + 1
+   ```
+4. Compute and write the inactive master CRC.
+5. Mark the inactive master dirty.
+6. Flush the inactive master.
+7. Call `sync()`.
+
+If the inactive master is torn or corrupt after a crash, the prior valid master remains selectable.
 
 ---
 
-### 3.6 Tuple Binary Format & Schema (`src/include/storage/tuple.hpp`)
+## 7. Table Pages and Slotted Storage
 
-#### Tuple Binary Encoding:
+### 7.1 Header Layout
+
+| Byte Range | Field | Type | Rule |
+|---|---|---|---|
+| `0x00..0x03` | page_id | `int32_t` | Matches requested page ID; must be `>= 2` |
+| `0x04..0x07` | prev_page_id | `int32_t` | Valid data page ID or invalid |
+| `0x08..0x0B` | next_page_id | `int32_t` | Valid data page ID or invalid |
+| `0x0C..0x0D` | slot_count | `uint16_t` | `<= MAX_SLOT_COUNT` |
+| `0x0E..0x0F` | free_space_pointer | `uint16_t` | Within valid bounds |
+| `0x10..0x17` | generation_id | `uint64_t` | Reserved; must be zero in Phase 1 |
+| `0x18..0x1B` | flags | `uint32_t` | Only `HAS_HOLES` may be set |
+| `0x1C..0x1F` | checksum | `uint32_t` | CRC field |
+| `0x20..0x23` | reserved | `uint32_t` | Must be zero |
+
+`generation_id` is reserved for a later copy-on-write or versioned-page design. Since Phase 1 pages are mutable in place, it must remain zero and has no commit-version semantics.
+
+### 7.2 Slot Layout
+
+Each slot is four bytes:
+
 ```text
-+-----------------------------------------------------------------------------------------------+
-| FormatVersion (1B) | Flags (1B) | NumColumns (2B) | NullBitmap (ceil(N/8) B)                 |
-+-----------------------------------------------------------------------------------------------+
-| Fixed-Width Values Array (N * 8B)                                                             |
-+-----------------------------------------------------------------------------------------------+
-| Var-Length Payloads: [Raw UTF-8 Bytes for TEXT columns ...]                                   |
-+-----------------------------------------------------------------------------------------------+
+Bytes 0-1: little-endian packed metadata
+  Bits 15-14: SlotState
+  Bit 13: reserved, must be 0
+  Bits 12-0: payload byte offset within page
+
+Bytes 2-3: little-endian payload length
 ```
 
-- **`FormatVersion`**: `1`. Deserializer strictly rejects any version $\ne 1$ (`StorageResult::VERSION_MISMATCH`).
-- **`Flags`**: 8-bit reserved mask (must be `0` for Phase 1).
-- **`NumColumns`**: $N \le 256$.
-- **`NullBitmap`**: $\lceil N / 8 \rceil$ bytes. Bit $i = 1$ means column $i$ is NULL.
-- **Fixed-Width Array ($N \times 8$ bytes)**:
-  - `INT`: 8 bytes Little-Endian `int64_t`. (If NULL, zeroed).
-  - `DOUBLE`: 8 bytes IEEE-754 Little-Endian `double`. (If NULL, zeroed).
-  - `TEXT`: 8 bytes packed as `{ uint32_t var_offset, uint32_t var_length }`. (If NULL, both fields zeroed).
-- **Var-Length Payloads**: Concatenated UTF-8 bytes. Empty strings consume 0 bytes with `var_length = 0`. Non-monotonic or overlapping text ranges are strictly rejected.
+For `LIVE` slots:
 
-#### Schema Validation on Decode:
-`Tuple::deserialize(const uint8_t* data, size_t size, const Schema& schema, std::vector<Value>& out_values)` validates:
-- `size >= 4 + ceil(schema.count() / 8) + schema.count() * 8`.
-- `FormatVersion == 1`.
-- `NumColumns == schema.count()`.
-- For each column $i$:
-  - If `NullBitmap[i] == 1`: verify `schema.column(i).is_nullable`. If not nullable $\rightarrow$ reject (`SCHEMA_MISMATCH`).
-  - If `TEXT`: verify `var_offset + var_length <= total_var_length`. Verify UTF-8 byte validity.
-  - If `INT` or `DOUBLE`: decode using canonical Little-Endian helpers.
+```text
+1 <= length <= MAX_TUPLE_SIZE
+free_space_pointer <= offset
+offset + length <= PAGE_SIZE
+```
+
+For `DEAD` slots:
+
+```text
+offset == 0
+length == 0
+```
+
+`EMPTY` and `FORWARDED` are invalid inside `[0, slot_count)` in Phase 1.
+
+### 7.3 Slot Directory and Payload Rules
+
+- The slot directory begins at offset `36` and grows upward.
+- Tuple payloads grow downward from offset `4096`.
+- `free_space_pointer` identifies the lowest byte allocated to any payload.
+- Slot indices are stable through compaction.
+- New slots are appended by increasing `slot_count`.
+- Internal dead slots may be reused by a later insertion.
+- Trailing dead slots are removed during compaction.
+
+A deleted or relocated RID is not a stable external identity in Phase 1. Since dead slots may be reused, callers must not retain deleted RIDs as references to future data.
+
+### 7.4 Space Formulas
+
+```text
+slot_dir_end =
+    PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE
+
+allocated_payload_bytes =
+    PAGE_SIZE - free_space_pointer
+
+live_payload_bytes =
+    sum(length of each LIVE slot)
+
+contiguous_free_space =
+    max(0, free_space_pointer - slot_dir_end)
+
+reclaimable_hole_space =
+    allocated_payload_bytes - live_payload_bytes
+
+total_free_space_after_compaction =
+    contiguous_free_space + reclaimable_hole_space
+```
+
+### 7.5 `HAS_HOLES`
+
+`HAS_HOLES` is bit `0` in the table-page flags field.
+
+It is a strict derived invariant:
+
+```text
+HAS_HOLES is set if and only if reclaimable_hole_space > 0
+```
+
+It must be updated after:
+
+- tuple deletion;
+- shrinking in-place updates;
+- relocated updates;
+- reuse of a dead slot;
+- defragmentation.
+
+Defragmentation clears `HAS_HOLES`.
+
+### 7.6 Validation Rules
+
+`TablePage::validate(expected_page_id, page_count)` must enforce:
+
+1. Valid CRC.
+2. `page_id == expected_page_id`.
+3. `page_id >= FIRST_DATA_PAGE_ID`.
+4. `slot_count <= MAX_SLOT_COUNT`.
+5. `slot_dir_end <= free_space_pointer <= PAGE_SIZE`.
+6. `prev_page_id` and `next_page_id` are either `INVALID_PAGE_ID` or satisfy:
+   ```text
+   FIRST_DATA_PAGE_ID <= page_id < page_count
+   ```
+7. Neither page link equals the page’s own ID.
+8. `generation_id == 0`.
+9. Only `HAS_HOLES` is set in `flags`.
+10. Reserved header bytes are zero.
+11. Every slot entry has its reserved bit clear.
+12. Every slot in `[0, slot_count)` is `LIVE` or `DEAD`.
+13. Every `DEAD` slot has zero offset and zero length.
+14. Live payload ranges are within bounds and do not overlap.
+15. `HAS_HOLES` equals the derived hole-state calculation.
+
+A validation failure returns `StorageResult::CORRUPTED_PAGE`.
+
+### 7.7 Defragmentation
+
+`defragment()` must:
+
+1. Preserve every live slot index.
+2. Copy live payloads in ascending slot-index order.
+3. Pack payloads consecutively downward from `PAGE_SIZE`.
+4. Preserve exact serialized tuple bytes.
+5. Set every internal dead slot to `state = DEAD`, `offset = 0`, `length = 0`.
+6. Remove trailing dead slots.
+7. Set `free_space_pointer` to the beginning of the packed live payload region.
+8. Clear `HAS_HOLES`.
+9. Recompute and write the page checksum after mutation.
+
+After pruning:
+
+```text
+new_slot_count =
+    highest LIVE slot index + 1,
+    or 0 if no LIVE slots remain
+```
 
 ---
 
-### 3.7 Type System, Values & 3VL Comparison Policy (`src/include/storage/value.hpp`)
+## 8. Tuple Format, Schema, and Values
 
-`Value` represents an in-memory decoded scalar value supporting SQL Three-Valued Logic.
+### 8.1 Schema Model
 
-#### Text Handling Policy:
-- Input strings are validated for UTF-8 conformity on insertion and deserialization.
-- String comparisons use exact bytewise comparison (`std::string_view::compare`).
-- No Unicode normalization or collation transforms applied in core engine.
-- Identifiers are strictly case-sensitive.
-
-#### Exact `INT` vs `DOUBLE` Comparison Algorithm:
 ```cpp
-inline std::optional<bool> compare_int_double(int64_t i, double d) {
-    if (std::isnan(d)) return std::nullopt; // UNKNOWN in 3VL
-    
-    if (d > static_cast<double>(std::numeric_limits<int64_t>::max())) return false;
-    if (d < static_cast<double>(std::numeric_limits<int64_t>::min())) return false;
-    
-    double int_part;
-    if (std::modf(d, &int_part) != 0.0) return false;
-    
-    return i == static_cast<int64_t>(d);
+struct Column {
+    TypeId type{TypeId::INVALID};
+    bool is_nullable{false};
+};
+
+class Schema {
+public:
+    size_t count() const noexcept;
+    const Column& column(size_t index) const;
+};
+```
+
+A schema is valid only when:
+
+- `1 <= count() <= MAX_COLUMNS`;
+- every column has type `INT`, `DOUBLE`, or `TEXT`;
+- no column has `TypeId::INVALID`.
+
+### 8.2 Value Model
+
+`Value` represents one of:
+
+- SQL `NULL`;
+- `int64_t`;
+- `double`;
+- UTF-8 `std::string`.
+
+A non-null `Value` must match the associated schema column type. Mismatched input values return `StorageResult::SCHEMA_MISMATCH`.
+
+### 8.3 Tuple Encoding
+
+```text
++--------------------------------------------------------------------------------+
+| format_version (1) | flags (1) | num_columns (2) | null_bitmap (ceil(N / 8)) |
++--------------------------------------------------------------------------------+
+| fixed-width values: N entries × 8 bytes                                      |
++--------------------------------------------------------------------------------+
+| text bytes, concatenated in ascending column order                            |
++--------------------------------------------------------------------------------+
+```
+
+- `format_version` must equal `1`.
+- `flags` must equal `0`.
+- `num_columns` is little-endian `uint16_t`.
+- A null bitmap bit of `1` means the corresponding column is SQL `NULL`.
+
+Each fixed-width entry is:
+
+| Column Type | Fixed Field |
+|---|---|
+| `INT` | little-endian `int64_t` |
+| `DOUBLE` | little-endian IEEE-754 `double` |
+| `TEXT` | little-endian `{ uint32_t var_offset, uint32_t var_length }` |
+
+### 8.4 Deterministic NULL and TEXT Rules
+
+- A NULL column’s complete 8-byte fixed-width entry must be zero.
+- A NULL `TEXT` column consumes no variable payload bytes.
+- Empty strings are valid and have `var_length == 0`.
+- Text payload bytes are concatenated in ascending schema-column order.
+- For each non-null text column, `var_offset` must equal the running text-payload cursor.
+- The final cursor must equal the tuple’s total variable-payload length.
+- Therefore, overlapping, non-monotonic, skipped, or trailing unused text ranges are invalid.
+- Text must be valid UTF-8 on construction and deserialization.
+
+### 8.5 Tuple Validation
+
+`Tuple::deserialize()` must validate:
+
+1. Input size does not exceed `MAX_TUPLE_SIZE`.
+2. Input size is at least:
+   ```text
+   4 + ceil(column_count / 8) + column_count * 8
+   ```
+3. Tuple format version is `1`.
+4. Tuple flags are `0`.
+5. Serialized column count equals the provided schema count.
+6. Every NULL value is allowed by the schema.
+7. NULL fixed fields are all zero.
+8. Every text range follows the deterministic cursor rule.
+9. Every text range lies within the variable payload region.
+10. Every text payload is valid UTF-8.
+
+Malformed persisted tuple bytes return `StorageResult::CORRUPTED_PAGE`. Invalid caller-provided values or schema/value mismatches return `StorageResult::SCHEMA_MISMATCH` or `StorageResult::INVALID_ARGUMENT` as appropriate.
+
+---
+
+## 9. Comparison and SQL Three-Valued Logic
+
+Comparison methods return `std::optional<bool>`:
+
+- `true`: SQL `TRUE`
+- `false`: SQL `FALSE`
+- `std::nullopt`: SQL `UNKNOWN`
+
+### 9.1 NULL and NaN
+
+- Comparing NULL with any value returns `UNKNOWN`.
+- Comparing a `DOUBLE` NaN with any value returns `UNKNOWN`.
+- `+0.0` and `-0.0` compare equal.
+- Positive and negative infinity use normal IEEE ordering against finite values.
+
+### 9.2 Text Comparison
+
+Text uses exact bytewise comparison:
+
+```cpp
+std::string_view::compare
+```
+
+No Unicode normalization, locale collation, or case folding occurs in the storage engine.
+
+### 9.3 Exact INT/DOUBLE Equality
+
+For `int64_t i` and `double d`:
+
+```cpp
+std::optional<bool> compare_int_double_equal(int64_t i, double d) {
+    if (std::isnan(d)) {
+        return std::nullopt;
+    }
+
+    if (!std::isfinite(d)) {
+        return false;
+    }
+
+    constexpr double kMinInt64 = -9223372036854775808.0; // -2^63
+    constexpr double kPastMaxInt64 = 9223372036854775808.0; // 2^63
+
+    if (d < kMinInt64 || d >= kPastMaxInt64) {
+        return false;
+    }
+
+    double integral_part;
+    if (std::modf(d, &integral_part) != 0.0) {
+        return false;
+    }
+
+    return i == static_cast<int64_t>(integral_part);
 }
 ```
 
-#### 3VL Kleene Logic Truth Table:
-`compare_equals()` and `compare_less_than()` return `std::optional<bool>`:
-- `true` $\rightarrow$ `TRUE`
-- `false` $\rightarrow$ `FALSE`
-- `std::nullopt` $\rightarrow$ `UNKNOWN`
+### 9.4 Exact INT/DOUBLE Less-Than
 
-| Left | Operator | Right | Result |
-| :--- | :--- | :--- | :--- |
-| `NULL` | any | any | `UNKNOWN` (`std::nullopt`) |
-| any | any | `NULL` | `UNKNOWN` (`std::nullopt`) |
-| `10` | `=` | `10` | `true` |
-| `10` | `=` | `20` | `false` |
-| `'abc'` | `<` | `'abd'` | `true` (bytewise) |
+For finite `d` within the signed 64-bit range:
+
+```text
+i < d:
+  if d is integral: i < int64(d)
+  otherwise:        i <= floor(d)
+
+d < i:
+  if d is integral: int64(d) < i
+  otherwise:        ceil(d) <= i
+```
+
+Values outside the range are handled before conversion:
+
+| Expression | `d <= -2^63` | `d >= 2^63` |
+|---|---:|---:|
+| `i < d` | false | true |
+| `d < i` | true | false |
+
+No out-of-range floating-point value may be converted to `int64_t`.
 
 ---
 
-### 3.8 TableHeap & Iterator Contract (`src/include/storage/table_heap.hpp`)
+## 10. TableHeap and Iterator
 
-`TableHeap` represents an un-ordered table storage abstraction across a doubly-linked chain of `TablePage`s.
+### 10.1 TableHeap State
 
-#### Iterator State & Error Discrimination:
-`TableIterator` explicitly differentiates normal scan termination from corruption or link cycles:
+A `TableHeap` stores:
+
+- `first_page_id`;
+- `last_page_id`;
+- a reference to `IPageAccessor`;
+- mutable pending master metadata needed for append-only page allocation.
+
+`last_page_id` is an in-memory append optimization. When reopening a heap, it must be reconstructed by walking from `first_page_id` and validating chain links.
+
+### 10.2 Insert
+
+```cpp
+StorageResult insert_tuple(const Tuple& tuple, RID* out_rid);
+```
+
+Insert order:
+
+1. Reject serialized tuples larger than `MAX_TUPLE_SIZE`.
+2. Attempt insertion into `last_page_id`.
+3. If contiguous space is insufficient and `HAS_HOLES` is set, defragment and retry.
+4. If still full, allocate a new page using the pending master `page_count`.
+5. Initialize and link the new page:
+   - new page `prev_page_id = old_last_page_id`;
+   - new page `next_page_id = INVALID_PAGE_ID`;
+   - old last page `next_page_id = new_page_id`;
+   - update in-memory `last_page_id`.
+6. Insert the tuple into the new page.
+
+### 10.3 Update
+
+```cpp
+UpdateResult update_tuple(const RID& rid, const Tuple& new_tuple);
+```
+
+Decision order:
+
+1. Reject an oversized serialized tuple.
+2. Fetch and validate the source page.
+3. Confirm that `rid.slot_num < slot_count` and the slot is `LIVE`.
+4. If `new_size <= old_size`, overwrite the tuple in place:
+   - preserve the RID;
+   - if smaller, record the reclaimed bytes as holes.
+5. Otherwise, if the growth delta fits in contiguous free space, allocate a new payload region in the same page and update the same slot.
+6. Otherwise, if the growth delta fits after compaction, compact and update the same slot.
+7. Otherwise:
+   - insert the new tuple elsewhere;
+   - mark the old slot `DEAD`;
+   - return distinct old/new RIDs with `rid_changed = true`.
+
+Phase 1 never writes `FORWARDED` slots.
+
+### 10.4 Delete
+
+```cpp
+StorageResult delete_tuple(const RID& rid);
+```
+
+Deletion:
+
+1. Fetch and validate the page.
+2. Require that the target slot exists and is `LIVE`.
+3. Change the slot to `DEAD`.
+4. Set slot offset and length to zero.
+5. Recalculate `HAS_HOLES`.
+6. Mark the page dirty.
+
+### 10.5 Iterator
+
 ```cpp
 enum class IteratorStatus : uint8_t {
     AT_RECORD = 0,
     END_OF_SCAN,
     CORRUPTED_PAGE,
     CYCLE_DETECTED,
-    PAGE_NOT_FOUND
+    PAGE_NOT_FOUND,
 };
 ```
-- Tracks a visited-page hash set bounded at `MAX_PAGES` (1,048,576). If a page ID appears twice, transitions to `CYCLE_DETECTED`.
-- Verifies `current_page->prev_page_id == previous_page_id`.
 
-#### Key Invariants & Operations:
-1. **Append Optimization**: Maintains `last_page_id` in memory for $O(1)$ appends without chain traversal.
-2. **`insert_tuple(const Tuple& tuple, RID* out_rid) -> StorageResult`**:
-   - Attempts insert on `last_page_id`.
-   - If full, attempts defragmentation. If still full, allocates a new page via `accessor.allocate_page()`, links pointers, and updates `last_page_id`.
-3. **`update_tuple(const RID& rid, const Tuple& new_tuple) -> UpdateResult`**:
-   - Follows Decision Order (Section 1.3). Relocated updates mark old slot `DEAD` and insert on `last_page_id` with `rid_changed = true`.
-4. **`delete_tuple(const RID& rid) -> StorageResult`**:
-   - Sets slot state to `DEAD`, marks page dirty.
+The iterator:
 
----
-
-## 4. Test Suite & Verification Matrix (`tests/test_storage.cpp`)
-
-The test suite will cover 100% of Phase 1 edge cases:
-
-1. **CRC-32 IEEE 802.3 & Checksum Tests**:
-   - Full 4096-byte checksum verification with zero-masked fields at respective offsets (0x20 for Master, 0x1C for TablePage).
-   - Mutation test: Flip bit at offset 0, offset 100, offset 4095; verify checksum fails.
-   - Verify checksum field mutation itself causes verification failure.
-2. **Dual Master Page Tests**:
-   - Initial state: Master A valid (gen 1), Master B empty (gen 0). Active = A.
-   - Interrupted write test: Corrupt Master B during write; verify engine still boots into Master A.
-   - Clean commit test: Write Master B (gen 2); verify engine boots into Master B.
-   - Tie-breaker test: Both pages valid with identical generation $\rightarrow$ selects Master A.
-   - Total corruption test: Corrupt both Master A and B $\rightarrow$ returns `StorageResult::CORRUPTED_PAGE`.
-3. **Slotted Page Structural Integrity**:
-   - Insert until `contiguous_free_space < tuple_size`.
-   - Delete alternating slots; verify `contiguous_free_space` is small but `reclaimable_hole_space` is large.
-   - Trigger `defragment()`; verify all live slots retain exact byte content and valid offsets.
-   - Verify trailing dead slots are pruned, expanding contiguous space.
-   - Invariant validation: Craft malformed page buffers (slot overlaps, `free_space_pointer` < header end, out-of-bounds offsets) and assert `validate()` returns `CORRUPTED_PAGE`.
-4. **Tuple Size Boundaries & Alignment Safety**:
-   - Insert tuple of exact size `MAX_TUPLE_SIZE (4056 B)` $\rightarrow$ Success.
-   - Insert tuple of size $4057$ B $\rightarrow$ Rejected with `TUPLE_TOO_LARGE`.
-   - Verify non-aligned scalar offsets (e.g., $N=1, 3, 5$) read/write without crashes or UBSan errors.
-   - Empty text strings (`var_length = 0`) correctly packed and read back.
-   - Overlapping text ranges $\rightarrow$ Rejected with `SCHEMA_MISMATCH`.
-   - NULL columns verify fixed and var-len fields are zeroed.
-5. **3VL & UTF-8 Tests**:
-   - `Value::compare_equals(NULL, NULL)` returns `std::nullopt`.
-   - Exact `INT` vs `DOUBLE` precision comparison tests.
-   - Malformed UTF-8 sequence in `TEXT` column $\rightarrow$ Rejected on tuple construction.
-   - Type mismatch during decoding (e.g. string payload for INT column) $\rightarrow$ Rejected.
-6. **TableHeap & Iterator Tests**:
-   - Multi-page insert spanning 5+ pages.
-   - Sequential scan reads all tuples back in order.
-   - Update with enlargement: Verify `UpdateResult.rid_changed == true` and old/new RIDs are distinct.
-   - Corrupted next pointer: Detect cycle and terminate iterator with `IteratorStatus::CYCLE_DETECTED`.
+- maintains a visited page-ID set bounded by `MAX_PAGES`;
+- validates every fetched table page;
+- checks:
+  ```text
+  current_page.prev_page_id == previous_page_id
+  ```
+- returns `CYCLE_DETECTED` if a page is visited twice or traversal exceeds `MAX_PAGES`;
+- distinguishes normal end-of-scan from page corruption or missing pages.
 
 ---
 
-## 5. Review Sign-off Checklist
+## 11. Source Layout
 
-- [x] Unambiguous universal CRC32 rule and deliberate offset differences documented.
-- [x] `page_count` canonical meaning defined (total allocated pages / next unallocated page ID).
-- [x] Dual Master tie-breaking and corruption handling specified.
-- [x] `IPageAccessor` ownership, lifecycle, and `sync()` contract finalized.
-- [x] Text empty string, overlap rejection, and NULL zeroing rules defined.
-- [x] Slot state machine transitions specified; `FORWARDED` deferred to Phase 3.
-- [x] Defragmentation physical ordering and trailing slot pruning clarified.
-- [x] In-memory data models (`MasterData`, `UpdateResult`) defined.
-- [x] Error handling returns `StorageResult` codes (no exceptions).
-- [x] Append-only allocation and single-threaded core explicitly stated.
-- [x] `IteratorStatus` error discrimination and `MAX_PAGES = 1048576` defined.
-- [x] Exact 4-step update decision order formalized.
+```text
+src/
+├── common/
+│   └── checksum.cpp
+├── include/
+│   ├── common/
+│   │   ├── checksum.hpp
+│   │   ├── endian.hpp
+│   │   └── types.hpp
+│   └── storage/
+│       ├── master_page.hpp
+│       ├── page_accessor.hpp
+│       ├── slotted_page.hpp
+│       ├── table_heap.hpp
+│       ├── tuple.hpp
+│       └── value.hpp
+└── storage/
+    ├── master_page.cpp
+    ├── slotted_page.cpp
+    ├── table_heap.cpp
+    ├── tuple.cpp
+    └── value.cpp
+
+tests/
+└── test_storage.cpp
+```
+
+CMake must compile `src/common/checksum.cpp`, all Phase 1 storage sources, and register `tests/test_storage.cpp`.
+
+---
+
+## 12. Required Test Matrix
+
+### 12.1 Checksums
+
+- Verify known CRC-32 IEEE 802.3 test vectors.
+- Compute valid master and table checksums using their distinct checksum offsets.
+- Mutate bytes at offsets `0`, `100`, and `4095`; validation must fail.
+- Mutate the stored checksum field; validation must fail.
+- Verify all checksum calculations cover exactly 4096 bytes.
+
+### 12.2 Master Pages
+
+- New database creates two valid checksummed masters.
+- Master A starts at generation `1`; Master B starts at generation `0`.
+- Active master after initialization is Master A.
+- Valid higher-generation Master B becomes active after a commit.
+- Equal valid generations select Master A.
+- One corrupted master falls back to the other valid master.
+- Both corrupted masters return `CORRUPTED_PAGE`.
+- Invalid roots, invalid `page_count`, and nonzero reserved bytes are rejected.
+
+### 12.3 Slotted Pages
+
+- Empty initialized page validates.
+- Insert a tuple of exact serialized size `MAX_TUPLE_SIZE`; it succeeds on an empty page.
+- A tuple of `MAX_TUPLE_SIZE + 1` is rejected with `TUPLE_TOO_LARGE`.
+- Fill a page until insertion returns `PAGE_FULL`.
+- Delete alternating tuples and verify hole accounting.
+- Defragment and verify all live RIDs retain their slot numbers and exact tuple bytes.
+- Verify payloads are packed in ascending slot-index order.
+- Verify trailing dead-slot pruning reduces `slot_count`.
+- Verify malformed slot offsets, overlap, reserved slot bits, invalid states, and bad flags return `CORRUPTED_PAGE`.
+- Verify `HAS_HOLES` is correct after delete, shrink, reuse, and compaction.
+
+### 12.4 Tuples and Alignment
+
+- Exercise schemas with `1`, `3`, and `5` columns under UBSan or equivalent alignment-sensitive checks.
+- Round-trip `INT`, `DOUBLE`, empty TEXT, non-empty TEXT, and NULL values.
+- Reject malformed UTF-8 on input and deserialization.
+- Reject nonzero tuple flags.
+- Reject a wrong serialized column count.
+- Reject out-of-range, overlapping, skipped, and trailing text regions.
+- Reject nonzero fixed-width fields for NULL columns.
+- Reject NULL in a non-nullable schema column.
+
+### 12.5 Numeric and 3VL Comparison
+
+- `NULL = NULL` returns `UNKNOWN`.
+- NaN comparisons return `UNKNOWN`.
+- `+0.0 == -0.0`.
+- `INT64_MIN` compares correctly with `-2^63`.
+- `2^63` must never be cast to `int64_t`.
+- Verify equality and less-than around `2^53`, where not every integer is exactly representable as a double.
+- Verify finite/infinite ordering behavior.
+
+### 12.6 TableHeap and Iteration
+
+- Insert enough tuples to span at least five pages.
+- Scan all tuples in insertion order.
+- Reopen/reconstruct the heap tail by walking the chain.
+- Update a tuple with a larger payload that remains on the same page.
+- Update a tuple requiring relocation and verify old/new RID distinction.
+- Verify an old deleted or relocated RID does not resolve as a stable external identity.
+- Detect a corrupted self-link, a broken backward link, and a multi-page cycle.
+- Verify iterator distinguishes end-of-scan, page-not-found, corruption, and cycle detection.
+
+---
+
+## 13. Implementation Sign-Off Checklist
+
+- [ ] `MAX_SLOT_COUNT` is implemented as `1015`.
+- [ ] Page checksum code masks the correct four-byte field for each page type.
+- [ ] All persisted multi-byte values use endian helpers.
+- [ ] Master A and Master B are both initialized as valid checksummed pages.
+- [ ] `page_count` is the authoritative next unallocated page ID.
+- [ ] Allocation is append-only and coordinated with pending master metadata.
+- [ ] Phase 1 crash scope is documented as detection, not data-page recovery.
+- [ ] `IPageAccessor` returns `StorageResult`; no expected errors use exceptions.
+- [ ] `UpdateResult` includes a status code.
+- [ ] `FORWARDED` is rejected in Phase 1 persisted pages.
+- [ ] `EMPTY` is not valid within the persisted slot-directory range.
+- [ ] `HAS_HOLES` is maintained as a strict derived invariant.
+- [ ] Table-page generation is reserved and zero in Phase 1.
+- [ ] Tuple TEXT ranges follow deterministic packed cursor semantics.
+- [ ] Numeric comparisons avoid undefined out-of-range float-to-integer conversions.
+- [ ] Required source files, CMake targets, and test targets are included.
