@@ -22,6 +22,7 @@ bool Value::is_valid_utf8(std::string_view sv) noexcept {
             if (s[i] == 0xED && s[i + 1] >= 0xA0) return false; // Surrogate halves
             i += 3;
         } else if ((s[i] & 0xF8) == 0xF0) {
+            if (s[i] > 0xF4) return false; // Code points above U+10FFFF are invalid in UTF-8
             if (i + 3 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80) return false;
             if (s[i] == 0xF0 && s[i + 1] < 0x90) return false; // Overlong
             if (s[i] == 0xF4 && s[i + 1] >= 0x90) return false; // Out of Unicode range (> 0x10FFFF)

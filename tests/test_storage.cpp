@@ -355,6 +355,16 @@ void test_tuple_and_3vl() {
     const char bad_utf8[] = { static_cast<char>(0xFF), static_cast<char>(0xFE), 0 };
     TEST_ASSERT(!Value::is_valid_utf8(std::string_view(bad_utf8, 2)), "Invalid UTF-8 rejected");
 
+    // Test rejection of 4-byte sequences with lead bytes 0xF5..0xF7 (> U+10FFFF)
+    const uint8_t bad_lead_f5[] = { 0xF5, 0x80, 0x80, 0x80 };
+    TEST_ASSERT(!Value::is_valid_utf8(std::string_view(reinterpret_cast<const char*>(bad_lead_f5), 4)), "0xF5 lead byte rejected");
+    const uint8_t bad_lead_f7[] = { 0xF7, 0xBF, 0xBF, 0xBF };
+    TEST_ASSERT(!Value::is_valid_utf8(std::string_view(reinterpret_cast<const char*>(bad_lead_f7), 4)), "0xF7 lead byte rejected");
+    const uint8_t max_valid_utf8[] = { 0xF4, 0x8F, 0xBF, 0xBF }; // U+10FFFF
+    TEST_ASSERT(Value::is_valid_utf8(std::string_view(reinterpret_cast<const char*>(max_valid_utf8), 4)), "U+10FFFF is valid UTF-8");
+    const uint8_t just_above_max[] = { 0xF4, 0x90, 0x80, 0x80 }; // U+110000
+    TEST_ASSERT(!Value::is_valid_utf8(std::string_view(reinterpret_cast<const char*>(just_above_max), 4)), "U+110000 is rejected");
+
     // 3. Schema and Tuple serialization
     Schema schema({
         Column{"id", TypeId::INT, false},
