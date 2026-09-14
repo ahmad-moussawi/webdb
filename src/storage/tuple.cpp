@@ -118,12 +118,7 @@ StorageResult Tuple::deserialize(const uint8_t* data,
     if (size > MAX_TUPLE_SIZE) {
         return StorageResult::TUPLE_TOO_LARGE;
     }
-
-    const size_t num_cols = schema.count();
-    const size_t null_bitmap_bytes = (num_cols + 7) / 8;
-    const size_t min_fixed_size = 4 + null_bitmap_bytes + (num_cols * 8);
-
-    if (size < min_fixed_size) {
+    if (size < 4) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -140,8 +135,16 @@ StorageResult Tuple::deserialize(const uint8_t* data,
 
     // 2. Column count check
     const uint16_t serialized_cols = endian::read_uint16(data + 2);
+    const size_t num_cols = schema.count();
     if (serialized_cols != num_cols) {
         return StorageResult::SCHEMA_MISMATCH;
+    }
+
+    const size_t null_bitmap_bytes = (num_cols + 7) / 8;
+    const size_t min_fixed_size = 4 + null_bitmap_bytes + (num_cols * 8);
+
+    if (size < min_fixed_size) {
+        return StorageResult::CORRUPTED_PAGE;
     }
 
     const uint8_t* bitmap = data + 4;

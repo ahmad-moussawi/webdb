@@ -74,8 +74,10 @@ else()
     target_link_libraries(webdb_cli PRIVATE webdb_core)
 
     # Storage Engine Unit Test Suite (Phase 1)
+    enable_testing()
     add_executable(test_storage
         tests/test_storage.cpp
     )
     target_link_libraries(test_storage PRIVATE webdb_core)
+    add_test(NAME storage COMMAND test_storage)
 endif()

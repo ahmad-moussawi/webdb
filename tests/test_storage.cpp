@@ -111,21 +111,40 @@ void test_checksums() {
     // Known standard CRC-32 IEEE 802.3 for "123456789" is 0xCBF43926
     TEST_ASSERT(csum == 0xCBF43926u, "CRC-32 IEEE 802.3 standard vector check");
 
-    // 2. Page checksum masking verification
-    std::vector<uint8_t> page(PAGE_SIZE, 0xAB);
-    // Set dummy checksum field
-    endian::write_uint32(page.data() + 0x20, 0x12345678u);
-    const uint32_t page_csum1 = checksum::compute_page_checksum(page.data(), 0x20);
+    // Additional standard vector: empty string has CRC32 = 0
+    TEST_ASSERT(checksum::crc32(nullptr, 0) == 0, "CRC32 of empty is 0");
 
-    // Modify the checksum field itself; computed checksum must remain identical because it is zero-masked
-    endian::write_uint32(page.data() + 0x20, 0xDEADBEEFu);
-    const uint32_t page_csum2 = checksum::compute_page_checksum(page.data(), 0x20);
-    TEST_ASSERT(page_csum1 == page_csum2, "Checksum field zero-masking invariance");
+    // 2. Page checksum masking verification for MasterPage (offset 0x20) and TablePage (offset 0x1C)
+    std::vector<uint8_t> master_page(PAGE_SIZE, 0xAB);
+    endian::write_uint32(master_page.data() + MasterPage::CHECKSUM_OFFSET, 0x12345678u);
+    const uint32_t master_csum1 = checksum::compute_page_checksum(master_page.data(), MasterPage::CHECKSUM_OFFSET);
 
-    // Mutating any other byte MUST change the checksum
-    page[0] ^= 0x01;
-    const uint32_t page_csum3 = checksum::compute_page_checksum(page.data(), 0x20);
-    TEST_ASSERT(page_csum1 != page_csum3, "Byte flip changes CRC");
+    endian::write_uint32(master_page.data() + MasterPage::CHECKSUM_OFFSET, 0xDEADBEEFu);
+    const uint32_t master_csum2 = checksum::compute_page_checksum(master_page.data(), MasterPage::CHECKSUM_OFFSET);
+    TEST_ASSERT(master_csum1 == master_csum2, "MasterPage checksum field zero-masking invariance");
+
+    std::vector<uint8_t> table_page(PAGE_SIZE, 0xCD);
+    endian::write_uint32(table_page.data() + TablePage::CHECKSUM_OFFSET, 0x55AA55AAu);
+    const uint32_t table_csum1 = checksum::compute_page_checksum(table_page.data(), TablePage::CHECKSUM_OFFSET);
+
+    endian::write_uint32(table_page.data() + TablePage::CHECKSUM_OFFSET, 0xCAFEBABEu);
+    const uint32_t table_csum2 = checksum::compute_page_checksum(table_page.data(), TablePage::CHECKSUM_OFFSET);
+    TEST_ASSERT(table_csum1 == table_csum2, "TablePage checksum field zero-masking invariance");
+
+    // Mutating byte at offset 0, offset 100, and offset 4095 MUST change the checksum
+    std::vector<uint8_t> boundary_page(PAGE_SIZE, 0x55);
+    const uint32_t base_csum = checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET);
+
+    boundary_page[0] ^= 0x01;
+    TEST_ASSERT(checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET) != base_csum, "Byte 0 flip changes CRC");
+    boundary_page[0] ^= 0x01; // revert
+
+    boundary_page[100] ^= 0x01;
+    TEST_ASSERT(checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET) != base_csum, "Byte 100 flip changes CRC");
+    boundary_page[100] ^= 0x01; // revert
+
+    boundary_page[PAGE_SIZE - 1] ^= 0x01;
+    TEST_ASSERT(checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET) != base_csum, "Byte 4095 flip changes CRC");
 
     std::cout << "[PASSED] test_checksums" << std::endl;
 }
@@ -207,6 +226,48 @@ void test_master_page_dual() {
     res = MasterPageManager::commit_master(accessor, active_id, active_data);
     TEST_ASSERT(res == StorageResult::IO_ERROR, "Commit fails when mark_dirty fails");
     accessor.fail_mark_dirty = false;
+
+    // 9. Master page structural validation rejections
+    std::vector<uint8_t> test_master(PAGE_SIZE, 0);
+    MasterData valid_md{};
+    valid_md.generation_id = 1;
+    valid_md.page_count = 5;
+    MasterPage::serialize(valid_md, test_master.data());
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::SUCCESS, "Valid serialized master");
+
+    // a. Invalid page_count (< 2)
+    endian::write_uint32(test_master.data() + 0x1C, 1);
+    uint32_t csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::CORRUPTED_PAGE, "page_count < 2 rejected");
+
+    // b. Invalid root (root >= page_count)
+    MasterPage::serialize(valid_md, test_master.data()); // reset
+    endian::write_int32(test_master.data() + 0x10, 10); // root 10 >= page_count 5
+    csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::CORRUPTED_PAGE, "Root >= page_count rejected");
+
+    // c. Invalid root (root < FIRST_DATA_PAGE_ID and != INVALID_PAGE_ID)
+    MasterPage::serialize(valid_md, test_master.data()); // reset
+    endian::write_int32(test_master.data() + 0x14, 1); // root 1 is Master B
+    csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::CORRUPTED_PAGE, "Root pointing to master page rejected");
+
+    // d. Nonzero reserved bytes
+    MasterPage::serialize(valid_md, test_master.data()); // reset
+    test_master[0x50] = 0x01; // inside reserved region [0x24..0xFFF]
+    csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::CORRUPTED_PAGE, "Nonzero reserved bytes rejected");
+
+    // e. Version mismatch
+    MasterPage::serialize(valid_md, test_master.data()); // reset
+    endian::write_uint16(test_master.data() + 0x04, 2); // version 2 != 1
+    csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::VERSION_MISMATCH, "Version mismatch rejected");
 
     std::cout << "[PASSED] test_master_page_dual" << std::endl;
 }
@@ -293,7 +354,7 @@ void test_slotted_page() {
     get_res = page.get_tuple(slots[1], &out_p, out_len);
     TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 200, "Surviving slot 1 valid");
 
-    // 6. In-place update
+    // 6. In-place update (shrink)
     const std::vector<uint8_t> smaller_t1(50, 0x33);
     auto upd_res = page.update_tuple(slots[0], smaller_t1.data(), smaller_t1.size());
     TEST_ASSERT(upd_res.success(), "In-place shrink update succeeds");
@@ -301,7 +362,109 @@ void test_slotted_page() {
     get_res = page.get_tuple(slots[0], &out_p, out_len);
     TEST_ASSERT(out_len == 50 && out_p[0] == 0x33, "Shrunk tuple payload matches");
 
-    // 7. Corrupted slot offset protection in update_tuple, get_tuple, and delete_tuple
+    // 7. Same-page growth update (growing into contiguous free space)
+    std::vector<uint8_t> growth_buf(PAGE_SIZE, 0);
+    TablePage::init(growth_buf.data(), 4);
+    TablePage growth_page(growth_buf.data());
+    const std::vector<uint8_t> init_item(50, 0x44);
+    uint16_t growth_slot = 0;
+    growth_page.insert_tuple(init_item.data(), init_item.size(), growth_slot);
+    TEST_ASSERT(growth_slot == 0, "Inserted init item at slot 0");
+
+    const std::vector<uint8_t> grown_item(120, 0x55);
+    auto growth_res = growth_page.update_tuple(growth_slot, grown_item.data(), grown_item.size());
+    TEST_ASSERT(growth_res.success(), "Same-page growth succeeds");
+    TEST_ASSERT(!growth_res.rid_changed, "Same-page growth preserves RID");
+    get_res = growth_page.get_tuple(growth_slot, &out_p, out_len);
+    TEST_ASSERT(out_len == 120 && out_p[0] == 0x55, "Grown item data valid");
+    TEST_ASSERT((growth_page.get_flags() & TablePage::FLAG_HAS_HOLES) != 0, "Old item space becomes hole");
+
+    // 8. Trailing dead-slot pruning on defragment
+    std::vector<uint8_t> prune_buf(PAGE_SIZE, 0);
+    TablePage::init(prune_buf.data(), 5);
+    TablePage prune_page(prune_buf.data());
+    uint16_t ps0 = 0, ps1 = 0, ps2 = 0;
+    const std::vector<uint8_t> p_item(40, 0x66);
+    prune_page.insert_tuple(p_item.data(), p_item.size(), ps0);
+    prune_page.insert_tuple(p_item.data(), p_item.size(), ps1);
+    prune_page.insert_tuple(p_item.data(), p_item.size(), ps2);
+    TEST_ASSERT(prune_page.get_slot_count() == 3, "Slot count is 3");
+
+    // Delete trailing slots (slot 2 and slot 1)
+    prune_page.delete_tuple(ps2);
+    prune_page.delete_tuple(ps1);
+    TEST_ASSERT(prune_page.get_slot_count() == 3, "Before defrag, slot count still 3");
+    prune_page.defragment();
+    TEST_ASSERT(prune_page.get_slot_count() == 1, "After defrag, trailing dead slots pruned to 1");
+    get_res = prune_page.get_tuple(ps0, &out_p, out_len);
+    TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 40, "Slot 0 remains valid");
+
+    // 9. Malformed TablePage validation tests
+    std::vector<uint8_t> malformed(PAGE_SIZE, 0);
+    TablePage::init(malformed.data(), 6, INVALID_PAGE_ID, INVALID_PAGE_ID);
+
+    // a. slot_count > MAX_SLOT_COUNT
+    endian::write_uint16(malformed.data() + 0x0C, MAX_SLOT_COUNT + 1);
+    TablePage::init(malformed.data(), 6); // re-init
+    endian::write_uint16(malformed.data() + 0x0C, 1016);
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "slot_count > MAX rejected");
+
+    // b. free_space_pointer < slot_dir_end
+    TablePage::init(malformed.data(), 6);
+    endian::write_uint16(malformed.data() + 0x0E, static_cast<uint16_t>(PAGE_HEADER_SIZE - 1));
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "free_space_pointer < slot_dir_end rejected");
+
+    // c. free_space_pointer > PAGE_SIZE
+    TablePage::init(malformed.data(), 6);
+    endian::write_uint16(malformed.data() + 0x0E, static_cast<uint16_t>(PAGE_SIZE + 1));
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "free_space_pointer > PAGE_SIZE rejected");
+
+    // d. Nonzero generation_id on table page
+    TablePage::init(malformed.data(), 6);
+    endian::write_uint64(malformed.data() + 0x10, 1);
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "Nonzero generation_id on TablePage rejected");
+
+    // e. Unknown flag bits set
+    TablePage::init(malformed.data(), 6);
+    endian::write_uint32(malformed.data() + 0x18, 0x02); // bit 1 set
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "Unknown flags rejected");
+
+    // f. Reserved slot bit set (bit 13)
+    TablePage::init(malformed.data(), 6);
+    TablePage(malformed.data()).insert_tuple(p_item.data(), p_item.size(), ps0);
+    uint8_t* s_entry = malformed.data() + PAGE_HEADER_SIZE;
+    uint16_t s_meta = endian::read_uint16(s_entry);
+    s_meta |= (1u << 13); // set reserved bit 13
+    endian::write_uint16(s_entry, s_meta);
+    TablePage(malformed.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "Reserved slot bit set rejected");
+
+    // g. Overlapping live slot payloads
+    TablePage::init(malformed.data(), 6);
+    TablePage tp_overlap(malformed.data());
+    tp_overlap.insert_tuple(p_item.data(), p_item.size(), ps0);
+    tp_overlap.insert_tuple(p_item.data(), p_item.size(), ps1);
+    // Force slot 1 to point to same offset as slot 0
+    uint8_t* s1_entry = malformed.data() + PAGE_HEADER_SIZE + SLOT_ENTRY_SIZE;
+    uint16_t s0_offset = tp_overlap.get_slot_offset(ps0);
+    endian::write_uint16(s1_entry, static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (s0_offset & 0x1FFFu)));
+    tp_overlap.update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "Overlapping live payloads rejected");
+
+    // h. Invalid slot state (EMPTY or FORWARDED inside [0, slot_count))
+    TablePage::init(malformed.data(), 6);
+    TablePage tp_state(malformed.data());
+    tp_state.insert_tuple(p_item.data(), p_item.size(), ps0);
+    endian::write_uint16(malformed.data() + PAGE_HEADER_SIZE, static_cast<uint16_t>((static_cast<uint16_t>(SlotState::FORWARDED) << 14) | 4000u));
+    tp_state.update_checksum();
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "FORWARDED slot state rejected in Phase 1");
+
+    // 10. Corrupted slot offset protection in update_tuple, get_tuple, and delete_tuple
     // Corrupt slot 0's offset in the slot directory to point below free_space_pointer
     uint8_t* slot0_ptr = buffer.data() + PAGE_HEADER_SIZE;
     endian::write_uint16(slot0_ptr, static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | 10u)); // offset = 10 (< free_space_pointer)
@@ -354,6 +517,39 @@ void test_tuple_and_3vl() {
     TEST_ASSERT(v_int10.compare_equals(v_double10) == true, "10 == 10.0");
     TEST_ASSERT(v_double10.compare_equals(v_int10) == true, "10.0 == 10");
     TEST_ASSERT(v_str_a.compare_less_than(v_str_b) == true, "apple < banana");
+
+    // Negative zero vs positive zero: +0.0 == -0.0
+    Value v_pos_zero = Value::make_double(+0.0);
+    Value v_neg_zero = Value::make_double(-0.0);
+    TEST_ASSERT(v_pos_zero.compare_equals(v_neg_zero) == true, "+0.0 == -0.0 in SQL");
+
+    // Extreme numeric boundaries: INT64_MIN (-2^63) and INT64_MAX
+    constexpr int64_t kInt64Min = std::numeric_limits<int64_t>::min();
+    constexpr int64_t kInt64Max = std::numeric_limits<int64_t>::max();
+    Value v_int_min = Value::make_int(kInt64Min);
+    Value v_int_max = Value::make_int(kInt64Max);
+    Value v_double_min = Value::make_double(-9223372036854775808.0); // exact -2^63
+    Value v_double_past_max = Value::make_double(9223372036854775808.0); // 2^63 (cannot be cast to int64)
+    TEST_ASSERT(v_int_min.compare_equals(v_double_min) == true, "INT64_MIN == -2^63");
+    TEST_ASSERT(v_int_max.compare_equals(v_double_past_max) == false, "INT64_MAX != 2^63");
+    TEST_ASSERT(v_int_max.compare_less_than(v_double_past_max) == true, "INT64_MAX < 2^63");
+    TEST_ASSERT(v_double_past_max.compare_less_than(v_int_max) == false, "NOT (2^63 < INT64_MAX)");
+
+    // Ordering behavior with finite vs infinities
+    Value v_pos_inf = Value::make_double(std::numeric_limits<double>::infinity());
+    Value v_neg_inf = Value::make_double(-std::numeric_limits<double>::infinity());
+    TEST_ASSERT(v_int_max.compare_less_than(v_pos_inf) == true, "INT64_MAX < +inf");
+    TEST_ASSERT(v_neg_inf.compare_less_than(v_int_min) == true, "-inf < INT64_MIN");
+    TEST_ASSERT(v_neg_inf.compare_less_than(v_pos_inf) == true, "-inf < +inf");
+
+    // Comparisons around 2^53 (9007199254740992) where double precision starts losing odd integer representation
+    constexpr int64_t kTwo53 = 9007199254740992LL;
+    Value v_int_2_53 = Value::make_int(kTwo53);
+    Value v_int_2_53_plus1 = Value::make_int(kTwo53 + 1);
+    Value v_double_2_53 = Value::make_double(static_cast<double>(kTwo53)); // exactly 9007199254740992.0
+    TEST_ASSERT(v_int_2_53.compare_equals(v_double_2_53) == true, "2^53 == 2^53.0");
+    TEST_ASSERT(v_int_2_53_plus1.compare_equals(v_double_2_53) == false, "2^53+1 != 2^53.0");
+    TEST_ASSERT(v_double_2_53.compare_less_than(v_int_2_53_plus1) == true, "2^53.0 < 2^53+1");
 
     // Precision boundary: integer cannot equal double with fractional part
     Value v_double_frac = Value::make_double(10.5);
@@ -427,6 +623,71 @@ void test_tuple_and_3vl() {
     std::vector<uint8_t> bad_bytes;
     ser_res = Tuple::serialize(bad_row, schema, bad_bytes);
     TEST_ASSERT(ser_res == StorageResult::SCHEMA_MISMATCH, "NULL in non-nullable column rejected");
+
+    // 4. Alignment testing with 1-column, 3-column, and 5-column schemas
+    // 1-column schema: tests odd header boundary (FormatVersion 1B + Flags 1B + NumCols 2B + NullBitmap 1B = 5 bytes offset)
+    Schema schema_1({
+        Column{"single_int", TypeId::INT, false}
+    });
+    std::vector<Value> row_1 = { Value::make_int(123456789012345678LL) };
+    std::vector<uint8_t> bytes_1;
+    TEST_ASSERT(Tuple::serialize(row_1, schema_1, bytes_1) == StorageResult::SUCCESS, "Serialize 1-column");
+    std::vector<Value> decoded_1;
+    TEST_ASSERT(Tuple::deserialize(bytes_1.data(), bytes_1.size(), schema_1, decoded_1) == StorageResult::SUCCESS, "Deserialize 1-column");
+    TEST_ASSERT(decoded_1[0].as_int() == 123456789012345678LL, "1-column int matches");
+
+    // 5-column schema: NullBitmap = 1B, total fixed header = 4 + 1 + (5 * 8) = 45 bytes
+    Schema schema_5({
+        Column{"c0", TypeId::INT, false},
+        Column{"c1", TypeId::DOUBLE, false},
+        Column{"c2", TypeId::TEXT, true},
+        Column{"c3", TypeId::INT, true},
+        Column{"c4", TypeId::TEXT, false}
+    });
+    std::vector<Value> row_5 = {
+        Value::make_int(42),
+        Value::make_double(3.14159),
+        Value::make_null(TypeId::TEXT), // empty/null text
+        Value::make_int(-999),
+        Value::make_text("") // empty string
+    };
+    std::vector<uint8_t> bytes_5;
+    TEST_ASSERT(Tuple::serialize(row_5, schema_5, bytes_5) == StorageResult::SUCCESS, "Serialize 5-column with empty/null text");
+    std::vector<Value> decoded_5;
+    TEST_ASSERT(Tuple::deserialize(bytes_5.data(), bytes_5.size(), schema_5, decoded_5) == StorageResult::SUCCESS, "Deserialize 5-column");
+    TEST_ASSERT(decoded_5[0].as_int() == 42, "Col 0 matches");
+    TEST_ASSERT(decoded_5[1].as_double() == 3.14159, "Col 1 matches");
+    TEST_ASSERT(decoded_5[2].is_null(), "Col 2 is NULL");
+    TEST_ASSERT(decoded_5[3].as_int() == -999, "Col 3 matches");
+    TEST_ASSERT(decoded_5[4].as_text().empty(), "Col 4 is empty string");
+
+    // 5. Tuple deserialization rejections for malformed inputs
+    // a. Wrong format version
+    std::vector<uint8_t> malformed_t = bytes_1;
+    malformed_t[0] = 2; // version 2 != 1
+    TEST_ASSERT(Tuple::deserialize(malformed_t.data(), malformed_t.size(), schema_1, decoded_1) == StorageResult::VERSION_MISMATCH, "Bad tuple version rejected");
+
+    // b. Nonzero flags
+    malformed_t = bytes_1;
+    malformed_t[1] = 0x01; // flags must be 0
+    TEST_ASSERT(Tuple::deserialize(malformed_t.data(), malformed_t.size(), schema_1, decoded_1) == StorageResult::CORRUPTED_PAGE, "Nonzero tuple flags rejected");
+
+    // c. Wrong column count
+    TEST_ASSERT(Tuple::deserialize(bytes_1.data(), bytes_1.size(), schema, decoded_1) == StorageResult::SCHEMA_MISMATCH, "Wrong column count rejected");
+
+    // d. Nonzero fixed-width field for NULL column
+    std::vector<uint8_t> malformed_null_t = tuple_bytes_null;
+    // For schema (3 cols), null_bitmap is 1B. Fixed array starts at offset 5.
+    // Col 2 fixed field is at 5 + 2 * 8 = 21. Set a nonzero byte in col 2's fixed field.
+    malformed_null_t[21] = 0x01;
+    TEST_ASSERT(Tuple::deserialize(malformed_null_t.data(), malformed_null_t.size(), schema, decoded_row2) == StorageResult::CORRUPTED_PAGE, "Nonzero NULL field rejected");
+
+    // e. Non-monotonic/overlapping text offset
+    // In row1 (id, name: 'Alice' (5B), score), text section starts after fixed header (4 + 1 + 24 = 29)
+    // Name text offset is at 5 + 1 * 8 = 13.
+    std::vector<uint8_t> malformed_text_t = tuple_bytes;
+    endian::write_uint32(malformed_text_t.data() + 13, 10); // var_offset = 10 instead of expected 0
+    TEST_ASSERT(Tuple::deserialize(malformed_text_t.data(), malformed_text_t.size(), schema, decoded_row1) == StorageResult::CORRUPTED_PAGE, "Non-monotonic text offset rejected");
 
     std::cout << "[PASSED] test_tuple_and_3vl" << std::endl;
 }
@@ -608,6 +869,37 @@ void test_table_heap() {
 
     auto corrupt_del = reopened_heap.delete_tuple(RID{tail_id, 0});
     TEST_ASSERT(corrupt_del == StorageResult::CORRUPTED_PAGE, "delete_tuple rejects corrupt page");
+
+    // 11. Iterator error differentiation tests
+    // a. Normal end-of-scan: empty heap
+    TableHeap empty_heap;
+    TableHeap::create(accessor, master, empty_heap);
+    auto empty_it = empty_heap.begin();
+    TEST_ASSERT(empty_it.status() == IteratorStatus::END_OF_SCAN, "Empty heap iterator yields END_OF_SCAN");
+    TEST_ASSERT(empty_it.is_end(), "Empty heap iterator is_end() == true");
+    TEST_ASSERT(!empty_it.is_valid(), "Empty heap iterator is_valid() == false");
+
+    // b. Corrupted page link detection
+    TableHeap corrupted_link_heap;
+    TableHeap::create(accessor, master, corrupted_link_heap);
+    RID ins_rid{};
+    corrupted_link_heap.insert_tuple(Tuple(test_bytes), ins_rid);
+    uint8_t* cl_buf = accessor.raw_buffer(corrupted_link_heap.get_first_page_id());
+    TablePage cl_page(cl_buf);
+    cl_page.set_next_page_id(master.page_count + 10); // out of range link
+    auto cl_it = corrupted_link_heap.begin();
+    TEST_ASSERT(cl_it.status() == IteratorStatus::CORRUPTED_PAGE, "Iterator catches corrupted page with invalid link");
+
+    // c. Self-link corruption (page points to itself)
+    TableHeap self_link_heap;
+    TableHeap::create(accessor, master, self_link_heap);
+    const page_id_t sl_id = self_link_heap.get_first_page_id();
+    self_link_heap.insert_tuple(Tuple(test_bytes), ins_rid);
+    uint8_t* sl_buf = accessor.raw_buffer(sl_id);
+    TablePage sl_page(sl_buf);
+    sl_page.set_next_page_id(sl_id); // points to itself
+    auto sl_it = self_link_heap.begin();
+    TEST_ASSERT(sl_it.status() == IteratorStatus::CORRUPTED_PAGE, "Iterator catches self-link corruption");
 
     std::cout << "[PASSED] test_table_heap" << std::endl;
 }
