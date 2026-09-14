@@ -94,13 +94,16 @@ std::optional<bool> Value::compare_equals(const Value& other) const noexcept {
         return std::nullopt; // NULL = anything is UNKNOWN
     }
 
+    // A DOUBLE NaN compared with any value returns UNKNOWN in SQL 3VL
+    if ((type_ == TypeId::DOUBLE && std::isnan(as_double())) ||
+        (other.type_ == TypeId::DOUBLE && std::isnan(other.as_double()))) {
+        return std::nullopt;
+    }
+
     if (type_ == TypeId::INT && other.type_ == TypeId::INT) {
         return as_int() == other.as_int();
     }
     if (type_ == TypeId::DOUBLE && other.type_ == TypeId::DOUBLE) {
-        if (std::isnan(as_double()) || std::isnan(other.as_double())) {
-            return std::nullopt;
-        }
         return as_double() == other.as_double();
     }
     if (type_ == TypeId::TEXT && other.type_ == TypeId::TEXT) {
@@ -121,13 +124,16 @@ std::optional<bool> Value::compare_less_than(const Value& other) const noexcept 
         return std::nullopt;
     }
 
+    // A DOUBLE NaN compared with any value returns UNKNOWN in SQL 3VL
+    if ((type_ == TypeId::DOUBLE && std::isnan(as_double())) ||
+        (other.type_ == TypeId::DOUBLE && std::isnan(other.as_double()))) {
+        return std::nullopt;
+    }
+
     if (type_ == TypeId::INT && other.type_ == TypeId::INT) {
         return as_int() < other.as_int();
     }
     if (type_ == TypeId::DOUBLE && other.type_ == TypeId::DOUBLE) {
-        if (std::isnan(as_double()) || std::isnan(other.as_double())) {
-            return std::nullopt;
-        }
         return as_double() < other.as_double();
     }
     if (type_ == TypeId::TEXT && other.type_ == TypeId::TEXT) {

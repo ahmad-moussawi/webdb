@@ -337,6 +337,17 @@ void test_tuple_and_3vl() {
     TEST_ASSERT(!v_int10.compare_equals(v_null).has_value(), "10 = NULL is UNKNOWN");
     TEST_ASSERT(!v_double10.compare_equals(v_nan).has_value(), "10.0 = NaN is UNKNOWN");
 
+    // NaN compared with ANY value (including TEXT and INT) must yield UNKNOWN in 3VL
+    TEST_ASSERT(!v_nan.compare_equals(v_nan).has_value(), "NaN = NaN is UNKNOWN");
+    TEST_ASSERT(!v_nan.compare_equals(v_int10).has_value(), "NaN = INT is UNKNOWN");
+    TEST_ASSERT(!v_int10.compare_equals(v_nan).has_value(), "INT = NaN is UNKNOWN");
+    TEST_ASSERT(!v_nan.compare_equals(v_str_a).has_value(), "NaN = TEXT is UNKNOWN");
+    TEST_ASSERT(!v_str_a.compare_equals(v_nan).has_value(), "TEXT = NaN is UNKNOWN");
+    TEST_ASSERT(!v_nan.compare_less_than(v_str_a).has_value(), "NaN < TEXT is UNKNOWN");
+    TEST_ASSERT(!v_str_a.compare_less_than(v_nan).has_value(), "TEXT < NaN is UNKNOWN");
+    TEST_ASSERT(!v_nan.compare_less_than(v_int10).has_value(), "NaN < INT is UNKNOWN");
+    TEST_ASSERT(!v_int10.compare_less_than(v_nan).has_value(), "INT < NaN is UNKNOWN");
+
     // Exact equality
     TEST_ASSERT(v_int10.compare_equals(v_int10) == true, "10 == 10");
     TEST_ASSERT(v_int10.compare_equals(v_int20) == false, "10 != 20");
