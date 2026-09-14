@@ -505,7 +505,27 @@ void test_table_heap() {
         TEST_ASSERT(*it >= FIRST_DATA_PAGE_ID, "Data pages flushed before master metadata");
     }
 
-    // 8. Cycle detection in TableIterator
+    // 8. Test TableHeap::open with mutable pending_master
+    TableHeap reopened_heap;
+    auto open_res = TableHeap::open(accessor, master, heap.get_first_page_id(), reopened_heap);
+    TEST_ASSERT(open_res == StorageResult::SUCCESS, "Reopen TableHeap successfully");
+    TEST_ASSERT(reopened_heap.get_first_page_id() == heap.get_first_page_id(), "Reopened first page matches");
+    TEST_ASSERT(reopened_heap.get_last_page_id() == heap.get_last_page_id(), "Reopened last page matches reconstructed tail");
+
+    // Verify append on reopened heap updates master.page_count without UB
+    const uint32_t count_before = master.page_count;
+    std::vector<Value> extra_row = {
+        Value::make_int(12345),
+        Value::make_text(std::string(3500, 'Z')) // Force allocation of another page
+    };
+    std::vector<uint8_t> extra_bytes;
+    Tuple::serialize(extra_row, schema, extra_bytes);
+    RID extra_rid{};
+    auto reopen_ins = reopened_heap.insert_tuple(Tuple(extra_bytes), extra_rid);
+    TEST_ASSERT(reopen_ins == StorageResult::SUCCESS, "Insert on reopened heap succeeds");
+    TEST_ASSERT(master.page_count > count_before, "pending_master.page_count modified through mutable reference");
+
+    // 9. Cycle detection in TableIterator
     // Manually create a link cycle: page 3 next_page_id points back to page 2
     uint8_t* p3_buf = accessor.raw_buffer(3);
     TablePage p3(p3_buf);

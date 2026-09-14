@@ -26,10 +26,10 @@ StorageResult TableHeap::create(IPageAccessor& accessor,
 }
 
 StorageResult TableHeap::open(IPageAccessor& accessor,
-                              const MasterData& master,
+                              MasterData& pending_master,
                               page_id_t first_page_id,
                               TableHeap& out_heap) noexcept {
-    if (first_page_id < FIRST_DATA_PAGE_ID || static_cast<uint32_t>(first_page_id) >= master.page_count) {
+    if (first_page_id < FIRST_DATA_PAGE_ID || static_cast<uint32_t>(first_page_id) >= pending_master.page_count) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -39,7 +39,7 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
     page_id_t prev = INVALID_PAGE_ID;
 
     while (curr != INVALID_PAGE_ID) {
-        if (visited.contains(curr) || visited.size() >= MAX_PAGES) {
+        if (visited.find(curr) != visited.end() || visited.size() >= MAX_PAGES) {
             return StorageResult::CYCLE_DETECTED;
         }
         visited.insert(curr);
@@ -50,7 +50,7 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
             return fetch_res;
         }
 
-        auto val_res = TablePage::validate(buf, curr, master.page_count);
+        auto val_res = TablePage::validate(buf, curr, pending_master.page_count);
         if (val_res != StorageResult::SUCCESS) {
             return val_res;
         }
@@ -64,7 +64,7 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
         curr = page.get_next_page_id();
     }
 
-    out_heap = TableHeap(&accessor, const_cast<MasterData*>(&master), first_page_id, prev);
+    out_heap = TableHeap(&accessor, &pending_master, first_page_id, prev);
     return StorageResult::SUCCESS;
 }
 
@@ -252,7 +252,7 @@ TableIterator TableHeap::begin() noexcept {
 
 void TableIterator::locate_next_live_tuple() noexcept {
     while (current_rid_.page_id != INVALID_PAGE_ID) {
-        if (!visited_pages_.contains(current_rid_.page_id)) {
+        if (visited_pages_.find(current_rid_.page_id) == visited_pages_.end()) {
             if (visited_pages_.size() >= MAX_PAGES) {
                 status_ = IteratorStatus::CYCLE_DETECTED;
                 return;
@@ -294,7 +294,7 @@ void TableIterator::locate_next_live_tuple() noexcept {
         current_rid_.page_id = page.get_next_page_id();
         current_rid_.slot_num = 0;
 
-        if (current_rid_.page_id != INVALID_PAGE_ID && visited_pages_.contains(current_rid_.page_id)) {
+        if (current_rid_.page_id != INVALID_PAGE_ID && visited_pages_.find(current_rid_.page_id) != visited_pages_.end()) {
             status_ = IteratorStatus::CYCLE_DETECTED;
             return;
         }

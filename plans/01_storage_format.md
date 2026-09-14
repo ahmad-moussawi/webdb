@@ -748,9 +748,9 @@ A `TableHeap` stores:
 - `first_page_id`;
 - `last_page_id`;
 - a reference to `IPageAccessor`;
-- mutable pending master metadata needed for append-only page allocation.
+- a pointer/reference to mutable `MasterData& pending_master` needed for append-only page allocation.
 
-`last_page_id` is an in-memory append optimization. When reopening a heap, it must be reconstructed by walking from `first_page_id` and validating chain links.
+`last_page_id` is an in-memory append optimization. When opening a heap via `TableHeap::open(accessor, pending_master, first_page_id, out_heap)`, it accepts mutable pending metadata and reconstructs `last_page_id` by walking from `first_page_id` and validating chain links.
 
 ### 10.2 Insert
 

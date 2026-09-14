@@ -59,7 +59,7 @@ public:
      * @brief Reopens an existing TableHeap, validating chain links and reconstructing last_page_id.
      */
     static StorageResult open(IPageAccessor& accessor,
-                              const MasterData& master,
+                              MasterData& pending_master,
                               page_id_t first_page_id,
                               TableHeap& out_heap) noexcept;
 
