@@ -51,18 +51,35 @@ public:
         if (fail_flush) return StorageResult::IO_ERROR;
         if (!pages_.contains(page_id)) return StorageResult::IO_ERROR;
         dirty_pages_.erase(page_id);
+        flush_history.push_back(page_id);
+        return StorageResult::SUCCESS;
+    }
+
+    StorageResult flush_dirty_pages() override {
+        if (fail_flush) return StorageResult::IO_ERROR;
+        std::vector<page_id_t> to_flush(dirty_pages_.begin(), dirty_pages_.end());
+        for (page_id_t pid : to_flush) {
+            auto res = flush_page(pid);
+            if (res != StorageResult::SUCCESS) return res;
+        }
         return StorageResult::SUCCESS;
     }
 
     StorageResult sync() override {
         if (fail_sync) return StorageResult::IO_ERROR;
-        dirty_pages_.clear();
+        sync_call_count++;
         return StorageResult::SUCCESS;
     }
 
     bool fail_flush{false};
     bool fail_sync{false};
     bool fail_mark_dirty{false};
+    size_t sync_call_count{0};
+    std::vector<page_id_t> flush_history;
+
+    size_t dirty_count() const noexcept {
+        return dirty_pages_.size();
+    }
 
     bool has_page(page_id_t page_id) const {
         return pages_.contains(page_id);
@@ -471,7 +488,24 @@ void test_table_heap() {
     get_res = heap.get_tuple(inserted_rids[1], dead_t);
     TEST_ASSERT(get_res == StorageResult::SLOT_NOT_FOUND, "Deleted tuple not found");
 
-    // 7. Cycle detection in TableIterator
+    // 7. Commit with dirty data pages and verify flush ordering
+    accessor.flush_history.clear();
+    TEST_ASSERT(accessor.dirty_count() > 0, "Dirty data pages exist before commit");
+    master.system_tables_root = heap.get_first_page_id();
+    auto commit_res = MasterPageManager::commit_master(accessor, active_id, master);
+    TEST_ASSERT(commit_res == StorageResult::SUCCESS, "Commit master with dirty heap pages");
+    TEST_ASSERT(accessor.dirty_count() == 0, "All dirty data and master pages flushed after commit");
+
+    // Verify ordering: data pages must be flushed before the inactive master page
+    const page_id_t expected_inactive_master = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
+    auto master_flush_it = std::find(accessor.flush_history.begin(), accessor.flush_history.end(), expected_inactive_master);
+    TEST_ASSERT(master_flush_it != accessor.flush_history.end(), "Inactive master was flushed");
+    // All items before master_flush_it must be data pages (page_id >= FIRST_DATA_PAGE_ID)
+    for (auto it = accessor.flush_history.begin(); it != master_flush_it; ++it) {
+        TEST_ASSERT(*it >= FIRST_DATA_PAGE_ID, "Data pages flushed before master metadata");
+    }
+
+    // 8. Cycle detection in TableIterator
     // Manually create a link cycle: page 3 next_page_id points back to page 2
     uint8_t* p3_buf = accessor.raw_buffer(3);
     TablePage p3(p3_buf);

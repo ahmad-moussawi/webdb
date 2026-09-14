@@ -193,14 +193,27 @@ StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,
 
 StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
                                                page_id_t active_id,
-                                               MasterData& pending_data) noexcept {
-    // 1. Sync all previously flushed data pages
+                                               MasterData& pending_data,
+                                               const std::vector<page_id_t>& dirty_page_ids) noexcept {
+    // 1. Flush all dirty data pages before durability barrier
+    for (page_id_t pid : dirty_page_ids) {
+        auto flush_res = accessor.flush_page(pid);
+        if (flush_res != StorageResult::SUCCESS) {
+            return flush_res;
+        }
+    }
+    auto flush_all_res = accessor.flush_dirty_pages();
+    if (flush_all_res != StorageResult::SUCCESS) {
+        return flush_all_res;
+    }
+
+    // 2. Durability barrier: guarantee all newly referenced data pages are durable on storage
     auto sync_res = accessor.sync();
     if (sync_res != StorageResult::SUCCESS) {
         return sync_res;
     }
 
-    // 2. Identify inactive master
+    // 3. Identify inactive master
     const page_id_t inactive_id = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
     uint8_t* inactive_buf = nullptr;
     auto fetch_res = accessor.fetch_page(inactive_id, &inactive_buf);
@@ -208,17 +221,17 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
         return fetch_res;
     }
 
-    // 3. Increment generation counter
+    // 4. Increment generation counter
     pending_data.generation_id++;
 
-    // 4. Serialize to inactive master page
+    // 5. Serialize to inactive master page
     MasterPage::serialize(pending_data, inactive_buf);
     auto mark_res = accessor.mark_dirty(inactive_id);
     if (mark_res != StorageResult::SUCCESS) {
         return mark_res;
     }
 
-    // 5. Flush inactive master and barrier sync
+    // 6. Flush inactive master and barrier sync
     auto flush_res = accessor.flush_page(inactive_id);
     if (flush_res != StorageResult::SUCCESS) {
         return flush_res;

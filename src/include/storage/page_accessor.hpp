@@ -39,6 +39,11 @@ public:
     virtual StorageResult flush_page(page_id_t page_id) = 0;
 
     /**
+     * @brief Flushes all currently dirty pages to the underlying storage backend.
+     */
+    virtual StorageResult flush_dirty_pages() = 0;
+
+    /**
      * @brief Requests a durable storage sync barrier from the backend.
      */
     virtual StorageResult sync() = 0;

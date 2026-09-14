@@ -3,6 +3,8 @@
 #include "common/types.hpp"
 #include "storage/page_accessor.hpp"
 
+#include <vector>
+
 namespace webdb {
 
 struct MasterData {
@@ -56,11 +58,14 @@ public:
 
     /**
      * @brief Atomically commits new metadata to the inactive master page.
-     * Sequence: flush data pages -> sync() -> write inactive master with gen+1 -> flush master -> sync().
+     * Sequence: flush all dirty data pages -> sync() -> write inactive master with gen+1 -> flush master -> sync().
+     * @param dirty_page_ids Optional explicit list of dirty data page IDs to flush. In addition,
+     *                       accessor.flush_dirty_pages() is invoked to ensure all dirty data pages are flushed.
      */
     static StorageResult commit_master(IPageAccessor& accessor,
                                        page_id_t active_id,
-                                       MasterData& pending_data) noexcept;
+                                       MasterData& pending_data,
+                                       const std::vector<page_id_t>& dirty_page_ids = {}) noexcept;
 };
 
 } // namespace webdb
