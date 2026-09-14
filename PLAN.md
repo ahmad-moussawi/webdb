@@ -77,59 +77,16 @@ flowchart TD
 
 ## Detailed Milestone Breakdown
 
-### Phase 1: Storage Format, Master Page & Slotted Pages
-**Objective**: Build a deterministic 4KB page binary layout with canonical Little-Endian encoding, corruption detection, and Master Page bootstrap.
+### Phase 1: Storage Format, Dual Master Pages & Slotted Pages
+**Objective**: Build a deterministic 4KB block storage layout with canonical Little-Endian encoding, corruption detection, Dual Master Pages for crash-resilient commits, slotted-page record storage with defragmentation, and an abstract page accessor.
 
-- [ ] **1.1 Page Format & Master Header (`MasterPage`)**
-  - Page size constant: `PAGE_SIZE = 4096` bytes.
-  - All integers, floats, offsets, and bitmaps encoded strictly in **canonical Little-Endian**.
-  - **Master Page (Page 0) Layout**:
-    ```text
-    +---------------------------------------------------------------------------------+
-    | Magic "WEBD" (4B) | Version (2B) | PageSize (2B) | GenerationID (8B)            |
-    +---------------------------------------------------------------------------------+
-    | SystemTablesRootPageID (4B) | SystemColumnsRootPageID (4B) | SystemIdxRoot (4B) |
-    +---------------------------------------------------------------------------------+
-    | FreeListHeadPageID (4B)     | PageCount (4B)               | Checksum CRC32 (4B)|
-    +---------------------------------------------------------------------------------+
-    | Reserved / Commit Checkpoint State (4064B)                                     |
-    +---------------------------------------------------------------------------------+
-    ```
-  - Eliminates bootstrap circular dependencies: Catalog tables are loaded directly from Page 0 roots.
+> **Full Detailed Specification**: See [plans/01_storage_format.md](plans/01_storage_format.md) for complete byte-level layouts, CRC-32 IEEE 802.3 masking rules, unaligned access safety, RID stability policies, and the test matrix.
 
-- [ ] **1.2 Slotted Page Layout (`TablePage`)**
-  - Design the slotted page binary structure:
-    ```text
-    +---------------------------------------------------------------------------------+
-    | PageHeader: PageID (4B), PrevPageID (4B), NextPageID (4B), SlotCount (2B),      |
-    |             FreeSpaceOffset (2B), GenerationID (8B), CRC32 (4B)                 |
-    +---------------------------------------------------------------------------------+
-    | Slot Directory Array: [Slot 0: {offset: 2B, length: 2B}] [Slot 1] ...           |
-    +---------------------------------------------------------------------------------+
-    |                               <-- FREE SPACE -->                                |
-    +---------------------------------------------------------------------------------+
-    | ... [Tuple 1 Data] [Tuple 0 Data]                                               |
-    +---------------------------------------------------------------------------------+
-    ```
-  - Slot directory grows downwards from the header; tuple payloads grow upwards from the bottom.
-  - Explicit in-page defragmentation / compaction when deleted slots create free space holes.
-  - Page checksum validation on read to detect corrupted storage blocks.
-
-- [ ] **1.3 Record Serialization & Strict Types**
-  - **Base Storage Types**:
-    - `INT`: 64-bit signed integer (`int64_t`), 8 bytes fixed inline.
-    - `DOUBLE`: 64-bit IEEE-754 double precision float (`double`), 8 bytes fixed inline.
-    - `TEXT`: Variable-length UTF-8 encoded string. Inline descriptor stores `{ uint16_t offset, uint16_t length }` (max tuple text size 65,535 bytes) pointing to the tuple's var-length payload section.
-  - **Nullability & 3VL Model**:
-    - `NULL` is a value state, not a type.
-    - Tuple starts with a `NullBitmap` (1 bit per column, `ceil(N/8)` bytes).
-    - If bit $i$ is 1, column $i$ is NULL (inline 8 bytes are zeroed/ignored).
-  - `RID` (Record Identifier): composite struct `{ page_id_t page_id, uint16_t slot_num }`.
-
-- [ ] **1.4 Table Heap (`TableHeap`)**
-  - Doubly-linked list of `TablePage`s forming table data storage.
-  - Insert, update, delete, and read operations by `RID`.
-  - Sequential scan cursor yielding tuples across slotted pages.
+- [ ] **1.1 Dual Master Pages (Pages 0 & 1)**: Alternating crash-resilient master pair tracking active generation, catalog roots (`_system_tables`, `_system_columns`, `_system_indexes`), and append-only `page_count`.
+- [ ] **1.2 Slotted TablePage Architecture**: Fixed 36-byte header with CRC-32 verification; downward-growing tuple payloads and upward-growing slot directory with in-place defragmentation and trailing dead slot pruning.
+- [ ] **1.3 Binary Tuple Serialization & Strict Types**: Fixed-width scalar slots (`INT`, `DOUBLE`) and variable-length `TEXT` payload tail, preceded by format version, flags, and `NullBitmap`.
+- [ ] **1.4 TableHeap & Cycle-Protected Scanner**: Doubly-linked chain of `TablePage`s supporting $O(1)$ tail appends, updates with relocation tracking (`UpdateResult`), and cycle-protected scanning.
+- [ ] **1.5 Decoupled Page Accessor (`IPageAccessor`)**: Synchronous abstract page interface (`fetch_page`, `allocate_page`, `mark_dirty`, `flush_page`, `sync`) decoupling Phase 1 tests from the Phase 2 async buffer pool.
 
 ---
 
