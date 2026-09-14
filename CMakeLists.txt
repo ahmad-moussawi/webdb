@@ -15,6 +15,12 @@ endif()
 # Core database engine library (independent of any web/WASM dependencies)
 add_library(webdb_core STATIC
     src/engine.cpp
+    src/common/checksum.cpp
+    src/storage/master_page.cpp
+    src/storage/slotted_page.cpp
+    src/storage/tuple.cpp
+    src/storage/value.cpp
+    src/storage/table_heap.cpp
 )
 
 target_include_directories(webdb_core PUBLIC
@@ -65,6 +71,11 @@ else()
     add_executable(webdb_cli
         src/main.cpp
     )
-
     target_link_libraries(webdb_cli PRIVATE webdb_core)
+
+    # Storage Engine Unit Test Suite (Phase 1)
+    add_executable(test_storage
+        tests/test_storage.cpp
+    )
+    target_link_libraries(test_storage PRIVATE webdb_core)
 endif()
