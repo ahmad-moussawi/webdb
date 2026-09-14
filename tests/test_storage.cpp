@@ -41,21 +41,28 @@ public:
     }
 
     StorageResult mark_dirty(page_id_t page_id) override {
+        if (fail_mark_dirty) return StorageResult::IO_ERROR;
         if (!pages_.contains(page_id)) return StorageResult::IO_ERROR;
         dirty_pages_.insert(page_id);
         return StorageResult::SUCCESS;
     }
 
     StorageResult flush_page(page_id_t page_id) override {
+        if (fail_flush) return StorageResult::IO_ERROR;
         if (!pages_.contains(page_id)) return StorageResult::IO_ERROR;
         dirty_pages_.erase(page_id);
         return StorageResult::SUCCESS;
     }
 
     StorageResult sync() override {
+        if (fail_sync) return StorageResult::IO_ERROR;
         dirty_pages_.clear();
         return StorageResult::SUCCESS;
     }
+
+    bool fail_flush{false};
+    bool fail_sync{false};
+    bool fail_mark_dirty{false};
 
     bool has_page(page_id_t page_id) const {
         return pages_.contains(page_id);
@@ -161,6 +168,28 @@ void test_master_page_dual() {
     TEST_ASSERT(res == StorageResult::SUCCESS, "Tie-break load");
     TEST_ASSERT(active_id == MASTER_PAGE_A_ID, "Tie-break selects Master A");
     TEST_ASSERT(active_data.generation_id == 5, "Generation matches tie");
+
+    // 8. Error propagation on write/sync failure during init and commit
+    InMemoryPageAccessor failing_acc;
+    failing_acc.fail_flush = true;
+    res = MasterPageManager::init_new_database(failing_acc);
+    TEST_ASSERT(res == StorageResult::IO_ERROR, "Init fails when flush fails");
+
+    InMemoryPageAccessor failing_sync_acc;
+    failing_sync_acc.fail_sync = true;
+    res = MasterPageManager::init_new_database(failing_sync_acc);
+    TEST_ASSERT(res == StorageResult::IO_ERROR, "Init fails when sync fails");
+
+    // Test commit failure propagation
+    accessor.fail_flush = true;
+    res = MasterPageManager::commit_master(accessor, active_id, active_data);
+    TEST_ASSERT(res == StorageResult::IO_ERROR, "Commit fails when flush fails");
+    accessor.fail_flush = false;
+
+    accessor.fail_mark_dirty = true;
+    res = MasterPageManager::commit_master(accessor, active_id, active_data);
+    TEST_ASSERT(res == StorageResult::IO_ERROR, "Commit fails when mark_dirty fails");
+    accessor.fail_mark_dirty = false;
 
     std::cout << "[PASSED] test_master_page_dual" << std::endl;
 }

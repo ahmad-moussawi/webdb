@@ -15,7 +15,10 @@ StorageResult TableHeap::create(IPageAccessor& accessor,
     }
 
     TablePage::init(page_buf, new_page_id, INVALID_PAGE_ID, INVALID_PAGE_ID);
-    accessor.mark_dirty(new_page_id);
+    auto mark_res = accessor.mark_dirty(new_page_id);
+    if (mark_res != StorageResult::SUCCESS) {
+        return mark_res;
+    }
     pending_master.page_count++;
 
     out_heap = TableHeap(&accessor, &pending_master, new_page_id, new_page_id);
@@ -85,7 +88,10 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
     auto ins_res = last_page.insert_tuple(tuple.data(), tuple.size(), slot_num);
 
     if (ins_res == StorageResult::SUCCESS) {
-        accessor_->mark_dirty(last_page_id_);
+        auto mark_res = accessor_->mark_dirty(last_page_id_);
+        if (mark_res != StorageResult::SUCCESS) {
+            return mark_res;
+        }
         out_rid = RID{last_page_id_, slot_num};
         return StorageResult::SUCCESS;
     }
@@ -107,7 +113,10 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
 
     // Link old last page forward to new page
     last_page.set_next_page_id(new_page_id);
-    accessor_->mark_dirty(last_page_id_);
+    auto mark_old = accessor_->mark_dirty(last_page_id_);
+    if (mark_old != StorageResult::SUCCESS) {
+        return mark_old;
+    }
 
     // Insert tuple into the fresh page
     TablePage new_page(new_buf);
@@ -116,7 +125,10 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
         return ins_res;
     }
 
-    accessor_->mark_dirty(new_page_id);
+    auto mark_new = accessor_->mark_dirty(new_page_id);
+    if (mark_new != StorageResult::SUCCESS) {
+        return mark_new;
+    }
     master_ptr_->page_count++;
     last_page_id_ = new_page_id;
 
@@ -169,7 +181,11 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     TablePage page(buf);
     auto page_update = page.update_tuple(rid.slot_num, new_tuple.data(), new_tuple.size());
     if (page_update.status == StorageResult::SUCCESS) {
-        accessor_->mark_dirty(rid.page_id);
+        auto mark_res = accessor_->mark_dirty(rid.page_id);
+        if (mark_res != StorageResult::SUCCESS) {
+            result.status = mark_res;
+            return result;
+        }
         return page_update;
     }
 
@@ -187,7 +203,11 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
 
     // Mark old slot DEAD
     page.delete_tuple(rid.slot_num);
-    accessor_->mark_dirty(rid.page_id);
+    auto mark_res = accessor_->mark_dirty(rid.page_id);
+    if (mark_res != StorageResult::SUCCESS) {
+        result.status = mark_res;
+        return result;
+    }
 
     result.status = StorageResult::SUCCESS;
     result.new_rid = new_rid;
@@ -209,7 +229,10 @@ StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
     TablePage page(buf);
     auto del_res = page.delete_tuple(rid.slot_num);
     if (del_res == StorageResult::SUCCESS) {
-        accessor_->mark_dirty(rid.page_id);
+        auto mark_res = accessor_->mark_dirty(rid.page_id);
+        if (mark_res != StorageResult::SUCCESS) {
+            return mark_res;
+        }
     }
     return del_res;
 }

@@ -118,8 +118,14 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     data_a.generation_id = 1;
     data_a.page_count = 2;
     MasterPage::serialize(data_a, master_a_buf);
-    accessor.mark_dirty(MASTER_PAGE_A_ID);
-    accessor.flush_page(MASTER_PAGE_A_ID);
+    res = accessor.mark_dirty(MASTER_PAGE_A_ID);
+    if (res != StorageResult::SUCCESS) {
+        return res;
+    }
+    res = accessor.flush_page(MASTER_PAGE_A_ID);
+    if (res != StorageResult::SUCCESS) {
+        return res;
+    }
 
     // Master B: generation 0, page_count 2
     MasterData data_b{};
@@ -128,11 +134,16 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     data_b.generation_id = 0;
     data_b.page_count = 2;
     MasterPage::serialize(data_b, master_b_buf);
-    accessor.mark_dirty(MASTER_PAGE_B_ID);
-    accessor.flush_page(MASTER_PAGE_B_ID);
+    res = accessor.mark_dirty(MASTER_PAGE_B_ID);
+    if (res != StorageResult::SUCCESS) {
+        return res;
+    }
+    res = accessor.flush_page(MASTER_PAGE_B_ID);
+    if (res != StorageResult::SUCCESS) {
+        return res;
+    }
 
-    accessor.sync();
-    return StorageResult::SUCCESS;
+    return accessor.sync();
 }
 
 StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,
@@ -202,7 +213,10 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
 
     // 4. Serialize to inactive master page
     MasterPage::serialize(pending_data, inactive_buf);
-    accessor.mark_dirty(inactive_id);
+    auto mark_res = accessor.mark_dirty(inactive_id);
+    if (mark_res != StorageResult::SUCCESS) {
+        return mark_res;
+    }
 
     // 5. Flush inactive master and barrier sync
     auto flush_res = accessor.flush_page(inactive_id);
