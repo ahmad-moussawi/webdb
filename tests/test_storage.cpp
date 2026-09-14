@@ -537,6 +537,33 @@ void test_table_heap() {
     }
     TEST_ASSERT(it.status() == IteratorStatus::CYCLE_DETECTED, "Iterator caught link cycle");
 
+    // 10. Corrupt tail page protection on insert_tuple
+    // Corrupt the tail page of reopened_heap
+    const page_id_t tail_id = reopened_heap.get_last_page_id();
+    uint8_t* tail_buf = accessor.raw_buffer(tail_id);
+    tail_buf[15] ^= 0xFF; // Invalidate checksum / structure
+
+    std::vector<Value> test_row = {
+        Value::make_int(9999),
+        Value::make_text("will fail")
+    };
+    std::vector<uint8_t> test_bytes;
+    Tuple::serialize(test_row, schema, test_bytes);
+    RID fail_rid{};
+    auto corrupt_ins = reopened_heap.insert_tuple(Tuple(test_bytes), fail_rid);
+    TEST_ASSERT(corrupt_ins == StorageResult::CORRUPTED_PAGE, "insert_tuple rejects corrupt tail page");
+
+    // Corrupted page on get_tuple, update_tuple, and delete_tuple
+    Tuple dummy_tuple;
+    auto corrupt_get = reopened_heap.get_tuple(RID{tail_id, 0}, dummy_tuple);
+    TEST_ASSERT(corrupt_get == StorageResult::CORRUPTED_PAGE, "get_tuple rejects corrupt page");
+
+    auto corrupt_upd = reopened_heap.update_tuple(RID{tail_id, 0}, Tuple(test_bytes));
+    TEST_ASSERT(corrupt_upd.status == StorageResult::CORRUPTED_PAGE, "update_tuple rejects corrupt page");
+
+    auto corrupt_del = reopened_heap.delete_tuple(RID{tail_id, 0});
+    TEST_ASSERT(corrupt_del == StorageResult::CORRUPTED_PAGE, "delete_tuple rejects corrupt page");
+
     std::cout << "[PASSED] test_table_heap" << std::endl;
 }
 

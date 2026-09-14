@@ -83,6 +83,11 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
         return fetch_res;
     }
 
+    auto val_res = TablePage::validate(last_buf, last_page_id_, master_ptr_->page_count);
+    if (val_res != StorageResult::SUCCESS) {
+        return val_res;
+    }
+
     TablePage last_page(last_buf);
     uint16_t slot_num = 0;
     auto ins_res = last_page.insert_tuple(tuple.data(), tuple.size(), slot_num);
@@ -147,6 +152,12 @@ StorageResult TableHeap::get_tuple(const RID& rid, Tuple& out_tuple) const noexc
         return fetch_res;
     }
 
+    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
+    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    if (val_res != StorageResult::SUCCESS) {
+        return val_res;
+    }
+
     TablePage page(buf);
     const uint8_t* tuple_bytes = nullptr;
     size_t tuple_size = 0;
@@ -175,6 +186,13 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     auto fetch_res = accessor_->fetch_page(rid.page_id, &buf);
     if (fetch_res != StorageResult::SUCCESS) {
         result.status = fetch_res;
+        return result;
+    }
+
+    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
+    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    if (val_res != StorageResult::SUCCESS) {
+        result.status = val_res;
         return result;
     }
 
@@ -224,6 +242,12 @@ StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
     auto fetch_res = accessor_->fetch_page(rid.page_id, &buf);
     if (fetch_res != StorageResult::SUCCESS) {
         return fetch_res;
+    }
+
+    const uint32_t page_count = master_ptr_ ? master_ptr_->page_count : static_cast<uint32_t>(rid.page_id + 1);
+    auto val_res = TablePage::validate(buf, rid.page_id, page_count);
+    if (val_res != StorageResult::SUCCESS) {
+        return val_res;
     }
 
     TablePage page(buf);
