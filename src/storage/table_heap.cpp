@@ -222,7 +222,11 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     }
 
     // Mark old slot DEAD
-    page.delete_tuple(rid.slot_num);
+    auto del_old = page.delete_tuple(rid.slot_num);
+    if (del_old != StorageResult::SUCCESS) {
+        result.status = del_old;
+        return result;
+    }
     auto mark_res = accessor_->mark_dirty(rid.page_id);
     if (mark_res != StorageResult::SUCCESS) {
         result.status = mark_res;
@@ -300,7 +304,7 @@ void TableIterator::locate_next_live_tuple() noexcept {
         }
 
         TablePage page(buf);
-        if (prev_page_id_ != INVALID_PAGE_ID && page.get_prev_page_id() != prev_page_id_) {
+        if (page.get_prev_page_id() != prev_page_id_) {
             status_ = IteratorStatus::CORRUPTED_PAGE;
             return;
         }

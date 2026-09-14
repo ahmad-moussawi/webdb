@@ -539,7 +539,7 @@ void test_table_heap() {
     TEST_ASSERT(reopen_ins == StorageResult::SUCCESS, "Insert on reopened heap succeeds");
     TEST_ASSERT(master.page_count > count_before, "pending_master.page_count modified through mutable reference");
 
-    // 9. Cycle detection in TableIterator
+    // 9. Cycle detection and backward-link validation in TableIterator
     // Manually create a link cycle: page 3 next_page_id points back to page 2
     uint8_t* p3_buf = accessor.raw_buffer(3);
     TablePage p3(p3_buf);
@@ -550,6 +550,16 @@ void test_table_heap() {
         it.advance();
     }
     TEST_ASSERT(it.status() == IteratorStatus::CYCLE_DETECTED, "Iterator caught link cycle");
+
+    // Test first page backward link corruption: first page must have prev_page_id == INVALID_PAGE_ID
+    // Create a new heap whose first page has an invalid backward link
+    TableHeap bad_head_heap;
+    TableHeap::create(accessor, master, bad_head_heap);
+    uint8_t* bad_head_buf = accessor.raw_buffer(bad_head_heap.get_first_page_id());
+    TablePage bad_head_page(bad_head_buf);
+    bad_head_page.set_prev_page_id(2); // Points backward to page 2 instead of INVALID_PAGE_ID
+    auto bad_it = bad_head_heap.begin();
+    TEST_ASSERT(bad_it.status() == IteratorStatus::CORRUPTED_PAGE, "Iterator catches corrupted first page prev_page_id");
 
     // 10. Corrupt tail page protection on insert_tuple
     // Corrupt the tail page of reopened_heap

@@ -52,8 +52,13 @@ struct RID {
         return page_id != INVALID_PAGE_ID;
     }
 
-    constexpr bool operator==(const RID& other) const noexcept = default;
-    constexpr bool operator!=(const RID& other) const noexcept = default;
+    constexpr bool operator==(const RID& other) const noexcept {
+        return page_id == other.page_id && slot_num == other.slot_num;
+    }
+
+    constexpr bool operator!=(const RID& other) const noexcept {
+        return !(*this == other);
+    }
 };
 
 enum class StorageResult : uint8_t {
