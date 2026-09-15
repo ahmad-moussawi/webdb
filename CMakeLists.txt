@@ -88,11 +88,22 @@ else()
     )
     target_link_libraries(webdb_cli PRIVATE webdb_core)
 
-    # Storage Engine Unit Test Suite (Phase 1)
+    # Storage Engine Unit Tests (Phase 1)
     enable_testing()
-    add_executable(test_storage
-        tests/test_storage.cpp
-    )
-    target_link_libraries(test_storage PRIVATE webdb_core)
-    add_test(NAME storage COMMAND test_storage)
+
+    function(add_storage_test target source definition test_name)
+        add_executable(${target}
+            ${source}
+            tests/test_main.cpp
+        )
+        target_compile_definitions(${target} PRIVATE ${definition})
+        target_link_libraries(${target} PRIVATE webdb_core)
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
+
+    add_storage_test(test_checksum tests/test_checksum.cpp WEBDB_TEST_CHECKSUMS checksum)
+    add_storage_test(test_master_page tests/test_master_page.cpp WEBDB_TEST_MASTER_PAGE master_page)
+    add_storage_test(test_slotted_page tests/test_slotted_page.cpp WEBDB_TEST_SLOTTED_PAGE slotted_page)
+    add_storage_test(test_tuple tests/test_tuple.cpp WEBDB_TEST_TUPLE tuple)
+    add_storage_test(test_table_heap tests/test_table_heap.cpp WEBDB_TEST_TABLE_HEAP table_heap)
 endif()
