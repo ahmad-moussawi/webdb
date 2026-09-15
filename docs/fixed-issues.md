@@ -653,6 +653,8 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
    Any subsequent read or validation of the page failed with `CORRUPTED_PAGE`.
 3. **Compaction Dead-Slot Pruning Race in Updates**:
    When an update expanded a tuple and required compaction, marking the updating slot `DEAD` before running `defragment()` risked having the slot pruned if it was at the trailing end of the slot directory.
+4. **Buffer Underflow / Slot Directory Overwrite in Fast Growth**:
+   In Case B (growth without compaction), the check tested `delta <= contiguous_free_space()`, but the code allocated an entirely new payload of size `n_size` (`new_ptr = free_space_pointer - n_size`) without reclaiming the old payload. When `delta <= contiguous_free_space()` but `n_size > contiguous_free_space()`, `new_ptr` moved past the slot directory or underflowed, and `std::memcpy` overwrote the slot directory and page header.
 
 ### How We Fixed It
 1. Added rigorous parameter validation at the entry of both `TablePage::update_tuple` and `TableHeap::update_tuple`:
@@ -662,7 +664,15 @@ if (!new_tuple_data || new_size == 0) {
     return result;
 }
 ```
-2. Unified page compaction into an atomic `compact()` method that writes the new payload directly into the temporary buffer without marking the slot `DEAD` or exposing it to trailing pruning.
+2. Changed Case B's condition to check that the entire new payload fits in contiguous free space:
+```cpp
+// Case B: full new payload fits in contiguous free space (without compaction)
+if (n_size <= contiguous_free_space()) {
+    const uint16_t new_ptr = static_cast<uint16_t>(get_free_space_pointer() - n_size);
+    ...
+```
+   When `n_size > contiguous_free_space()`, the engine now falls through to Case C (`delta <= total_free_space_after_compaction()`), invoking `compact()` where the old payload is reclaimed during repacking.
+3. Unified page compaction into an atomic `compact()` method that writes the new payload directly into the temporary buffer without marking the slot `DEAD` or exposing it to trailing pruning.
 
 ---
 
@@ -679,3 +689,4 @@ if (!new_tuple_data || new_size == 0) {
 | Inconsistent 3VL evaluation | Handle `NULL` and `NaN` globally before pairwise comparisons. |
 | Raw pointer casting on serialized byte streams | Use `std::memcpy`-based endianness helpers for all multi-byte I/O. |
 | Asymmetric argument validation across CRUD methods | Enforce non-null and non-zero invariants symmetrically on both insert and update. |
+| Checking growth delta against free space without prior compaction | Check `n_size <= contiguous_free_space()` for uncompacted allocations; only use `delta` when repacking/compacting. |

@@ -409,6 +409,34 @@ void test_slotted_page() {
     get_res = case_c_page.get_tuple(c_s2, &out_p, out_len);
     TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 1200 && out_p[0] == 0x77, "Trailing slot data valid after Case C update");
 
+    // 7c. Regression test: delta fits in contiguous free space but n_size does NOT
+    // (Must trigger Case C compaction, NOT allocate past slot directory in Case B)
+    std::vector<uint8_t> case_b_c_buf(PAGE_SIZE, 0);
+    TablePage::init(case_b_c_buf.data(), 9);
+    TablePage case_b_c_page(case_b_c_buf.data());
+    uint16_t b_c_s0 = 0, b_c_s1 = 0;
+    // Fill page almost completely: leave exactly 100 bytes contiguous free space
+    // Header=36, slots=8 -> slot dir end = 44. To have 100 contiguous bytes, free_ptr = 144.
+    // Total payload space needed = 4096 - 144 = 3952 bytes.
+    // Item 0: 3852 bytes, Item 1: 100 bytes.
+    const std::vector<uint8_t> b_c_item0(3852, 0xAA);
+    const std::vector<uint8_t> b_c_item1(100, 0xBB);
+    case_b_c_page.insert_tuple(b_c_item0.data(), b_c_item0.size(), b_c_s0);
+    case_b_c_page.insert_tuple(b_c_item1.data(), b_c_item1.size(), b_c_s1);
+    TEST_ASSERT(case_b_c_page.contiguous_free_space() == 100, "Contiguous free space is exactly 100");
+
+    // Grow item 1 from 100 bytes to 150 bytes:
+    // delta = 50 <= contiguous_free_space() (100).
+    // But n_size = 150 > contiguous_free_space() (100)!
+    // If buggy Case B ran, free_ptr would drop from 144 to (144 - 150) -> underflow or cross dir end (44)!
+    const std::vector<uint8_t> b_c_item1_grown(150, 0xCC);
+    auto b_c_res = case_b_c_page.update_tuple(b_c_s1, b_c_item1_grown.data(), b_c_item1_grown.size());
+    TEST_ASSERT(b_c_res.success(), "Update succeeds via compaction when n_size > contiguous_free_space");
+    TEST_ASSERT(TablePage::validate(case_b_c_buf.data(), 9, 20) == StorageResult::SUCCESS, "Page remains valid and non-corrupted");
+    get_res = case_b_c_page.get_tuple(b_c_s1, &out_p, out_len);
+    TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 150 && out_p[0] == 0xCC, "Tuple data valid");
+    TEST_ASSERT(case_b_c_page.contiguous_free_space() == 50, "Contiguous free space correctly reflects compacted growth (100 - 50 = 50)");
+
     // 8. Trailing dead-slot pruning on defragment
     std::vector<uint8_t> prune_buf(PAGE_SIZE, 0);
     TablePage::init(prune_buf.data(), 5);

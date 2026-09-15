@@ -390,8 +390,8 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
     // Expansion needed
     const uint16_t delta = static_cast<uint16_t>(n_size - old_size);
 
-    // Case B: growth fits in contiguous free space
-    if (delta <= contiguous_free_space()) {
+    // Case B: full new payload fits in contiguous free space (without compaction)
+    if (n_size <= contiguous_free_space()) {
         const uint16_t new_ptr = static_cast<uint16_t>(get_free_space_pointer() - n_size);
         set_free_space_pointer(new_ptr);
         std::memcpy(data_ + new_ptr, new_tuple_data, n_size);
@@ -402,7 +402,7 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
         return result;
     }
 
-    // Case C: growth fits after compaction
+    // Case C: net growth fits after compaction
     if (delta <= total_free_space_after_compaction()) {
         compact(static_cast<int32_t>(slot_num), new_tuple_data, n_size);
         result.status = StorageResult::SUCCESS;
