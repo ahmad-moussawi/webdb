@@ -14,6 +14,8 @@
 #include <cassert>
 #include <unordered_map>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 namespace webdb::test {
 
@@ -22,6 +24,16 @@ namespace webdb::test {
  */
 class InMemoryPageAccessor final : public IPageAccessor {
 public:
+    enum class EventType {
+        FLUSH,
+        SYNC,
+    };
+
+    struct Event {
+        EventType type;
+        page_id_t page_id{INVALID_PAGE_ID}; // Only for FLUSH
+    };
+
     StorageResult fetch_page(page_id_t page_id, uint8_t** out_page) override {
         auto it = pages_.find(page_id);
         if (it == pages_.end()) {
@@ -52,6 +64,7 @@ public:
         if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
         dirty_pages_.erase(page_id);
         flush_history.push_back(page_id);
+        events.push_back(Event{EventType::FLUSH, page_id});
         return StorageResult::SUCCESS;
     }
 
@@ -68,6 +81,7 @@ public:
     StorageResult sync() override {
         if (fail_sync) return StorageResult::IO_ERROR;
         sync_call_count++;
+        events.push_back(Event{EventType::SYNC, INVALID_PAGE_ID});
         return StorageResult::SUCCESS;
     }
 
@@ -76,6 +90,7 @@ public:
     bool fail_mark_dirty{false};
     size_t sync_call_count{0};
     std::vector<page_id_t> flush_history;
+    std::vector<Event> events;
 
     size_t dirty_count() const noexcept {
         return dirty_pages_.size();
@@ -329,14 +344,17 @@ void test_slotted_page() {
     std::vector<uint16_t> slots;
     slots.push_back(s1);
     const std::vector<uint8_t> chunk(200, 0x22);
+    StorageResult fill_res = StorageResult::SUCCESS;
     while (true) {
         uint16_t s = 0;
-        if (page.insert_tuple(chunk.data(), chunk.size(), s) == StorageResult::SUCCESS) {
+        fill_res = page.insert_tuple(chunk.data(), chunk.size(), s);
+        if (fill_res == StorageResult::SUCCESS) {
             slots.push_back(s);
         } else {
             break;
         }
     }
+    TEST_ASSERT(fill_res == StorageResult::PAGE_FULL, "Page fill terminates specifically with PAGE_FULL");
     TEST_ASSERT(page.get_slot_count() > 10, "Multiple tuples inserted");
 
     // 4. Deletion and hole tracking
@@ -879,8 +897,9 @@ void test_table_heap() {
     get_res = heap.get_tuple(inserted_rids[1], dead_t);
     TEST_ASSERT(get_res == StorageResult::SLOT_NOT_FOUND, "Deleted tuple not found");
 
-    // 7. Commit with dirty data pages and verify flush ordering
+    // 7. Commit with dirty data pages and verify flush ordering & sync barriers
     accessor.flush_history.clear();
+    accessor.events.clear();
     TEST_ASSERT(accessor.dirty_count() > 0, "Dirty data pages exist before commit");
     master.system_tables_root = heap.get_first_page_id();
     const page_id_t master_to_be_written = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
@@ -896,6 +915,33 @@ void test_table_heap() {
     for (auto it = accessor.flush_history.begin(); it != master_flush_it; ++it) {
         TEST_ASSERT(*it >= FIRST_DATA_PAGE_ID, "Data pages flushed before master metadata");
     }
+
+    // Verify exact sequence of events:
+    // [1..N data page FLUSHes] -> [SYNC 1 (durability barrier for data)] -> [FLUSH master page] -> [SYNC 2 (final commit barrier)]
+    auto first_sync_it = std::find_if(accessor.events.begin(), accessor.events.end(), [](const InMemoryPageAccessor::Event& e) {
+        return e.type == InMemoryPageAccessor::EventType::SYNC;
+    });
+    TEST_ASSERT(first_sync_it != accessor.events.end(), "First sync barrier occurred");
+
+    // All events before first sync barrier must be data page flushes
+    size_t data_flush_count = 0;
+    for (auto it = accessor.events.begin(); it != first_sync_it; ++it) {
+        TEST_ASSERT(it->type == InMemoryPageAccessor::EventType::FLUSH, "Pre-sync event is a page flush");
+        TEST_ASSERT(it->page_id >= FIRST_DATA_PAGE_ID, "Pre-sync flush is a data page");
+        data_flush_count++;
+    }
+    TEST_ASSERT(data_flush_count > 0, "At least one data page was flushed before first sync barrier");
+
+    // After first sync, exactly one master flush followed by the final sync barrier
+    auto after_first_sync = first_sync_it + 1;
+    TEST_ASSERT(after_first_sync != accessor.events.end(), "Event exists after first sync");
+    TEST_ASSERT(after_first_sync->type == InMemoryPageAccessor::EventType::FLUSH, "Event after first sync is master page flush");
+    TEST_ASSERT(after_first_sync->page_id == master_to_be_written, "Flushed page after first sync is the newly committed master");
+
+    auto final_sync_it = after_first_sync + 1;
+    TEST_ASSERT(final_sync_it != accessor.events.end(), "Final sync barrier exists");
+    TEST_ASSERT(final_sync_it->type == InMemoryPageAccessor::EventType::SYNC, "Event after master flush is final sync barrier");
+    TEST_ASSERT(final_sync_it + 1 == accessor.events.end(), "No further events after final sync barrier");
 
     // 8. Test TableHeap::open with mutable pending_master
     TableHeap reopened_heap;
