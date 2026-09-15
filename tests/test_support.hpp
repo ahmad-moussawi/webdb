@@ -5,6 +5,7 @@
 #include "common/endian.hpp"
 #include "storage/page_accessor.hpp"
 #include "storage/master_page.hpp"
+#include "storage/operation_scheduler.hpp"
 #include "storage/slotted_page.hpp"
 #include "storage/tuple.hpp"
 #include "storage/value.hpp"
