@@ -44,7 +44,7 @@ struct PageData {
 // The JavaScript host performs I/O, then resumes an operation through this API.
 class OperationScheduler {
    public:
-    // Creates an operation in READY state. The opaque plan is interpreted in later Phase 2 work.
+    // Parses and validates the versioned Phase 2 test-operation format before creating an operation.
     StorageResult start_operation(std::string_view plan, operation_id_t& out_operation_id) noexcept;
     // Advances one state-machine action. Terminal operations retain their state and result.
     SchedulerStatus step_operation(operation_id_t operation_id) noexcept;
@@ -65,12 +65,22 @@ class OperationScheduler {
 
    private:
     struct Operation {
+        struct Write {
+            page_id_t page_id{INVALID_PAGE_ID};
+            size_t byte_offset{0};
+            uint8_t value{0};
+        };
+
         SchedulerStatus status{SchedulerStatus::READY};
-        std::string plan;   // Owned so the caller may reuse or discard its input after creation.
         std::string result; // Retained for the host until release_operation().
         std::string error;  // Retained for diagnostics until release_operation().
+        std::vector<page_id_t> read_page_ids;
+        std::vector<Write> writes;
+        size_t next_read_index{0};
+        bool writes_applied{false};
         std::unordered_map<page_id_t, std::vector<uint8_t>> resident_pages;
         std::optional<PageRequest> pending_page_request;
+        std::unordered_map<page_id_t, std::vector<uint8_t>> dirty_pages;
     };
 
     // The registry owns all operation memory. Erasing an entry is the scheduler's cleanup boundary.
@@ -80,6 +90,9 @@ class OperationScheduler {
 
     Operation* find_operation(operation_id_t operation_id) noexcept;
     const Operation* find_operation(operation_id_t operation_id) const noexcept;
+    static StorageResult parse_test_operation(std::string_view plan,
+                                              std::vector<page_id_t>& out_read_page_ids,
+                                              std::vector<Operation::Write>& out_writes) noexcept;
 };
 
 }  // namespace webdb
