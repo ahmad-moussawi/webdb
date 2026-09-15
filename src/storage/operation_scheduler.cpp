@@ -246,8 +246,8 @@ std::vector<uint8_t> OperationScheduler::copy_resident_page(operation_id_t opera
     return page_it == operation->resident_pages.end() ? std::vector<uint8_t>{} : page_it->second;
 }
 
-std::vector<PageData> OperationScheduler::get_dirty_pages_for_flush(operation_id_t operation_id) const noexcept {
-    const Operation* operation = find_operation(operation_id);
+std::vector<PageData> OperationScheduler::get_dirty_pages_for_flush(operation_id_t operation_id) noexcept {
+    Operation* operation = find_operation(operation_id);
     if (!operation || operation->status != SchedulerStatus::FLUSHING) {
         return {};
     }
@@ -258,13 +258,19 @@ std::vector<PageData> OperationScheduler::get_dirty_pages_for_flush(operation_id
             pages.push_back(PageData{page_id, bytes});
         }
     } catch (const std::bad_alloc&) {
+        operation->status = SchedulerStatus::ERROR;
+        try {
+            operation->error = "Insufficient memory to copy dirty-page snapshots.";
+        } catch (const std::bad_alloc&) {
+            operation->error.clear();
+        }
         return {};
     }
     return pages;
 }
 
-std::vector<page_id_t> OperationScheduler::get_dirty_page_ids(operation_id_t operation_id) const noexcept {
-    const Operation* operation = find_operation(operation_id);
+std::vector<page_id_t> OperationScheduler::get_dirty_page_ids(operation_id_t operation_id) noexcept {
+    Operation* operation = find_operation(operation_id);
     if (!operation || operation->status != SchedulerStatus::FLUSHING) {
         return {};
     }
@@ -277,6 +283,12 @@ std::vector<page_id_t> OperationScheduler::get_dirty_page_ids(operation_id_t ope
             page_ids.push_back(page_id);
         }
     } catch (const std::bad_alloc&) {
+        operation->status = SchedulerStatus::ERROR;
+        try {
+            operation->error = "Insufficient memory to copy dirty-page IDs.";
+        } catch (const std::bad_alloc&) {
+            operation->error.clear();
+        }
         return {};
     }
     return page_ids;
@@ -327,7 +339,7 @@ StorageResult OperationScheduler::fail_operation(operation_id_t operation_id, st
 
 StorageResult OperationScheduler::parse_test_operation(std::string_view plan,
                                                        std::vector<page_id_t>& out_read_page_ids,
-                                                       std::vector<Operation::Write>& out_writes) noexcept {
+                                                       std::vector<Operation::Write>& out_writes) {
     JsonCursor cursor(plan);
     std::unordered_set<page_id_t> read_page_ids;
     bool saw_version = false;
@@ -393,7 +405,6 @@ StorageResult OperationScheduler::parse_test_operation(std::string_view plan,
                         if (!cursor.consume(',')) return StorageResult::INVALID_ARGUMENT;
                     }
                     if (!saw_page_id || !saw_offset || !saw_value ||
-                        read_page_ids.find(write.page_id) == read_page_ids.end() ||
                         out_writes.size() >= MAX_DIRTY_PAGES_PER_OPERATION) {
                         return StorageResult::INVALID_ARGUMENT;
                     }
@@ -410,7 +421,15 @@ StorageResult OperationScheduler::parse_test_operation(std::string_view plan,
             break;
         }
     }
-    return saw_version && saw_reads && cursor.at_end() ? StorageResult::SUCCESS : StorageResult::INVALID_ARGUMENT;
+    if (!saw_version || !saw_reads || !cursor.at_end()) {
+        return StorageResult::INVALID_ARGUMENT;
+    }
+    for (const Operation::Write& write : out_writes) {
+        if (read_page_ids.find(write.page_id) == read_page_ids.end()) {
+            return StorageResult::INVALID_ARGUMENT;
+        }
+    }
+    return StorageResult::SUCCESS;
 }
 
 void OperationScheduler::cancel_operation(operation_id_t operation_id) noexcept {

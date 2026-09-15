@@ -62,11 +62,20 @@ export async function runOperation(
 
     if (status === SchedulerStatus.Flushing) {
       const pages = new Map<number, Uint8Array>();
-      for (const pageId of scheduler.getDirtyPageIds(operationId)) {
+      const dirtyPageIds = scheduler.getDirtyPageIds(operationId);
+      if (dirtyPageIds.length === 0) {
+        scheduler.failOperation(operationId, "Scheduler returned an empty dirty-page snapshot.");
+        const error = scheduler.getExecutionError(operationId) || "Scheduler returned an empty dirty-page snapshot.";
+        scheduler.releaseOperation(operationId);
+        return { status: SchedulerStatus.Error, error };
+      }
+      for (const pageId of dirtyPageIds) {
         const page = scheduler.copyDirtyPage(operationId, pageId);
         if (page.byteLength !== DATABASE_PAGE_SIZE) {
           scheduler.failOperation(operationId, "Scheduler returned an invalid dirty page.");
-          break;
+          const error = scheduler.getExecutionError(operationId);
+          scheduler.releaseOperation(operationId);
+          return { status: SchedulerStatus.Error, error };
         }
         pages.set(pageId, page.slice());
       }

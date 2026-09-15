@@ -39,3 +39,20 @@ test("WASM bridge rejects a non-page-sized host buffer before crossing into WASM
   scheduler.releaseOperation(operationId);
   scheduler.dispose();
 });
+
+test("WASM bridge rejects invalid JavaScript page IDs before Embind coercion", async () => {
+  const module = await loadWasmModule();
+  const scheduler = new WasmSchedulerBridge(module);
+  const operationId = scheduler.startOperation('{"version":1,"reads":[2]}');
+  const validPage = new Uint8Array(DATABASE_PAGE_SIZE);
+
+  assert.equal(scheduler.stepOperation(operationId), SchedulerStatus.PageFault);
+  for (const invalidPageId of [1.5, Number.NaN, Number.POSITIVE_INFINITY, 1, 2_147_483_648]) {
+    assert.equal(scheduler.providePage(operationId, invalidPageId, validPage), StorageResult.InvalidArgument);
+    assert.equal(scheduler.stepOperation(operationId), SchedulerStatus.PageFault);
+  }
+
+  scheduler.cancelOperation(operationId);
+  scheduler.releaseOperation(operationId);
+  scheduler.dispose();
+});

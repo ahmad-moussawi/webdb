@@ -5,6 +5,9 @@ import {
   StorageResult,
 } from "./protocol.js";
 
+const FIRST_DATA_PAGE_ID = 2;
+const MAX_PAGE_ID = 2_147_483_647;
+
 interface EmbindEnum {
   readonly value: number;
 }
@@ -47,6 +50,10 @@ export interface WebDbWasmModule {
 
 function enumValue(value: EmbindEnum): number {
   return value.value;
+}
+
+function isValidPageId(pageId: number): boolean {
+  return Number.isSafeInteger(pageId) && pageId >= FIRST_DATA_PAGE_ID && pageId <= MAX_PAGE_ID;
 }
 
 function copyPage(vector: EmbindByteVector): Uint8Array {
@@ -96,7 +103,9 @@ export class WasmSchedulerBridge implements SchedulerBridge {
   }
 
   providePage(operationId: string, pageId: number, bytes: Uint8Array): StorageResult {
-    if (bytes.byteLength !== DATABASE_PAGE_SIZE) return StorageResult.InvalidArgument;
+    if (!isValidPageId(pageId) || bytes.byteLength !== DATABASE_PAGE_SIZE) {
+      return StorageResult.InvalidArgument;
+    }
 
     const vector = new this.module.ByteVector();
     try {

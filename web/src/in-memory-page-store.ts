@@ -1,4 +1,4 @@
-import { AsyncPageStore, DATABASE_PAGE_SIZE } from "./protocol.js";
+import { AsyncPageStore, DATABASE_PAGE_SIZE, validateDataPageId } from "./protocol.js";
 
 function copyPage(page: Uint8Array): Uint8Array {
   if (page.byteLength !== DATABASE_PAGE_SIZE) {
@@ -22,11 +22,15 @@ export class InMemoryAsyncPageStore implements AsyncPageStore {
 
   async readPages(pageIds: readonly number[]): Promise<Map<number, Uint8Array>> {
     if (this.failReads) throw new Error("Injected page-read failure.");
+    if (new Set(pageIds).size !== pageIds.length) {
+      throw new RangeError("A page read batch cannot contain duplicate page IDs.");
+    }
 
     const result = new Map<number, Uint8Array>();
     for (const pageId of pageIds) {
+      validateDataPageId(pageId);
       const page = this.pages.get(pageId);
-      if (!Number.isSafeInteger(pageId) || pageId < 2 || !page) {
+      if (!page) {
         throw new Error(`Page ${pageId} is unavailable.`);
       }
       result.set(pageId, copyPage(page));
@@ -40,9 +44,7 @@ export class InMemoryAsyncPageStore implements AsyncPageStore {
     // Validate and copy the whole batch before changing durable state.
     const replacement = new Map(this.pages);
     for (const [pageId, page] of pages) {
-      if (!Number.isSafeInteger(pageId) || pageId < 2) {
-        throw new RangeError(`Invalid page ID: ${pageId}`);
-      }
+      validateDataPageId(pageId);
       replacement.set(pageId, copyPage(page));
     }
     this.pages.clear();

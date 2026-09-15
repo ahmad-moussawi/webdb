@@ -98,10 +98,10 @@ flowchart TD
 - [ ] Define operation state transitions, page-transfer data types, and a bounded per-operation resident-page cache.
 - [ ] Export start/step/provide/flush/cancel/result operations through Embind.
 - [ ] Add a worker host protocol and deterministic in-memory async page store for native and WASM tests.
-- [ ] Implement an IndexedDB adapter that commits dirty pages and master metadata in one `readwrite` transaction and waits for `oncomplete`.
-- [ ] Document and test cancellation, invalid protocol inputs, failed commits, and restart from durable images.
+- [ ] Implement an IndexedDB adapter that flushes each dirty-page batch in one `readwrite` transaction and waits for `oncomplete`.
+- [ ] Document and test cancellation, invalid protocol inputs, failed page-batch flushes, and restart from durable images.
 
-Phase 2 establishes asynchronous page delivery and host commit semantics. Buffer-pool eviction, shared request deduplication, prefetching, OPFS, and recoverable atomic table-data updates remain later milestones.
+Phase 2 establishes asynchronous page delivery and page-batch durability. Buffer-pool eviction, shared request deduplication, prefetching, OPFS, and atomic master metadata publication remain later milestones; Phase 4 adds the recoverable page-plus-master commit protocol.
 
 ---
 

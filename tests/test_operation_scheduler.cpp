@@ -165,6 +165,15 @@ void test_operation_scheduler() {
     TEST_ASSERT(scheduler.release_operation(write_operation_id) == StorageResult::SUCCESS,
                 "Completed read/write operations release successfully");
 
+    operation_id_t reordered_operation_id = 0;
+    constexpr std::string_view reordered_plan =
+        R"({"writes":[{"page_id":2,"byte_offset":0,"value":1}],"reads":[2],"version":1})";
+    TEST_ASSERT(scheduler.start_operation(reordered_plan, reordered_operation_id) == StorageResult::SUCCESS,
+                "Valid operations accept writes before reads because JSON object order is insignificant");
+    scheduler.cancel_operation(reordered_operation_id);
+    TEST_ASSERT(scheduler.release_operation(reordered_operation_id) == StorageResult::SUCCESS,
+                "Reordered operations release successfully");
+
     operation_id_t failed_flush_id = 0;
     TEST_ASSERT(scheduler.start_operation(R"({"version":1,"reads":[2],"writes":[{"page_id":2,"byte_offset":0,"value":1}]})",
                                           failed_flush_id) == StorageResult::SUCCESS,

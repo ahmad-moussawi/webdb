@@ -11,6 +11,8 @@ class SchedulerMock implements SchedulerBridge {
   private released = false;
   private error = "";
   private flushCompleted = false;
+  public invalidDirtyPage = false;
+  public emptyDirtyPageIds = false;
   public providedPages = 0;
   public flushes: boolean[] = [];
 
@@ -45,11 +47,13 @@ class SchedulerMock implements SchedulerBridge {
   }
 
   getDirtyPageIds(_operationId: string): readonly number[] {
-    return this.status === SchedulerStatus.Flushing ? [2] : [];
+    if (this.status !== SchedulerStatus.Flushing || this.emptyDirtyPageIds) return [];
+    return [2];
   }
 
   copyDirtyPage(_operationId: string, pageId: number): Uint8Array {
-    return pageId === 2 && this.status === SchedulerStatus.Flushing ? this.page.slice() : new Uint8Array();
+    if (pageId !== 2 || this.status !== SchedulerStatus.Flushing) return new Uint8Array();
+    return this.invalidDirtyPage ? new Uint8Array(DATABASE_PAGE_SIZE - 1) : this.page.slice();
   }
 
   finishFlush(_operationId: string, success: boolean): StorageResult {
@@ -135,6 +139,46 @@ test("coordinator reports a flush failure and never claims completion", async ()
   assert.equal(scheduler.isReleased, true);
 });
 
+test("coordinator does not write a partial dirty batch after an invalid snapshot", async () => {
+  const scheduler = new SchedulerMock();
+  scheduler.invalidDirtyPage = true;
+  let writeCalls = 0;
+  const store = {
+    readPages: async () => new Map([[2, new Uint8Array(DATABASE_PAGE_SIZE)]]),
+    writePages: async () => {
+      writeCalls += 1;
+    },
+  };
+
+  const outcome = await runOperation(scheduler, store, "{}");
+
+  assert.equal(outcome.status, SchedulerStatus.Error);
+  if (outcome.status === SchedulerStatus.Error) {
+    assert.match(outcome.error, /invalid dirty page/);
+  }
+  assert.equal(writeCalls, 0);
+  assert.equal(scheduler.isReleased, true);
+});
+
+test("coordinator does not acknowledge an empty dirty snapshot", async () => {
+  const scheduler = new SchedulerMock();
+  scheduler.emptyDirtyPageIds = true;
+  let writeCalls = 0;
+  const store = {
+    readPages: async () => new Map([[2, new Uint8Array(DATABASE_PAGE_SIZE)]]),
+    writePages: async () => {
+      writeCalls += 1;
+    },
+  };
+
+  const outcome = await runOperation(scheduler, store, "{}");
+
+  assert.equal(outcome.status, SchedulerStatus.Error);
+  assert.equal(writeCalls, 0);
+  assert.deepEqual(scheduler.flushes, []);
+  assert.equal(scheduler.isReleased, true);
+});
+
 test("coordinator drops a late read response after cancellation", async () => {
   const scheduler = new SchedulerMock();
   const controller = new AbortController();
@@ -176,4 +220,15 @@ test("coordinator drops a late write completion after cancellation", async () =>
   assert.deepEqual(outcome, { status: SchedulerStatus.Cancelled });
   assert.deepEqual(scheduler.flushes, []);
   assert.equal(scheduler.isReleased, true);
+});
+
+test("in-memory page store matches the production page-ID wire contract", async () => {
+  const store = new InMemoryAsyncPageStore(new Map([[2, new Uint8Array(DATABASE_PAGE_SIZE)]]));
+  const validPage = new Uint8Array(DATABASE_PAGE_SIZE);
+
+  await assert.rejects(() => store.readPages([2, 2]), RangeError);
+  for (const invalidPageId of [1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648]) {
+    await assert.rejects(() => store.readPages([invalidPageId]), RangeError);
+    await assert.rejects(() => store.writePages(new Map([[invalidPageId, validPage]])), RangeError);
+  }
 });

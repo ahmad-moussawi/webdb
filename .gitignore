@@ -1,6 +1,7 @@
 # CMake build trees
 /dist/
 /web/dist/
+/web/test-results/
 node_modules/
 **/CMakeFiles/
 **/CMakeCache.txt

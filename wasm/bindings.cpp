@@ -54,7 +54,7 @@ class WasmOperationScheduler {
         return scheduler_.provide_page(parsed_id, page_id, bytes);
     }
 
-    std::vector<page_id_t> get_dirty_page_ids(const std::string& operation_id) const noexcept {
+    std::vector<page_id_t> get_dirty_page_ids(const std::string& operation_id) noexcept {
         operation_id_t parsed_id = 0;
         return parse_operation_id(operation_id, parsed_id) ? scheduler_.get_dirty_page_ids(parsed_id)
                                                           : std::vector<page_id_t>{};

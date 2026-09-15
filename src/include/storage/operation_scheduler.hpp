@@ -58,8 +58,8 @@ class OperationScheduler {
                                const std::vector<uint8_t>& bytes) noexcept;
     // Returns a copy so callers cannot mutate scheduler-owned resident page memory.
     std::vector<uint8_t> copy_resident_page(operation_id_t operation_id, page_id_t page_id) const;
-    std::vector<PageData> get_dirty_pages_for_flush(operation_id_t operation_id) const noexcept;
-    std::vector<page_id_t> get_dirty_page_ids(operation_id_t operation_id) const noexcept;
+    std::vector<PageData> get_dirty_pages_for_flush(operation_id_t operation_id) noexcept;
+    std::vector<page_id_t> get_dirty_page_ids(operation_id_t operation_id) noexcept;
     std::vector<uint8_t> copy_dirty_page(operation_id_t operation_id, page_id_t page_id) const;
     StorageResult finish_flush(operation_id_t operation_id, bool success) noexcept;
     StorageResult fail_operation(operation_id_t operation_id, std::string_view message) noexcept;
@@ -99,7 +99,7 @@ class OperationScheduler {
     const Operation* find_operation(operation_id_t operation_id) const noexcept;
     static StorageResult parse_test_operation(std::string_view plan,
                                               std::vector<page_id_t>& out_read_page_ids,
-                                              std::vector<Operation::Write>& out_writes) noexcept;
+                                              std::vector<Operation::Write>& out_writes);
 };
 
 }  // namespace webdb

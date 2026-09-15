@@ -1,16 +1,7 @@
-import { AsyncPageStore, DATABASE_PAGE_SIZE } from "./protocol.js";
+import { AsyncPageStore, DATABASE_PAGE_SIZE, validateDataPageId } from "./protocol.js";
 
 const DATABASE_VERSION = 1;
 const PAGES_STORE = "webdb_pages";
-const MIN_DATA_PAGE_ID = 2;
-const MAX_PAGE_ID = 2_147_483_647;
-
-function validatePageId(pageId: number): void {
-  if (!Number.isSafeInteger(pageId) || pageId < MIN_DATA_PAGE_ID || pageId > MAX_PAGE_ID) {
-    throw new RangeError(`Invalid page ID: ${pageId}`);
-  }
-}
-
 function copyPage(page: Uint8Array): Uint8Array {
   if (page.byteLength !== DATABASE_PAGE_SIZE) {
     throw new RangeError(`Page must contain exactly ${DATABASE_PAGE_SIZE} bytes.`);
@@ -48,21 +39,28 @@ export class IndexedDbPageStore implements AsyncPageStore {
     if (uniquePageIds.size !== pageIds.length) {
       throw new RangeError("A page read batch cannot contain duplicate page IDs.");
     }
-    for (const pageId of pageIds) validatePageId(pageId);
+    for (const pageId of pageIds) validateDataPageId(pageId);
 
     const database = await this.open();
     const transaction = database.transaction(PAGES_STORE, "readonly");
     const store = transaction.objectStore(PAGES_STORE);
     const done = transactionDone(transaction);
-    const results = await Promise.all(pageIds.map(async (pageId) => {
-      const stored = await requestResult(store.get(pageId));
-      if (!(stored instanceof Uint8Array)) {
-        throw new Error(`Page ${pageId} is unavailable or malformed.`);
-      }
-      return [pageId, copyPage(stored)] as const;
-    }));
-    await done;
-    return new Map(results);
+    try {
+      const results = await Promise.all(pageIds.map(async (pageId) => {
+        const stored = await requestResult(store.get(pageId));
+        if (!(stored instanceof Uint8Array)) {
+          throw new Error(`Page ${pageId} is unavailable or malformed.`);
+        }
+        return [pageId, copyPage(stored)] as const;
+      }));
+      await done;
+      return new Map(results);
+    } catch (error) {
+      // A request error also aborts the IndexedDB transaction. Observe that rejection before
+      // returning the request failure so the transaction promise cannot become unhandled.
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   async writePages(pages: ReadonlyMap<number, Uint8Array>): Promise<void> {
@@ -70,7 +68,7 @@ export class IndexedDbPageStore implements AsyncPageStore {
     // mutable page buffer from changing while IndexedDB serializes the batch.
     const copiedPages = new Map<number, Uint8Array>();
     for (const [pageId, page] of pages) {
-      validatePageId(pageId);
+      validateDataPageId(pageId);
       copiedPages.set(pageId, copyPage(page));
     }
     if (copiedPages.size === 0) return;

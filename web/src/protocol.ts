@@ -1,4 +1,12 @@
 export const DATABASE_PAGE_SIZE = 4096;
+export const FIRST_DATA_PAGE_ID = 2;
+export const MAX_DATA_PAGE_ID = 2_147_483_647;
+
+export function validateDataPageId(pageId: number): void {
+  if (!Number.isSafeInteger(pageId) || pageId < FIRST_DATA_PAGE_ID || pageId > MAX_DATA_PAGE_ID) {
+    throw new RangeError(`Invalid page ID: ${pageId}`);
+  }
+}
 
 export enum SchedulerStatus {
   Ready = 0,
