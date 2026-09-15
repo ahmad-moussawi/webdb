@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(webdb LANGUAGES CXX)
 
+option(WEBDB_WASM_SIZE_OPTIMIZED "Optimize the Emscripten build for output size" OFF)
+
+file(REAL_PATH "${CMAKE_SOURCE_DIR}/dist" WEBDB_DIST_DIR)
+file(REAL_PATH "${CMAKE_BINARY_DIR}" WEBDB_BINARY_DIR)
+cmake_path(IS_PREFIX WEBDB_DIST_DIR "${WEBDB_BINARY_DIR}" NORMALIZE WEBDB_BINARY_UNDER_DIST)
+if (NOT WEBDB_BINARY_UNDER_DIST)
+    message(FATAL_ERROR "Build files must be placed under ${WEBDB_DIST_DIR}. Use: cmake -S . -B dist/native")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -33,6 +42,12 @@ target_include_directories(webdb_core PUBLIC
 if (EMSCRIPTEN)
     message(STATUS "Configuring build for WebAssembly (Emscripten)")
 
+    if (WEBDB_WASM_SIZE_OPTIMIZED)
+        set(WEBDB_WASM_OPT_FLAGS -Oz -flto)
+    else()
+        set(WEBDB_WASM_OPT_FLAGS -O3)
+    endif()
+
     add_executable(webdb_wasm
         wasm/bindings.cpp
     )
@@ -47,16 +62,16 @@ if (EMSCRIPTEN)
     # EXPORT_ES6=1: ES6 module output syntax
     # EXPORT_NAME="createWebDB": JavaScript factory function name
     # NO_DISABLE_EXCEPTION_CATCHING: Clean exception handling support across boundaries
-    target_compile_options(webdb_wasm PRIVATE -O3)
+    target_compile_options(webdb_wasm PRIVATE ${WEBDB_WASM_OPT_FLAGS})
     target_link_options(webdb_wasm PRIVATE
-        -O3
+        ${WEBDB_WASM_OPT_FLAGS}
         --bind
-        -s ALLOW_MEMORY_GROWTH=1
-        -s MODULARIZE=1
-        -s EXPORT_ES6=1
-        -s EXPORT_NAME="createWebDB"
-        -s NO_DISABLE_EXCEPTION_CATCHING
-        -s FILESYSTEM=0
+        -sALLOW_MEMORY_GROWTH=1
+        -sMODULARIZE=1
+        -sEXPORT_ES6=1
+        -sEXPORT_NAME=createWebDB
+        -sNO_DISABLE_EXCEPTION_CATCHING
+        -sFILESYSTEM=0
     )
 
     # Output artifact name: webdb.js (which generates webdb.wasm alongside it)
