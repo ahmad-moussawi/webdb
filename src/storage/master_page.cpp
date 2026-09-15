@@ -10,9 +10,7 @@ namespace webdb {
 
 namespace {
 
-StorageResult write_initial_master(IPageAccessor& accessor,
-                                   page_id_t page_id,
-                                   uint8_t* buffer,
+StorageResult write_initial_master(IPageAccessor& accessor, page_id_t page_id, uint8_t* buffer,
                                    generation_id_t generation_id) noexcept {
     MasterData data{};
     data.version = MasterPage::CURRENT_VERSION;
@@ -28,7 +26,7 @@ StorageResult write_initial_master(IPageAccessor& accessor,
     return accessor.flush_page(page_id);
 }
 
-} // namespace
+}  // namespace
 
 void MasterPage::serialize(const MasterData& data, uint8_t* out_buffer) noexcept {
     // 1. Zero out the entire 4096-byte page buffer (including reserved space)
@@ -88,8 +86,7 @@ StorageResult MasterPage::validate(const uint8_t* buffer) noexcept {
         return root >= FIRST_DATA_PAGE_ID && static_cast<uint32_t>(root) < page_count;
     };
 
-    if (!check_root(endian::read_int32(buffer + 0x10)) ||
-        !check_root(endian::read_int32(buffer + 0x14)) ||
+    if (!check_root(endian::read_int32(buffer + 0x10)) || !check_root(endian::read_int32(buffer + 0x14)) ||
         !check_root(endian::read_int32(buffer + 0x18))) {
         return StorageResult::CORRUPTED_PAGE;
     }
@@ -165,20 +162,19 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     return StorageResult::SUCCESS;
 }
 
-StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,
-                                                    page_id_t& out_active_id,
+StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor, page_id_t& out_active_id,
                                                     MasterData& out_data) noexcept {
     uint8_t* buf_a = nullptr;
     const auto res_a = accessor.fetch_page(MASTER_PAGE_A_ID, &buf_a);
     MasterData data_a{};
-    const bool valid_a = (res_a == StorageResult::SUCCESS) &&
-                         (MasterPage::deserialize(buf_a, data_a) == StorageResult::SUCCESS);
+    const bool valid_a =
+        (res_a == StorageResult::SUCCESS) && (MasterPage::deserialize(buf_a, data_a) == StorageResult::SUCCESS);
 
     uint8_t* buf_b = nullptr;
     const auto res_b = accessor.fetch_page(MASTER_PAGE_B_ID, &buf_b);
     MasterData data_b{};
-    const bool valid_b = (res_b == StorageResult::SUCCESS) &&
-                         (MasterPage::deserialize(buf_b, data_b) == StorageResult::SUCCESS);
+    const bool valid_b =
+        (res_b == StorageResult::SUCCESS) && (MasterPage::deserialize(buf_b, data_b) == StorageResult::SUCCESS);
 
     if (valid_a && valid_b) {
         if (data_a.generation_id > data_b.generation_id) {
@@ -210,9 +206,7 @@ StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,
     return StorageResult::CORRUPTED_PAGE;
 }
 
-StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
-                                               page_id_t& active_id,
-                                               MasterData& pending_data,
+StorageResult MasterPageManager::commit_master(IPageAccessor& accessor, page_id_t& active_id, MasterData& pending_data,
                                                const std::vector<page_id_t>& dirty_page_ids) noexcept {
     if (active_id != MASTER_PAGE_A_ID && active_id != MASTER_PAGE_B_ID) {
         return StorageResult::INVALID_ARGUMENT;
@@ -298,4 +292,4 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
     return StorageResult::SUCCESS;
 }
 
-} // namespace webdb
+}  // namespace webdb

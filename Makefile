@@ -4,7 +4,7 @@ EMCMAKE ?= emcmake
 NATIVE_BUILD_DIR ?= dist/native
 WASM_BUILD_DIR ?= dist/wasm
 
-.PHONY: all help configure build test run wasm wasm-prod clean
+.PHONY: all help configure build test format run wasm wasm-prod clean
 
 all: build
 
@@ -13,6 +13,7 @@ help:
 		'WebDB build commands:' \
 		'  make build      Configure and build the native targets' \
 		'  make test       Build and run all native CTest tests' \
+		'  make format     Format tracked C++ source and header files' \
 		'  make run        Build and run the native CLI' \
 		'  make wasm       Configure and build the development WASM target' \
 		'  make wasm-prod  Configure and build the size-optimized WASM target' \
@@ -26,6 +27,10 @@ build: configure
 
 test: build
 	ctest --test-dir $(NATIVE_BUILD_DIR) --output-on-failure
+
+format:
+	@command -v clang-format >/dev/null || { echo 'clang-format is required; install it with: brew install clang-format'; exit 1; }
+	@git ls-files '*.cpp' '*.hpp' | xargs clang-format -i
 
 run: build
 	$(NATIVE_BUILD_DIR)/webdb_cli

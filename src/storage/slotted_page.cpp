@@ -32,125 +32,122 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
     }
 
     try {
-
-    // 1. Checksum validation always precedes interpretation
-    const uint32_t expected_crc = checksum::compute_page_checksum(buffer, CHECKSUM_OFFSET);
-    const uint32_t actual_crc = endian::read_uint32(buffer + CHECKSUM_OFFSET);
-    if (expected_crc != actual_crc) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    // 2. Page ID checks
-    const page_id_t pid = endian::read_int32(buffer + PAGE_ID_OFFSET);
-    if (pid != expected_page_id || pid < FIRST_DATA_PAGE_ID ||
-        static_cast<uint32_t>(pid) >= page_count) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    // 3. Link checks
-    const page_id_t prev_id = endian::read_int32(buffer + PREV_PAGE_ID_OFFSET);
-    const page_id_t next_id = endian::read_int32(buffer + NEXT_PAGE_ID_OFFSET);
-    if (prev_id == pid || next_id == pid) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    auto check_link = [page_count](page_id_t link) {
-        if (link == INVALID_PAGE_ID) return true;
-        return link >= FIRST_DATA_PAGE_ID && static_cast<uint32_t>(link) < page_count;
-    };
-
-    if (!check_link(prev_id) || !check_link(next_id)) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    // 4. Slot count & free space pointer bounds
-    const uint16_t slot_count = endian::read_uint16(buffer + SLOT_COUNT_OFFSET);
-    if (slot_count > MAX_SLOT_COUNT) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    const uint16_t free_ptr = endian::read_uint16(buffer + FREE_SPACE_POINTER_OFFSET);
-    const uint16_t slot_dir_limit = static_cast<uint16_t>(PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE);
-    if (free_ptr < slot_dir_limit || free_ptr > PAGE_SIZE) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    // 5. Reserved fields
-    if (endian::read_uint64(buffer + GENERATION_ID_OFFSET) != 0) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-    const uint32_t flags = endian::read_uint32(buffer + FLAGS_OFFSET);
-    if ((flags & ~FLAG_HAS_HOLES) != 0) { // Unknown flag bits
-        return StorageResult::CORRUPTED_PAGE;
-    }
-    if (endian::read_uint32(buffer + RESERVED_OFFSET) != 0) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
-
-    // 6. Validate each slot entry and check for overlapping payloads
-    struct PayloadRange {
-        uint16_t start;
-        uint16_t end;
-    };
-    std::vector<PayloadRange> live_ranges;
-    live_ranges.reserve(slot_count);
-
-    uint32_t live_payload_sum = 0;
-
-    for (uint16_t i = 0; i < slot_count; ++i) {
-        const uint8_t* slot_ptr = buffer + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
-        const uint16_t meta = endian::read_uint16(slot_ptr);
-        const uint16_t len = endian::read_uint16(slot_ptr + 2);
-
-        const uint8_t state_bits = static_cast<uint8_t>((meta >> 14) & 0x03u);
-        const uint8_t reserved_bit = static_cast<uint8_t>((meta >> 13) & 0x01u);
-        const uint16_t offset = static_cast<uint16_t>(meta & 0x1FFFu);
-
-        if (reserved_bit != 0) {
+        // 1. Checksum validation always precedes interpretation
+        const uint32_t expected_crc = checksum::compute_page_checksum(buffer, CHECKSUM_OFFSET);
+        const uint32_t actual_crc = endian::read_uint32(buffer + CHECKSUM_OFFSET);
+        if (expected_crc != actual_crc) {
             return StorageResult::CORRUPTED_PAGE;
         }
 
-        const auto state = static_cast<SlotState>(state_bits);
-        if (state == SlotState::EMPTY || state == SlotState::FORWARDED) {
-            return StorageResult::CORRUPTED_PAGE; // Invalid on disk in Phase 1
+        // 2. Page ID checks
+        const page_id_t pid = endian::read_int32(buffer + PAGE_ID_OFFSET);
+        if (pid != expected_page_id || pid < FIRST_DATA_PAGE_ID || static_cast<uint32_t>(pid) >= page_count) {
+            return StorageResult::CORRUPTED_PAGE;
         }
 
-        if (state == SlotState::DEAD) {
-            if (offset != 0 || len != 0) {
-                return StorageResult::CORRUPTED_PAGE;
-            }
-        } else if (state == SlotState::LIVE) {
-            if (len == 0 || len > MAX_TUPLE_SIZE) {
-                return StorageResult::CORRUPTED_PAGE;
-            }
-            if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
-                return StorageResult::CORRUPTED_PAGE;
-            }
-            live_ranges.push_back({offset, static_cast<uint16_t>(offset + len)});
-            live_payload_sum += len;
+        // 3. Link checks
+        const page_id_t prev_id = endian::read_int32(buffer + PREV_PAGE_ID_OFFSET);
+        const page_id_t next_id = endian::read_int32(buffer + NEXT_PAGE_ID_OFFSET);
+        if (prev_id == pid || next_id == pid) {
+            return StorageResult::CORRUPTED_PAGE;
         }
-    }
 
-    // Check overlaps among live payloads
-    std::sort(live_ranges.begin(), live_ranges.end(), [](const auto& a, const auto& b) {
-        return a.start < b.start;
-    });
-    for (size_t i = 1; i < live_ranges.size(); ++i) {
-        if (live_ranges[i].start < live_ranges[i - 1].end) {
-            return StorageResult::CORRUPTED_PAGE; // Overlapping live payload
+        auto check_link = [page_count](page_id_t link) {
+            if (link == INVALID_PAGE_ID) return true;
+            return link >= FIRST_DATA_PAGE_ID && static_cast<uint32_t>(link) < page_count;
+        };
+
+        if (!check_link(prev_id) || !check_link(next_id)) {
+            return StorageResult::CORRUPTED_PAGE;
         }
-    }
 
-    // Check HAS_HOLES invariant
-    const uint32_t allocated_payloads = PAGE_SIZE - free_ptr;
-    const uint32_t reclaimable_holes = allocated_payloads - live_payload_sum;
-    const bool should_have_holes = (reclaimable_holes > 0);
-    const bool actually_has_holes = (flags & FLAG_HAS_HOLES) != 0;
-    if (should_have_holes != actually_has_holes) {
-        return StorageResult::CORRUPTED_PAGE;
-    }
+        // 4. Slot count & free space pointer bounds
+        const uint16_t slot_count = endian::read_uint16(buffer + SLOT_COUNT_OFFSET);
+        if (slot_count > MAX_SLOT_COUNT) {
+            return StorageResult::CORRUPTED_PAGE;
+        }
 
-    return StorageResult::SUCCESS;
+        const uint16_t free_ptr = endian::read_uint16(buffer + FREE_SPACE_POINTER_OFFSET);
+        const uint16_t slot_dir_limit = static_cast<uint16_t>(PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE);
+        if (free_ptr < slot_dir_limit || free_ptr > PAGE_SIZE) {
+            return StorageResult::CORRUPTED_PAGE;
+        }
+
+        // 5. Reserved fields
+        if (endian::read_uint64(buffer + GENERATION_ID_OFFSET) != 0) {
+            return StorageResult::CORRUPTED_PAGE;
+        }
+        const uint32_t flags = endian::read_uint32(buffer + FLAGS_OFFSET);
+        if ((flags & ~FLAG_HAS_HOLES) != 0) {  // Unknown flag bits
+            return StorageResult::CORRUPTED_PAGE;
+        }
+        if (endian::read_uint32(buffer + RESERVED_OFFSET) != 0) {
+            return StorageResult::CORRUPTED_PAGE;
+        }
+
+        // 6. Validate each slot entry and check for overlapping payloads
+        struct PayloadRange {
+            uint16_t start;
+            uint16_t end;
+        };
+        std::vector<PayloadRange> live_ranges;
+        live_ranges.reserve(slot_count);
+
+        uint32_t live_payload_sum = 0;
+
+        for (uint16_t i = 0; i < slot_count; ++i) {
+            const uint8_t* slot_ptr = buffer + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
+            const uint16_t meta = endian::read_uint16(slot_ptr);
+            const uint16_t len = endian::read_uint16(slot_ptr + 2);
+
+            const uint8_t state_bits = static_cast<uint8_t>((meta >> 14) & 0x03u);
+            const uint8_t reserved_bit = static_cast<uint8_t>((meta >> 13) & 0x01u);
+            const uint16_t offset = static_cast<uint16_t>(meta & 0x1FFFu);
+
+            if (reserved_bit != 0) {
+                return StorageResult::CORRUPTED_PAGE;
+            }
+
+            const auto state = static_cast<SlotState>(state_bits);
+            if (state == SlotState::EMPTY || state == SlotState::FORWARDED) {
+                return StorageResult::CORRUPTED_PAGE;  // Invalid on disk in Phase 1
+            }
+
+            if (state == SlotState::DEAD) {
+                if (offset != 0 || len != 0) {
+                    return StorageResult::CORRUPTED_PAGE;
+                }
+            } else if (state == SlotState::LIVE) {
+                if (len == 0 || len > MAX_TUPLE_SIZE) {
+                    return StorageResult::CORRUPTED_PAGE;
+                }
+                if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+                    return StorageResult::CORRUPTED_PAGE;
+                }
+                live_ranges.push_back({offset, static_cast<uint16_t>(offset + len)});
+                live_payload_sum += len;
+            }
+        }
+
+        // Check overlaps among live payloads
+        std::sort(live_ranges.begin(), live_ranges.end(),
+                  [](const auto& a, const auto& b) { return a.start < b.start; });
+        for (size_t i = 1; i < live_ranges.size(); ++i) {
+            if (live_ranges[i].start < live_ranges[i - 1].end) {
+                return StorageResult::CORRUPTED_PAGE;  // Overlapping live payload
+            }
+        }
+
+        // Check HAS_HOLES invariant
+        const uint32_t allocated_payloads = PAGE_SIZE - free_ptr;
+        const uint32_t reclaimable_holes = allocated_payloads - live_payload_sum;
+        const bool should_have_holes = (reclaimable_holes > 0);
+        const bool actually_has_holes = (flags & FLAG_HAS_HOLES) != 0;
+        if (should_have_holes != actually_has_holes) {
+            return StorageResult::CORRUPTED_PAGE;
+        }
+
+        return StorageResult::SUCCESS;
     } catch (const std::bad_alloc&) {
         return StorageResult::IO_ERROR;
     }
@@ -446,18 +443,14 @@ StorageResult TablePage::delete_tuple(uint16_t slot_num) noexcept {
     return StorageResult::SUCCESS;
 }
 
-StorageResult TablePage::restore_tuple(uint16_t slot_num,
-                                       const uint8_t* tuple_data,
-                                       uint16_t tuple_size,
+StorageResult TablePage::restore_tuple(uint16_t slot_num, const uint8_t* tuple_data, uint16_t tuple_size,
                                        uint16_t tuple_offset) noexcept {
-    if (!tuple_data || tuple_size == 0 || slot_num >= get_slot_count() ||
-        get_slot_state(slot_num) != SlotState::DEAD) {
+    if (!tuple_data || tuple_size == 0 || slot_num >= get_slot_count() || get_slot_state(slot_num) != SlotState::DEAD) {
         return StorageResult::INVALID_ARGUMENT;
     }
 
     const uint16_t free_ptr = get_free_space_pointer();
-    if (tuple_offset < free_ptr ||
-        static_cast<uint32_t>(tuple_offset) + tuple_size > PAGE_SIZE) {
+    if (tuple_offset < free_ptr || static_cast<uint32_t>(tuple_offset) + tuple_size > PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -494,7 +487,8 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
 
             // Write updated slot in temp
             uint8_t* p = temp + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
-            const uint16_t meta = static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
+            const uint16_t meta =
+                static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
             endian::write_uint16(p, meta);
             endian::write_uint16(p + 2, replacement->length);
         } else if (get_slot_state(i) == SlotState::LIVE) {
@@ -505,7 +499,8 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
 
             // Write updated slot in temp
             uint8_t* p = temp + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
-            const uint16_t meta = static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
+            const uint16_t meta =
+                static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
             endian::write_uint16(p, meta);
             endian::write_uint16(p + 2, len);
         } else {
@@ -531,8 +526,7 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
 
     // Zero out any pruned trailing slot directory entries
     if (new_slot_count < count) {
-        std::memset(temp + PAGE_HEADER_SIZE + (new_slot_count * SLOT_ENTRY_SIZE),
-                    0,
+        std::memset(temp + PAGE_HEADER_SIZE + (new_slot_count * SLOT_ENTRY_SIZE), 0,
                     (count - new_slot_count) * SLOT_ENTRY_SIZE);
     }
 
@@ -546,7 +540,7 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
     endian::write_uint16(temp + SLOT_COUNT_OFFSET, new_slot_count);
     endian::write_uint16(temp + FREE_SPACE_POINTER_OFFSET, temp_free_ptr);
     uint32_t flags = endian::read_uint32(temp + FLAGS_OFFSET);
-    flags &= ~FLAG_HAS_HOLES; // Compaction clears holes
+    flags &= ~FLAG_HAS_HOLES;  // Compaction clears holes
     endian::write_uint32(temp + FLAGS_OFFSET, flags);
 
     // 5. Copy back to page data and update CRC
@@ -558,4 +552,4 @@ void TablePage::defragment() noexcept {
     rebuild_compacted_page();
 }
 
-} // namespace webdb
+}  // namespace webdb

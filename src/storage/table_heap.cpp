@@ -14,11 +14,8 @@ StorageResult TableHeap::fetch_validated_page(page_id_t page_id, uint8_t*& out_p
     return TablePage::validate(out_page, page_id, master_ptr_->page_count);
 }
 
-UpdateResult TableHeap::relocate_tuple(const RID& old_rid,
-                                       TablePage& old_page,
-                                       const Tuple& new_tuple,
-                                       const std::vector<uint8_t>& old_tuple,
-                                       uint16_t old_offset,
+UpdateResult TableHeap::relocate_tuple(const RID& old_rid, TablePage& old_page, const Tuple& new_tuple,
+                                       const std::vector<uint8_t>& old_tuple, uint16_t old_offset,
                                        uint16_t old_size) noexcept {
     UpdateResult result{};
     result.old_rid = old_rid;
@@ -70,9 +67,7 @@ UpdateResult TableHeap::relocate_tuple(const RID& old_rid,
     return result;
 }
 
-StorageResult TableHeap::create(IPageAccessor& accessor,
-                                MasterData& pending_master,
-                                TableHeap& out_heap) noexcept {
+StorageResult TableHeap::create(IPageAccessor& accessor, MasterData& pending_master, TableHeap& out_heap) noexcept {
     if (pending_master.page_count < FIRST_DATA_PAGE_ID ||
         pending_master.page_count >= static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
         return StorageResult::CORRUPTED_PAGE;
@@ -96,49 +91,46 @@ StorageResult TableHeap::create(IPageAccessor& accessor,
     return StorageResult::SUCCESS;
 }
 
-StorageResult TableHeap::open(IPageAccessor& accessor,
-                              MasterData& pending_master,
-                              page_id_t first_page_id,
+StorageResult TableHeap::open(IPageAccessor& accessor, MasterData& pending_master, page_id_t first_page_id,
                               TableHeap& out_heap) noexcept {
     if (first_page_id < FIRST_DATA_PAGE_ID || static_cast<uint32_t>(first_page_id) >= pending_master.page_count) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
     try {
+        // Walk chain to validate links, protect against cycles, and reconstruct last_page_id
+        std::unordered_set<page_id_t> visited;
+        page_id_t curr = first_page_id;
+        page_id_t prev = INVALID_PAGE_ID;
 
-    // Walk chain to validate links, protect against cycles, and reconstruct last_page_id
-    std::unordered_set<page_id_t> visited;
-    page_id_t curr = first_page_id;
-    page_id_t prev = INVALID_PAGE_ID;
+        while (curr != INVALID_PAGE_ID) {
+            if (visited.find(curr) != visited.end() || visited.size() >= MAX_PAGES) {
+                return StorageResult::CYCLE_DETECTED;
+            }
+            visited.insert(curr);
 
-    while (curr != INVALID_PAGE_ID) {
-        if (visited.find(curr) != visited.end() || visited.size() >= MAX_PAGES) {
-            return StorageResult::CYCLE_DETECTED;
+            uint8_t* buf = nullptr;
+            auto fetch_res = accessor.fetch_page(curr, &buf);
+            if (fetch_res != StorageResult::SUCCESS) {
+                return fetch_res;
+            }
+
+            auto val_res = TablePage::validate(buf, curr, pending_master.page_count);
+            if (val_res != StorageResult::SUCCESS) {
+                return val_res;
+            }
+
+            TablePage page(buf);
+            if (page.get_prev_page_id() != prev) {
+                return StorageResult::CORRUPTED_PAGE;  // Broken backward link
+            }
+
+            prev = curr;
+            curr = page.get_next_page_id();
         }
-        visited.insert(curr);
 
-        uint8_t* buf = nullptr;
-        auto fetch_res = accessor.fetch_page(curr, &buf);
-        if (fetch_res != StorageResult::SUCCESS) {
-            return fetch_res;
-        }
-
-        auto val_res = TablePage::validate(buf, curr, pending_master.page_count);
-        if (val_res != StorageResult::SUCCESS) {
-            return val_res;
-        }
-
-        TablePage page(buf);
-        if (page.get_prev_page_id() != prev) {
-            return StorageResult::CORRUPTED_PAGE; // Broken backward link
-        }
-
-        prev = curr;
-        curr = page.get_next_page_id();
-    }
-
-    out_heap = TableHeap(&accessor, &pending_master, first_page_id, prev);
-    return StorageResult::SUCCESS;
+        out_heap = TableHeap(&accessor, &pending_master, first_page_id, prev);
+        return StorageResult::SUCCESS;
     } catch (const std::bad_alloc&) {
         return StorageResult::IO_ERROR;
     }
@@ -340,56 +332,58 @@ TableIterator TableHeap::begin() noexcept {
 
 void TableIterator::locate_next_live_tuple() noexcept {
     try {
-    while (current_rid_.page_id != INVALID_PAGE_ID) {
-        if (visited_pages_.find(current_rid_.page_id) == visited_pages_.end()) {
-            if (visited_pages_.size() >= MAX_PAGES) {
+        while (current_rid_.page_id != INVALID_PAGE_ID) {
+            if (visited_pages_.find(current_rid_.page_id) == visited_pages_.end()) {
+                if (visited_pages_.size() >= MAX_PAGES) {
+                    status_ = IteratorStatus::CYCLE_DETECTED;
+                    return;
+                }
+                visited_pages_.insert(current_rid_.page_id);
+            }
+
+            uint8_t* buf = nullptr;
+            auto fetch_res = heap_->get_accessor()->fetch_page(current_rid_.page_id, &buf);
+            if (fetch_res != StorageResult::SUCCESS) {
+                status_ = IteratorStatus::PAGE_NOT_FOUND;
+                return;
+            }
+
+            const uint32_t page_count =
+                heap_->get_master() ? heap_->get_master()->page_count : (current_rid_.page_id + 1);
+            auto val_res = TablePage::validate(buf, current_rid_.page_id, page_count);
+            if (val_res != StorageResult::SUCCESS) {
+                status_ = IteratorStatus::CORRUPTED_PAGE;
+                return;
+            }
+
+            TablePage page(buf);
+            if (page.get_prev_page_id() != prev_page_id_) {
+                status_ = IteratorStatus::CORRUPTED_PAGE;
+                return;
+            }
+
+            const uint16_t slots = page.get_slot_count();
+            while (current_rid_.slot_num < slots) {
+                if (page.get_slot_state(current_rid_.slot_num) == SlotState::LIVE) {
+                    status_ = IteratorStatus::AT_RECORD;
+                    return;  // Found next valid LIVE tuple
+                }
+                current_rid_.slot_num++;
+            }
+
+            // Exhausted slots on this page, move to next page
+            prev_page_id_ = current_rid_.page_id;
+            current_rid_.page_id = page.get_next_page_id();
+            current_rid_.slot_num = 0;
+
+            if (current_rid_.page_id != INVALID_PAGE_ID &&
+                visited_pages_.find(current_rid_.page_id) != visited_pages_.end()) {
                 status_ = IteratorStatus::CYCLE_DETECTED;
                 return;
             }
-            visited_pages_.insert(current_rid_.page_id);
         }
 
-        uint8_t* buf = nullptr;
-        auto fetch_res = heap_->get_accessor()->fetch_page(current_rid_.page_id, &buf);
-        if (fetch_res != StorageResult::SUCCESS) {
-            status_ = IteratorStatus::PAGE_NOT_FOUND;
-            return;
-        }
-
-        const uint32_t page_count = heap_->get_master() ? heap_->get_master()->page_count : (current_rid_.page_id + 1);
-        auto val_res = TablePage::validate(buf, current_rid_.page_id, page_count);
-        if (val_res != StorageResult::SUCCESS) {
-            status_ = IteratorStatus::CORRUPTED_PAGE;
-            return;
-        }
-
-        TablePage page(buf);
-        if (page.get_prev_page_id() != prev_page_id_) {
-            status_ = IteratorStatus::CORRUPTED_PAGE;
-            return;
-        }
-
-        const uint16_t slots = page.get_slot_count();
-        while (current_rid_.slot_num < slots) {
-            if (page.get_slot_state(current_rid_.slot_num) == SlotState::LIVE) {
-                status_ = IteratorStatus::AT_RECORD;
-                return; // Found next valid LIVE tuple
-            }
-            current_rid_.slot_num++;
-        }
-
-        // Exhausted slots on this page, move to next page
-        prev_page_id_ = current_rid_.page_id;
-        current_rid_.page_id = page.get_next_page_id();
-        current_rid_.slot_num = 0;
-
-        if (current_rid_.page_id != INVALID_PAGE_ID && visited_pages_.find(current_rid_.page_id) != visited_pages_.end()) {
-            status_ = IteratorStatus::CYCLE_DETECTED;
-            return;
-        }
-    }
-
-    status_ = IteratorStatus::END_OF_SCAN;
+        status_ = IteratorStatus::END_OF_SCAN;
     } catch (const std::bad_alloc&) {
         status_ = IteratorStatus::OUT_OF_MEMORY;
     }
@@ -408,4 +402,4 @@ StorageResult TableIterator::get_current_tuple(Tuple& out_tuple) const noexcept 
     return heap_->get_tuple(current_rid_, out_tuple);
 }
 
-} // namespace webdb
+}  // namespace webdb

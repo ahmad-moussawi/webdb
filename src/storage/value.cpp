@@ -14,18 +14,19 @@ bool Value::is_valid_utf8(std::string_view sv) noexcept {
             i += 1;
         } else if ((s[i] & 0xE0) == 0xC0) {
             if (i + 1 >= len || (s[i + 1] & 0xC0) != 0x80) return false;
-            if (s[i] < 0xC2) return false; // Overlong encoding
+            if (s[i] < 0xC2) return false;  // Overlong encoding
             i += 2;
         } else if ((s[i] & 0xF0) == 0xE0) {
             if (i + 2 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80) return false;
-            if (s[i] == 0xE0 && s[i + 1] < 0xA0) return false; // Overlong
-            if (s[i] == 0xED && s[i + 1] >= 0xA0) return false; // Surrogate halves
+            if (s[i] == 0xE0 && s[i + 1] < 0xA0) return false;   // Overlong
+            if (s[i] == 0xED && s[i + 1] >= 0xA0) return false;  // Surrogate halves
             i += 3;
         } else if ((s[i] & 0xF8) == 0xF0) {
-            if (s[i] > 0xF4) return false; // Code points above U+10FFFF are invalid in UTF-8
-            if (i + 3 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80) return false;
-            if (s[i] == 0xF0 && s[i + 1] < 0x90) return false; // Overlong
-            if (s[i] == 0xF4 && s[i + 1] >= 0x90) return false; // Out of Unicode range (> 0x10FFFF)
+            if (s[i] > 0xF4) return false;  // Code points above U+10FFFF are invalid in UTF-8
+            if (i + 3 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80)
+                return false;
+            if (s[i] == 0xF0 && s[i + 1] < 0x90) return false;   // Overlong
+            if (s[i] == 0xF4 && s[i + 1] >= 0x90) return false;  // Out of Unicode range (> 0x10FFFF)
             i += 4;
         } else {
             return false;
@@ -36,14 +37,14 @@ bool Value::is_valid_utf8(std::string_view sv) noexcept {
 
 std::optional<bool> compare_int_double_equal(int64_t i, double d) noexcept {
     if (std::isnan(d)) {
-        return std::nullopt; // UNKNOWN in 3VL
+        return std::nullopt;  // UNKNOWN in 3VL
     }
     if (!std::isfinite(d)) {
         return false;
     }
 
-    constexpr double kMinInt64 = -9223372036854775808.0; // -2^63
-    constexpr double kPastMaxInt64 = 9223372036854775808.0; // 2^63
+    constexpr double kMinInt64 = -9223372036854775808.0;     // -2^63
+    constexpr double kPastMaxInt64 = 9223372036854775808.0;  // 2^63
 
     if (d < kMinInt64 || d >= kPastMaxInt64) {
         return false;
@@ -60,20 +61,21 @@ std::optional<bool> compare_int_double_equal(int64_t i, double d) noexcept {
 
 std::optional<bool> compare_int_double_less_than(int64_t i, double d) noexcept {
     if (std::isnan(d)) {
-        return std::nullopt; // UNKNOWN in 3VL
+        return std::nullopt;  // UNKNOWN in 3VL
     }
     if (std::isinf(d)) {
-        return d > 0.0; // i < +inf is true, i < -inf is false
+        return d > 0.0;  // i < +inf is true, i < -inf is false
     }
 
-    constexpr double kMinInt64 = -9223372036854775808.0; // -2^63
-    constexpr double kPastMaxInt64 = 9223372036854775808.0; // 2^63
+    constexpr double kMinInt64 = -9223372036854775808.0;     // -2^63
+    constexpr double kPastMaxInt64 = 9223372036854775808.0;  // 2^63
 
     if (d >= kPastMaxInt64) {
-        return true; // i < d is always true since i <= 2^63 - 1 < d
+        return true;  // i < d is always true since i <= 2^63 - 1 < d
     }
+
     if (d <= kMinInt64) {
-        return false; // i < d is always false since i >= -2^63 >= d
+        return false;  // i < d is always false since i >= -2^63 >= d
     }
 
     double int_part;
@@ -91,7 +93,7 @@ std::optional<bool> compare_int_double_less_than(int64_t i, double d) noexcept {
 
 std::optional<bool> Value::compare_equals(const Value& other) const noexcept {
     if (is_null() || other.is_null()) {
-        return std::nullopt; // NULL = anything is UNKNOWN
+        return std::nullopt;  // NULL = anything is UNKNOWN
     }
 
     // A DOUBLE NaN compared with any value returns UNKNOWN in SQL 3VL
@@ -103,20 +105,24 @@ std::optional<bool> Value::compare_equals(const Value& other) const noexcept {
     if (type_ == TypeId::INT && other.type_ == TypeId::INT) {
         return as_int() == other.as_int();
     }
+
     if (type_ == TypeId::DOUBLE && other.type_ == TypeId::DOUBLE) {
         return as_double() == other.as_double();
     }
+
     if (type_ == TypeId::TEXT && other.type_ == TypeId::TEXT) {
-        return as_text() == other.as_text(); // exact bytewise
+        return as_text() == other.as_text();  // exact bytewise
     }
+
     if (type_ == TypeId::INT && other.type_ == TypeId::DOUBLE) {
         return compare_int_double_equal(as_int(), other.as_double());
     }
+
     if (type_ == TypeId::DOUBLE && other.type_ == TypeId::INT) {
         return compare_int_double_equal(other.as_int(), as_double());
     }
 
-    return false; // Cross-type comparison (e.g. TEXT vs INT)
+    return false;  // Cross-type comparison (e.g. TEXT vs INT)
 }
 
 std::optional<bool> Value::compare_less_than(const Value& other) const noexcept {
@@ -137,7 +143,7 @@ std::optional<bool> Value::compare_less_than(const Value& other) const noexcept 
         return as_double() < other.as_double();
     }
     if (type_ == TypeId::TEXT && other.type_ == TypeId::TEXT) {
-        return as_text() < other.as_text(); // exact bytewise
+        return as_text() < other.as_text();  // exact bytewise
     }
     if (type_ == TypeId::INT && other.type_ == TypeId::DOUBLE) {
         return compare_int_double_less_than(as_int(), other.as_double());
@@ -147,7 +153,7 @@ std::optional<bool> Value::compare_less_than(const Value& other) const noexcept 
         // Check equality first:
         auto eq = compare_int_double_equal(other.as_int(), as_double());
         if (!eq.has_value()) return std::nullopt;
-        if (*eq) return false; // d == i, so d < i is false
+        if (*eq) return false;  // d == i, so d < i is false
         // Since not equal: d < i <=> NOT (other.as_int() < as_double())
         auto lt = compare_int_double_less_than(other.as_int(), as_double());
         if (!lt.has_value()) return std::nullopt;
@@ -157,4 +163,4 @@ std::optional<bool> Value::compare_less_than(const Value& other) const noexcept 
     return false;
 }
 
-} // namespace webdb
+}  // namespace webdb
