@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -47,8 +48,12 @@ class OperationScheduler {
     StorageResult start_operation(std::string_view plan, operation_id_t& out_operation_id) noexcept;
     // Advances one state-machine action. Terminal operations retain their state and result.
     SchedulerStatus step_operation(operation_id_t operation_id) noexcept;
+    // Step 2 native test hook. The Step 3 plan parser will create the same request internally.
+    StorageResult request_page(operation_id_t operation_id, page_id_t page_id, bool is_write) noexcept;
     std::vector<PageRequest> get_pending_page_requests(operation_id_t operation_id) const noexcept;
     StorageResult provide_pages(operation_id_t operation_id, const std::vector<PageData>& pages) noexcept;
+    // Returns a copy so callers cannot mutate scheduler-owned resident page memory.
+    std::vector<uint8_t> copy_resident_page(operation_id_t operation_id, page_id_t page_id) const;
     std::vector<PageData> get_dirty_pages_for_flush(operation_id_t operation_id) const noexcept;
     StorageResult finish_flush(operation_id_t operation_id, bool success) noexcept;
     // Cancellation is cooperative: late page or flush responses must be rejected by the host.
@@ -64,6 +69,8 @@ class OperationScheduler {
         std::string plan;   // Owned so the caller may reuse or discard its input after creation.
         std::string result; // Retained for the host until release_operation().
         std::string error;  // Retained for diagnostics until release_operation().
+        std::unordered_map<page_id_t, std::vector<uint8_t>> resident_pages;
+        std::optional<PageRequest> pending_page_request;
     };
 
     // The registry owns all operation memory. Erasing an entry is the scheduler's cleanup boundary.

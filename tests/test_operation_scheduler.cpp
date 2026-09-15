@@ -45,6 +45,51 @@ void test_operation_scheduler() {
     TEST_ASSERT(scheduler.release_operation(active_id) == StorageResult::SUCCESS,
                 "Cancelled active operations release their memory");
 
+    operation_id_t page_id = 0;
+    TEST_ASSERT(scheduler.start_operation("{}", page_id) == StorageResult::SUCCESS,
+                "A page-cache test operation creates successfully");
+    TEST_ASSERT(scheduler.request_page(page_id, FIRST_DATA_PAGE_ID, true) == StorageResult::SUCCESS,
+                "Ready operations can request an absent data page");
+    TEST_ASSERT(scheduler.step_operation(page_id) == SchedulerStatus::PAGE_FAULT,
+                "A requested page pauses the operation at a page fault");
+    const auto requests = scheduler.get_pending_page_requests(page_id);
+    TEST_ASSERT(requests.size() == 1 && requests.front().page_id == FIRST_DATA_PAGE_ID && requests.front().is_write,
+                "The scheduler exposes the exact pending page request");
+
+    PageData wrong_size{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(PAGE_SIZE - 1, 0)};
+    TEST_ASSERT(scheduler.provide_pages(page_id, {wrong_size}) == StorageResult::INVALID_ARGUMENT,
+                "Wrong-sized pages cannot resume a page fault");
+    PageData wrong_id{FIRST_DATA_PAGE_ID + 1, std::vector<uint8_t>(PAGE_SIZE, 0)};
+    TEST_ASSERT(scheduler.provide_pages(page_id, {wrong_id}) == StorageResult::INVALID_ARGUMENT,
+                "Unexpected page IDs cannot resume a page fault");
+    TEST_ASSERT(scheduler.get_pending_page_requests(page_id).size() == 1,
+                "Invalid supplied pages preserve the outstanding request");
+
+    PageData supplied_page{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(PAGE_SIZE, 0x3C)};
+    TEST_ASSERT(scheduler.provide_pages(page_id, {supplied_page}) == StorageResult::SUCCESS,
+                "The requested 4 KiB page resumes the operation");
+    supplied_page.bytes[0] = 0x00;
+    const auto resident_copy = scheduler.copy_resident_page(page_id, FIRST_DATA_PAGE_ID);
+    TEST_ASSERT(resident_copy.size() == PAGE_SIZE && resident_copy[0] == 0x3C,
+                "The scheduler owns a copy of supplied page bytes");
+    TEST_ASSERT(scheduler.request_page(page_id, FIRST_DATA_PAGE_ID, false) == StorageResult::SUCCESS,
+                "Requesting an already resident page does not create another fault");
+    TEST_ASSERT(scheduler.step_operation(page_id) == SchedulerStatus::COMPLETE,
+                "A resumed operation can make forward progress");
+    TEST_ASSERT(scheduler.release_operation(page_id) == StorageResult::SUCCESS,
+                "Completed page-cache operations release successfully");
+
+    operation_id_t fault_cancel_id = 0;
+    TEST_ASSERT(scheduler.start_operation("{}", fault_cancel_id) == StorageResult::SUCCESS,
+                "A fault-cancellation test operation creates successfully");
+    TEST_ASSERT(scheduler.request_page(fault_cancel_id, FIRST_DATA_PAGE_ID, false) == StorageResult::SUCCESS,
+                "The operation enters a page fault before cancellation");
+    scheduler.cancel_operation(fault_cancel_id);
+    TEST_ASSERT(scheduler.provide_pages(fault_cancel_id, {supplied_page}) == StorageResult::INVALID_ARGUMENT,
+                "Cancelled operations reject late page responses");
+    TEST_ASSERT(scheduler.release_operation(fault_cancel_id) == StorageResult::SUCCESS,
+                "Cancelled page-fault operations release successfully");
+
     operation_id_t invalid_plan_id = 0;
     const std::string oversized_plan(MAX_OPERATION_PLAN_SIZE + 1, 'x');
     TEST_ASSERT(scheduler.start_operation(oversized_plan, invalid_plan_id) == StorageResult::INVALID_ARGUMENT,
