@@ -7,11 +7,12 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "npx tsc --noEmit",
+    "check": "tsc --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "fake-indexeddb": "^6.2.5",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }
