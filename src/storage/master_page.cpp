@@ -8,6 +8,28 @@
 
 namespace webdb {
 
+namespace {
+
+StorageResult write_initial_master(IPageAccessor& accessor,
+                                   page_id_t page_id,
+                                   uint8_t* buffer,
+                                   generation_id_t generation_id) noexcept {
+    MasterData data{};
+    data.version = MasterPage::CURRENT_VERSION;
+    data.page_size = static_cast<uint16_t>(PAGE_SIZE);
+    data.generation_id = generation_id;
+    data.page_count = 2;
+
+    MasterPage::serialize(data, buffer);
+    auto mark_res = accessor.mark_dirty(page_id);
+    if (mark_res != StorageResult::SUCCESS) {
+        return mark_res;
+    }
+    return accessor.flush_page(page_id);
+}
+
+} // namespace
+
 void MasterPage::serialize(const MasterData& data, uint8_t* out_buffer) noexcept {
     // 1. Zero out the entire 4096-byte page buffer (including reserved space)
     std::memset(out_buffer, 0, PAGE_SIZE);
@@ -122,37 +144,14 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     }
     master_b_allocated = true;
 
-    // Master A: generation 1, page_count 2
-    MasterData data_a{};
-    data_a.version = MasterPage::CURRENT_VERSION;
-    data_a.page_size = static_cast<uint16_t>(PAGE_SIZE);
-    data_a.generation_id = 1;
-    data_a.page_count = 2;
-    MasterPage::serialize(data_a, master_a_buf);
-    res = accessor.mark_dirty(MASTER_PAGE_A_ID);
-    if (res != StorageResult::SUCCESS) {
-        cleanup();
-        return res;
-    }
-    res = accessor.flush_page(MASTER_PAGE_A_ID);
+    // Master A starts authoritative; Master B is the rollback fallback.
+    res = write_initial_master(accessor, MASTER_PAGE_A_ID, master_a_buf, 1);
     if (res != StorageResult::SUCCESS) {
         cleanup();
         return res;
     }
 
-    // Master B: generation 0, page_count 2
-    MasterData data_b{};
-    data_b.version = MasterPage::CURRENT_VERSION;
-    data_b.page_size = static_cast<uint16_t>(PAGE_SIZE);
-    data_b.generation_id = 0;
-    data_b.page_count = 2;
-    MasterPage::serialize(data_b, master_b_buf);
-    res = accessor.mark_dirty(MASTER_PAGE_B_ID);
-    if (res != StorageResult::SUCCESS) {
-        cleanup();
-        return res;
-    }
-    res = accessor.flush_page(MASTER_PAGE_B_ID);
+    res = write_initial_master(accessor, MASTER_PAGE_B_ID, master_b_buf, 0);
     if (res != StorageResult::SUCCESS) {
         cleanup();
         return res;

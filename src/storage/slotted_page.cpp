@@ -12,14 +12,14 @@ namespace webdb {
 void TablePage::init(uint8_t* buffer, page_id_t page_id, page_id_t prev_page_id, page_id_t next_page_id) noexcept {
     std::memset(buffer, 0, PAGE_SIZE);
 
-    endian::write_int32(buffer + 0x00, page_id);
-    endian::write_int32(buffer + 0x04, prev_page_id);
-    endian::write_int32(buffer + 0x08, next_page_id);
-    endian::write_uint16(buffer + 0x0C, 0); // slot_count = 0
-    endian::write_uint16(buffer + 0x0E, static_cast<uint16_t>(PAGE_SIZE)); // free_space_pointer = 4096
-    endian::write_uint64(buffer + 0x10, 0); // generation_id = 0 (reserved in Phase 1)
-    endian::write_uint32(buffer + 0x18, 0); // flags = 0
-    endian::write_uint32(buffer + 0x20, 0); // reserved = 0
+    endian::write_int32(buffer + PAGE_ID_OFFSET, page_id);
+    endian::write_int32(buffer + PREV_PAGE_ID_OFFSET, prev_page_id);
+    endian::write_int32(buffer + NEXT_PAGE_ID_OFFSET, next_page_id);
+    endian::write_uint16(buffer + SLOT_COUNT_OFFSET, 0);
+    endian::write_uint16(buffer + FREE_SPACE_POINTER_OFFSET, static_cast<uint16_t>(PAGE_SIZE));
+    endian::write_uint64(buffer + GENERATION_ID_OFFSET, 0);
+    endian::write_uint32(buffer + FLAGS_OFFSET, 0);
+    endian::write_uint32(buffer + RESERVED_OFFSET, 0);
 
     // Compute initial CRC
     const uint32_t csum = checksum::compute_page_checksum(buffer, CHECKSUM_OFFSET);
@@ -41,15 +41,15 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
     }
 
     // 2. Page ID checks
-    const page_id_t pid = endian::read_int32(buffer + 0x00);
+    const page_id_t pid = endian::read_int32(buffer + PAGE_ID_OFFSET);
     if (pid != expected_page_id || pid < FIRST_DATA_PAGE_ID ||
         static_cast<uint32_t>(pid) >= page_count) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
     // 3. Link checks
-    const page_id_t prev_id = endian::read_int32(buffer + 0x04);
-    const page_id_t next_id = endian::read_int32(buffer + 0x08);
+    const page_id_t prev_id = endian::read_int32(buffer + PREV_PAGE_ID_OFFSET);
+    const page_id_t next_id = endian::read_int32(buffer + NEXT_PAGE_ID_OFFSET);
     if (prev_id == pid || next_id == pid) {
         return StorageResult::CORRUPTED_PAGE;
     }
@@ -64,26 +64,26 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
     }
 
     // 4. Slot count & free space pointer bounds
-    const uint16_t slot_count = endian::read_uint16(buffer + 0x0C);
+    const uint16_t slot_count = endian::read_uint16(buffer + SLOT_COUNT_OFFSET);
     if (slot_count > MAX_SLOT_COUNT) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
-    const uint16_t free_ptr = endian::read_uint16(buffer + 0x0E);
+    const uint16_t free_ptr = endian::read_uint16(buffer + FREE_SPACE_POINTER_OFFSET);
     const uint16_t slot_dir_limit = static_cast<uint16_t>(PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE);
     if (free_ptr < slot_dir_limit || free_ptr > PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
     // 5. Reserved fields
-    if (endian::read_uint64(buffer + 0x10) != 0) { // generation_id must be 0
+    if (endian::read_uint64(buffer + GENERATION_ID_OFFSET) != 0) {
         return StorageResult::CORRUPTED_PAGE;
     }
-    const uint32_t flags = endian::read_uint32(buffer + 0x18);
+    const uint32_t flags = endian::read_uint32(buffer + FLAGS_OFFSET);
     if ((flags & ~FLAG_HAS_HOLES) != 0) { // Unknown flag bits
         return StorageResult::CORRUPTED_PAGE;
     }
-    if (endian::read_uint32(buffer + 0x20) != 0) { // Reserved header field
+    if (endian::read_uint32(buffer + RESERVED_OFFSET) != 0) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -157,49 +157,49 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
 }
 
 page_id_t TablePage::get_page_id() const noexcept {
-    return endian::read_int32(data_ + 0x00);
+    return endian::read_int32(data_ + PAGE_ID_OFFSET);
 }
 
 page_id_t TablePage::get_prev_page_id() const noexcept {
-    return endian::read_int32(data_ + 0x04);
+    return endian::read_int32(data_ + PREV_PAGE_ID_OFFSET);
 }
 
 void TablePage::set_prev_page_id(page_id_t prev_id) noexcept {
-    endian::write_int32(data_ + 0x04, prev_id);
+    endian::write_int32(data_ + PREV_PAGE_ID_OFFSET, prev_id);
     update_checksum();
 }
 
 page_id_t TablePage::get_next_page_id() const noexcept {
-    return endian::read_int32(data_ + 0x08);
+    return endian::read_int32(data_ + NEXT_PAGE_ID_OFFSET);
 }
 
 void TablePage::set_next_page_id(page_id_t next_id) noexcept {
-    endian::write_int32(data_ + 0x08, next_id);
+    endian::write_int32(data_ + NEXT_PAGE_ID_OFFSET, next_id);
     update_checksum();
 }
 
 uint16_t TablePage::get_slot_count() const noexcept {
-    return endian::read_uint16(data_ + 0x0C);
+    return endian::read_uint16(data_ + SLOT_COUNT_OFFSET);
 }
 
 void TablePage::set_slot_count(uint16_t count) noexcept {
-    endian::write_uint16(data_ + 0x0C, count);
+    endian::write_uint16(data_ + SLOT_COUNT_OFFSET, count);
 }
 
 uint16_t TablePage::get_free_space_pointer() const noexcept {
-    return endian::read_uint16(data_ + 0x0E);
+    return endian::read_uint16(data_ + FREE_SPACE_POINTER_OFFSET);
 }
 
 void TablePage::set_free_space_pointer(uint16_t ptr) noexcept {
-    endian::write_uint16(data_ + 0x0E, ptr);
+    endian::write_uint16(data_ + FREE_SPACE_POINTER_OFFSET, ptr);
 }
 
 uint32_t TablePage::get_flags() const noexcept {
-    return endian::read_uint32(data_ + 0x18);
+    return endian::read_uint32(data_ + FLAGS_OFFSET);
 }
 
 void TablePage::set_flags(uint32_t flags) noexcept {
-    endian::write_uint32(data_ + 0x18, flags);
+    endian::write_uint32(data_ + FLAGS_OFFSET, flags);
 }
 
 uint16_t TablePage::contiguous_free_space() const noexcept {
@@ -418,7 +418,7 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
 
     // Case C: net growth fits after compaction
     if (delta <= total_free_space_after_compaction()) {
-        compact(static_cast<int32_t>(slot_num), new_tuple_data, n_size);
+        rebuild_compacted_page(Replacement{slot_num, new_tuple_data, n_size});
         result.status = StorageResult::SUCCESS;
         return result;
     }
@@ -468,7 +468,15 @@ StorageResult TablePage::restore_tuple(uint16_t slot_num,
     return StorageResult::SUCCESS;
 }
 
-void TablePage::compact(int32_t update_slot, const uint8_t* update_data, uint16_t update_len) noexcept {
+void TablePage::rebuild_compacted_page() noexcept {
+    rebuild_compacted_page(static_cast<const Replacement*>(nullptr));
+}
+
+void TablePage::rebuild_compacted_page(Replacement replacement) noexcept {
+    rebuild_compacted_page(&replacement);
+}
+
+void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept {
     const uint16_t count = get_slot_count();
     if (count == 0) return;
 
@@ -480,15 +488,15 @@ void TablePage::compact(int32_t update_slot, const uint8_t* update_data, uint16_
 
     // 1. Pack live payloads downward from byte 4096 in ascending slot index order
     for (uint16_t i = 0; i < count; ++i) {
-        if (update_slot >= 0 && i == static_cast<uint16_t>(update_slot)) {
-            temp_free_ptr = static_cast<uint16_t>(temp_free_ptr - update_len);
-            std::memcpy(temp + temp_free_ptr, update_data, update_len);
+        if (replacement && i == replacement->slot_num) {
+            temp_free_ptr = static_cast<uint16_t>(temp_free_ptr - replacement->length);
+            std::memcpy(temp + temp_free_ptr, replacement->data, replacement->length);
 
             // Write updated slot in temp
             uint8_t* p = temp + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
             const uint16_t meta = static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
             endian::write_uint16(p, meta);
-            endian::write_uint16(p + 2, update_len);
+            endian::write_uint16(p + 2, replacement->length);
         } else if (get_slot_state(i) == SlotState::LIVE) {
             const uint16_t old_offset = get_slot_offset(i);
             const uint16_t len = get_slot_length(i);
@@ -535,11 +543,11 @@ void TablePage::compact(int32_t update_slot, const uint8_t* update_data, uint16_
     }
 
     // 4. Update header fields
-    endian::write_uint16(temp + 0x0C, new_slot_count);
-    endian::write_uint16(temp + 0x0E, temp_free_ptr);
-    uint32_t flags = endian::read_uint32(temp + 0x18);
+    endian::write_uint16(temp + SLOT_COUNT_OFFSET, new_slot_count);
+    endian::write_uint16(temp + FREE_SPACE_POINTER_OFFSET, temp_free_ptr);
+    uint32_t flags = endian::read_uint32(temp + FLAGS_OFFSET);
     flags &= ~FLAG_HAS_HOLES; // Compaction clears holes
-    endian::write_uint32(temp + 0x18, flags);
+    endian::write_uint32(temp + FLAGS_OFFSET, flags);
 
     // 5. Copy back to page data and update CRC
     std::memcpy(data_, temp, PAGE_SIZE);
@@ -547,7 +555,7 @@ void TablePage::compact(int32_t update_slot, const uint8_t* update_data, uint16_
 }
 
 void TablePage::defragment() noexcept {
-    compact(-1, nullptr, 0);
+    rebuild_compacted_page();
 }
 
 } // namespace webdb

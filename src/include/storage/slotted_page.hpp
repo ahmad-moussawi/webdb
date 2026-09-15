@@ -10,7 +10,15 @@ namespace webdb {
 
 class TablePage {
 public:
-    static constexpr size_t CHECKSUM_OFFSET = 0x1C; // Bytes [28..31]
+    static constexpr size_t PAGE_ID_OFFSET = 0x00;
+    static constexpr size_t PREV_PAGE_ID_OFFSET = 0x04;
+    static constexpr size_t NEXT_PAGE_ID_OFFSET = 0x08;
+    static constexpr size_t SLOT_COUNT_OFFSET = 0x0C;
+    static constexpr size_t FREE_SPACE_POINTER_OFFSET = 0x0E;
+    static constexpr size_t GENERATION_ID_OFFSET = 0x10;
+    static constexpr size_t FLAGS_OFFSET = 0x18;
+    static constexpr size_t CHECKSUM_OFFSET = 0x1C;
+    static constexpr size_t RESERVED_OFFSET = 0x20;
     static constexpr uint32_t FLAG_HAS_HOLES = 1u << 0;
 
     /**
@@ -70,6 +78,12 @@ public:
     const uint8_t* data() const noexcept { return data_; }
 
 private:
+    struct Replacement {
+        uint16_t slot_num;
+        const uint8_t* data;
+        uint16_t length;
+    };
+
     uint8_t* data_{nullptr};
 
     void set_slot(uint16_t slot_num, SlotState state, uint16_t offset, uint16_t length) noexcept;
@@ -77,7 +91,9 @@ private:
     void set_slot_count(uint16_t count) noexcept;
     void set_flags(uint32_t flags) noexcept;
     void recalculate_has_holes() noexcept;
-    void compact(int32_t update_slot, const uint8_t* update_data, uint16_t update_len) noexcept;
+    void rebuild_compacted_page() noexcept;
+    void rebuild_compacted_page(Replacement replacement) noexcept;
+    void rebuild_compacted_page(const Replacement* replacement) noexcept;
 };
 
 } // namespace webdb

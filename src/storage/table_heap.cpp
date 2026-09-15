@@ -6,6 +6,70 @@
 
 namespace webdb {
 
+StorageResult TableHeap::fetch_validated_page(page_id_t page_id, uint8_t*& out_page) const noexcept {
+    auto fetch_res = accessor_->fetch_page(page_id, &out_page);
+    if (fetch_res != StorageResult::SUCCESS) {
+        return fetch_res;
+    }
+    return TablePage::validate(out_page, page_id, master_ptr_->page_count);
+}
+
+UpdateResult TableHeap::relocate_tuple(const RID& old_rid,
+                                       TablePage& old_page,
+                                       const Tuple& new_tuple,
+                                       const std::vector<uint8_t>& old_tuple,
+                                       uint16_t old_offset,
+                                       uint16_t old_size) noexcept {
+    UpdateResult result{};
+    result.old_rid = old_rid;
+    result.new_rid = old_rid;
+
+    const uint32_t page_count_before_insert = master_ptr_->page_count;
+    RID new_rid{};
+    auto insert_res = insert_tuple(new_tuple, new_rid);
+    if (insert_res != StorageResult::SUCCESS) {
+        result.status = insert_res;
+        return result;
+    }
+    const bool allocated_new_page = master_ptr_->page_count > page_count_before_insert;
+
+    auto rollback_new_tuple = [&]() noexcept {
+        if (allocated_new_page) {
+            --master_ptr_->page_count;
+            (void)accessor_->discard_page(new_rid.page_id);
+            return;
+        }
+
+        uint8_t* new_buf = nullptr;
+        if (accessor_->fetch_page(new_rid.page_id, &new_buf) == StorageResult::SUCCESS) {
+            TablePage new_page(new_buf);
+            if (new_page.delete_tuple(new_rid.slot_num) == StorageResult::SUCCESS) {
+                (void)accessor_->mark_dirty(new_rid.page_id);
+            }
+        }
+    };
+
+    auto delete_res = old_page.delete_tuple(old_rid.slot_num);
+    if (delete_res != StorageResult::SUCCESS) {
+        rollback_new_tuple();
+        result.status = delete_res;
+        return result;
+    }
+    auto mark_res = accessor_->mark_dirty(old_rid.page_id);
+    if (mark_res != StorageResult::SUCCESS) {
+        (void)old_page.restore_tuple(old_rid.slot_num, old_tuple.data(), old_size, old_offset);
+        (void)accessor_->mark_dirty(old_rid.page_id);
+        rollback_new_tuple();
+        result.status = mark_res;
+        return result;
+    }
+
+    result.status = StorageResult::SUCCESS;
+    result.new_rid = new_rid;
+    result.rid_changed = true;
+    return result;
+}
+
 StorageResult TableHeap::create(IPageAccessor& accessor,
                                 MasterData& pending_master,
                                 TableHeap& out_heap) noexcept {
@@ -90,14 +154,9 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
 
     // 1. Try to insert into last_page_id
     uint8_t* last_buf = nullptr;
-    auto fetch_res = accessor_->fetch_page(last_page_id_, &last_buf);
-    if (fetch_res != StorageResult::SUCCESS) {
-        return fetch_res;
-    }
-
-    auto val_res = TablePage::validate(last_buf, last_page_id_, master_ptr_->page_count);
-    if (val_res != StorageResult::SUCCESS) {
-        return val_res;
+    auto last_page_res = fetch_validated_page(last_page_id_, last_buf);
+    if (last_page_res != StorageResult::SUCCESS) {
+        return last_page_res;
     }
 
     TablePage last_page(last_buf);
@@ -165,14 +224,9 @@ StorageResult TableHeap::get_tuple(const RID& rid, Tuple& out_tuple) const noexc
     }
 
     uint8_t* buf = nullptr;
-    auto fetch_res = accessor_->fetch_page(rid.page_id, &buf);
-    if (fetch_res != StorageResult::SUCCESS) {
-        return fetch_res;
-    }
-
-    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
-    if (val_res != StorageResult::SUCCESS) {
-        return val_res;
+    auto page_res = fetch_validated_page(rid.page_id, buf);
+    if (page_res != StorageResult::SUCCESS) {
+        return page_res;
     }
 
     TablePage page(buf);
@@ -208,15 +262,9 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     }
 
     uint8_t* buf = nullptr;
-    auto fetch_res = accessor_->fetch_page(rid.page_id, &buf);
-    if (fetch_res != StorageResult::SUCCESS) {
-        result.status = fetch_res;
-        return result;
-    }
-
-    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
-    if (val_res != StorageResult::SUCCESS) {
-        result.status = val_res;
+    auto page_res = fetch_validated_page(rid.page_id, buf);
+    if (page_res != StorageResult::SUCCESS) {
+        result.status = page_res;
         return result;
     }
 
@@ -251,52 +299,8 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
         return page_update;
     }
 
-    // Cannot fit on current page: Relocate to table heap tail
-    const uint32_t page_count_before_insert = master_ptr_->page_count;
-    RID new_rid{};
-    auto ins_res = insert_tuple(new_tuple, new_rid);
-    if (ins_res != StorageResult::SUCCESS) {
-        result.status = ins_res;
-        return result;
-    }
-    const bool allocated_new_page = master_ptr_->page_count > page_count_before_insert;
-
-    auto rollback_new_tuple = [&]() noexcept {
-        if (allocated_new_page) {
-            --master_ptr_->page_count;
-            (void)accessor_->discard_page(new_rid.page_id);
-            return;
-        }
-
-        uint8_t* new_buf = nullptr;
-        if (accessor_->fetch_page(new_rid.page_id, &new_buf) == StorageResult::SUCCESS) {
-            TablePage new_page(new_buf);
-            if (new_page.delete_tuple(new_rid.slot_num) == StorageResult::SUCCESS) {
-                (void)accessor_->mark_dirty(new_rid.page_id);
-            }
-        }
-    };
-
-    // Mark old slot DEAD
-    auto del_old = page.delete_tuple(rid.slot_num);
-    if (del_old != StorageResult::SUCCESS) {
-        rollback_new_tuple();
-        result.status = del_old;
-        return result;
-    }
-    auto mark_res = accessor_->mark_dirty(rid.page_id);
-    if (mark_res != StorageResult::SUCCESS) {
-        (void)page.restore_tuple(rid.slot_num, old_copy.data(), old_size, old_offset);
-        (void)accessor_->mark_dirty(rid.page_id);
-        rollback_new_tuple();
-        result.status = mark_res;
-        return result;
-    }
-
-    result.status = StorageResult::SUCCESS;
-    result.new_rid = new_rid;
-    result.rid_changed = true;
-    return result;
+    // Relocation requires compensating writes if retiring the old tuple fails.
+    return relocate_tuple(rid, page, new_tuple, old_copy, old_offset, old_size);
 }
 
 StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
@@ -305,14 +309,9 @@ StorageResult TableHeap::delete_tuple(const RID& rid) noexcept {
     }
 
     uint8_t* buf = nullptr;
-    auto fetch_res = accessor_->fetch_page(rid.page_id, &buf);
-    if (fetch_res != StorageResult::SUCCESS) {
-        return fetch_res;
-    }
-
-    auto val_res = TablePage::validate(buf, rid.page_id, master_ptr_->page_count);
-    if (val_res != StorageResult::SUCCESS) {
-        return val_res;
+    auto page_res = fetch_validated_page(rid.page_id, buf);
+    if (page_res != StorageResult::SUCCESS) {
+        return page_res;
     }
 
     TablePage page(buf);

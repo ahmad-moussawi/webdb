@@ -86,6 +86,14 @@ private:
     MasterData* master_ptr_{nullptr};
     page_id_t first_page_id_{INVALID_PAGE_ID};
     page_id_t last_page_id_{INVALID_PAGE_ID};
+
+    StorageResult fetch_validated_page(page_id_t page_id, uint8_t*& out_page) const noexcept;
+    UpdateResult relocate_tuple(const RID& old_rid,
+                                TablePage& old_page,
+                                const Tuple& new_tuple,
+                                const std::vector<uint8_t>& old_tuple,
+                                uint16_t old_offset,
+                                uint16_t old_size) noexcept;
 };
 
 } // namespace webdb
