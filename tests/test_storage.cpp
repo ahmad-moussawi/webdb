@@ -202,6 +202,13 @@ void test_slotted_page() {
     auto val_res = TablePage::validate(buffer.data(), 2, 10);
     TEST_ASSERT(val_res == StorageResult::SUCCESS, "Fresh TablePage validates");
 
+    // A page ID must be inside the published page-count range, even with a valid checksum.
+    endian::write_int32(buffer.data() + 0x00, 10);
+    TablePage(buffer.data()).update_checksum();
+    TEST_ASSERT(TablePage::validate(buffer.data(), 10, 10) == StorageResult::CORRUPTED_PAGE,
+                "TablePage rejects an unpublished own page ID");
+    TablePage::init(buffer.data(), 2, INVALID_PAGE_ID, INVALID_PAGE_ID);
+
     TablePage page(buffer.data());
     TEST_ASSERT(page.get_page_id() == 2, "Page ID is 2");
     TEST_ASSERT(page.get_slot_count() == 0, "Slot count is 0");
@@ -222,6 +229,9 @@ void test_slotted_page() {
     TEST_ASSERT(get_res == StorageResult::SUCCESS, "Get tuple 1");
     TEST_ASSERT(out_len == 100, "Tuple 1 length matches");
     TEST_ASSERT(std::memcmp(out_p, t1.data(), 100) == 0, "Tuple 1 bytes match");
+
+    TEST_ASSERT(page.get_tuple(s1, nullptr, out_len) == StorageResult::INVALID_ARGUMENT,
+                "Get tuple rejects a null output pointer");
 
     // 2. Insert maximum tuple size on an empty page
     std::vector<uint8_t> max_buf(PAGE_SIZE, 0);
@@ -638,6 +648,15 @@ void test_tuple_and_3vl() {
     ser_res = Tuple::serialize(bad_row, schema, bad_bytes);
     TEST_ASSERT(ser_res == StorageResult::SCHEMA_MISMATCH, "NULL in non-nullable column rejected");
 
+    // Typed NULLs must still match the declared nullable column type.
+    std::vector<Value> mismatched_null_row = {
+        Value::make_int(103),
+        Value::make_text("Dana"),
+        Value::make_null(TypeId::TEXT)
+    };
+    TEST_ASSERT(Tuple::serialize(mismatched_null_row, schema, bad_bytes) == StorageResult::SCHEMA_MISMATCH,
+                "Typed NULL with the wrong column type rejected");
+
     // 4. Alignment testing with 1-column, 3-column, and 5-column schemas
     // 1-column schema: tests odd header boundary (FormatVersion 1B + Flags 1B + NumCols 2B + NullBitmap 1B = 5 bytes offset)
     Schema schema_1({
@@ -717,6 +736,33 @@ void test_table_heap() {
     page_id_t active_id = INVALID_PAGE_ID;
     MasterData master{};
     MasterPageManager::load_active_master(accessor, active_id, master);
+
+    MasterData create_limit_master = master;
+    create_limit_master.page_count = static_cast<uint32_t>(std::numeric_limits<page_id_t>::max());
+    TableHeap create_limit_heap;
+    TEST_ASSERT(TableHeap::create(accessor, create_limit_master, create_limit_heap) == StorageResult::CORRUPTED_PAGE,
+                "TableHeap creation rejects the maximum signed page ID as an allocation cursor");
+
+    InMemoryPageAccessor append_limit_accessor;
+    uint8_t* append_limit_buf = nullptr;
+    TEST_ASSERT(append_limit_accessor.allocate_page(FIRST_DATA_PAGE_ID, &append_limit_buf) == StorageResult::SUCCESS,
+                "Allocate the append-boundary test page");
+    TablePage::init(append_limit_buf, FIRST_DATA_PAGE_ID);
+    TEST_ASSERT(append_limit_accessor.mark_dirty(FIRST_DATA_PAGE_ID) == StorageResult::SUCCESS,
+                "Mark the append-boundary test page dirty");
+    MasterData append_limit_master = master;
+    append_limit_master.page_count = static_cast<uint32_t>(std::numeric_limits<page_id_t>::max());
+    TableHeap append_limit_heap(&append_limit_accessor, &append_limit_master,
+                                FIRST_DATA_PAGE_ID, FIRST_DATA_PAGE_ID);
+    const Tuple full_boundary_tuple(std::vector<uint8_t>(MAX_TUPLE_SIZE, 0xA5));
+    RID boundary_rid{};
+    TEST_ASSERT(append_limit_heap.insert_tuple(full_boundary_tuple, boundary_rid) == StorageResult::SUCCESS,
+                "Fill the append-boundary test page");
+    const uint32_t append_count_before = append_limit_master.page_count;
+    TEST_ASSERT(append_limit_heap.insert_tuple(Tuple(std::vector<uint8_t>(8, 0x5A)), boundary_rid) == StorageResult::CORRUPTED_PAGE,
+                "Append rejects the maximum signed page ID as an allocation cursor");
+    TEST_ASSERT(append_limit_master.page_count == append_count_before,
+                "Rejected append leaves the page-count cursor unchanged");
 
     // Exercise failure at both publication points: marking the new page and marking the old tail.
     for (const page_id_t failed_page_id : {3, 2}) {

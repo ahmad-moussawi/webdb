@@ -36,6 +36,40 @@ void test_master_page_dual() {
     TEST_ASSERT(active_data.system_tables_root == 2 && active_data.page_count == 4,
                 "Reload preserves committed metadata");
 
+    InMemoryPageAccessor stale_generation_accessor;
+    TEST_ASSERT(MasterPageManager::init_new_database(stale_generation_accessor) == StorageResult::SUCCESS,
+                "Initialize stale-generation test database");
+    page_id_t stale_active_id = INVALID_PAGE_ID;
+    MasterData stale_data{};
+    TEST_ASSERT(MasterPageManager::load_active_master(stale_generation_accessor, stale_active_id, stale_data) == StorageResult::SUCCESS,
+                "Load stale-generation test master");
+    stale_data.generation_id = 0;
+    TEST_ASSERT(MasterPageManager::commit_master(stale_generation_accessor, stale_active_id, stale_data) == StorageResult::SUCCESS,
+                "Commit succeeds with stale caller generation");
+    TEST_ASSERT(stale_data.generation_id == 2 && stale_active_id == MASTER_PAGE_B_ID,
+                "Commit derives the next generation from the active master");
+    TEST_ASSERT(MasterPageManager::load_active_master(stale_generation_accessor, stale_active_id, stale_data) == StorageResult::SUCCESS &&
+                    stale_data.generation_id == 2,
+                "Recovery selects the newly committed generation");
+
+    InMemoryPageAccessor failed_publication_accessor;
+    TEST_ASSERT(MasterPageManager::init_new_database(failed_publication_accessor) == StorageResult::SUCCESS,
+                "Initialize failed-publication test database");
+    page_id_t failed_active_id = INVALID_PAGE_ID;
+    MasterData failed_data{};
+    TEST_ASSERT(MasterPageManager::load_active_master(failed_publication_accessor, failed_active_id, failed_data) == StorageResult::SUCCESS,
+                "Load failed-publication test master");
+    const MasterData failed_data_before = failed_data;
+    uint8_t inactive_before[PAGE_SIZE];
+    std::memcpy(inactive_before, failed_publication_accessor.raw_buffer(MASTER_PAGE_B_ID), PAGE_SIZE);
+    failed_publication_accessor.fail_mark_dirty = true;
+    TEST_ASSERT(MasterPageManager::commit_master(failed_publication_accessor, failed_active_id, failed_data) == StorageResult::IO_ERROR,
+                "Failed master publication reports dirty-mark failure");
+    TEST_ASSERT(failed_active_id == MASTER_PAGE_A_ID && failed_data.generation_id == failed_data_before.generation_id,
+                "Failed publication leaves active ID and caller metadata unchanged");
+    TEST_ASSERT(std::memcmp(inactive_before, failed_publication_accessor.raw_buffer(MASTER_PAGE_B_ID), PAGE_SIZE) == 0,
+                "Failed publication restores the inactive master buffer");
+
     uint8_t* master_a_buf = accessor.raw_buffer(MASTER_PAGE_A_ID);
     master_a_buf[10] ^= 0xFF;
     result = MasterPageManager::load_active_master(accessor, active_id, active_data);

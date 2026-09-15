@@ -10,7 +10,7 @@ StorageResult TableHeap::create(IPageAccessor& accessor,
                                 MasterData& pending_master,
                                 TableHeap& out_heap) noexcept {
     if (pending_master.page_count < FIRST_DATA_PAGE_ID ||
-        pending_master.page_count > static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
+        pending_master.page_count >= static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
         return StorageResult::CORRUPTED_PAGE;
     }
     const page_id_t new_page_id = static_cast<page_id_t>(pending_master.page_count);
@@ -119,7 +119,7 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
 
     // 2. Last page is full: allocate a new append-only page
     if (master_ptr_->page_count < FIRST_DATA_PAGE_ID ||
-        master_ptr_->page_count > static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
+        master_ptr_->page_count >= static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
         return StorageResult::CORRUPTED_PAGE;
     }
     const page_id_t new_page_id = static_cast<page_id_t>(master_ptr_->page_count);

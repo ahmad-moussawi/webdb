@@ -35,6 +35,9 @@ StorageResult Tuple::serialize(const std::vector<Value>& values,
             if (!col.is_nullable) {
                 return StorageResult::SCHEMA_MISMATCH; // Column declared NOT NULL
             }
+            if (val.type() != col.type) {
+                return StorageResult::SCHEMA_MISMATCH;
+            }
             continue;
         }
 

@@ -492,7 +492,7 @@ Address:        0x1000  0x1001  0x1002  0x1003  0x1004  0x1005  0x1006  0x1007 â
 #### 1. Hardware Alignment Faults (`SIGBUS`)
 - On modern desktop **x86-64** CPUs (Intel/AMD), the CPU silently handles unaligned loads by issuing two memory reads behind the scenes and stitching the bytes together (at a performance penalty).
 - On **ARM processors** (Apple Silicon, Raspberry Pi, Android/iOS devices) and embedded hardware, unaligned access can cause a hardware **alignment fault**, sending a `SIGBUS` signal that immediately terminates the program.
-- In **WebAssembly (WASM32)**, the WebAssembly virtual machine specification dictates that unaligned memory operations can either trigger traps or incur massive software emulation penalties in JavaScript engines (V8, SpiderMonkey, JavaScriptCore).
+- In WebAssembly (WASM32), unaligned loads and stores are defined; the instruction's alignment value is an optimization hint, not a requirement that causes a trap. Misaligned accesses may still be slower, while out-of-bounds accesses trap.
 
 #### 2. Undefined Behavior in C++ ([basic.align] & [expr.reinterpret.cast])
 According to the ISO C++ Standard:

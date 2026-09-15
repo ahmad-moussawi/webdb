@@ -48,6 +48,8 @@ if (EMSCRIPTEN)
         set(WEBDB_WASM_OPT_FLAGS -O3)
     endif()
 
+    target_compile_options(webdb_core PRIVATE ${WEBDB_WASM_OPT_FLAGS})
+
     add_executable(webdb_wasm
         wasm/bindings.cpp
     )

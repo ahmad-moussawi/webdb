@@ -42,7 +42,8 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
 
     // 2. Page ID checks
     const page_id_t pid = endian::read_int32(buffer + 0x00);
-    if (pid != expected_page_id || pid < FIRST_DATA_PAGE_ID) {
+    if (pid != expected_page_id || pid < FIRST_DATA_PAGE_ID ||
+        static_cast<uint32_t>(pid) >= page_count) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -339,6 +340,9 @@ StorageResult TablePage::insert_tuple(const uint8_t* tuple_data, size_t tuple_si
 }
 
 StorageResult TablePage::get_tuple(uint16_t slot_num, const uint8_t** out_tuple_data, size_t& out_size) const noexcept {
+    if (!out_tuple_data) {
+        return StorageResult::INVALID_ARGUMENT;
+    }
     if (slot_num >= get_slot_count()) {
         return StorageResult::SLOT_NOT_FOUND;
     }

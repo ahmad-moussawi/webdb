@@ -31,7 +31,7 @@ run: build
 	$(NATIVE_BUILD_DIR)/webdb_cli
 
 wasm:
-	$(EMCMAKE) $(CMAKE) -S . -B $(WASM_BUILD_DIR)
+	$(EMCMAKE) $(CMAKE) -S . -B $(WASM_BUILD_DIR) -DWEBDB_WASM_SIZE_OPTIMIZED=OFF
 	$(CMAKE) --build $(WASM_BUILD_DIR)
 
 wasm-prod:

@@ -219,6 +219,31 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
         return StorageResult::INVALID_ARGUMENT;
     }
 
+    uint8_t* active_buf = nullptr;
+    auto fetch_active_res = accessor.fetch_page(active_id, &active_buf);
+    if (fetch_active_res != StorageResult::SUCCESS) {
+        return fetch_active_res;
+    }
+
+    MasterData active_data{};
+    auto active_data_res = MasterPage::deserialize(active_buf, active_data);
+    if (active_data_res != StorageResult::SUCCESS) {
+        return active_data_res;
+    }
+    if (active_data.generation_id == std::numeric_limits<generation_id_t>::max()) {
+        return StorageResult::IO_ERROR;
+    }
+
+    MasterData candidate = pending_data;
+    candidate.generation_id = active_data.generation_id + 1;
+
+    uint8_t candidate_buf[PAGE_SIZE];
+    MasterPage::serialize(candidate, candidate_buf);
+    auto candidate_res = MasterPage::validate(candidate_buf);
+    if (candidate_res != StorageResult::SUCCESS) {
+        return candidate_res;
+    }
+
     // 1. Flush all dirty data pages before durability barrier
     for (page_id_t pid : dirty_page_ids) {
         auto flush_res = accessor.flush_page(pid);
@@ -245,19 +270,21 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
         return fetch_res;
     }
 
-    // 4. Increment generation counter
-    pending_data.generation_id++;
+    uint8_t previous_inactive[PAGE_SIZE];
+    std::memcpy(previous_inactive, inactive_buf, PAGE_SIZE);
 
-    // 5. Serialize to inactive master page
-    MasterPage::serialize(pending_data, inactive_buf);
+    // 4. Serialize the validated candidate to the inactive master page.
+    std::memcpy(inactive_buf, candidate_buf, PAGE_SIZE);
     auto mark_res = accessor.mark_dirty(inactive_id);
     if (mark_res != StorageResult::SUCCESS) {
+        std::memcpy(inactive_buf, previous_inactive, PAGE_SIZE);
         return mark_res;
     }
 
-    // 6. Flush inactive master and barrier sync
+    // 5. Flush inactive master and barrier sync.
     auto flush_res = accessor.flush_page(inactive_id);
     if (flush_res != StorageResult::SUCCESS) {
+        std::memcpy(inactive_buf, previous_inactive, PAGE_SIZE);
         return flush_res;
     }
 
@@ -266,7 +293,8 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
         return final_sync_res;
     }
 
-    // Commit succeeded atomically: update active_id to the newly active page
+    // Publish caller-visible state only after the final durability barrier.
+    pending_data = candidate;
     active_id = inactive_id;
     return StorageResult::SUCCESS;
 }
