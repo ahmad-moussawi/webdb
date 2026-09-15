@@ -57,6 +57,8 @@ public:
     StorageResult get_tuple(uint16_t slot_num, const uint8_t** out_tuple_data, size_t& out_size) const noexcept;
     UpdateResult update_tuple(uint16_t slot_num, const uint8_t* new_tuple_data, size_t new_size) noexcept;
     StorageResult delete_tuple(uint16_t slot_num) noexcept;
+    StorageResult restore_tuple(uint16_t slot_num, const uint8_t* tuple_data,
+                                uint16_t tuple_size, uint16_t tuple_offset) noexcept;
 
     // In-place defragmentation: preserves slot IDs, packs payloads downward, prunes trailing dead slots
     void defragment() noexcept;

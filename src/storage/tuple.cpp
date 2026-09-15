@@ -2,6 +2,7 @@
 #include "common/endian.hpp"
 
 #include <cstring>
+#include <new>
 #include <vector>
 
 namespace webdb {
@@ -9,6 +10,7 @@ namespace webdb {
 StorageResult Tuple::serialize(const std::vector<Value>& values,
                                const Schema& schema,
                                std::vector<uint8_t>& out_bytes) noexcept {
+    try {
     if (!schema.is_valid()) {
         return StorageResult::INVALID_ARGUMENT;
     }
@@ -106,12 +108,16 @@ StorageResult Tuple::serialize(const std::vector<Value>& values,
     }
 
     return StorageResult::SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return StorageResult::IO_ERROR;
+    }
 }
 
 StorageResult Tuple::deserialize(const uint8_t* data,
                                  size_t size,
                                  const Schema& schema,
                                  std::vector<Value>& out_values) noexcept {
+    try {
     if (!data || !schema.is_valid()) {
         return StorageResult::INVALID_ARGUMENT;
     }
@@ -210,6 +216,9 @@ StorageResult Tuple::deserialize(const uint8_t* data,
     }
 
     return StorageResult::SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return StorageResult::IO_ERROR;
+    }
 }
 
 } // namespace webdb

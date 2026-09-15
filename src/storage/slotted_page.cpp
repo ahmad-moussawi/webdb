@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <new>
 #include <vector>
 
 namespace webdb {
@@ -29,6 +30,8 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
     if (!buffer) {
         return StorageResult::INVALID_ARGUMENT;
     }
+
+    try {
 
     // 1. Checksum validation always precedes interpretation
     const uint32_t expected_crc = checksum::compute_page_checksum(buffer, CHECKSUM_OFFSET);
@@ -147,6 +150,9 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
     }
 
     return StorageResult::SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return StorageResult::IO_ERROR;
+    }
 }
 
 page_id_t TablePage::get_page_id() const noexcept {
@@ -431,6 +437,28 @@ StorageResult TablePage::delete_tuple(uint16_t slot_num) noexcept {
     }
 
     set_slot(slot_num, SlotState::DEAD, 0, 0);
+    recalculate_has_holes();
+    update_checksum();
+    return StorageResult::SUCCESS;
+}
+
+StorageResult TablePage::restore_tuple(uint16_t slot_num,
+                                       const uint8_t* tuple_data,
+                                       uint16_t tuple_size,
+                                       uint16_t tuple_offset) noexcept {
+    if (!tuple_data || tuple_size == 0 || slot_num >= get_slot_count() ||
+        get_slot_state(slot_num) != SlotState::DEAD) {
+        return StorageResult::INVALID_ARGUMENT;
+    }
+
+    const uint16_t free_ptr = get_free_space_pointer();
+    if (tuple_offset < free_ptr ||
+        static_cast<uint32_t>(tuple_offset) + tuple_size > PAGE_SIZE) {
+        return StorageResult::CORRUPTED_PAGE;
+    }
+
+    std::memcpy(data_ + tuple_offset, tuple_data, tuple_size);
+    set_slot(slot_num, SlotState::LIVE, tuple_offset, tuple_size);
     recalculate_has_holes();
     update_checksum();
     return StorageResult::SUCCESS;

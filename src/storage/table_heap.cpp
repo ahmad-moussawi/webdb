@@ -1,5 +1,7 @@
 #include "storage/table_heap.hpp"
 
+#include <limits>
+#include <new>
 #include <vector>
 
 namespace webdb {
@@ -7,6 +9,10 @@ namespace webdb {
 StorageResult TableHeap::create(IPageAccessor& accessor,
                                 MasterData& pending_master,
                                 TableHeap& out_heap) noexcept {
+    if (pending_master.page_count < FIRST_DATA_PAGE_ID ||
+        pending_master.page_count > static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
+        return StorageResult::CORRUPTED_PAGE;
+    }
     const page_id_t new_page_id = static_cast<page_id_t>(pending_master.page_count);
     uint8_t* page_buf = nullptr;
     auto alloc_res = accessor.allocate_page(new_page_id, &page_buf);
@@ -17,6 +23,7 @@ StorageResult TableHeap::create(IPageAccessor& accessor,
     TablePage::init(page_buf, new_page_id, INVALID_PAGE_ID, INVALID_PAGE_ID);
     auto mark_res = accessor.mark_dirty(new_page_id);
     if (mark_res != StorageResult::SUCCESS) {
+        (void)accessor.discard_page(new_page_id);
         return mark_res;
     }
     pending_master.page_count++;
@@ -32,6 +39,8 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
     if (first_page_id < FIRST_DATA_PAGE_ID || static_cast<uint32_t>(first_page_id) >= pending_master.page_count) {
         return StorageResult::CORRUPTED_PAGE;
     }
+
+    try {
 
     // Walk chain to validate links, protect against cycles, and reconstruct last_page_id
     std::unordered_set<page_id_t> visited;
@@ -66,6 +75,9 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
 
     out_heap = TableHeap(&accessor, &pending_master, first_page_id, prev);
     return StorageResult::SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return StorageResult::IO_ERROR;
+    }
 }
 
 StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept {
@@ -106,6 +118,10 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
     }
 
     // 2. Last page is full: allocate a new append-only page
+    if (master_ptr_->page_count < FIRST_DATA_PAGE_ID ||
+        master_ptr_->page_count > static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
+        return StorageResult::CORRUPTED_PAGE;
+    }
     const page_id_t new_page_id = static_cast<page_id_t>(master_ptr_->page_count);
     uint8_t* new_buf = nullptr;
     auto alloc_res = accessor_->allocate_page(new_page_id, &new_buf);
@@ -113,27 +129,29 @@ StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept
         return alloc_res;
     }
 
-    // Initialize new page linked to old last page
+    // Build the new page completely before publishing the forward link.
     TablePage::init(new_buf, new_page_id, last_page_id_, INVALID_PAGE_ID);
-
-    // Link old last page forward to new page
-    last_page.set_next_page_id(new_page_id);
-    auto mark_old = accessor_->mark_dirty(last_page_id_);
-    if (mark_old != StorageResult::SUCCESS) {
-        return mark_old;
-    }
-
-    // Insert tuple into the fresh page
     TablePage new_page(new_buf);
     ins_res = new_page.insert_tuple(tuple.data(), tuple.size(), slot_num);
     if (ins_res != StorageResult::SUCCESS) {
+        (void)accessor_->discard_page(new_page_id);
         return ins_res;
     }
 
     auto mark_new = accessor_->mark_dirty(new_page_id);
     if (mark_new != StorageResult::SUCCESS) {
+        (void)accessor_->discard_page(new_page_id);
         return mark_new;
     }
+
+    last_page.set_next_page_id(new_page_id);
+    auto mark_old = accessor_->mark_dirty(last_page_id_);
+    if (mark_old != StorageResult::SUCCESS) {
+        last_page.set_next_page_id(INVALID_PAGE_ID);
+        (void)accessor_->discard_page(new_page_id);
+        return mark_old;
+    }
+
     master_ptr_->page_count++;
     last_page_id_ = new_page_id;
 
@@ -166,8 +184,12 @@ StorageResult TableHeap::get_tuple(const RID& rid, Tuple& out_tuple) const noexc
         return get_res;
     }
 
-    out_tuple = Tuple(std::vector<uint8_t>(tuple_bytes, tuple_bytes + tuple_size));
-    return StorageResult::SUCCESS;
+    try {
+        out_tuple = Tuple(std::vector<uint8_t>(tuple_bytes, tuple_bytes + tuple_size));
+        return StorageResult::SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return StorageResult::IO_ERROR;
+    }
 }
 
 UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noexcept {
@@ -199,6 +221,22 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     }
 
     TablePage page(buf);
+    const uint16_t old_offset = page.get_slot_offset(rid.slot_num);
+    const uint16_t old_size = page.get_slot_length(rid.slot_num);
+    const uint8_t* old_data = nullptr;
+    size_t old_data_size = 0;
+    auto old_get = page.get_tuple(rid.slot_num, &old_data, old_data_size);
+    if (old_get != StorageResult::SUCCESS || old_data_size != old_size) {
+        result.status = old_get == StorageResult::SUCCESS ? StorageResult::CORRUPTED_PAGE : old_get;
+        return result;
+    }
+    std::vector<uint8_t> old_copy;
+    try {
+        old_copy.assign(old_data, old_data + old_data_size);
+    } catch (const std::bad_alloc&) {
+        result.status = StorageResult::IO_ERROR;
+        return result;
+    }
     auto page_update = page.update_tuple(rid.slot_num, new_tuple.data(), new_tuple.size());
     if (page_update.status == StorageResult::SUCCESS) {
         auto mark_res = accessor_->mark_dirty(rid.page_id);
@@ -214,21 +252,43 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     }
 
     // Cannot fit on current page: Relocate to table heap tail
+    const uint32_t page_count_before_insert = master_ptr_->page_count;
     RID new_rid{};
     auto ins_res = insert_tuple(new_tuple, new_rid);
     if (ins_res != StorageResult::SUCCESS) {
         result.status = ins_res;
         return result;
     }
+    const bool allocated_new_page = master_ptr_->page_count > page_count_before_insert;
+
+    auto rollback_new_tuple = [&]() noexcept {
+        if (allocated_new_page) {
+            --master_ptr_->page_count;
+            (void)accessor_->discard_page(new_rid.page_id);
+            return;
+        }
+
+        uint8_t* new_buf = nullptr;
+        if (accessor_->fetch_page(new_rid.page_id, &new_buf) == StorageResult::SUCCESS) {
+            TablePage new_page(new_buf);
+            if (new_page.delete_tuple(new_rid.slot_num) == StorageResult::SUCCESS) {
+                (void)accessor_->mark_dirty(new_rid.page_id);
+            }
+        }
+    };
 
     // Mark old slot DEAD
     auto del_old = page.delete_tuple(rid.slot_num);
     if (del_old != StorageResult::SUCCESS) {
+        rollback_new_tuple();
         result.status = del_old;
         return result;
     }
     auto mark_res = accessor_->mark_dirty(rid.page_id);
     if (mark_res != StorageResult::SUCCESS) {
+        (void)page.restore_tuple(rid.slot_num, old_copy.data(), old_size, old_offset);
+        (void)accessor_->mark_dirty(rid.page_id);
+        rollback_new_tuple();
         result.status = mark_res;
         return result;
     }
@@ -280,6 +340,7 @@ TableIterator TableHeap::begin() noexcept {
 }
 
 void TableIterator::locate_next_live_tuple() noexcept {
+    try {
     while (current_rid_.page_id != INVALID_PAGE_ID) {
         if (visited_pages_.find(current_rid_.page_id) == visited_pages_.end()) {
             if (visited_pages_.size() >= MAX_PAGES) {
@@ -330,6 +391,9 @@ void TableIterator::locate_next_live_tuple() noexcept {
     }
 
     status_ = IteratorStatus::END_OF_SCAN;
+    } catch (const std::bad_alloc&) {
+        status_ = IteratorStatus::OUT_OF_MEMORY;
+    }
 }
 
 void TableIterator::advance() noexcept {

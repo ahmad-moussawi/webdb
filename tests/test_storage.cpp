@@ -1,122 +1,8 @@
-#include "common/types.hpp"
-#include "common/checksum.hpp"
-#include "common/endian.hpp"
-#include "storage/page_accessor.hpp"
-#include "storage/master_page.hpp"
-#include "storage/slotted_page.hpp"
-#include "storage/tuple.hpp"
-#include "storage/value.hpp"
-#include "storage/table_heap.hpp"
-
-#include <iostream>
-#include <vector>
-#include <string>
-#include <cassert>
-#include <unordered_map>
-#include <cmath>
-#include <algorithm>
-#include <limits>
+#include "test_support.hpp"
 
 namespace webdb::test {
 
-/**
- * @brief In-memory implementation of IPageAccessor for Phase 1 verification.
- */
-class InMemoryPageAccessor final : public IPageAccessor {
-public:
-    enum class EventType {
-        FLUSH,
-        SYNC,
-    };
-
-    struct Event {
-        EventType type;
-        page_id_t page_id{INVALID_PAGE_ID}; // Only for FLUSH
-    };
-
-    StorageResult fetch_page(page_id_t page_id, uint8_t** out_page) override {
-        auto it = pages_.find(page_id);
-        if (it == pages_.end()) {
-            return StorageResult::IO_ERROR;
-        }
-        *out_page = it->second.data();
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) override {
-        if (pages_.find(expected_page_id) != pages_.end()) {
-            return StorageResult::INVALID_ARGUMENT;
-        }
-        pages_[expected_page_id] = std::vector<uint8_t>(PAGE_SIZE, 0);
-        *out_page = pages_[expected_page_id].data();
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult mark_dirty(page_id_t page_id) override {
-        if (fail_mark_dirty) return StorageResult::IO_ERROR;
-        if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
-        dirty_pages_.insert(page_id);
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult flush_page(page_id_t page_id) override {
-        if (fail_flush) return StorageResult::IO_ERROR;
-        if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
-        dirty_pages_.erase(page_id);
-        flush_history.push_back(page_id);
-        events.push_back(Event{EventType::FLUSH, page_id});
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult flush_dirty_pages() override {
-        if (fail_flush) return StorageResult::IO_ERROR;
-        std::vector<page_id_t> to_flush(dirty_pages_.begin(), dirty_pages_.end());
-        for (page_id_t pid : to_flush) {
-            auto res = flush_page(pid);
-            if (res != StorageResult::SUCCESS) return res;
-        }
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult sync() override {
-        if (fail_sync) return StorageResult::IO_ERROR;
-        sync_call_count++;
-        events.push_back(Event{EventType::SYNC, INVALID_PAGE_ID});
-        return StorageResult::SUCCESS;
-    }
-
-    bool fail_flush{false};
-    bool fail_sync{false};
-    bool fail_mark_dirty{false};
-    size_t sync_call_count{0};
-    std::vector<page_id_t> flush_history;
-    std::vector<Event> events;
-
-    size_t dirty_count() const noexcept {
-        return dirty_pages_.size();
-    }
-
-    bool has_page(page_id_t page_id) const {
-        return pages_.find(page_id) != pages_.end();
-    }
-
-    uint8_t* raw_buffer(page_id_t page_id) {
-        return pages_.at(page_id).data();
-    }
-
-private:
-    std::unordered_map<page_id_t, std::vector<uint8_t>> pages_;
-    std::unordered_set<page_id_t> dirty_pages_;
-};
-
-#define TEST_ASSERT(cond, msg) \
-    do { \
-        if (!(cond)) { \
-            std::cerr << "FAILED: " << msg << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-            std::exit(1); \
-        } \
-    } while (0)
-
+#if defined(WEBDB_RUN_CHECKSUMS)
 void test_checksums() {
     std::cout << "[RUNNING] test_checksums..." << std::endl;
 
@@ -163,7 +49,9 @@ void test_checksums() {
 
     std::cout << "[PASSED] test_checksums" << std::endl;
 }
+#endif
 
+#if defined(WEBDB_RUN_MASTER_PAGE)
 void test_master_page_dual() {
     std::cout << "[RUNNING] test_master_page_dual..." << std::endl;
     InMemoryPageAccessor accessor;
@@ -292,11 +180,22 @@ void test_master_page_dual() {
     endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
     TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::VERSION_MISMATCH, "Version mismatch rejected");
 
+    // f. page_count must fit in the persisted page ID type
+    MasterPage::serialize(valid_md, test_master.data());
+    endian::write_uint32(test_master.data() + 0x1C,
+                         static_cast<uint32_t>(std::numeric_limits<page_id_t>::max()) + 1u);
+    csum = checksum::compute_page_checksum(test_master.data(), MasterPage::CHECKSUM_OFFSET);
+    endian::write_uint32(test_master.data() + MasterPage::CHECKSUM_OFFSET, csum);
+    TEST_ASSERT(MasterPage::validate(test_master.data()) == StorageResult::CORRUPTED_PAGE,
+                "page_count beyond page ID range rejected");
+
     std::cout << "[PASSED] test_master_page_dual" << std::endl;
 }
+#endif
 
+#if defined(WEBDB_RUN_SLOTTED_PAGE)
 void test_slotted_page() {
-    std::cout << "[RUNNING] test_slotted_page..." << std::endl;
+    std::cout << "[RUNNING] slotted-page layout and mutation tests..." << std::endl;
     std::vector<uint8_t> buffer(PAGE_SIZE, 0);
 
     TablePage::init(buffer.data(), 2, INVALID_PAGE_ID, INVALID_PAGE_ID);
@@ -413,7 +312,7 @@ void test_slotted_page() {
     TEST_ASSERT(out_len == 120 && out_p[0] == 0x55, "Grown item data valid");
     TEST_ASSERT((growth_page.get_flags() & TablePage::FLAG_HAS_HOLES) != 0, "Old item space becomes hole");
 
-    // 7b. Growth requiring compaction (Case C) on last slot and internal slot
+    // 7b. Growth requiring compaction: the net growth fits, but contiguous space does not.
     std::vector<uint8_t> case_c_buf(PAGE_SIZE, 0);
     TablePage::init(case_c_buf.data(), 8);
     TablePage case_c_page(case_c_buf.data());
@@ -430,10 +329,12 @@ void test_slotted_page() {
     // Grow item 3 to 1200 bytes (delta = 700 bytes > contiguous free space, fits after compaction)
     const std::vector<uint8_t> c_item3_grown(1200, 0x77);
     auto c_res = case_c_page.update_tuple(c_s2, c_item3_grown.data(), c_item3_grown.size());
-    TEST_ASSERT(c_res.success(), "Case C update on trailing slot succeeds");
-    TEST_ASSERT(TablePage::validate(case_c_buf.data(), 8, 20) == StorageResult::SUCCESS, "Page valid after Case C update");
+    TEST_ASSERT(c_res.success(), "Growth requiring compaction succeeds");
+    TEST_ASSERT(TablePage::validate(case_c_buf.data(), 8, 20) == StorageResult::SUCCESS,
+                "Page remains valid after compaction-based growth");
     get_res = case_c_page.get_tuple(c_s2, &out_p, out_len);
-    TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 1200 && out_p[0] == 0x77, "Trailing slot data valid after Case C update");
+    TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 1200 && out_p[0] == 0x77,
+                "Updated trailing slot retains its payload after compaction");
 
     // 7c. Regression test: delta fits in contiguous free space but n_size does NOT
     // (Must trigger Case C compaction, NOT allocate past slot directory in Case B)
@@ -479,7 +380,8 @@ void test_slotted_page() {
     prune_page.delete_tuple(ps1);
     TEST_ASSERT(prune_page.get_slot_count() == 3, "Before defrag, slot count still 3");
     prune_page.defragment();
-    TEST_ASSERT(prune_page.get_slot_count() == 1, "After defrag, trailing dead slots pruned to 1");
+    TEST_ASSERT(prune_page.get_slot_count() == 1,
+                "Defragmentation prunes trailing DEAD slots and leaves one slot");
     get_res = prune_page.get_tuple(ps0, &out_p, out_len);
     TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 40, "Slot 0 remains valid");
 
@@ -502,9 +404,11 @@ void test_slotted_page() {
     const std::vector<uint8_t> big_item(available_contig + 20, 0x88); // forces compaction
     uint16_t pi_new = 0;
     auto ins_prune_res = prune_ins_page.insert_tuple(big_item.data(), big_item.size(), pi_new);
-    TEST_ASSERT(ins_prune_res == StorageResult::SUCCESS, "Insert forcing defrag succeeds");
-    TEST_ASSERT(pi_new == 1, "New slot index is 1 (pruned count was 1, so new slot is at 1)");
-    TEST_ASSERT(prune_ins_page.get_slot_count() == 2, "Slot count is 2 (pruned count 1 + 1), NOT 3+1=4");
+    TEST_ASSERT(ins_prune_res == StorageResult::SUCCESS,
+                "Insert succeeds after defragmenting trailing DEAD slots");
+    TEST_ASSERT(pi_new == 1, "Inserted tuple reuses the first slot after trailing-slot pruning");
+    TEST_ASSERT(prune_ins_page.get_slot_count() == 2,
+                "Slot count reflects one surviving slot plus the inserted slot");
     TEST_ASSERT(TablePage::validate(prune_ins_buf.data(), 12, 20) == StorageResult::SUCCESS, "Page valid without empty/corrupted slots");
 
     // 9. Malformed TablePage validation tests
@@ -586,11 +490,13 @@ void test_slotted_page() {
     auto bad_del = page.delete_tuple(slots[0]);
     TEST_ASSERT(bad_del == StorageResult::CORRUPTED_PAGE, "delete_tuple rejects corrupted slot offset");
 
-    std::cout << "[PASSED] test_slotted_page" << std::endl;
+    std::cout << "[PASSED] slotted-page layout and mutation tests" << std::endl;
 }
+#endif
 
+#if defined(WEBDB_RUN_TUPLE)
 void test_tuple_and_3vl() {
-    std::cout << "[RUNNING] test_tuple_and_3vl..." << std::endl;
+    std::cout << "[RUNNING] tuple serialization and three-valued logic tests..." << std::endl;
 
     // 1. 3VL Value comparisons
     Value v_null = Value::make_null(TypeId::INT);
@@ -797,11 +703,13 @@ void test_tuple_and_3vl() {
     endian::write_uint32(malformed_text_t.data() + 13, 10); // var_offset = 10 instead of expected 0
     TEST_ASSERT(Tuple::deserialize(malformed_text_t.data(), malformed_text_t.size(), schema, decoded_row1) == StorageResult::CORRUPTED_PAGE, "Non-monotonic text offset rejected");
 
-    std::cout << "[PASSED] test_tuple_and_3vl" << std::endl;
+    std::cout << "[PASSED] tuple serialization and three-valued logic tests" << std::endl;
 }
+#endif
 
+#if defined(WEBDB_RUN_TABLE_HEAP)
 void test_table_heap() {
-    std::cout << "[RUNNING] test_table_heap..." << std::endl;
+    std::cout << "[RUNNING] table-heap allocation, iteration, and recovery tests..." << std::endl;
     InMemoryPageAccessor accessor;
 
     // 1. Initialize master pages
@@ -809,6 +717,44 @@ void test_table_heap() {
     page_id_t active_id = INVALID_PAGE_ID;
     MasterData master{};
     MasterPageManager::load_active_master(accessor, active_id, master);
+
+    // Exercise failure at both publication points: marking the new page and marking the old tail.
+    for (const page_id_t failed_page_id : {3, 2}) {
+        InMemoryPageAccessor failing_accessor;
+        TEST_ASSERT(MasterPageManager::init_new_database(failing_accessor) == StorageResult::SUCCESS,
+                    "Initialize failure-injection database");
+        page_id_t failing_active_id = INVALID_PAGE_ID;
+        MasterData failing_master{};
+        TEST_ASSERT(MasterPageManager::load_active_master(failing_accessor, failing_active_id, failing_master) == StorageResult::SUCCESS,
+                    "Load failure-injection master");
+        TableHeap failing_heap;
+        TEST_ASSERT(TableHeap::create(failing_accessor, failing_master, failing_heap) == StorageResult::SUCCESS,
+                    "Create failure-injection heap");
+
+        const Tuple full_tuple(std::vector<uint8_t>(MAX_TUPLE_SIZE, 0xA5));
+        RID full_rid{};
+        TEST_ASSERT(failing_heap.insert_tuple(full_tuple, full_rid) == StorageResult::SUCCESS,
+                    "Fill failure-injection page");
+        const uint32_t page_count_before = failing_master.page_count;
+        failing_accessor.fail_mark_dirty_page = failed_page_id;
+
+        RID failed_rid{};
+        const auto failed_insert = failing_heap.insert_tuple(Tuple(std::vector<uint8_t>(8, 0x5A)), failed_rid);
+        TEST_ASSERT(failed_insert == StorageResult::IO_ERROR,
+                "Append reports a dirty-mark failure at either publication point");
+        TEST_ASSERT(failing_master.page_count == page_count_before,
+                "Failed append leaves the allocation cursor unchanged");
+        TEST_ASSERT(!failing_accessor.has_page(3),
+                "Failed append discards the newly allocated page");
+
+        uint8_t* surviving_buf = nullptr;
+        TEST_ASSERT(failing_accessor.fetch_page(failing_heap.get_last_page_id(), &surviving_buf) == StorageResult::SUCCESS,
+                    "Fetch surviving tail page");
+        TEST_ASSERT(TablePage::validate(surviving_buf, failing_heap.get_last_page_id(), failing_master.page_count) == StorageResult::SUCCESS,
+                    "Surviving tail remains valid after failed append");
+        TEST_ASSERT(TablePage(surviving_buf).get_next_page_id() == INVALID_PAGE_ID,
+                    "Failed append leaves no dangling forward link");
+    }
 
     // 2. Create TableHeap
     TableHeap heap;
@@ -1043,22 +989,8 @@ void test_table_heap() {
     auto sl_it = self_link_heap.begin();
     TEST_ASSERT(sl_it.status() == IteratorStatus::CORRUPTED_PAGE, "Iterator catches self-link corruption");
 
-    std::cout << "[PASSED] test_table_heap" << std::endl;
+    std::cout << "[PASSED] table-heap allocation, iteration, and recovery tests" << std::endl;
 }
+#endif
 
 } // namespace webdb::test
-
-int main() {
-    std::cout << "========================================" << std::endl;
-    std::cout << "  WebDB Storage Engine Unit Tests (Phase 1)" << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    webdb::test::test_checksums();
-    webdb::test::test_master_page_dual();
-    webdb::test::test_slotted_page();
-    webdb::test::test_tuple_and_3vl();
-    webdb::test::test_table_heap();
-
-    std::cout << "\nALL PHASE 1 STORAGE ENGINE TESTS PASSED!" << std::endl;
-    return 0;
-}

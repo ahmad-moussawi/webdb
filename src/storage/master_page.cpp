@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <limits>
 
 namespace webdb {
 
@@ -55,7 +56,7 @@ StorageResult MasterPage::validate(const uint8_t* buffer) noexcept {
     }
 
     const uint32_t page_count = endian::read_uint32(buffer + 0x1C);
-    if (page_count < 2) {
+    if (page_count < 2 || page_count > static_cast<uint32_t>(std::numeric_limits<page_id_t>::max())) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -105,11 +106,21 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
         return res;
     }
 
+    bool master_b_allocated = false;
+    auto cleanup = [&]() noexcept {
+        if (master_b_allocated) {
+            (void)accessor.discard_page(MASTER_PAGE_B_ID);
+        }
+        (void)accessor.discard_page(MASTER_PAGE_A_ID);
+    };
+
     uint8_t* master_b_buf = nullptr;
     res = accessor.allocate_page(MASTER_PAGE_B_ID, &master_b_buf);
     if (res != StorageResult::SUCCESS) {
+        cleanup();
         return res;
     }
+    master_b_allocated = true;
 
     // Master A: generation 1, page_count 2
     MasterData data_a{};
@@ -120,10 +131,12 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     MasterPage::serialize(data_a, master_a_buf);
     res = accessor.mark_dirty(MASTER_PAGE_A_ID);
     if (res != StorageResult::SUCCESS) {
+        cleanup();
         return res;
     }
     res = accessor.flush_page(MASTER_PAGE_A_ID);
     if (res != StorageResult::SUCCESS) {
+        cleanup();
         return res;
     }
 
@@ -136,14 +149,21 @@ StorageResult MasterPageManager::init_new_database(IPageAccessor& accessor) noex
     MasterPage::serialize(data_b, master_b_buf);
     res = accessor.mark_dirty(MASTER_PAGE_B_ID);
     if (res != StorageResult::SUCCESS) {
+        cleanup();
         return res;
     }
     res = accessor.flush_page(MASTER_PAGE_B_ID);
     if (res != StorageResult::SUCCESS) {
+        cleanup();
         return res;
     }
 
-    return accessor.sync();
+    res = accessor.sync();
+    if (res != StorageResult::SUCCESS) {
+        cleanup();
+        return res;
+    }
+    return StorageResult::SUCCESS;
 }
 
 StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,

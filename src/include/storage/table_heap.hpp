@@ -17,6 +17,7 @@ enum class IteratorStatus : uint8_t {
     CORRUPTED_PAGE,
     CYCLE_DETECTED,
     PAGE_NOT_FOUND,
+    OUT_OF_MEMORY,
 };
 
 class TableHeap;

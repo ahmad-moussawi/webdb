@@ -29,6 +29,11 @@ public:
     virtual StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) = 0;
 
     /**
+     * @brief Discards a page allocated during a failed pending operation.
+     */
+    virtual StorageResult discard_page(page_id_t page_id) = 0;
+
+    /**
      * @brief Marks a page dirty after byte modification.
      */
     virtual StorageResult mark_dirty(page_id_t page_id) = 0;
