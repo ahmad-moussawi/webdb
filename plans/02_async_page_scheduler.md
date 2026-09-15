@@ -207,14 +207,111 @@ The coordinator must use a single in-flight host request per operation. It check
 
 ## Implementation Sequence
 
-1. Add scheduler enums, protocol data types, and error/result contracts.
-2. Add `OperationScheduler` with operation lookup, state-transition validation, cancellation, and operation memory cleanup.
-3. Add a minimal per-operation resident page cache with page request, page supply, writable-page tracking, and dirty-page collection.
-4. Add a deterministic in-memory async page store for native tests. It must model a durable image separately from supplied page buffers and support a fresh reader over the durable image.
-5. Add Embind bindings for scalar state APIs and page transfer. Use typed arrays or byte vectors without exposing raw C++ pointers.
-6. Create the `web/` TypeScript package, worker coordinator, and an in-memory `AsyncPageStore` implementation.
-7. Implement the IndexedDB `webdb_pages` store. Persist each flush batch in one `readwrite` transaction and wait for completion. Reserve `webdb_meta` and atomic master publication for Phase 4.
-8. Add browser integration tests for IndexedDB transaction completion, read failures, cancellation, and flush error propagation.
+### Step 1: Scheduler lifecycle foundation
+
+**Purpose:** Establish a bounded C++ operation registry before introducing page I/O or parsing.
+
+**Implement:**
+
+- `operation_id_t`, `SchedulerStatus`, `PageRequest`, `PageData`, and resource-limit constants.
+- `OperationScheduler` creation, lookup, cancellation, terminal-state retention, diagnostics, and explicit release.
+- `start_operation()` accepts an opaque byte string only for this step. It checks the plan-size limit and copies the input into scheduler-owned memory.
+- `step_operation()` transitions `READY` directly to `COMPLETE` with a placeholder result. This proves lifecycle behavior without pretending to execute the future test-operation format.
+- Page fault, page supply, dirty-page collection, flush completion, JSON validation, and Embind exports remain unimplemented and reject unsupported calls deterministically.
+
+**Tests:** operation-ID uniqueness, plan-size and operation-count limits, cancellation, terminal result retention, release rules, unknown IDs, and invalid transition rejection.
+
+**Exit gate:** Native unit tests pass. No public WASM or JavaScript API is promised yet.
+
+### Step 2: Per-operation resident-page cache
+
+**Purpose:** Add deterministic page faults and safe page delivery while retaining one-operation ownership.
+
+**Implement:**
+
+- Resident-page map and a single pending page request per operation.
+- `READY -> PAGE_FAULT` when an operation needs an absent page; `PAGE_FAULT -> READY` only after the expected page is supplied.
+- Strict page validation: requested non-negative ID, exactly `PAGE_SIZE` bytes, no duplicate, missing, or unexpected response.
+- Copy supplied bytes into scheduler-owned memory. The host retains no alias to resident page memory.
+- Preserve the vector API even though this step produces one missing-page request at a time.
+
+**Tests:** fault/resume transitions, wrong-sized and wrong-ID pages, duplicate/missing responses, source-buffer mutation after supply, cancellation during a fault, and resident-page limits.
+
+**Exit gate:** An in-memory C++ caller can request, supply, and subsequently access a page without asynchronous or WASM tooling.
+
+### Step 3: Versioned test-operation parser and mutation flow
+
+**Purpose:** Exercise the full scheduler loop without introducing the Phase 7 query language.
+
+**Implement:**
+
+- Parse only the documented version-1 `reads`/`writes` test-operation JSON format.
+- Reject malformed JSON, unknown fields, duplicate IDs, invalid page IDs, invalid byte offsets, out-of-range byte values, excessive nesting, and writes targeting pages absent from `reads`.
+- Change `step_operation()` to request required pages in order, apply validated single-byte writes, mark changed pages dirty, enter `FLUSHING`, then complete after a successful flush.
+- Build a stable dirty-page snapshot. No mutation is allowed while `FLUSHING`.
+
+**Tests:** parser rejection matrix, read order, one fault at a time, writes changing only the target byte, dirty-page deduplication, snapshot stability, and `finish_flush(false) -> ERROR` diagnostics.
+
+**Exit gate:** A native test completes `PAGE_FAULT -> provide_pages -> FLUSHING -> finish_flush(true) -> COMPLETE` for a valid test operation.
+
+### Step 4: Durable in-memory async page store
+
+**Purpose:** Separate volatile host buffers from a durable store image so tests can model a restart honestly.
+
+**Implement:**
+
+- Test-only `AsyncPageStore` with independent copies for reads, pending writes, and durable pages.
+- Batch writes that either fully replace the durable image or fail without changing it.
+- Fresh-store/restart constructor that exposes only durable state.
+
+**Tests:** successful flush, rejected flush, durable-image immutability after caller buffer changes, restart visibility, and multi-page batch behavior.
+
+**Exit gate:** Native integration tests prove scheduler/host page flushing without claiming recovery of torn data-page writes.
+
+### Step 5: Embind scheduler boundary
+
+**Purpose:** Expose the tested C++ protocol to JavaScript without raw pointers or unsafe integer conversion.
+
+**Implement:**
+
+- Bind `SchedulerStatus` and scalar scheduler operations.
+- Use the explicit page wire API: page-ID vectors plus a single page ID and byte vector for transfer.
+- Verify whether the configured Emscripten version round-trips `uint64_t` as `BigInt`; otherwise use decimal-string operation IDs.
+- Reject non-4096-byte `Uint8Array` values in the JavaScript wrapper before crossing into WASM.
+
+**Tests:** `make wasm` builds the bindings; a WASM smoke test creates, steps, cancels, releases, and transfers a page through the wrapper.
+
+**Exit gate:** The browser-facing protocol has the same state and validation semantics as native tests.
+
+### Step 6: TypeScript worker coordinator and in-memory host
+
+**Purpose:** Implement the real asynchronous control loop with a testable host before relying on IndexedDB.
+
+**Implement:**
+
+- Create `web/` with pinned Node.js tooling, TypeScript configuration, and an `AsyncPageStore` interface.
+- Implement the normal `async` worker loop: step, read on `PAGE_FAULT`, write on `FLUSHING`, then resume.
+- Enforce one in-flight host request per operation and re-check cancellation after every `await`.
+- Translate read failures to `fail_operation()` and write failures to `finish_flush(id, false)`.
+
+**Tests:** end-to-end worker flow against the in-memory host, cancellation while awaiting read/write, late-response rejection, and host exception propagation.
+
+**Exit gate:** A TypeScript test drives a compiled WASM operation through page fault, mutation, flush, and completion.
+
+### Step 7: IndexedDB page store
+
+**Purpose:** Persist Phase 2 page batches in the universal browser backend.
+
+**Implement:**
+
+- Add `webdb_pages`, keyed by signed 32-bit page ID, whose values are copied 4096-byte `Uint8Array` images.
+- Run each `writePages()` batch in one IndexedDB `readwrite` transaction.
+- Resolve only after `transaction.oncomplete`; reject on `abort` or `error`.
+- Keep `webdb_meta`, master-page publication, generation advancement, and recoverable atomic commits out of scope until Phase 4.
+
+**Tests:** fake-IndexedDB unit tests for validation and transaction errors, plus real-browser tests for completion, abort, copied pages, and cancellation after awaits.
+
+**Exit gate:** IndexedDB failures surface through the worker as scheduler errors, and successful flushes survive an IndexedDB reopen.
 
 ## Test Plan
 
