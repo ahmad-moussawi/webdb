@@ -32,56 +32,77 @@ public:
         page_id_t page_id{INVALID_PAGE_ID};
     };
 
-    StorageResult fetch_page(page_id_t page_id, uint8_t** out_page) override {
+    StorageResult fetch_page(page_id_t page_id, uint8_t** out_page) noexcept override {
         auto it = pages_.find(page_id);
         if (it == pages_.end()) return StorageResult::IO_ERROR;
         *out_page = it->second.data();
         return StorageResult::SUCCESS;
     }
 
-    StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) override {
-        if (pages_.find(expected_page_id) != pages_.end()) return StorageResult::INVALID_ARGUMENT;
-        pages_[expected_page_id] = std::vector<uint8_t>(PAGE_SIZE, 0);
-        *out_page = pages_[expected_page_id].data();
-        return StorageResult::SUCCESS;
+    StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) noexcept override {
+        if (!out_page || pages_.find(expected_page_id) != pages_.end()) return StorageResult::INVALID_ARGUMENT;
+        try {
+            auto [it, inserted] = pages_.try_emplace(expected_page_id, PAGE_SIZE, 0);
+            if (!inserted) return StorageResult::INVALID_ARGUMENT;
+            *out_page = it->second.data();
+            return StorageResult::SUCCESS;
+        } catch (const std::bad_alloc&) {
+            return StorageResult::IO_ERROR;
+        }
     }
 
-    StorageResult discard_page(page_id_t page_id) override {
+    StorageResult discard_page(page_id_t page_id) noexcept override {
         if (pages_.erase(page_id) == 0) return StorageResult::IO_ERROR;
         dirty_pages_.erase(page_id);
         return StorageResult::SUCCESS;
     }
 
-    StorageResult mark_dirty(page_id_t page_id) override {
+    StorageResult mark_dirty(page_id_t page_id) noexcept override {
         if (fail_mark_dirty || page_id == fail_mark_dirty_page) return StorageResult::IO_ERROR;
         if (pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
-        dirty_pages_.insert(page_id);
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult flush_page(page_id_t page_id) override {
-        if (fail_flush || pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
-        dirty_pages_.erase(page_id);
-        flush_history.push_back(page_id);
-        events.push_back(Event{EventType::FLUSH, page_id});
-        return StorageResult::SUCCESS;
-    }
-
-    StorageResult flush_dirty_pages() override {
-        if (fail_flush) return StorageResult::IO_ERROR;
-        const auto to_flush = dirty_pages_;
-        for (const page_id_t page_id : to_flush) {
-            const auto result = flush_page(page_id);
-            if (result != StorageResult::SUCCESS) return result;
+        try {
+            dirty_pages_.insert(page_id);
+            return StorageResult::SUCCESS;
+        } catch (const std::bad_alloc&) {
+            return StorageResult::IO_ERROR;
         }
-        return StorageResult::SUCCESS;
     }
 
-    StorageResult sync() override {
+    StorageResult flush_page(page_id_t page_id) noexcept override {
+        if (fail_flush || pages_.find(page_id) == pages_.end()) return StorageResult::IO_ERROR;
+        try {
+            dirty_pages_.erase(page_id);
+            flush_history.push_back(page_id);
+            events.push_back(Event{EventType::FLUSH, page_id});
+            return StorageResult::SUCCESS;
+        } catch (const std::bad_alloc&) {
+            return StorageResult::IO_ERROR;
+        }
+    }
+
+    StorageResult flush_dirty_pages() noexcept override {
+        if (fail_flush) return StorageResult::IO_ERROR;
+        try {
+            const auto to_flush = dirty_pages_;
+            for (const page_id_t page_id : to_flush) {
+                const auto result = flush_page(page_id);
+                if (result != StorageResult::SUCCESS) return result;
+            }
+            return StorageResult::SUCCESS;
+        } catch (const std::bad_alloc&) {
+            return StorageResult::IO_ERROR;
+        }
+    }
+
+    StorageResult sync() noexcept override {
         if (fail_sync) return StorageResult::IO_ERROR;
-        ++sync_call_count;
-        events.push_back(Event{EventType::SYNC, INVALID_PAGE_ID});
-        return StorageResult::SUCCESS;
+        try {
+            ++sync_call_count;
+            events.push_back(Event{EventType::SYNC, INVALID_PAGE_ID});
+            return StorageResult::SUCCESS;
+        } catch (const std::bad_alloc&) {
+            return StorageResult::IO_ERROR;
+        }
     }
 
     bool fail_flush{false};
