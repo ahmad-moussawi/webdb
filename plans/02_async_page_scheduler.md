@@ -207,7 +207,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 ## Implementation Sequence
 
-### Step 1: Scheduler lifecycle foundation
+### Step 1: Scheduler lifecycle foundation [Complete]
 
 **Purpose:** Establish a bounded C++ operation registry before introducing page I/O or parsing.
 
@@ -223,7 +223,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** Native unit tests pass. No public WASM or JavaScript API is promised yet.
 
-### Step 2: Per-operation resident-page cache
+### Step 2: Per-operation resident-page cache [Complete]
 
 **Purpose:** Add deterministic page faults and safe page delivery while retaining one-operation ownership.
 
@@ -239,7 +239,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** An in-memory C++ caller can request, supply, and subsequently access a page without asynchronous or WASM tooling.
 
-### Step 3: Versioned test-operation parser and mutation flow
+### Step 3: Versioned test-operation parser and mutation flow [Complete]
 
 **Purpose:** Exercise the full scheduler loop without introducing the Phase 7 query language.
 
@@ -254,7 +254,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** A native test completes `PAGE_FAULT -> provide_pages -> FLUSHING -> finish_flush(true) -> COMPLETE` for a valid test operation.
 
-### Step 4: Durable in-memory async page store
+### Step 4: Durable in-memory async page store [Complete]
 
 **Purpose:** Separate volatile host buffers from a durable store image so tests can model a restart honestly.
 
@@ -268,7 +268,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** Native integration tests prove scheduler/host page flushing without claiming recovery of torn data-page writes.
 
-### Step 5: Embind scheduler boundary
+### Step 5: Embind scheduler boundary [Complete]
 
 **Purpose:** Expose the tested C++ protocol to JavaScript without raw pointers or unsafe integer conversion.
 
@@ -283,7 +283,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** The browser-facing protocol has the same state and validation semantics as native tests.
 
-### Step 6: TypeScript worker coordinator and in-memory host
+### Step 6: TypeScript worker coordinator and in-memory host [Complete]
 
 **Purpose:** Implement the real asynchronous control loop with a testable host before relying on IndexedDB.
 
@@ -298,7 +298,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 **Exit gate:** A TypeScript test drives a compiled WASM operation through page fault, mutation, flush, and completion.
 
-### Step 7: IndexedDB page store
+### Step 7: IndexedDB page store [Complete]
 
 **Purpose:** Persist Phase 2 page batches in the universal browser backend.
 
@@ -352,12 +352,12 @@ These tests establish host page-flush behavior only. They must not claim atomic 
 
 Phase 2 is complete when:
 
-1. Native tests cover scheduler state transitions, invalid protocol inputs, cancellation, and durable-image recovery behavior.
-2. The WASM module exports the scheduler operations and can complete a page fault/flush/resume flow with a test host.
-3. The worker host can read and flush page batches through IndexedDB, awaiting transaction completion.
-4. A failed IndexedDB transaction is surfaced as `ERROR` and does not alter the test store's durable image.
-5. Every operation is explicitly released after observing its terminal result or error.
-6. Documentation states clearly that Phase 2 does not make Phase 1 in-place data-page mutations recoverable; Phase 4 provides that stronger guarantee.
+1. [x] Native tests cover scheduler state transitions, invalid protocol inputs, cancellation, and durable-image recovery behavior.
+2. [x] The WASM module exports the scheduler operations and can complete a page fault/flush/resume flow with a test host.
+3. [x] The worker host can read and flush page batches through IndexedDB, awaiting transaction completion.
+4. [x] Failed in-memory and real-browser IndexedDB writes reject without replacing prior durable page values.
+5. [x] Every coordinator-managed operation is explicitly released after observing its terminal result or error.
+6. [x] Documentation states clearly that Phase 2 does not make Phase 1 in-place data-page mutations recoverable; Phase 4 provides that stronger guarantee.
 
 ## Open Decisions for Review
 

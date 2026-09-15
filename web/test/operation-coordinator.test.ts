@@ -155,3 +155,25 @@ test("coordinator drops a late read response after cancellation", async () => {
   assert.equal(scheduler.providedPages, 0);
   assert.equal(scheduler.isReleased, true);
 });
+
+test("coordinator drops a late write completion after cancellation", async () => {
+  const scheduler = new SchedulerMock();
+  const controller = new AbortController();
+  let resolveWrite: (() => void) | undefined;
+  const store = {
+    readPages: async () => new Map([[2, new Uint8Array(DATABASE_PAGE_SIZE)]]),
+    writePages: () => new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    }),
+  };
+
+  const outcomePromise = runOperation(scheduler, store, "{}", controller.signal);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  controller.abort();
+  resolveWrite?.();
+  const outcome = await outcomePromise;
+
+  assert.deepEqual(outcome, { status: SchedulerStatus.Cancelled });
+  assert.deepEqual(scheduler.flushes, []);
+  assert.equal(scheduler.isReleased, true);
+});
