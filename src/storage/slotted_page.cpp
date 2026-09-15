@@ -303,6 +303,10 @@ StorageResult TablePage::insert_tuple(const uint8_t* tuple_data, size_t tuple_si
         if (reusing_slot && target_slot >= get_slot_count()) {
             reusing_slot = false;
             target_slot = get_slot_count();
+            // We now grow the slot directory, re-check space with slot growth
+            if (contiguous_free_space() < static_cast<uint16_t>(t_size + SLOT_ENTRY_SIZE)) {
+                return StorageResult::PAGE_FULL;
+            }
         }
     }
 
@@ -319,7 +323,7 @@ StorageResult TablePage::insert_tuple(const uint8_t* tuple_data, size_t tuple_si
     // 4. Update slot entry
     set_slot(target_slot, SlotState::LIVE, new_free_ptr, t_size);
     if (!reusing_slot) {
-        set_slot_count(static_cast<uint16_t>(cur_slots + 1));
+        set_slot_count(static_cast<uint16_t>(target_slot + 1));
     }
 
     out_slot_num = target_slot;

@@ -457,6 +457,30 @@ void test_slotted_page() {
     get_res = prune_page.get_tuple(ps0, &out_p, out_len);
     TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 40, "Slot 0 remains valid");
 
+    // 8b. Trailing DEAD slot pruning during insert_tuple with compaction
+    // When cur_slots had trailing DEAD slots, insert_tuple might initially pick slot 1 as reusable DEAD slot.
+    // Compaction prunes slots 1 & 2 down to 1. The new slot must be placed at slot 1, and slot_count must become 2 (not 3+1=4!).
+    std::vector<uint8_t> prune_ins_buf(PAGE_SIZE, 0);
+    TablePage::init(prune_ins_buf.data(), 12);
+    TablePage prune_ins_page(prune_ins_buf.data());
+    uint16_t pi0 = 0, pi1 = 0, pi2 = 0;
+    prune_ins_page.insert_tuple(p_item.data(), p_item.size(), pi0);
+    prune_ins_page.insert_tuple(p_item.data(), p_item.size(), pi1);
+    prune_ins_page.insert_tuple(p_item.data(), p_item.size(), pi2);
+    // Delete slots 1 and 2, creating holes and trailing dead slots
+    prune_ins_page.delete_tuple(pi2);
+    prune_ins_page.delete_tuple(pi1);
+    TEST_ASSERT(prune_ins_page.get_slot_count() == 3, "Slot count before insert is 3");
+    // Insert a new tuple that forces defragmentation (e.g. size that doesn't fit in contiguous space without compaction)
+    const uint16_t available_contig = prune_ins_page.contiguous_free_space();
+    const std::vector<uint8_t> big_item(available_contig + 20, 0x88); // forces compaction
+    uint16_t pi_new = 0;
+    auto ins_prune_res = prune_ins_page.insert_tuple(big_item.data(), big_item.size(), pi_new);
+    TEST_ASSERT(ins_prune_res == StorageResult::SUCCESS, "Insert forcing defrag succeeds");
+    TEST_ASSERT(pi_new == 1, "New slot index is 1 (pruned count was 1, so new slot is at 1)");
+    TEST_ASSERT(prune_ins_page.get_slot_count() == 2, "Slot count is 2 (pruned count 1 + 1), NOT 3+1=4");
+    TEST_ASSERT(TablePage::validate(prune_ins_buf.data(), 12, 20) == StorageResult::SUCCESS, "Page valid without empty/corrupted slots");
+
     // 9. Malformed TablePage validation tests
     std::vector<uint8_t> malformed(PAGE_SIZE, 0);
     TablePage::init(malformed.data(), 6, INVALID_PAGE_ID, INVALID_PAGE_ID);

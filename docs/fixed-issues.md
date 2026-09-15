@@ -15,6 +15,7 @@ This document catalogs every critical code review finding identified during the 
 7. [SQL Three-Valued Logic (3VL) with `NaN` across Different Types](#7-sql-three-valued-logic-3vl-with-nan-across-different-types)
 8. [Unaligned Memory Access on WebAssembly & ARM Architectures](#8-unaligned-memory-access-on-webassembly--arm-architectures)
 9. [Zero-Length Tuples & Null Buffers in Slotted Page Updates](#9-zero-length-tuples--null-buffers-in-slotted-page-updates)
+10. [Stale Slot Directory Count after Trailing Dead Slot Pruning](#10-stale-slot-directory-count-after-trailing-dead-slot-pruning)
 
 ---
 
@@ -676,6 +677,79 @@ if (n_size <= contiguous_free_space()) {
 
 ---
 
+## 10. Stale Slot Directory Count after Trailing Dead Slot Pruning
+
+### The Problem
+In `TablePage::insert_tuple`, `cur_slots` was sampled before checking free space:
+```cpp
+const uint16_t cur_slots = get_slot_count();
+...
+// Find a reusable DEAD slot:
+for (uint16_t i = 0; i < cur_slots; ++i) {
+    if (get_slot_state(i) == SlotState::DEAD) {
+        target_slot = i;
+        reusing_slot = true;
+        break;
+    }
+}
+```
+If contiguous space was insufficient, `defragment()` was called to compact the page. `defragment()` prunes trailing `DEAD` slots from the end of the slot directory.
+If `target_slot` was among the pruned slots, the code detected this and set:
+```cpp
+if (reusing_slot && target_slot >= get_slot_count()) {
+    reusing_slot = false;
+    target_slot = get_slot_count();
+}
+```
+However, when updating the slot count after writing the payload, the code used the pre-compaction `cur_slots`:
+```cpp
+// Flawed earlier implementation:
+if (!reusing_slot) {
+    set_slot_count(static_cast<uint16_t>(cur_slots + 1)); // BUG: cur_slots is stale!
+}
+```
+
+### Why This is Dangerous
+Suppose a page had 3 slots:
+- Slot 0: `LIVE`
+- Slot 1: `DEAD`
+- Slot 2: `DEAD`
+Here `cur_slots = 3`. `insert_tuple` selected `target_slot = 1` (`reusing_slot = true`).
+Because contiguous space was small, `defragment()` ran. Compacting pruned trailing slots 1 and 2, resetting `slot_count` to **1** and zeroing out the directory bytes for slots 1 and 2.
+Next:
+- `target_slot (1) >= get_slot_count() (1)` triggered, setting `reusing_slot = false` and `target_slot = 1`.
+- Slot 1 was populated with the new live tuple.
+- But `set_slot_count(cur_slots + 1)` set `slot_count` to $3 + 1 =$ **4**!
+This exposed slot 2 and slot 3 (which were zeroed out) as valid slot entries on the page. In WebDB, all-zero slot metadata corresponds to `SlotState::EMPTY`.
+When `TablePage::validate()` subsequently scanned the page:
+```cpp
+if (state == SlotState::EMPTY || state == SlotState::FORWARDED) {
+    return StorageResult::CORRUPTED_PAGE; // Empty slots in [0, slot_count) are illegal on disk!
+}
+```
+The page failed validation with `CORRUPTED_PAGE`, and any scan or query reading the page broke.
+
+### How We Fixed It
+1. Grow the directory strictly from `target_slot + 1` instead of `cur_slots + 1`:
+```cpp
+if (!reusing_slot) {
+    set_slot_count(static_cast<uint16_t>(target_slot + 1));
+}
+```
+2. When trailing slot pruning converts a slot reuse into a slot growth, re-verify that contiguous free space accommodates the new 4-byte slot directory entry (`SLOT_ENTRY_SIZE`):
+```cpp
+if (reusing_slot && target_slot >= get_slot_count()) {
+    reusing_slot = false;
+    target_slot = get_slot_count();
+    // Growing slot directory by 4 bytes; re-check space with slot growth:
+    if (contiguous_free_space() < static_cast<uint16_t>(t_size + SLOT_ENTRY_SIZE)) {
+        return StorageResult::PAGE_FULL;
+    }
+}
+```
+
+---
+
 ## Summary Checklist for Systems Developers
 
 | Anti-Pattern to Avoid | Best Practice Adopted |
@@ -690,3 +764,4 @@ if (n_size <= contiguous_free_space()) {
 | Raw pointer casting on serialized byte streams | Use `std::memcpy`-based endianness helpers for all multi-byte I/O. |
 | Asymmetric argument validation across CRUD methods | Enforce non-null and non-zero invariants symmetrically on both insert and update. |
 | Checking growth delta against free space without prior compaction | Check `n_size <= contiguous_free_space()` for uncompacted allocations; only use `delta` when repacking/compacting. |
+| Using cached slot count after defragmentation | Derive new directory bounds directly from `target_slot + 1` after pruning. |
