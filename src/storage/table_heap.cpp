@@ -69,7 +69,7 @@ StorageResult TableHeap::open(IPageAccessor& accessor,
 }
 
 StorageResult TableHeap::insert_tuple(const Tuple& tuple, RID& out_rid) noexcept {
-    if (!accessor_ || !master_ptr_) {
+    if (!accessor_ || !master_ptr_ || !tuple.data() || tuple.size() == 0) {
         return StorageResult::INVALID_ARGUMENT;
     }
     if (tuple.size() > MAX_TUPLE_SIZE) {
@@ -176,7 +176,7 @@ UpdateResult TableHeap::update_tuple(const RID& rid, const Tuple& new_tuple) noe
     result.new_rid = rid;
     result.rid_changed = false;
 
-    if (!accessor_ || !master_ptr_ || !rid.is_valid()) {
+    if (!accessor_ || !master_ptr_ || !rid.is_valid() || !new_tuple.data() || new_tuple.size() == 0) {
         result.status = StorageResult::INVALID_ARGUMENT;
         return result;
     }

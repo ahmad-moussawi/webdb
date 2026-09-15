@@ -14,6 +14,7 @@ This document catalogs every critical code review finding identified during the 
 6. [UTF-8 Lead-Byte Validation Beyond Unicode Bounds (`0xF5..0xF7`)](#6-utf-8-lead-byte-validation-beyond-unicode-bounds-0xf50xf7)
 7. [SQL Three-Valued Logic (3VL) with `NaN` across Different Types](#7-sql-three-valued-logic-3vl-with-nan-across-different-types)
 8. [Unaligned Memory Access on WebAssembly & ARM Architectures](#8-unaligned-memory-access-on-webassembly--arm-architectures)
+9. [Zero-Length Tuples & Null Buffers in Slotted Page Updates](#9-zero-length-tuples--null-buffers-in-slotted-page-updates)
 
 ---
 
@@ -608,6 +609,63 @@ All reads and writes execute with zero alignment warnings or faults.
 
 ---
 
+## 9. Zero-Length Tuples & Null Buffers in Slotted Page Updates
+
+### The Problem
+In `TablePage::insert_tuple`, input arguments were strictly validated against null pointers and zero lengths:
+```cpp
+if (!tuple_data || tuple_size == 0) {
+    return StorageResult::INVALID_ARGUMENT;
+}
+```
+However, in `TablePage::update_tuple`, these guards were omitted:
+```cpp
+// Flawed earlier implementation:
+UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple_data, size_t new_size) noexcept {
+    ...
+    if (slot_num >= get_slot_count() || get_slot_state(slot_num) != SlotState::LIVE) {
+        return SLOT_NOT_FOUND;
+    }
+    if (new_size > MAX_TUPLE_SIZE) {
+        return TUPLE_TOO_LARGE;
+    }
+
+    // Shrink path:
+    if (n_size <= old_size) {
+        std::memcpy(data_ + old_offset, new_tuple_data, n_size);
+        set_slot(slot_num, SlotState::LIVE, old_offset, n_size);
+        ...
+```
+
+### Why This is Dangerous
+1. **Undefined Behavior from `std::memcpy(..., nullptr, ...)`**:
+   In C and C++, passing `nullptr` to `std::memcpy` is undefined behavior (UB), even if the size argument is `0`. If `new_size > 0` and `new_tuple_data == nullptr`, it dereferences null and immediately crashes with a segmentation fault.
+2. **Page Invariant Violation**:
+   If `new_size == 0`, because `old_size >= 1`, the shrink path (`n_size <= old_size`) was selected. The engine called `set_slot(slot_num, SlotState::LIVE, old_offset, 0)`.
+   This placed a `SlotState::LIVE` entry on the page with a length of `0`.
+   However, `TablePage::validate` enforces that any live slot must have a non-zero length:
+   ```cpp
+   if (state == SlotState::LIVE) {
+       if (len == 0 || len > MAX_TUPLE_SIZE) {
+           return StorageResult::CORRUPTED_PAGE;
+       }
+   ```
+   Any subsequent read or validation of the page failed with `CORRUPTED_PAGE`.
+3. **Compaction Dead-Slot Pruning Race in Updates**:
+   When an update expanded a tuple and required compaction, marking the updating slot `DEAD` before running `defragment()` risked having the slot pruned if it was at the trailing end of the slot directory.
+
+### How We Fixed It
+1. Added rigorous parameter validation at the entry of both `TablePage::update_tuple` and `TableHeap::update_tuple`:
+```cpp
+if (!new_tuple_data || new_size == 0) {
+    result.status = StorageResult::INVALID_ARGUMENT;
+    return result;
+}
+```
+2. Unified page compaction into an atomic `compact()` method that writes the new payload directly into the temporary buffer without marking the slot `DEAD` or exposing it to trailing pruning.
+
+---
+
 ## Summary Checklist for Systems Developers
 
 | Anti-Pattern to Avoid | Best Practice Adopted |
@@ -620,3 +678,4 @@ All reads and writes execute with zero alignment warnings or faults.
 | Incomplete UTF-8 range checks | Validate all lead bytes up to standard boundaries (`s[i] <= 0xF4`). |
 | Inconsistent 3VL evaluation | Handle `NULL` and `NaN` globally before pairwise comparisons. |
 | Raw pointer casting on serialized byte streams | Use `std::memcpy`-based endianness helpers for all multi-byte I/O. |
+| Asymmetric argument validation across CRUD methods | Enforce non-null and non-zero invariants symmetrically on both insert and update. |

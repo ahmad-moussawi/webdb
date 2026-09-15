@@ -354,6 +354,10 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
     result.new_rid = result.old_rid;
     result.rid_changed = false;
 
+    if (!new_tuple_data || new_size == 0) {
+        result.status = StorageResult::INVALID_ARGUMENT;
+        return result;
+    }
     if (slot_num >= get_slot_count() || get_slot_state(slot_num) != SlotState::LIVE) {
         result.status = StorageResult::SLOT_NOT_FOUND;
         return result;
@@ -400,18 +404,7 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
 
     // Case C: growth fits after compaction
     if (delta <= total_free_space_after_compaction()) {
-        // Temporarily mark slot DEAD with old size to allow defragmentation
-        set_slot(slot_num, SlotState::DEAD, 0, 0);
-        defragment();
-
-        // Place new payload
-        const uint16_t new_ptr = static_cast<uint16_t>(get_free_space_pointer() - n_size);
-        set_free_space_pointer(new_ptr);
-        std::memcpy(data_ + new_ptr, new_tuple_data, n_size);
-        set_slot(slot_num, SlotState::LIVE, new_ptr, n_size);
-
-        recalculate_has_holes();
-        update_checksum();
+        compact(static_cast<int32_t>(slot_num), new_tuple_data, n_size);
         result.status = StorageResult::SUCCESS;
         return result;
     }
@@ -439,7 +432,7 @@ StorageResult TablePage::delete_tuple(uint16_t slot_num) noexcept {
     return StorageResult::SUCCESS;
 }
 
-void TablePage::defragment() noexcept {
+void TablePage::compact(int32_t update_slot, const uint8_t* update_data, uint16_t update_len) noexcept {
     const uint16_t count = get_slot_count();
     if (count == 0) return;
 
@@ -451,7 +444,16 @@ void TablePage::defragment() noexcept {
 
     // 1. Pack live payloads downward from byte 4096 in ascending slot index order
     for (uint16_t i = 0; i < count; ++i) {
-        if (get_slot_state(i) == SlotState::LIVE) {
+        if (update_slot >= 0 && i == static_cast<uint16_t>(update_slot)) {
+            temp_free_ptr = static_cast<uint16_t>(temp_free_ptr - update_len);
+            std::memcpy(temp + temp_free_ptr, update_data, update_len);
+
+            // Write updated slot in temp
+            uint8_t* p = temp + PAGE_HEADER_SIZE + (i * SLOT_ENTRY_SIZE);
+            const uint16_t meta = static_cast<uint16_t>((static_cast<uint16_t>(SlotState::LIVE) << 14) | (temp_free_ptr & 0x1FFFu));
+            endian::write_uint16(p, meta);
+            endian::write_uint16(p + 2, update_len);
+        } else if (get_slot_state(i) == SlotState::LIVE) {
             const uint16_t old_offset = get_slot_offset(i);
             const uint16_t len = get_slot_length(i);
             temp_free_ptr = static_cast<uint16_t>(temp_free_ptr - len);
@@ -500,12 +502,16 @@ void TablePage::defragment() noexcept {
     endian::write_uint16(temp + 0x0C, new_slot_count);
     endian::write_uint16(temp + 0x0E, temp_free_ptr);
     uint32_t flags = endian::read_uint32(temp + 0x18);
-    flags &= ~FLAG_HAS_HOLES; // Defragmentation clears holes
+    flags &= ~FLAG_HAS_HOLES; // Compaction clears holes
     endian::write_uint32(temp + 0x18, flags);
 
     // 5. Copy back to page data and update CRC
     std::memcpy(data_, temp, PAGE_SIZE);
     update_checksum();
+}
+
+void TablePage::defragment() noexcept {
+    compact(-1, nullptr, 0);
 }
 
 } // namespace webdb

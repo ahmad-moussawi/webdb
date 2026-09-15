@@ -75,6 +75,7 @@ private:
     void set_slot_count(uint16_t count) noexcept;
     void set_flags(uint32_t flags) noexcept;
     void recalculate_has_holes() noexcept;
+    void compact(int32_t update_slot, const uint8_t* update_data, uint16_t update_len) noexcept;
 };
 
 } // namespace webdb

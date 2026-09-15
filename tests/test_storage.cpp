@@ -362,6 +362,14 @@ void test_slotted_page() {
     get_res = page.get_tuple(slots[0], &out_p, out_len);
     TEST_ASSERT(out_len == 50 && out_p[0] == 0x33, "Shrunk tuple payload matches");
 
+    // Null buffer and zero length rejection on update
+    auto null_upd = page.update_tuple(slots[0], nullptr, 50);
+    TEST_ASSERT(null_upd.status == StorageResult::INVALID_ARGUMENT, "update_tuple rejects null buffer");
+    auto zero_upd = page.update_tuple(slots[0], smaller_t1.data(), 0);
+    TEST_ASSERT(zero_upd.status == StorageResult::INVALID_ARGUMENT, "update_tuple rejects zero size");
+    auto null_zero_upd = page.update_tuple(slots[0], nullptr, 0);
+    TEST_ASSERT(null_zero_upd.status == StorageResult::INVALID_ARGUMENT, "update_tuple rejects null buffer and zero size");
+
     // 7. Same-page growth update (growing into contiguous free space)
     std::vector<uint8_t> growth_buf(PAGE_SIZE, 0);
     TablePage::init(growth_buf.data(), 4);
@@ -378,6 +386,28 @@ void test_slotted_page() {
     get_res = growth_page.get_tuple(growth_slot, &out_p, out_len);
     TEST_ASSERT(out_len == 120 && out_p[0] == 0x55, "Grown item data valid");
     TEST_ASSERT((growth_page.get_flags() & TablePage::FLAG_HAS_HOLES) != 0, "Old item space becomes hole");
+
+    // 7b. Growth requiring compaction (Case C) on last slot and internal slot
+    std::vector<uint8_t> case_c_buf(PAGE_SIZE, 0);
+    TablePage::init(case_c_buf.data(), 8);
+    TablePage case_c_page(case_c_buf.data());
+    uint16_t c_s0 = 0, c_s1 = 0, c_s2 = 0;
+    const std::vector<uint8_t> c_item1(1500, 0x11);
+    const std::vector<uint8_t> c_item2(1500, 0x22);
+    const std::vector<uint8_t> c_item3(500, 0x33);
+    case_c_page.insert_tuple(c_item1.data(), c_item1.size(), c_s0);
+    case_c_page.insert_tuple(c_item2.data(), c_item2.size(), c_s1);
+    case_c_page.insert_tuple(c_item3.data(), c_item3.size(), c_s2);
+    // Delete item 1 to create a 1500 byte hole
+    case_c_page.delete_tuple(c_s1);
+    // Item 3 is at slot 2 (last slot, 500 bytes). Contiguous free space is ~500 bytes.
+    // Grow item 3 to 1200 bytes (delta = 700 bytes > contiguous free space, fits after compaction)
+    const std::vector<uint8_t> c_item3_grown(1200, 0x77);
+    auto c_res = case_c_page.update_tuple(c_s2, c_item3_grown.data(), c_item3_grown.size());
+    TEST_ASSERT(c_res.success(), "Case C update on trailing slot succeeds");
+    TEST_ASSERT(TablePage::validate(case_c_buf.data(), 8, 20) == StorageResult::SUCCESS, "Page valid after Case C update");
+    get_res = case_c_page.get_tuple(c_s2, &out_p, out_len);
+    TEST_ASSERT(get_res == StorageResult::SUCCESS && out_len == 1200 && out_p[0] == 0x77, "Trailing slot data valid after Case C update");
 
     // 8. Trailing dead-slot pruning on defragment
     std::vector<uint8_t> prune_buf(PAGE_SIZE, 0);
@@ -713,6 +743,11 @@ void test_table_heap() {
         Column{"payload", TypeId::TEXT, false}
     });
 
+    // Test empty tuple insertion rejection
+    Tuple empty_tuple;
+    RID empty_rid{};
+    TEST_ASSERT(heap.insert_tuple(empty_tuple, empty_rid) == StorageResult::INVALID_ARGUMENT, "Heap rejects empty tuple insert");
+
     // 3. Insert enough rows to span multiple pages (each row ~500 bytes -> ~8 rows per page)
     const std::string large_str(500, 'X');
     constexpr size_t NUM_ROWS = 40; // Should span ~5 pages
@@ -732,7 +767,7 @@ void test_table_heap() {
         TEST_ASSERT(ins_res == StorageResult::SUCCESS, "Insert row into heap");
         inserted_rids.push_back(rid);
     }
-
+    TEST_ASSERT(heap.update_tuple(inserted_rids[0], empty_tuple).status == StorageResult::INVALID_ARGUMENT, "Heap rejects empty tuple update");
     TEST_ASSERT(heap.get_last_page_id() >= 5, "Heap spans across at least 4 pages");
 
     // 4. Sequential scan via TableIterator
