@@ -171,26 +171,34 @@ void test_master_page_dual() {
     active_data.page_count = 3;
     res = MasterPageManager::commit_master(accessor, active_id, active_data);
     TEST_ASSERT(res == StorageResult::SUCCESS, "Commit master update");
+    TEST_ASSERT(active_id == MASTER_PAGE_B_ID, "commit_master updates active_id to Master B in-place");
 
-    // 4. Reload active master -> should now be Master B with generation 2
+    // Commit a second time using the same active_id variable without re-loading -> must write Master A (gen 3)
+    active_data.page_count = 4;
+    res = MasterPageManager::commit_master(accessor, active_id, active_data);
+    TEST_ASSERT(res == StorageResult::SUCCESS, "Second commit succeeds");
+    TEST_ASSERT(active_id == MASTER_PAGE_A_ID, "commit_master alternates active_id back to Master A");
+    TEST_ASSERT(active_data.generation_id == 3, "Generation incremented to 3");
+
+    // 4. Reload active master -> should now be Master A with generation 3
     res = MasterPageManager::load_active_master(accessor, active_id, active_data);
     TEST_ASSERT(res == StorageResult::SUCCESS, "Reload master");
-    TEST_ASSERT(active_id == MASTER_PAGE_B_ID, "Master B is now active");
-    TEST_ASSERT(active_data.generation_id == 2, "Generation incremented to 2");
+    TEST_ASSERT(active_id == MASTER_PAGE_A_ID, "Master A is now active");
+    TEST_ASSERT(active_data.generation_id == 3, "Generation incremented to 3");
     TEST_ASSERT(active_data.system_tables_root == 2, "System tables root matches");
-    TEST_ASSERT(active_data.page_count == 3, "Page count updated");
+    TEST_ASSERT(active_data.page_count == 4, "Page count updated");
 
-    // 5. Interrupted write simulation: Corrupt Master B and reload -> falls back to Master A
-    uint8_t* master_b_buf = accessor.raw_buffer(MASTER_PAGE_B_ID);
-    master_b_buf[10] ^= 0xFF; // Corrupt byte
-    res = MasterPageManager::load_active_master(accessor, active_id, active_data);
-    TEST_ASSERT(res == StorageResult::SUCCESS, "Fall back to valid master");
-    TEST_ASSERT(active_id == MASTER_PAGE_A_ID, "Master A selected after Master B corrupted");
-    TEST_ASSERT(active_data.generation_id == 1, "Fallback generation is 1");
-
-    // 6. Total corruption: Corrupt Master A too -> returns CORRUPTED_PAGE
+    // 5. Interrupted write simulation: Corrupt Master A and reload -> falls back to Master B (gen 2)
     uint8_t* master_a_buf = accessor.raw_buffer(MASTER_PAGE_A_ID);
-    master_a_buf[10] ^= 0xFF;
+    master_a_buf[10] ^= 0xFF; // Corrupt byte
+    res = MasterPageManager::load_active_master(accessor, active_id, active_data);
+    TEST_ASSERT(res == StorageResult::SUCCESS, "Fall back to valid master B");
+    TEST_ASSERT(active_id == MASTER_PAGE_B_ID, "Master B selected after Master A corrupted");
+    TEST_ASSERT(active_data.generation_id == 2, "Fallback generation is 2");
+
+    // 6. Total corruption: Corrupt Master B too -> returns CORRUPTED_PAGE
+    uint8_t* master_b_buf = accessor.raw_buffer(MASTER_PAGE_B_ID);
+    master_b_buf[10] ^= 0xFF;
     res = MasterPageManager::load_active_master(accessor, active_id, active_data);
     TEST_ASSERT(res == StorageResult::CORRUPTED_PAGE, "Both corrupt returns error");
 
@@ -875,13 +883,14 @@ void test_table_heap() {
     accessor.flush_history.clear();
     TEST_ASSERT(accessor.dirty_count() > 0, "Dirty data pages exist before commit");
     master.system_tables_root = heap.get_first_page_id();
+    const page_id_t master_to_be_written = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
     auto commit_res = MasterPageManager::commit_master(accessor, active_id, master);
     TEST_ASSERT(commit_res == StorageResult::SUCCESS, "Commit master with dirty heap pages");
     TEST_ASSERT(accessor.dirty_count() == 0, "All dirty data and master pages flushed after commit");
+    TEST_ASSERT(active_id == master_to_be_written, "active_id updated to the newly committed master");
 
-    // Verify ordering: data pages must be flushed before the inactive master page
-    const page_id_t expected_inactive_master = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
-    auto master_flush_it = std::find(accessor.flush_history.begin(), accessor.flush_history.end(), expected_inactive_master);
+    // Verify ordering: data pages must be flushed before the newly committed master page
+    auto master_flush_it = std::find(accessor.flush_history.begin(), accessor.flush_history.end(), master_to_be_written);
     TEST_ASSERT(master_flush_it != accessor.flush_history.end(), "Inactive master was flushed");
     // All items before master_flush_it must be data pages (page_id >= FIRST_DATA_PAGE_ID)
     for (auto it = accessor.flush_history.begin(); it != master_flush_it; ++it) {

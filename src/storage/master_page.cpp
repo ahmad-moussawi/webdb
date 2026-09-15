@@ -192,9 +192,13 @@ StorageResult MasterPageManager::load_active_master(IPageAccessor& accessor,
 }
 
 StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
-                                               page_id_t active_id,
+                                               page_id_t& active_id,
                                                MasterData& pending_data,
                                                const std::vector<page_id_t>& dirty_page_ids) noexcept {
+    if (active_id != MASTER_PAGE_A_ID && active_id != MASTER_PAGE_B_ID) {
+        return StorageResult::INVALID_ARGUMENT;
+    }
+
     // 1. Flush all dirty data pages before durability barrier
     for (page_id_t pid : dirty_page_ids) {
         auto flush_res = accessor.flush_page(pid);
@@ -237,7 +241,14 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
         return flush_res;
     }
 
-    return accessor.sync();
+    auto final_sync_res = accessor.sync();
+    if (final_sync_res != StorageResult::SUCCESS) {
+        return final_sync_res;
+    }
+
+    // Commit succeeded atomically: update active_id to the newly active page
+    active_id = inactive_id;
+    return StorageResult::SUCCESS;
 }
 
 } // namespace webdb

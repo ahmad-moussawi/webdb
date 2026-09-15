@@ -16,6 +16,7 @@ This document catalogs every critical code review finding identified during the 
 8. [Unaligned Memory Access on WebAssembly & ARM Architectures](#8-unaligned-memory-access-on-webassembly--arm-architectures)
 9. [Zero-Length Tuples & Null Buffers in Slotted Page Updates](#9-zero-length-tuples--null-buffers-in-slotted-page-updates)
 10. [Stale Slot Directory Count after Trailing Dead Slot Pruning](#10-stale-slot-directory-count-after-trailing-dead-slot-pruning)
+11. [Loss of Master Page Alternation Across Consecutive Commits](#11-loss-of-master-page-alternation-across-consecutive-commits)
 
 ---
 
@@ -750,6 +751,61 @@ if (reusing_slot && target_slot >= get_slot_count()) {
 
 ---
 
+## 11. Loss of Master Page Alternation Across Consecutive Commits
+
+### The Problem
+In `MasterPageManager::commit_master`, the currently active page ID was passed by value:
+```cpp
+// Flawed earlier implementation:
+StorageResult MasterPageManager::commit_master(IPageAccessor& accessor,
+                                               page_id_t active_id, // Passed by value!
+                                               MasterData& pending_data,
+                                               const std::vector<page_id_t>& dirty_page_ids) noexcept {
+    ...
+    const page_id_t inactive_id = (active_id == MASTER_PAGE_A_ID) ? MASTER_PAGE_B_ID : MASTER_PAGE_A_ID;
+    ...
+    // Wrote to inactive_id, incremented generation_id, synced to disk...
+    return accessor.sync(); // active_id was discarded!
+}
+```
+
+### Why This is Dangerous
+Suppose a transaction coordinator or session loaded the database and discovered `active_id = MASTER_PAGE_A_ID`:
+1. **Commit 1**: The coordinator called `commit_master(..., active_id, ...)`.
+   - The method wrote to `MASTER_PAGE_B_ID` with `generation_id = 2`.
+   - `MASTER_PAGE_B_ID` was now the newest, valid, active master page on disk.
+   - But the caller's local variable `active_id` was still `MASTER_PAGE_A_ID`!
+2. **Commit 2**: The caller executed a second commit using its unmodified `active_id` (`MASTER_PAGE_A_ID`).
+   - Because `active_id` was still `A`, `commit_master` calculated `inactive_id = B` again!
+   - It overwrote `MASTER_PAGE_B_ID` with `generation_id = 3` instead of alternating to `MASTER_PAGE_A_ID`.
+3. **Catastrophic Fallback / Recovery Loss**:
+   If power failed or the browser crashed midway through writing `MASTER_PAGE_B_ID` on that second commit, `MASTER_PAGE_B_ID` had a corrupted CRC-32.
+   When the database recovered on next boot, `load_active_master()` fell back to the only other valid page: `MASTER_PAGE_A_ID` (`generation_id = 1`)!
+   **All changes from Commit 1 were completely wiped out**, because `MASTER_PAGE_A_ID` was never updated to generation 2. The entire purpose of dual-master crash resiliency—maintaining the immediately preceding generation as a safe fallback—was destroyed.
+
+### How We Fixed It
+1. Changed `active_id` from a value parameter to an in-out reference parameter:
+```cpp
+static StorageResult commit_master(IPageAccessor& accessor,
+                                   page_id_t& active_id,
+                                   MasterData& pending_data,
+                                   const std::vector<page_id_t>& dirty_page_ids = {}) noexcept;
+```
+2. Validated that `active_id` is either `MASTER_PAGE_A_ID` or `MASTER_PAGE_B_ID` upfront (`StorageResult::INVALID_ARGUMENT`).
+3. Updated `active_id = inactive_id` **strictly after** the final durability barrier `accessor.sync()` completes with `SUCCESS`:
+```cpp
+auto final_sync_res = accessor.sync();
+if (final_sync_res != StorageResult::SUCCESS) {
+    return final_sync_res; // active_id remains unchanged if sync failed
+}
+
+// Atomically transition caller's active_id to the newly committed master page
+active_id = inactive_id;
+return StorageResult::SUCCESS;
+```
+
+---
+
 ## Summary Checklist for Systems Developers
 
 | Anti-Pattern to Avoid | Best Practice Adopted |
@@ -765,3 +821,4 @@ if (reusing_slot && target_slot >= get_slot_count()) {
 | Asymmetric argument validation across CRUD methods | Enforce non-null and non-zero invariants symmetrically on both insert and update. |
 | Checking growth delta against free space without prior compaction | Check `n_size <= contiguous_free_space()` for uncompacted allocations; only use `delta` when repacking/compacting. |
 | Using cached slot count after defragmentation | Derive new directory bounds directly from `target_slot + 1` after pruning. |
+| Passing alternating state tokens by value | Pass `active_id` as `page_id_t&` and mutate it only after the final sync barrier. |

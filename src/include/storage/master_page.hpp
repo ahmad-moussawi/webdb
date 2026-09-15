@@ -59,11 +59,13 @@ public:
     /**
      * @brief Atomically commits new metadata to the inactive master page.
      * Sequence: flush all dirty data pages -> sync() -> write inactive master with gen+1 -> flush master -> sync().
+     * On success, active_id is updated to point to the newly active master page.
+     * @param active_id Reference to the currently active master page ID, updated to the newly active ID on success.
      * @param dirty_page_ids Optional explicit list of dirty data page IDs to flush. In addition,
      *                       accessor.flush_dirty_pages() is invoked to ensure all dirty data pages are flushed.
      */
     static StorageResult commit_master(IPageAccessor& accessor,
-                                       page_id_t active_id,
+                                       page_id_t& active_id,
                                        MasterData& pending_data,
                                        const std::vector<page_id_t>& dirty_page_ids = {}) noexcept;
 };
