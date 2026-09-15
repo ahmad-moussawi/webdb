@@ -5,6 +5,7 @@
 #include "common/endian.hpp"
 #include "storage/page_accessor.hpp"
 #include "storage/master_page.hpp"
+#include "storage/operation_scheduler.hpp"
 #include "storage/slotted_page.hpp"
 #include "storage/tuple.hpp"
 #include "storage/value.hpp"
@@ -42,7 +43,7 @@ public:
     StorageResult allocate_page(page_id_t expected_page_id, uint8_t** out_page) noexcept override {
         if (!out_page || pages_.find(expected_page_id) != pages_.end()) return StorageResult::INVALID_ARGUMENT;
         try {
-            auto [it, inserted] = pages_.try_emplace(expected_page_id, PAGE_SIZE, 0);
+            auto [it, inserted] = pages_.try_emplace(expected_page_id, DATABASE_PAGE_SIZE, 0);
             if (!inserted) return StorageResult::INVALID_ARGUMENT;
             *out_page = it->second.data();
             return StorageResult::SUCCESS;

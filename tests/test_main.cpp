@@ -7,6 +7,10 @@ void test_checksums();
 void test_master_page_dual();
 #elif defined(WEBDB_TEST_SLOTTED_PAGE)
 void test_slotted_page();
+#elif defined(WEBDB_TEST_ASYNC_PAGE_STORE)
+void test_async_page_store();
+#elif defined(WEBDB_TEST_OPERATION_SCHEDULER)
+void test_operation_scheduler();
 #elif defined(WEBDB_TEST_TUPLE)
 void test_tuple_and_3vl();
 #elif defined(WEBDB_TEST_TABLE_HEAP)
@@ -25,6 +29,10 @@ int main() {
     webdb::test::test_master_page_dual();
 #elif defined(WEBDB_TEST_SLOTTED_PAGE)
     webdb::test::test_slotted_page();
+#elif defined(WEBDB_TEST_ASYNC_PAGE_STORE)
+    webdb::test::test_async_page_store();
+#elif defined(WEBDB_TEST_OPERATION_SCHEDULER)
+    webdb::test::test_operation_scheduler();
 #elif defined(WEBDB_TEST_TUPLE)
     webdb::test::test_tuple_and_3vl();
 #elif defined(WEBDB_TEST_TABLE_HEAP)

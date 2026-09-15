@@ -13,16 +13,16 @@ inline constexpr page_id_t MASTER_PAGE_A_ID = 0;
 inline constexpr page_id_t MASTER_PAGE_B_ID = 1;
 inline constexpr page_id_t FIRST_DATA_PAGE_ID = 2;
 
-inline constexpr size_t PAGE_SIZE = 4096;
+inline constexpr size_t DATABASE_PAGE_SIZE = 4096;
 inline constexpr size_t PAGE_HEADER_SIZE = 36;
 inline constexpr size_t SLOT_ENTRY_SIZE = 4;
 
-// floor((PAGE_SIZE - PAGE_HEADER_SIZE) / SLOT_ENTRY_SIZE) = 1015.
+// floor((DATABASE_PAGE_SIZE - PAGE_HEADER_SIZE) / SLOT_ENTRY_SIZE) = 1015.
 inline constexpr uint16_t MAX_SLOT_COUNT = 1015;
 
 // One tuple plus one slot entry must fit in an otherwise empty TablePage.
 inline constexpr size_t MAX_TUPLE_SIZE =
-    PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056
+    DATABASE_PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056
 
 inline constexpr uint16_t MAX_COLUMNS = 256;
 inline constexpr size_t MAX_TEXT_SIZE = MAX_TUPLE_SIZE;

@@ -16,7 +16,7 @@
 
 </div>
 
-> 🚧 **Active Development & Community**
+🚧 **Active Development**
 > WebDB is currently under active development. If you are excited about the vision of a lightweight, truly browser-native relational database, please consider **starring the repository ⭐**, **sharing it with the web & systems community 📢**, and **submitting your feedback, use cases, or ideas 💬** in issues and discussions to help shape the future of WebDB!
 
 ---
@@ -33,25 +33,25 @@ WebDB compiles to a featherlight WebAssembly (WASM) binary with zero external ru
 
 To ensure consistency and focus, all contributions and architectural decisions in WebDB are guided by these core principles:
 
-### 1. 🌐 Browser-First by Purpose
+### 1. Browser-First by Purpose
 WebDB is conceived, designed, and optimized specifically for the browser environment. While native C++ compilation is fully supported for unit testing, benchmarking, and debugging, every architectural tradeoff prioritizes web constraints: quick cold-start times, minimal memory consumption, responsive main threads, and seamless execution inside Web Workers.
 
-### 2. ⚡ Single-Threaded Simplicity & Determinism
+### 2. Single-Threaded Simplicity & Determinism
 The core engine contains zero threading primitives (`std::thread`, `pthread`, mutexes, or atomic locks). This eliminates synchronization overhead, prevents race conditions, guarantees deterministic execution, and keeps the engine lightweight. Most importantly, it allows WebDB to run in standard Web Workers without requiring complex server deployment headers like Cross-Origin Opener Policy (`COOP`) or Cross-Origin Embedder Policy (`COEP`), which are mandatory for `SharedArrayBuffer` and multithreaded WASM.
 
-### 3. 🪶 Minimal by Design & Web API Delegation
+### 3. Minimal by Design & Web API Delegation
 Every byte in the WASM payload matters. WebDB resists the urge to reimplement features that the browser environment already provides natively. Date parsing, time zone math, regular expressions, cryptographic operations, and internationalization are delegated to JavaScript and Web APIs through User-Defined Functions (UDFs) rather than embedding bulky third-party C/C++ libraries into the binary.
 
-### 4. 💾 First-Class IndexedDB and OPFS Storage
+### 4. First-Class IndexedDB and OPFS Storage
 WebDB treats browser storage layers as first-class citizens. It provides universal browser compatibility via an asynchronous IndexedDB page store and unlocks high-throughput block I/O through the Origin Private File System (OPFS) `FileSystemSyncAccessHandle` inside dedicated workers.
 
-### 5. 🔄 Asynchronous Architecture by Design
+### 5. Asynchronous Architecture by Design
 Traditional databases rely on synchronous block I/O (`read()`, `write()`, `fsync()`), which does not exist in standard browser environments (e.g., IndexedDB). Instead of relying on heavy runtime shims such as Emscripten Asyncify or experimental JSPI, WebDB features a host-driven cooperative state machine. When an operation requires a non-resident page, the WASM engine yields a `PAGE_FAULT` back to JavaScript, allowing the host to resolve pages asynchronously and resume execution.
 
-### 6. 🧩 JavaScript User-Defined Functions (UDFs)
+### 6. JavaScript User-Defined Functions (UDFs)
 Extensibility is built directly into query evaluation. Applications can register synchronous JavaScript functions that execute directly on the worker thread during query execution. This provides a clean escape hatch for custom business logic, domain transforms, and complex calculations without bloating the WASM core.
 
-### 7. 🪄 Fluent Query Builder & Zero SQL Parser Overhead
+### 7. Fluent Query Builder & Zero SQL Parser Overhead
 Traditional SQL database engines spend tens of kilobytes of binary space on lexers, AST builders, and SQL text parsers. WebDB eliminates the SQL text parser from the WASM binary entirely. Instead, a type-safe, fluent TypeScript client library compiles queries into a compact JSON Intermediate Representation (Plan IR) that the C++ execution engine evaluates directly.
 
 ---

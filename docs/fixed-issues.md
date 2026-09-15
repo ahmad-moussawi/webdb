@@ -303,7 +303,7 @@ const uint16_t old_size = get_slot_length(slot_num);
 const uint16_t free_ptr = get_free_space_pointer();
 
 // Check that old_offset is within legal payload bounds:
-if (old_offset < free_ptr || (static_cast<uint32_t>(old_offset) + old_size) > PAGE_SIZE) {
+if (old_offset < free_ptr || (static_cast<uint32_t>(old_offset) + old_size) > DATABASE_PAGE_SIZE) {
     result.status = StorageResult::CORRUPTED_PAGE;
     return result; // Refuses to write!
 }
@@ -317,7 +317,7 @@ const uint16_t offset = get_slot_offset(slot_num);
 const uint16_t len = get_slot_length(slot_num);
 const uint16_t free_ptr = get_free_space_pointer();
 
-if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > DATABASE_PAGE_SIZE) {
     return StorageResult::CORRUPTED_PAGE;
 }
 ```

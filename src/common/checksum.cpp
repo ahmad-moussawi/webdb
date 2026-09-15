@@ -59,9 +59,9 @@ uint32_t compute_page_checksum(const uint8_t* page_data, size_t checksum_field_o
         crc = (crc >> 8) ^ CRC32_TABLE[static_cast<uint8_t>((crc ^ byte) & 0xFFu)];
     }
 
-    // Process remaining bytes from (checksum_field_offset + 4) to PAGE_SIZE
+    // Process remaining bytes from (checksum_field_offset + 4) to DATABASE_PAGE_SIZE
     const size_t tail_start = checksum_field_offset + sizeof(uint32_t);
-    for (size_t i = tail_start; i < PAGE_SIZE; ++i) {
+    for (size_t i = tail_start; i < DATABASE_PAGE_SIZE; ++i) {
         const uint8_t byte = page_data[i];
         crc = (crc >> 8) ^ CRC32_TABLE[static_cast<uint8_t>((crc ^ byte) & 0xFFu)];
     }

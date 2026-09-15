@@ -26,6 +26,7 @@ add_library(webdb_core STATIC
     src/engine.cpp
     src/common/checksum.cpp
     src/storage/master_page.cpp
+    src/storage/operation_scheduler.cpp
     src/storage/slotted_page.cpp
     src/storage/tuple.cpp
     src/storage/value.cpp
@@ -106,6 +107,8 @@ else()
     add_storage_test(test_checksum tests/test_checksum.cpp WEBDB_TEST_CHECKSUMS checksum)
     add_storage_test(test_master_page tests/test_master_page.cpp WEBDB_TEST_MASTER_PAGE master_page)
     add_storage_test(test_slotted_page tests/test_slotted_page.cpp WEBDB_TEST_SLOTTED_PAGE slotted_page)
+    add_storage_test(test_async_page_store tests/test_async_page_store.cpp WEBDB_TEST_ASYNC_PAGE_STORE async_page_store)
+    add_storage_test(test_operation_scheduler tests/test_operation_scheduler.cpp WEBDB_TEST_OPERATION_SCHEDULER operation_scheduler)
     add_storage_test(test_tuple tests/test_tuple.cpp WEBDB_TEST_TUPLE tuple)
     add_storage_test(test_table_heap tests/test_table_heap.cpp WEBDB_TEST_TABLE_HEAP table_heap)
 endif()

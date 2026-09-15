@@ -91,68 +91,17 @@ flowchart TD
 ---
 
 ### Phase 2: Host-Driven Async Page Scheduler & Page Store
-**Objective**: Build the asynchronous I/O scheduling state machine that allows the WASM engine to pause on page faults and resume once JavaScript delivers pages from IndexedDB or storage.
+**Objective**: Introduce a host-driven WASM scheduler that pauses on absent pages, receives page batches from JavaScript, and yields dirty pages for durable host commits.
 
-- [ ] **2.1 Page Store Abstraction (`IPageStore`)**
-  - Core interfaces for async block storage:
-    ```cpp
-    struct PageRequest {
-        page_id_t page_id;
-        bool is_write;
-    };
+> **Detailed implementation plan**: [plans/02_async_page_scheduler.md](plans/02_async_page_scheduler.md)
 
-    struct PageBatch {
-        std::vector<page_id_t> page_ids;
-        std::vector<const uint8_t*> page_buffers;
-    };
-    ```
-  - TypeScript Host Storage Interface:
-    ```typescript
-    interface IAsyncPageStore {
-      readPages(pageIds: number[]): Promise<Map<number, Uint8Array>>;
-      writePages(batch: Map<number, Uint8Array>): Promise<void>;
-      commit(generationId: bigint, masterPage: Uint8Array): Promise<void>;
-      recover(): Promise<{ generationId: bigint; masterPage: Uint8Array | null }>;
-    }
-    ```
+- [ ] Define operation state transitions, page-transfer data types, and a bounded per-operation resident-page cache.
+- [ ] Export start/step/provide/flush/cancel/result operations through Embind.
+- [ ] Add a worker host protocol and deterministic in-memory async page store for native and WASM tests.
+- [ ] Implement an IndexedDB adapter that flushes each dirty-page batch in one `readwrite` transaction and waits for `oncomplete`.
+- [ ] Document and test cancellation, invalid protocol inputs, failed page-batch flushes, and restart from durable images.
 
-- [ ] **2.2 WASM Scheduler State Machine & Protocol**
-  - Scheduler states for query operations:
-    - `READY`: Operation initialized, ready to step.
-    - `RUNNING`: Actively executing in WASM linear memory.
-    - `PAGE_FAULT`: Paused awaiting one or more storage pages. Yields list of missing `page_ids` to host.
-    - `FLUSHING`: Paused awaiting persistent write-out of dirty pages.
-    - `COMPLETE`: Query produced output; execution finished.
-    - `CANCELLED`: Query aborted via host cancellation signal.
-    - `ERROR`: Query halted with error code and diagnostics.
-  - Native WASM Export Interface (Embind):
-    - `startOperation(plan_json: string) -> operation_id_t`
-    - `stepOperation(operation_id_t) -> SchedulerStatus`
-    - `getMissingPageRequests(operation_id_t) -> vector<page_id_t>`
-    - `providePages(operation_id_t, page_buffers) -> bool`
-    - `cancelOperation(operation_id_t) -> void`
-    - `getDirtyPagesForFlush(operation_id_t) -> vector<PageData>`
-    - `finishFlush(operation_id_t, bool success) -> void`
-    - `getExecutionResults(operation_id_t) -> string`
-
-- [ ] **2.3 Host Scheduler Capabilities (JavaScript / Worker)**
-  - **Batching**: Merges multiple individual page faults into a single multi-page read transaction.
-  - **Deduplication**: If concurrent iterators or background tasks request the same page, only one I/O fetch is triggered.
-  - **Bounded Prefetching**: During sequential table scans, requests prefetch batches (e.g., next 4–8 contiguous pages) ahead of the executor cursor.
-  - **Bounded Outstanding Requests**: Limits in-flight storage requests to prevent saturating the IndexedDB transaction queue.
-  - **Cancellation**: If host triggers `cancelOperation()`, in-flight storage responses are safely dropped and WASM pins are released.
-
-- [ ] **2.4 IndexedDB Page Store Implementation (`webdb_pages`)**
-  - Database name: `webdb_<database_name>`.
-  - Object Stores:
-    - `webdb_pages`: Key: `page_id` (`INT`), Value: `Uint8Array` (4096 bytes).
-    - `webdb_meta`: Key: `"master"`, Value: `{ generation_id: bigint, data: Uint8Array }`.
-  - All dirty page writes in a commit batch are committed inside a **single `readwrite` IndexedDB transaction**.
-  - Await `transaction.oncomplete` before reporting successful commit.
-
-- [ ] **2.5 OPFS Page Store Implementation**
-  - In dedicated Web Worker: Use `FileSystemSyncAccessHandle` for synchronous zero-latency block reads and writes.
-  - Fallback for non-sync contexts: Reuse the async page scheduler against standard OPFS asynchronous file APIs.
+Phase 2 establishes asynchronous page delivery and page-batch durability. Buffer-pool eviction, shared request deduplication, prefetching, OPFS, and atomic master metadata publication remain later milestones; Phase 4 adds the recoverable page-plus-master commit protocol.
 
 ---
 

@@ -1,0 +1,23 @@
+{
+  "name": "@webdb/worker-host",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "build": "tsc --project tsconfig.build.json",
+    "test:browser": "npm run build && playwright test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@playwright/test": "^1.57.0",
+    "fake-indexeddb": "^6.2.5",
+    "serve": "14.2.4",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
