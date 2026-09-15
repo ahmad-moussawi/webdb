@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(webdb LANGUAGES CXX)
 
+option(WEBDB_WASM_SIZE_OPTIMIZED "Optimize the Emscripten build for output size" OFF)
+
+file(REAL_PATH "${CMAKE_SOURCE_DIR}/dist" WEBDB_DIST_DIR)
+file(REAL_PATH "${CMAKE_BINARY_DIR}" WEBDB_BINARY_DIR)
+cmake_path(IS_PREFIX WEBDB_DIST_DIR "${WEBDB_BINARY_DIR}" NORMALIZE WEBDB_BINARY_UNDER_DIST)
+if (NOT WEBDB_BINARY_UNDER_DIST)
+    message(FATAL_ERROR "Build files must be placed under ${WEBDB_DIST_DIR}. Use: cmake -S . -B dist/native")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -15,6 +24,12 @@ endif()
 # Core database engine library (independent of any web/WASM dependencies)
 add_library(webdb_core STATIC
     src/engine.cpp
+    src/common/checksum.cpp
+    src/storage/master_page.cpp
+    src/storage/slotted_page.cpp
+    src/storage/tuple.cpp
+    src/storage/value.cpp
+    src/storage/table_heap.cpp
 )
 
 target_include_directories(webdb_core PUBLIC
@@ -26,6 +41,14 @@ target_include_directories(webdb_core PUBLIC
 # ------------------------------------------------------------------------------
 if (EMSCRIPTEN)
     message(STATUS "Configuring build for WebAssembly (Emscripten)")
+
+    if (WEBDB_WASM_SIZE_OPTIMIZED)
+        set(WEBDB_WASM_OPT_FLAGS -Oz -flto)
+    else()
+        set(WEBDB_WASM_OPT_FLAGS -O3)
+    endif()
+
+    target_compile_options(webdb_core PRIVATE ${WEBDB_WASM_OPT_FLAGS})
 
     add_executable(webdb_wasm
         wasm/bindings.cpp
@@ -41,16 +64,16 @@ if (EMSCRIPTEN)
     # EXPORT_ES6=1: ES6 module output syntax
     # EXPORT_NAME="createWebDB": JavaScript factory function name
     # NO_DISABLE_EXCEPTION_CATCHING: Clean exception handling support across boundaries
-    target_compile_options(webdb_wasm PRIVATE -O3)
+    target_compile_options(webdb_wasm PRIVATE ${WEBDB_WASM_OPT_FLAGS})
     target_link_options(webdb_wasm PRIVATE
-        -O3
+        ${WEBDB_WASM_OPT_FLAGS}
         --bind
-        -s ALLOW_MEMORY_GROWTH=1
-        -s MODULARIZE=1
-        -s EXPORT_ES6=1
-        -s EXPORT_NAME="createWebDB"
-        -s NO_DISABLE_EXCEPTION_CATCHING
-        -s FILESYSTEM=0
+        -sALLOW_MEMORY_GROWTH=1
+        -sMODULARIZE=1
+        -sEXPORT_ES6=1
+        -sEXPORT_NAME=createWebDB
+        -sNO_DISABLE_EXCEPTION_CATCHING
+        -sFILESYSTEM=0
     )
 
     # Output artifact name: webdb.js (which generates webdb.wasm alongside it)
@@ -65,6 +88,24 @@ else()
     add_executable(webdb_cli
         src/main.cpp
     )
-
     target_link_libraries(webdb_cli PRIVATE webdb_core)
+
+    # Storage Engine Unit Tests (Phase 1)
+    enable_testing()
+
+    function(add_storage_test target source definition test_name)
+        add_executable(${target}
+            ${source}
+            tests/test_main.cpp
+        )
+        target_compile_definitions(${target} PRIVATE ${definition})
+        target_link_libraries(${target} PRIVATE webdb_core)
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
+
+    add_storage_test(test_checksum tests/test_checksum.cpp WEBDB_TEST_CHECKSUMS checksum)
+    add_storage_test(test_master_page tests/test_master_page.cpp WEBDB_TEST_MASTER_PAGE master_page)
+    add_storage_test(test_slotted_page tests/test_slotted_page.cpp WEBDB_TEST_SLOTTED_PAGE slotted_page)
+    add_storage_test(test_tuple tests/test_tuple.cpp WEBDB_TEST_TUPLE tuple)
+    add_storage_test(test_table_heap tests/test_table_heap.cpp WEBDB_TEST_TABLE_HEAP table_heap)
 endif()

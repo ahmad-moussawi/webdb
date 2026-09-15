@@ -286,6 +286,9 @@ public:
     // Persists the dirty page to the underlying backend.
     virtual StorageResult flush_page(page_id_t page_id) = 0;
 
+    // Persists all currently dirty pages to the underlying backend.
+    virtual StorageResult flush_dirty_pages() = 0;
+
     // Requests a durability barrier from the backend.
     virtual StorageResult sync() = 0;
 };
@@ -396,18 +399,18 @@ FIRST_DATA_PAGE_ID <= root < page_count
 
 ### 6.7 Master Commit Sequence
 
-Given the active master and a pending `MasterData`:
+Given the active master, pending `MasterData`, and an optional explicit list of dirty data pages:
 
-1. Flush all dirty data pages.
-2. Call `sync()`.
+1. Flush all dirty data pages (via `dirty_page_ids` and/or `accessor.flush_dirty_pages()`).
+2. Call `sync()` (durability barrier guaranteeing data pages are persistent before master update).
 3. Serialize the pending metadata to the inactive master page with:
    ```text
    generation_id = active_generation_id + 1
    ```
 4. Compute and write the inactive master CRC.
 5. Mark the inactive master dirty.
-6. Flush the inactive master.
-7. Call `sync()`.
+6. Flush the inactive master page (`accessor.flush_page(inactive_master_id)`).
+7. Call `sync()` (durability barrier publishing the new master).
 
 If the inactive master is torn or corrupt after a crash, the prior valid master remains selectable.
 
@@ -745,9 +748,9 @@ A `TableHeap` stores:
 - `first_page_id`;
 - `last_page_id`;
 - a reference to `IPageAccessor`;
-- mutable pending master metadata needed for append-only page allocation.
+- a pointer/reference to mutable `MasterData& pending_master` needed for append-only page allocation.
 
-`last_page_id` is an in-memory append optimization. When reopening a heap, it must be reconstructed by walking from `first_page_id` and validating chain links.
+`last_page_id` is an in-memory append optimization. When opening a heap via `TableHeap::open(accessor, pending_master, first_page_id, out_heap)`, it accepts mutable pending metadata and reconstructs `last_page_id` by walking from `first_page_id` and validating chain links.
 
 ### 10.2 Insert
 
