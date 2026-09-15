@@ -66,16 +66,16 @@ inline constexpr page_id_t MASTER_PAGE_A_ID = 0;
 inline constexpr page_id_t MASTER_PAGE_B_ID = 1;
 inline constexpr page_id_t FIRST_DATA_PAGE_ID = 2;
 
-inline constexpr size_t PAGE_SIZE = 4096;
+inline constexpr size_t DATABASE_PAGE_SIZE = 4096;
 inline constexpr size_t PAGE_HEADER_SIZE = 36;
 inline constexpr size_t SLOT_ENTRY_SIZE = 4;
 
-// floor((PAGE_SIZE - PAGE_HEADER_SIZE) / SLOT_ENTRY_SIZE) = 1015.
+// floor((DATABASE_PAGE_SIZE - PAGE_HEADER_SIZE) / SLOT_ENTRY_SIZE) = 1015.
 inline constexpr uint16_t MAX_SLOT_COUNT = 1015;
 
 // One tuple plus one slot entry must fit in an otherwise empty TablePage.
 inline constexpr size_t MAX_TUPLE_SIZE =
-    PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056
+    DATABASE_PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_ENTRY_SIZE; // 4056
 
 inline constexpr uint16_t MAX_COLUMNS = 256;
 inline constexpr size_t MAX_TEXT_SIZE = MAX_TUPLE_SIZE;
@@ -267,7 +267,7 @@ class IPageAccessor {
 public:
     virtual ~IPageAccessor() = default;
 
-    // Retrieves a mutable pointer to exactly PAGE_SIZE bytes.
+    // Retrieves a mutable pointer to exactly DATABASE_PAGE_SIZE bytes.
     // The accessor owns the memory. The pointer remains valid until database
     // shutdown in Phase 1; Phase 1 has no eviction.
     virtual StorageResult fetch_page(
@@ -337,7 +337,7 @@ No page IDs are reused in Phase 1.
 ```cpp
 struct MasterData {
     uint16_t version{1};
-    uint16_t page_size{PAGE_SIZE};
+    uint16_t page_size{DATABASE_PAGE_SIZE};
     generation_id_t generation_id{0};
 
     page_id_t system_tables_root{INVALID_PAGE_ID};
@@ -452,7 +452,7 @@ For `LIVE` slots:
 ```text
 1 <= length <= MAX_TUPLE_SIZE
 free_space_pointer <= offset
-offset + length <= PAGE_SIZE
+offset + length <= DATABASE_PAGE_SIZE
 ```
 
 For `DEAD` slots:
@@ -483,7 +483,7 @@ slot_dir_end =
     PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE
 
 allocated_payload_bytes =
-    PAGE_SIZE - free_space_pointer
+    DATABASE_PAGE_SIZE - free_space_pointer
 
 live_payload_bytes =
     sum(length of each LIVE slot)
@@ -526,7 +526,7 @@ Defragmentation clears `HAS_HOLES`.
 2. `page_id == expected_page_id`.
 3. `page_id >= FIRST_DATA_PAGE_ID`.
 4. `slot_count <= MAX_SLOT_COUNT`.
-5. `slot_dir_end <= free_space_pointer <= PAGE_SIZE`.
+5. `slot_dir_end <= free_space_pointer <= DATABASE_PAGE_SIZE`.
 6. `prev_page_id` and `next_page_id` are either `INVALID_PAGE_ID` or satisfy:
    ```text
    FIRST_DATA_PAGE_ID <= page_id < page_count
@@ -549,7 +549,7 @@ A validation failure returns `StorageResult::CORRUPTED_PAGE`.
 
 1. Preserve every live slot index.
 2. Copy live payloads in ascending slot-index order.
-3. Pack payloads consecutively downward from `PAGE_SIZE`.
+3. Pack payloads consecutively downward from `DATABASE_PAGE_SIZE`.
 4. Preserve exact serialized tuple bytes.
 5. Set every internal dead slot to `state = DEAD`, `offset = 0`, `length = 0`.
 6. Remove trailing dead slots.

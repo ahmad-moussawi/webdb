@@ -41,7 +41,7 @@ Each operation owns its resident page map and dirty-page list in Phase 2. This k
 
 ### Fixed page validation
 
-Every supplied page must be exactly `PAGE_SIZE` bytes. The operation validates page IDs, rejects duplicate/unrequested pages, copies host-owned bytes into WASM-owned storage, and reports `ERROR` for malformed protocol input.
+Every supplied page must be exactly `DATABASE_PAGE_SIZE` bytes. The operation validates page IDs, rejects duplicate/unrequested pages, copies host-owned bytes into WASM-owned storage, and reports `ERROR` for malformed protocol input.
 
 ### Two pause types
 
@@ -91,7 +91,7 @@ struct PageRequest {
 
 struct PageData {
     page_id_t page_id;
-    std::vector<uint8_t> bytes; // Always PAGE_SIZE bytes.
+    std::vector<uint8_t> bytes; // Always DATABASE_PAGE_SIZE bytes.
 };
 ```
 
@@ -123,7 +123,7 @@ For this milestone, `plan_json` uses a deliberately narrow, versioned test-opera
 ```
 
 - `reads` is the ordered set of page IDs required before writes execute.
-- `writes` is optional; every write targets a page in `reads`, has `byte_offset < PAGE_SIZE`, and writes one byte.
+- `writes` is optional; every write targets a page in `reads`, has `byte_offset < DATABASE_PAGE_SIZE`, and writes one byte.
 - Duplicate IDs and unknown fields are rejected. The input has a strict maximum size and nesting depth.
 - The operation requests one missing page per fault in Phase 2, while the vector API remains batch-capable for Phase 3.
 
@@ -231,7 +231,7 @@ The coordinator must use a single in-flight host request per operation. It check
 
 - Resident-page map and a single pending page request per operation.
 - `READY -> PAGE_FAULT` when an operation needs an absent page; `PAGE_FAULT -> READY` only after the expected page is supplied.
-- Strict page validation: requested non-negative ID, exactly `PAGE_SIZE` bytes, no duplicate, missing, or unexpected response.
+- Strict page validation: requested non-negative ID, exactly `DATABASE_PAGE_SIZE` bytes, no duplicate, missing, or unexpected response.
 - Copy supplied bytes into scheduler-owned memory. The host retains no alias to resident page memory.
 - Preserve the vector API even though this step produces one missing-page request at a time.
 
@@ -327,7 +327,7 @@ The coordinator must use a single in-flight host request per operation. It check
 - Cancellation works from `READY`, `PAGE_FAULT`, and `FLUSHING`; late host responses are rejected.
 - Operation IDs remain unique and unknown IDs return `INVALID_ARGUMENT`.
 - Releasing terminal operations frees their state; releasing nonterminal operations is rejected or explicitly defined as cancellation followed by release.
-- Embind page-transfer tests reject IDs outside the signed 32-bit range and byte arrays whose length differs from `PAGE_SIZE`.
+- Embind page-transfer tests reject IDs outside the signed 32-bit range and byte arrays whose length differs from `DATABASE_PAGE_SIZE`.
 
 ### Durability simulation tests
 

@@ -10,13 +10,13 @@
 namespace webdb {
 
 void TablePage::init(uint8_t* buffer, page_id_t page_id, page_id_t prev_page_id, page_id_t next_page_id) noexcept {
-    std::memset(buffer, 0, PAGE_SIZE);
+    std::memset(buffer, 0, DATABASE_PAGE_SIZE);
 
     endian::write_int32(buffer + PAGE_ID_OFFSET, page_id);
     endian::write_int32(buffer + PREV_PAGE_ID_OFFSET, prev_page_id);
     endian::write_int32(buffer + NEXT_PAGE_ID_OFFSET, next_page_id);
     endian::write_uint16(buffer + SLOT_COUNT_OFFSET, 0);
-    endian::write_uint16(buffer + FREE_SPACE_POINTER_OFFSET, static_cast<uint16_t>(PAGE_SIZE));
+    endian::write_uint16(buffer + FREE_SPACE_POINTER_OFFSET, static_cast<uint16_t>(DATABASE_PAGE_SIZE));
     endian::write_uint64(buffer + GENERATION_ID_OFFSET, 0);
     endian::write_uint32(buffer + FLAGS_OFFSET, 0);
     endian::write_uint32(buffer + RESERVED_OFFSET, 0);
@@ -69,7 +69,7 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
 
         const uint16_t free_ptr = endian::read_uint16(buffer + FREE_SPACE_POINTER_OFFSET);
         const uint16_t slot_dir_limit = static_cast<uint16_t>(PAGE_HEADER_SIZE + slot_count * SLOT_ENTRY_SIZE);
-        if (free_ptr < slot_dir_limit || free_ptr > PAGE_SIZE) {
+        if (free_ptr < slot_dir_limit || free_ptr > DATABASE_PAGE_SIZE) {
             return StorageResult::CORRUPTED_PAGE;
         }
 
@@ -121,7 +121,7 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
                 if (len == 0 || len > MAX_TUPLE_SIZE) {
                     return StorageResult::CORRUPTED_PAGE;
                 }
-                if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+                if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > DATABASE_PAGE_SIZE) {
                     return StorageResult::CORRUPTED_PAGE;
                 }
                 live_ranges.push_back({offset, static_cast<uint16_t>(offset + len)});
@@ -139,7 +139,7 @@ StorageResult TablePage::validate(const uint8_t* buffer, page_id_t expected_page
         }
 
         // Check HAS_HOLES invariant
-        const uint32_t allocated_payloads = PAGE_SIZE - free_ptr;
+        const uint32_t allocated_payloads = DATABASE_PAGE_SIZE - free_ptr;
         const uint32_t reclaimable_holes = allocated_payloads - live_payload_sum;
         const bool should_have_holes = (reclaimable_holes > 0);
         const bool actually_has_holes = (flags & FLAG_HAS_HOLES) != 0;
@@ -208,7 +208,7 @@ uint16_t TablePage::contiguous_free_space() const noexcept {
 
 uint16_t TablePage::reclaimable_hole_space() const noexcept {
     const uint16_t free_ptr = get_free_space_pointer();
-    const uint16_t allocated = static_cast<uint16_t>(PAGE_SIZE - free_ptr);
+    const uint16_t allocated = static_cast<uint16_t>(DATABASE_PAGE_SIZE - free_ptr);
     uint32_t live_sum = 0;
     const uint16_t count = get_slot_count();
     for (uint16_t i = 0; i < count; ++i) {
@@ -278,7 +278,7 @@ StorageResult TablePage::insert_tuple(const uint8_t* tuple_data, size_t tuple_si
     const uint16_t cur_slots = get_slot_count();
     const uint16_t free_ptr = get_free_space_pointer();
     const uint16_t dir_end = slot_dir_end();
-    if (free_ptr < dir_end || free_ptr > PAGE_SIZE || cur_slots > MAX_SLOT_COUNT) {
+    if (free_ptr < dir_end || free_ptr > DATABASE_PAGE_SIZE || cur_slots > MAX_SLOT_COUNT) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -350,7 +350,7 @@ StorageResult TablePage::get_tuple(uint16_t slot_num, const uint8_t** out_tuple_
     const uint16_t offset = get_slot_offset(slot_num);
     const uint16_t len = get_slot_length(slot_num);
     const uint16_t free_ptr = get_free_space_pointer();
-    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > DATABASE_PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -381,7 +381,7 @@ UpdateResult TablePage::update_tuple(uint16_t slot_num, const uint8_t* new_tuple
     const uint16_t old_offset = get_slot_offset(slot_num);
     const uint16_t old_size = get_slot_length(slot_num);
     const uint16_t free_ptr = get_free_space_pointer();
-    if (old_offset < free_ptr || (static_cast<uint32_t>(old_offset) + old_size) > PAGE_SIZE) {
+    if (old_offset < free_ptr || (static_cast<uint32_t>(old_offset) + old_size) > DATABASE_PAGE_SIZE) {
         result.status = StorageResult::CORRUPTED_PAGE;
         return result;
     }
@@ -433,7 +433,7 @@ StorageResult TablePage::delete_tuple(uint16_t slot_num) noexcept {
     const uint16_t offset = get_slot_offset(slot_num);
     const uint16_t len = get_slot_length(slot_num);
     const uint16_t free_ptr = get_free_space_pointer();
-    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > PAGE_SIZE) {
+    if (offset < free_ptr || (static_cast<uint32_t>(offset) + len) > DATABASE_PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -450,7 +450,7 @@ StorageResult TablePage::restore_tuple(uint16_t slot_num, const uint8_t* tuple_d
     }
 
     const uint16_t free_ptr = get_free_space_pointer();
-    if (tuple_offset < free_ptr || static_cast<uint32_t>(tuple_offset) + tuple_size > PAGE_SIZE) {
+    if (tuple_offset < free_ptr || static_cast<uint32_t>(tuple_offset) + tuple_size > DATABASE_PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -474,10 +474,10 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
     if (count == 0) return;
 
     // Allocate temporary page buffer
-    uint8_t temp[PAGE_SIZE];
+    uint8_t temp[DATABASE_PAGE_SIZE];
     std::memcpy(temp, data_, PAGE_HEADER_SIZE);
 
-    uint16_t temp_free_ptr = static_cast<uint16_t>(PAGE_SIZE);
+    uint16_t temp_free_ptr = static_cast<uint16_t>(DATABASE_PAGE_SIZE);
 
     // 1. Pack live payloads downward from byte 4096 in ascending slot index order
     for (uint16_t i = 0; i < count; ++i) {
@@ -544,7 +544,7 @@ void TablePage::rebuild_compacted_page(const Replacement* replacement) noexcept 
     endian::write_uint32(temp + FLAGS_OFFSET, flags);
 
     // 5. Copy back to page data and update CRC
-    std::memcpy(data_, temp, PAGE_SIZE);
+    std::memcpy(data_, temp, DATABASE_PAGE_SIZE);
     update_checksum();
 }
 

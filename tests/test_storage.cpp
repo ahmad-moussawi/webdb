@@ -16,7 +16,7 @@ void test_checksums() {
     TEST_ASSERT(checksum::crc32(nullptr, 0) == 0, "CRC32 of empty is 0");
 
     // 2. Page checksum masking verification for MasterPage (offset 0x20) and TablePage (offset 0x1C)
-    std::vector<uint8_t> master_page(PAGE_SIZE, 0xAB);
+    std::vector<uint8_t> master_page(DATABASE_PAGE_SIZE, 0xAB);
     endian::write_uint32(master_page.data() + MasterPage::CHECKSUM_OFFSET, 0x12345678u);
     const uint32_t master_csum1 = checksum::compute_page_checksum(master_page.data(), MasterPage::CHECKSUM_OFFSET);
 
@@ -24,7 +24,7 @@ void test_checksums() {
     const uint32_t master_csum2 = checksum::compute_page_checksum(master_page.data(), MasterPage::CHECKSUM_OFFSET);
     TEST_ASSERT(master_csum1 == master_csum2, "MasterPage checksum field zero-masking invariance");
 
-    std::vector<uint8_t> table_page(PAGE_SIZE, 0xCD);
+    std::vector<uint8_t> table_page(DATABASE_PAGE_SIZE, 0xCD);
     endian::write_uint32(table_page.data() + TablePage::CHECKSUM_OFFSET, 0x55AA55AAu);
     const uint32_t table_csum1 = checksum::compute_page_checksum(table_page.data(), TablePage::CHECKSUM_OFFSET);
 
@@ -33,7 +33,7 @@ void test_checksums() {
     TEST_ASSERT(table_csum1 == table_csum2, "TablePage checksum field zero-masking invariance");
 
     // Mutating byte at offset 0, offset 100, and offset 4095 MUST change the checksum
-    std::vector<uint8_t> boundary_page(PAGE_SIZE, 0x55);
+    std::vector<uint8_t> boundary_page(DATABASE_PAGE_SIZE, 0x55);
     const uint32_t base_csum = checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET);
 
     boundary_page[0] ^= 0x01;
@@ -44,7 +44,7 @@ void test_checksums() {
     TEST_ASSERT(checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET) != base_csum, "Byte 100 flip changes CRC");
     boundary_page[100] ^= 0x01; // revert
 
-    boundary_page[PAGE_SIZE - 1] ^= 0x01;
+    boundary_page[DATABASE_PAGE_SIZE - 1] ^= 0x01;
     TEST_ASSERT(checksum::compute_page_checksum(boundary_page.data(), TablePage::CHECKSUM_OFFSET) != base_csum, "Byte 4095 flip changes CRC");
 
     std::cout << "[PASSED] test_checksums" << std::endl;
@@ -139,7 +139,7 @@ void test_master_page_dual() {
     accessor.fail_mark_dirty = false;
 
     // 9. Master page structural validation rejections
-    std::vector<uint8_t> test_master(PAGE_SIZE, 0);
+    std::vector<uint8_t> test_master(DATABASE_PAGE_SIZE, 0);
     MasterData valid_md{};
     valid_md.generation_id = 1;
     valid_md.page_count = 5;
@@ -196,7 +196,7 @@ void test_master_page_dual() {
 #if defined(WEBDB_RUN_SLOTTED_PAGE)
 void test_slotted_page() {
     std::cout << "[RUNNING] slotted-page layout and mutation tests..." << std::endl;
-    std::vector<uint8_t> buffer(PAGE_SIZE, 0);
+    std::vector<uint8_t> buffer(DATABASE_PAGE_SIZE, 0);
 
     TablePage::init(buffer.data(), 2, INVALID_PAGE_ID, INVALID_PAGE_ID);
     auto val_res = TablePage::validate(buffer.data(), 2, 10);
@@ -212,7 +212,7 @@ void test_slotted_page() {
     TablePage page(buffer.data());
     TEST_ASSERT(page.get_page_id() == 2, "Page ID is 2");
     TEST_ASSERT(page.get_slot_count() == 0, "Slot count is 0");
-    TEST_ASSERT(page.contiguous_free_space() == PAGE_SIZE - PAGE_HEADER_SIZE, "Initial free space");
+    TEST_ASSERT(page.contiguous_free_space() == DATABASE_PAGE_SIZE - PAGE_HEADER_SIZE, "Initial free space");
 
     // 1. Insert a 100-byte tuple
     const std::vector<uint8_t> t1(100, 0x11);
@@ -234,7 +234,7 @@ void test_slotted_page() {
                 "Get tuple rejects a null output pointer");
 
     // 2. Insert maximum tuple size on an empty page
-    std::vector<uint8_t> max_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> max_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(max_buf.data(), 3);
     TablePage max_page(max_buf.data());
     const std::vector<uint8_t> max_tuple(MAX_TUPLE_SIZE, 0xAA);
@@ -306,7 +306,7 @@ void test_slotted_page() {
     TEST_ASSERT(null_zero_upd.status == StorageResult::INVALID_ARGUMENT, "update_tuple rejects null buffer and zero size");
 
     // 7. Same-page growth update (growing into contiguous free space)
-    std::vector<uint8_t> growth_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> growth_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(growth_buf.data(), 4);
     TablePage growth_page(growth_buf.data());
     const std::vector<uint8_t> init_item(50, 0x44);
@@ -323,7 +323,7 @@ void test_slotted_page() {
     TEST_ASSERT((growth_page.get_flags() & TablePage::FLAG_HAS_HOLES) != 0, "Old item space becomes hole");
 
     // 7b. Growth requiring compaction: the net growth fits, but contiguous space does not.
-    std::vector<uint8_t> case_c_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> case_c_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(case_c_buf.data(), 8);
     TablePage case_c_page(case_c_buf.data());
     uint16_t c_s0 = 0, c_s1 = 0, c_s2 = 0;
@@ -348,7 +348,7 @@ void test_slotted_page() {
 
     // 7c. Regression test: delta fits in contiguous free space but n_size does NOT
     // (Must trigger Case C compaction, NOT allocate past slot directory in Case B)
-    std::vector<uint8_t> case_b_c_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> case_b_c_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(case_b_c_buf.data(), 9);
     TablePage case_b_c_page(case_b_c_buf.data());
     uint16_t b_c_s0 = 0, b_c_s1 = 0;
@@ -375,7 +375,7 @@ void test_slotted_page() {
     TEST_ASSERT(case_b_c_page.contiguous_free_space() == 50, "Contiguous free space correctly reflects compacted growth (100 - 50 = 50)");
 
     // 8. Trailing dead-slot pruning on defragment
-    std::vector<uint8_t> prune_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> prune_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(prune_buf.data(), 5);
     TablePage prune_page(prune_buf.data());
     uint16_t ps0 = 0, ps1 = 0, ps2 = 0;
@@ -398,7 +398,7 @@ void test_slotted_page() {
     // 8b. Trailing DEAD slot pruning during insert_tuple with compaction
     // When cur_slots had trailing DEAD slots, insert_tuple might initially pick slot 1 as reusable DEAD slot.
     // Compaction prunes slots 1 & 2 down to 1. The new slot must be placed at slot 1, and slot_count must become 2 (not 3+1=4!).
-    std::vector<uint8_t> prune_ins_buf(PAGE_SIZE, 0);
+    std::vector<uint8_t> prune_ins_buf(DATABASE_PAGE_SIZE, 0);
     TablePage::init(prune_ins_buf.data(), 12);
     TablePage prune_ins_page(prune_ins_buf.data());
     uint16_t pi0 = 0, pi1 = 0, pi2 = 0;
@@ -422,7 +422,7 @@ void test_slotted_page() {
     TEST_ASSERT(TablePage::validate(prune_ins_buf.data(), 12, 20) == StorageResult::SUCCESS, "Page valid without empty/corrupted slots");
 
     // 9. Malformed TablePage validation tests
-    std::vector<uint8_t> malformed(PAGE_SIZE, 0);
+    std::vector<uint8_t> malformed(DATABASE_PAGE_SIZE, 0);
     TablePage::init(malformed.data(), 6, INVALID_PAGE_ID, INVALID_PAGE_ID);
 
     // a. slot_count > MAX_SLOT_COUNT
@@ -438,11 +438,11 @@ void test_slotted_page() {
     TablePage(malformed.data()).update_checksum();
     TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "free_space_pointer < slot_dir_end rejected");
 
-    // c. free_space_pointer > PAGE_SIZE
+    // c. free_space_pointer > DATABASE_PAGE_SIZE
     TablePage::init(malformed.data(), 6);
-    endian::write_uint16(malformed.data() + 0x0E, static_cast<uint16_t>(PAGE_SIZE + 1));
+    endian::write_uint16(malformed.data() + 0x0E, static_cast<uint16_t>(DATABASE_PAGE_SIZE + 1));
     TablePage(malformed.data()).update_checksum();
-    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "free_space_pointer > PAGE_SIZE rejected");
+    TEST_ASSERT(TablePage::validate(malformed.data(), 6, 10) == StorageResult::CORRUPTED_PAGE, "free_space_pointer > DATABASE_PAGE_SIZE rejected");
 
     // d. Nonzero generation_id on table page
     TablePage::init(malformed.data(), 6);

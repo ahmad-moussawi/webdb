@@ -57,21 +57,21 @@ void test_operation_scheduler() {
     TEST_ASSERT(requests.size() == 1 && requests.front().page_id == FIRST_DATA_PAGE_ID && requests.front().is_write,
                 "The scheduler exposes the exact pending page request");
 
-    PageData wrong_size{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(PAGE_SIZE - 1, 0)};
+    PageData wrong_size{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(DATABASE_PAGE_SIZE - 1, 0)};
     TEST_ASSERT(scheduler.provide_pages(page_id, {wrong_size}) == StorageResult::INVALID_ARGUMENT,
                 "Wrong-sized pages cannot resume a page fault");
-    PageData wrong_id{FIRST_DATA_PAGE_ID + 1, std::vector<uint8_t>(PAGE_SIZE, 0)};
+    PageData wrong_id{FIRST_DATA_PAGE_ID + 1, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0)};
     TEST_ASSERT(scheduler.provide_pages(page_id, {wrong_id}) == StorageResult::INVALID_ARGUMENT,
                 "Unexpected page IDs cannot resume a page fault");
     TEST_ASSERT(scheduler.get_pending_page_requests(page_id).size() == 1,
                 "Invalid supplied pages preserve the outstanding request");
 
-    PageData supplied_page{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(PAGE_SIZE, 0x3C)};
+    PageData supplied_page{FIRST_DATA_PAGE_ID, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x3C)};
     TEST_ASSERT(scheduler.provide_pages(page_id, {supplied_page}) == StorageResult::SUCCESS,
                 "The requested 4 KiB page resumes the operation");
     supplied_page.bytes[0] = 0x00;
     const auto resident_copy = scheduler.copy_resident_page(page_id, FIRST_DATA_PAGE_ID);
-    TEST_ASSERT(resident_copy.size() == PAGE_SIZE && resident_copy[0] == 0x3C,
+    TEST_ASSERT(resident_copy.size() == DATABASE_PAGE_SIZE && resident_copy[0] == 0x3C,
                 "The scheduler owns a copy of supplied page bytes");
     TEST_ASSERT(scheduler.request_page(page_id, FIRST_DATA_PAGE_ID, false) == StorageResult::SUCCESS,
                 "Requesting an already resident page does not create another fault");
@@ -132,16 +132,17 @@ void test_operation_scheduler() {
                 "A valid read/write test operation creates successfully");
     TEST_ASSERT(scheduler.step_operation(write_operation_id) == SchedulerStatus::PAGE_FAULT,
                 "The first missing read page causes a page fault");
-    TEST_ASSERT(scheduler.get_pending_page_requests(write_operation_id).front().page_id == 2,
+    TEST_ASSERT(scheduler.get_pending_page_requests(write_operation_id).front().page_id == 2 &&
+                    scheduler.get_pending_page_ids(write_operation_id) == std::vector<page_id_t>{2},
                 "Read pages are requested in plan order");
-    TEST_ASSERT(scheduler.provide_pages(write_operation_id, {PageData{2, std::vector<uint8_t>(PAGE_SIZE, 0)}}) ==
+    TEST_ASSERT(scheduler.provide_page(write_operation_id, 2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0)) ==
                     StorageResult::SUCCESS,
-                "Supplying the first requested page resumes the operation");
+                "The scalar page wire API resumes the first page fault");
     TEST_ASSERT(scheduler.step_operation(write_operation_id) == SchedulerStatus::PAGE_FAULT,
                 "The next missing read page causes a separate page fault");
     TEST_ASSERT(scheduler.get_pending_page_requests(write_operation_id).front().page_id == 3,
                 "The second requested page follows the read order");
-    TEST_ASSERT(scheduler.provide_pages(write_operation_id, {PageData{3, std::vector<uint8_t>(PAGE_SIZE, 0)}}) ==
+    TEST_ASSERT(scheduler.provide_pages(write_operation_id, {PageData{3, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0)}}) ==
                     StorageResult::SUCCESS,
                 "Supplying the second requested page resumes the operation");
     TEST_ASSERT(scheduler.step_operation(write_operation_id) == SchedulerStatus::FLUSHING,
@@ -150,6 +151,9 @@ void test_operation_scheduler() {
     TEST_ASSERT(dirty_pages.size() == 1 && dirty_pages.front().page_id == 2 &&
                     dirty_pages.front().bytes[64] == 42 && dirty_pages.front().bytes[65] == 43,
                 "Multiple writes to one page produce one dirty snapshot with both changes");
+    TEST_ASSERT(scheduler.get_dirty_page_ids(write_operation_id) == std::vector<page_id_t>{2} &&
+                    scheduler.copy_dirty_page(write_operation_id, 2) == dirty_pages.front().bytes,
+                "The scalar dirty-page wire API returns an independent page copy");
     auto modified_snapshot = dirty_pages;
     modified_snapshot.front().bytes[64] = 0;
     TEST_ASSERT(scheduler.get_dirty_pages_for_flush(write_operation_id).front().bytes[64] == 42,
@@ -167,7 +171,7 @@ void test_operation_scheduler() {
                 "A failed-flush test operation creates successfully");
     TEST_ASSERT(scheduler.step_operation(failed_flush_id) == SchedulerStatus::PAGE_FAULT,
                 "The failed-flush operation requests its page");
-    TEST_ASSERT(scheduler.provide_pages(failed_flush_id, {PageData{2, std::vector<uint8_t>(PAGE_SIZE, 0)}}) ==
+    TEST_ASSERT(scheduler.provide_pages(failed_flush_id, {PageData{2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0)}}) ==
                     StorageResult::SUCCESS,
                 "The failed-flush operation accepts its page");
     TEST_ASSERT(scheduler.step_operation(failed_flush_id) == SchedulerStatus::FLUSHING,
@@ -179,6 +183,16 @@ void test_operation_scheduler() {
                 "A failed flush retains diagnostics until release");
     TEST_ASSERT(scheduler.release_operation(failed_flush_id) == StorageResult::SUCCESS,
                 "Failed-flush operations release successfully");
+
+    operation_id_t host_failure_id = 0;
+    TEST_ASSERT(scheduler.start_operation(empty_plan, host_failure_id) == StorageResult::SUCCESS &&
+                    scheduler.fail_operation(host_failure_id, "Host read failed") == StorageResult::SUCCESS &&
+                    scheduler.step_operation(host_failure_id) == SchedulerStatus::ERROR,
+                "The host can transition an active operation to an error with diagnostics");
+    TEST_ASSERT(scheduler.get_execution_error(host_failure_id) == "Host read failed",
+                "Host failure diagnostics remain available until release");
+    TEST_ASSERT(scheduler.release_operation(host_failure_id) == StorageResult::SUCCESS,
+                "Host-failed operations release successfully");
 
     std::cout << "[PASSED] operation scheduler lifecycle tests" << std::endl;
 }

@@ -51,11 +51,18 @@ class OperationScheduler {
     // Step 2 native test hook. The Step 3 plan parser will create the same request internally.
     StorageResult request_page(operation_id_t operation_id, page_id_t page_id, bool is_write) noexcept;
     std::vector<PageRequest> get_pending_page_requests(operation_id_t operation_id) const noexcept;
+    std::vector<page_id_t> get_pending_page_ids(operation_id_t operation_id) const noexcept;
     StorageResult provide_pages(operation_id_t operation_id, const std::vector<PageData>& pages) noexcept;
+    StorageResult provide_page(operation_id_t operation_id,
+                               page_id_t page_id,
+                               const std::vector<uint8_t>& bytes) noexcept;
     // Returns a copy so callers cannot mutate scheduler-owned resident page memory.
     std::vector<uint8_t> copy_resident_page(operation_id_t operation_id, page_id_t page_id) const;
     std::vector<PageData> get_dirty_pages_for_flush(operation_id_t operation_id) const noexcept;
+    std::vector<page_id_t> get_dirty_page_ids(operation_id_t operation_id) const noexcept;
+    std::vector<uint8_t> copy_dirty_page(operation_id_t operation_id, page_id_t page_id) const;
     StorageResult finish_flush(operation_id_t operation_id, bool success) noexcept;
+    StorageResult fail_operation(operation_id_t operation_id, std::string_view message) noexcept;
     // Cancellation is cooperative: late page or flush responses must be rejected by the host.
     void cancel_operation(operation_id_t operation_id) noexcept;
     // Only terminal operations may be released, preventing accidental loss of active work.

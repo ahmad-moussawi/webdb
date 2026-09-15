@@ -9,7 +9,7 @@ namespace webdb {
 
 struct MasterData {
     uint16_t version{1};
-    uint16_t page_size{static_cast<uint16_t>(PAGE_SIZE)};
+    uint16_t page_size{static_cast<uint16_t>(DATABASE_PAGE_SIZE)};
     generation_id_t generation_id{0};
 
     page_id_t system_tables_root{INVALID_PAGE_ID};

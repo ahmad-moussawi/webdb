@@ -14,7 +14,7 @@ StorageResult write_initial_master(IPageAccessor& accessor, page_id_t page_id, u
                                    generation_id_t generation_id) noexcept {
     MasterData data{};
     data.version = MasterPage::CURRENT_VERSION;
-    data.page_size = static_cast<uint16_t>(PAGE_SIZE);
+    data.page_size = static_cast<uint16_t>(DATABASE_PAGE_SIZE);
     data.generation_id = generation_id;
     data.page_count = 2;
 
@@ -30,7 +30,7 @@ StorageResult write_initial_master(IPageAccessor& accessor, page_id_t page_id, u
 
 void MasterPage::serialize(const MasterData& data, uint8_t* out_buffer) noexcept {
     // 1. Zero out the entire 4096-byte page buffer (including reserved space)
-    std::memset(out_buffer, 0, PAGE_SIZE);
+    std::memset(out_buffer, 0, DATABASE_PAGE_SIZE);
 
     // 2. Write binary header fields using canonical little-endian helpers
     endian::write_uint32(out_buffer + 0x00, MAGIC);
@@ -71,7 +71,7 @@ StorageResult MasterPage::validate(const uint8_t* buffer) noexcept {
     }
 
     const uint16_t page_sz = endian::read_uint16(buffer + 0x06);
-    if (page_sz != PAGE_SIZE) {
+    if (page_sz != DATABASE_PAGE_SIZE) {
         return StorageResult::CORRUPTED_PAGE;
     }
 
@@ -92,7 +92,7 @@ StorageResult MasterPage::validate(const uint8_t* buffer) noexcept {
     }
 
     // 4. Verify reserved bytes [0x24..0xFFF] are all zero
-    for (size_t i = 0x24; i < PAGE_SIZE; ++i) {
+    for (size_t i = 0x24; i < DATABASE_PAGE_SIZE; ++i) {
         if (buffer[i] != 0) {
             return StorageResult::CORRUPTED_PAGE;
         }
@@ -230,7 +230,7 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor, page_id_
     MasterData candidate = pending_data;
     candidate.generation_id = active_data.generation_id + 1;
 
-    uint8_t candidate_buf[PAGE_SIZE];
+    uint8_t candidate_buf[DATABASE_PAGE_SIZE];
     MasterPage::serialize(candidate, candidate_buf);
     auto candidate_res = MasterPage::validate(candidate_buf);
     if (candidate_res != StorageResult::SUCCESS) {
@@ -263,21 +263,21 @@ StorageResult MasterPageManager::commit_master(IPageAccessor& accessor, page_id_
         return fetch_res;
     }
 
-    uint8_t previous_inactive[PAGE_SIZE];
-    std::memcpy(previous_inactive, inactive_buf, PAGE_SIZE);
+    uint8_t previous_inactive[DATABASE_PAGE_SIZE];
+    std::memcpy(previous_inactive, inactive_buf, DATABASE_PAGE_SIZE);
 
     // 4. Serialize the validated candidate to the inactive master page.
-    std::memcpy(inactive_buf, candidate_buf, PAGE_SIZE);
+    std::memcpy(inactive_buf, candidate_buf, DATABASE_PAGE_SIZE);
     auto mark_res = accessor.mark_dirty(inactive_id);
     if (mark_res != StorageResult::SUCCESS) {
-        std::memcpy(inactive_buf, previous_inactive, PAGE_SIZE);
+        std::memcpy(inactive_buf, previous_inactive, DATABASE_PAGE_SIZE);
         return mark_res;
     }
 
     // 5. Flush inactive master and barrier sync.
     auto flush_res = accessor.flush_page(inactive_id);
     if (flush_res != StorageResult::SUCCESS) {
-        std::memcpy(inactive_buf, previous_inactive, PAGE_SIZE);
+        std::memcpy(inactive_buf, previous_inactive, DATABASE_PAGE_SIZE);
         return flush_res;
     }
 

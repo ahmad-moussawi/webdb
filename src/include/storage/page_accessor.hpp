@@ -13,7 +13,7 @@ public:
     virtual ~IPageAccessor() = default;
 
     /**
-     * @brief Retrieves a mutable pointer to exactly PAGE_SIZE bytes.
+     * @brief Retrieves a mutable pointer to exactly DATABASE_PAGE_SIZE bytes.
      * @param page_id Target page ID.
      * @param out_page Pointer to receive the buffer.
      * @return StorageResult::SUCCESS on success, or StorageResult::IO_ERROR if unallocated/out of range.

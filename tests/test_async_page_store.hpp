@@ -39,7 +39,7 @@ class InMemoryAsyncPageStore {
         try {
             auto candidate = durable_pages_;
             for (const PageData& page : pages) {
-                if (page.page_id < FIRST_DATA_PAGE_ID || page.bytes.size() != PAGE_SIZE) {
+                if (page.page_id < FIRST_DATA_PAGE_ID || page.bytes.size() != DATABASE_PAGE_SIZE) {
                     return StorageResult::INVALID_ARGUMENT;
                 }
                 candidate[page.page_id] = page.bytes;

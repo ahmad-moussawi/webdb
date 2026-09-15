@@ -6,8 +6,8 @@ namespace webdb::test {
 void test_async_page_store() {
     std::cout << "[RUNNING] in-memory async page-store durability tests..." << std::endl;
 
-    InMemoryAsyncPageStore store({{2, std::vector<uint8_t>(PAGE_SIZE, 0x11)},
-                                  {3, std::vector<uint8_t>(PAGE_SIZE, 0x22)}});
+    InMemoryAsyncPageStore store({{2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x11)},
+                                  {3, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x22)}});
 
     std::vector<PageData> read_pages;
     TEST_ASSERT(store.read_pages({2, 3}, read_pages) == StorageResult::SUCCESS,
@@ -18,8 +18,8 @@ void test_async_page_store() {
     TEST_ASSERT(store.read_pages({2}, read_pages) == StorageResult::SUCCESS && read_pages[0].bytes[0] == 0x11,
                 "Read callers cannot mutate the durable image by aliasing");
 
-    const std::vector<PageData> valid_batch = {{2, std::vector<uint8_t>(PAGE_SIZE, 0x33)},
-                                               {3, std::vector<uint8_t>(PAGE_SIZE, 0x44)}};
+    const std::vector<PageData> valid_batch = {{2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x33)},
+                                               {3, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x44)}};
     TEST_ASSERT(store.write_pages(valid_batch) == StorageResult::SUCCESS,
                 "A valid page batch replaces durable values");
     TEST_ASSERT(store.read_pages({2, 3}, read_pages) == StorageResult::SUCCESS &&
@@ -27,15 +27,15 @@ void test_async_page_store() {
                 "A successful batch persists every supplied page");
 
     const auto before_rejected_write = store.durable_snapshot();
-    TEST_ASSERT(store.write_pages({PageData{2, std::vector<uint8_t>(PAGE_SIZE, 0x55)},
-                                   PageData{3, std::vector<uint8_t>(PAGE_SIZE - 1, 0x66)}}) ==
+    TEST_ASSERT(store.write_pages({PageData{2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x55)},
+                                   PageData{3, std::vector<uint8_t>(DATABASE_PAGE_SIZE - 1, 0x66)}}) ==
                     StorageResult::INVALID_ARGUMENT,
                 "Invalid pages reject the complete write batch");
     TEST_ASSERT(store.durable_snapshot() == before_rejected_write,
                 "A rejected batch leaves every durable page unchanged");
 
     store.fail_writes = true;
-    TEST_ASSERT(store.write_pages({PageData{2, std::vector<uint8_t>(PAGE_SIZE, 0x77)}}) == StorageResult::IO_ERROR,
+    TEST_ASSERT(store.write_pages({PageData{2, std::vector<uint8_t>(DATABASE_PAGE_SIZE, 0x77)}}) == StorageResult::IO_ERROR,
                 "Injected host write failures are reported");
     TEST_ASSERT(store.durable_snapshot() == before_rejected_write,
                 "A failed host write leaves the durable image unchanged");
