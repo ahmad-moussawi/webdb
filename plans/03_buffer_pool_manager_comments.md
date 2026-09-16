@@ -176,3 +176,334 @@ struct FrameDescriptor {
 4. **Clarify Clock sweep loop**: Specify a 2-pass sweep ($2 \times N$ max steps) where `ref_bit` is reset on the first pass, and `BUFFER_FULL` is returned only when no evictable candidate is found after inspecting all frames.
 5. **Update Step 7 tasks to explicitly include modifying [operation-coordinator.ts](web/src/operation-coordinator.ts)** to support multi-page batch faults and idempotent `providePage` calls.
 6. **Expose `frame_count` configuration** in [bindings.cpp](wasm/bindings.cpp) for test harness control.
+
+---
+
+# Round 2 Review Comments
+
+A secondary technical review of the updated [03_buffer_pool_manager.md](plans/03_buffer_pool_manager.md) confirms that the major structural items from Round 1 (result codes, `abort_page_load`, `new_page`, `FlushPage` with generation tracking, `FrameDescriptor`, bounded Clock sweep, and coordinator batching) were incorporated.
+
+However, several subtle implementation details, control-flow contracts, and edge cases must be resolved before implementing Step 1:
+
+### 1. Dirty-Pressure Eviction Control Flow in Synchronous C++
+
+#### The Issue
+Lines 81–82 and 264 state:
+> *"When memory pressure finds only unpinned dirty candidates, the pool requests a flush rather than silently evicting or deadlocking. The host flushes the selected dirty batch, calls `finish_page_flush()` for the matching generations, and the replacement attempt is retried."*
+
+#### Implementation Gap
+C++ in WebDB is **synchronous and single-threaded** (no async/await, no blocking threads). `pin_page()` cannot pause internally and await host I/O. 
+
+When `pin_page(op_id, page_id, out_handle)` runs, if all unpinned frames are dirty:
+1. **What does `BufferPoolManager::pin_page` return synchronously?**
+   - It cannot return `SUCCESS` because the page is not resident.
+   - If it returns `BUFFER_FULL`, how does the scheduler know this is a *temporary* condition solvable by flushing dirty frames, rather than a terminal out-of-memory error?
+   - Or should `pin_page` return a dedicated code (e.g. `StorageResult::FLUSH_REQUIRED`), or should `BufferPoolManager` expose `has_dirty_pressure()`?
+2. **How does `OperationScheduler` step through this?**
+   - In Phase 2, `OperationScheduler::step_operation` only transitions to `SchedulerStatus::FLUSHING` *after* all plan writes have executed.
+   - For dirty-pressure eviction, an operation needs to pause in `SchedulerStatus::FLUSHING` *in the middle of reading/pinning* before its writes even begin.
+   - Once the host completes `writePages()` and calls `finish_page_flush()`, the scheduler must resume and retry `pin_page()`.
+
+**Recommendation:** Define the exact contract:
+- When Clock finds only unpinned dirty candidates during victim selection, `BufferPoolManager::pin_page` returns a specific code (e.g. `StorageResult::BUSY` or `StorageResult::BUFFER_FULL` with an internal dirty flag).
+- `OperationScheduler::step_operation` checks if dirty unpinned frames are eligible for flush, marks the operation as `SchedulerStatus::FLUSHING`, collects those dirty pages via `copy_page_for_flush()`, and yields to the host.
+- When the host completes the flush, the operation transitions to `SchedulerStatus::READY` and re-attempts the pin.
+
+---
+
+### 2. `new_page()`: Page ID Assignment & Initial Frame State
+
+#### The Issue
+Line 137 defines:
+```cpp
+StorageResult new_page(operation_id_t operation_id,
+                       page_id_t& out_page_id,
+                       PageHandle& out_handle);
+```
+Line 165 states:
+> *"assigns the next caller-provided page ID according to the current allocation policy"*
+> *(and Open Decision 7 notes: "The final allocation source must be selected before Step 1 implementation.")*
+
+#### Implementation Gap
+1. **Input vs. Output parameter:**
+   In [IPageAccessor::allocate_page](src/include/storage/page_accessor.hpp#L29), the caller provides `expected_page_id` because [TableHeap](src/include/storage/table_heap.hpp#L55) knows the next page ID from `MasterData.page_count`. 
+   If `new_page` has `page_id_t& out_page_id` as an *output*, who decides what `page_id` to assign? If `BufferPoolManager` generates it, it needs an internal `next_page_id_` counter initialized at construction. If the caller decides it, the parameter should be `page_id_t expected_page_id` (input).
+2. **Initial State (`RESIDENT` vs `DIRTY`):**
+   When `new_page()` zero-initializes a new frame in memory:
+   - Does it start in `BufferFrameState::RESIDENT` or `DIRTY`?
+   - **Critical bug risk:** If a newly allocated page starts as `RESIDENT` (clean) with pin count 1, and the caller unpins it before modifying or marking it dirty, the Clock policy could evict it as clean! Because the page doesn't exist on disk yet, any future load will fail.
+   - A newly created page must either start as `DIRTY` with `dirty_generation = 1`, or `new_page()` must explicitly document that it starts `DIRTY`.
+
+---
+
+### 3. Valid Page ID Range: `BufferPoolManager` vs. `OperationScheduler`
+
+#### The Issue
+Line 213 states:
+> *"Page IDs and operation IDs use the same validation rules as Phase 2."*
+
+In Phase 2 ([operation_scheduler.cpp](src/storage/operation_scheduler.cpp#L163)), page validation rejects anything less than `FIRST_DATA_PAGE_ID` (2):
+```cpp
+if (page_id < FIRST_DATA_PAGE_ID) return StorageResult::INVALID_ARGUMENT;
+```
+
+#### Implementation Gap
+In Phase 4 ([PLAN.md](PLAN.md#L137-L148)), the Buffer Pool will need to manage **Master Page 0** and **Master Page 1**. If `BufferPoolManager` rejects `page_id < 2`, it will not be forward-compatible with Phase 4:
+- **`BufferPoolManager`** should allow all valid non-negative page IDs: `page_id >= 0 && page_id <= MAX_DATA_PAGE_ID`.
+- **`OperationScheduler`** (which parses user test-plans) is the layer that restricts user queries to data pages (`page_id >= FIRST_DATA_PAGE_ID`).
+
+---
+
+### 4. Waiter Wakeup API between `BufferPoolManager` and `OperationScheduler`
+
+#### The Issue
+Step 4 states:
+> *"Copying host bytes into the reserved frame and waking all non-cancelled waiters."*
+> *"Load abort returning frames to ABSENT and waking waiters with an error."*
+
+#### Implementation Gap
+`BufferPoolManager` tracks `operation_id_t` in a waiter registry, but `BufferPoolManager` does not have access to the `OperationScheduler::operations_` map. It cannot directly set `operation->status = READY` or `operation->status = ERROR`.
+
+How does `OperationScheduler` find out which operations were unblocked?
+- **Option A (Return woken IDs):** Update the signatures so the scheduler knows whom to wake:
+  ```cpp
+  StorageResult provide_page(page_id_t page_id,
+                             const std::vector<uint8_t>& bytes,
+                             std::vector<operation_id_t>& out_woken_operations);
+  StorageResult abort_page_load(page_id_t page_id,
+                                std::vector<operation_id_t>& out_failed_operations);
+  ```
+- **Option B (Query on step):** Or when `step_operation(op_id)` runs, if the operation is in `PAGE_FAULT`, it asks the buffer pool: `is_page_resident(page_id)` or re-attempts `pin_page()`.
+- Option A is much cleaner because `abort_page_load()` can immediately transition all waiting operations to `SchedulerStatus::ERROR`.
+
+---
+
+### 5. Host Coordinator Concurrency & Idempotent Page Supply
+
+#### The Issue
+Line 197 states:
+> *"The host supplies each page once through the buffer-pool/scheduler shared-load adapter... a second operation must not call the operation-owned Phase 2 `providePage()` API with the same page."*
+
+#### Implementation Gap
+In [operation-coordinator.ts](web/src/operation-coordinator.ts), each operation is run independently via `runOperation(scheduler, store, plan)`.
+If Operation 1 and Operation 2 run concurrently in JavaScript and both fault on Page 2:
+1. Both operations see `SchedulerStatus::PageFault` for Page 2.
+2. Both initiate `await store.readPages([2])`.
+3. Op 1 completes first and calls `providePage(op1, 2, bytes)`. Page 2 is now `RESIDENT`.
+4. Op 2 completes and calls `providePage(op2, 2, bytes)`.
+5. If line 188 ("a loading page cannot be supplied twice") causes Op 2's call to return `INVALID_ARGUMENT`, Op 2 will crash!
+
+**Recommendation:**
+In the WASM adapter/bridge, `provide_page` should be **idempotent**:
+If Page 2 is already `RESIDENT` with matching bytes, supplying it again for another waiting operation should return `StorageResult::SUCCESS` and wake that operation, rather than returning an error.
+
+---
+
+### 6. Explicit Values for New `StorageResult` Enum Members
+
+Line 49 notes that numeric values should be appended explicitly. To guarantee complete consistency across [types.hpp](src/include/common/types.hpp), [bindings.cpp](wasm/bindings.cpp), and [protocol.ts](web/src/protocol.ts), define the exact enum values in the plan:
+
+```cpp
+enum class StorageResult : uint8_t {
+    SUCCESS = 0,
+    PAGE_FULL = 1,
+    TUPLE_TOO_LARGE = 2,
+    SLOT_NOT_FOUND = 3,
+    CORRUPTED_PAGE = 4,
+    VERSION_MISMATCH = 5,
+    SCHEMA_MISMATCH = 6,
+    INVALID_ARGUMENT = 7,
+    CYCLE_DETECTED = 8,
+    IO_ERROR = 9,
+    // Phase 3 additions:
+    BUFFER_FULL = 10,
+    PAGE_NOT_RESIDENT = 11,
+    LOAD_IN_PROGRESS = 12,
+    BUSY = 13,
+};
+```
+
+---
+
+### 7. Allocation Precedence: Free List (`ABSENT` frames) vs. Clock Eviction
+
+The plan details the Clock policy for replacing `RESIDENT` pages, but should clarify how initial/empty frames are consumed:
+- `BufferPoolManager` should maintain a free list (or simple vector of `frame_id_t` in `ABSENT` state).
+- When a page is requested or allocated via `pin_page()` or `new_page()`:
+  1. Check if the page is already `RESIDENT` or `LOADING`.
+  2. If absent, take an `ABSENT` frame from the free list.
+  3. Only if the free list is empty does the manager invoke the Clock replacement algorithm to evict a clean `RESIDENT` frame.
+  4. If Clock finds only unpinned `DIRTY` frames, trigger the dirty-pressure flush.
+  5. If no candidate exists after $2 \times \text{frame\_count}$ inspections, return `BUFFER_FULL`.
+
+---
+
+### Summary Checklist for Implementation Readiness
+
+| Topic | Current Plan Status | Final Clarification Needed |
+| :--- | :--- | :--- |
+| **Dirty-pressure flush** | Concept described | Define synchronous return code and how `OperationScheduler` steps through it |
+| **`new_page()`** | Signature has output ID; text says caller provides ID | Clarify if `page_id` is input or generated; ensure frame starts as `DIRTY` |
+| **Page ID Range** | Says "same validation rules as Phase 2" | Allow `page_id >= 0` in buffer pool (reserving 0/1 for Master Pages) |
+| **Waiter Wakeup** | "Wakes all waiters" | Return list of unblocked `operation_id_t` from `provide_page`/`abort_page_load` |
+| **Duplicate Supply** | "Cannot be supplied twice" | Make supply idempotent at the adapter level so concurrent JS operations don't fail |
+| **Enum Constants** | Explicit numbers recommended | Explicitly assign `10, 11, 12, 13` to prevent binding drifts |
+
+---
+
+# Round 3 Review Comments
+
+The Phase 3 plan in [03_buffer_pool_manager.md](plans/03_buffer_pool_manager.md) is now in excellent shape. All architectural and foundational questions from Rounds 1 and 2 have been incorporated cleanly:
+- `FLUSH_REQUIRED = 14` is explicitly defined in `StorageResult`.
+- `new_page()` cleanly accepts `expected_page_id` from the caller and initializes the frame as `DIRTY` with `dirty_generation = 1`.
+- `provide_page()` and `abort_page_load()` output `operation_id_t` vectors so the scheduler can wake or fail waiters without the buffer pool needing access to scheduler internals.
+- Buffer pool page validation allows `page_id >= 0` (forward-compatible with Master Pages 0 and 1 in Phase 4).
+- Free-frame list (`ABSENT` frames) is consumed prior to invoking Clock eviction.
+- The dirty-pressure flush retry loop is concretely integrated into `OperationScheduler` via `FLUSH_REQUIRED` and state `FLUSHING`.
+
+Before proceeding to Step 1 implementation, there are 4 final interface and test details to confirm so that C++, WASM bindings, and TypeScript coordinators align seamlessly:
+
+### 1. In-Flight Read Deduplication at the Host Layer (`operation-coordinator.ts`)
+
+#### The Situation
+Line 201 states:
+> *"In particular, a loading page cannot be supplied twice, page supply is pool-level rather than operation-level..."*
+> *(and Acceptance Criterion 9: "The coordinator handles multi-page faults and shared waiter wakeups without duplicate page supply.")*
+
+#### Implementation Detail
+In [operation-coordinator.ts](web/src/operation-coordinator.ts), each operation is run independently via `runOperation(scheduler, store, plan)`.
+If Operation 1 and Operation 2 run concurrently in the browser and both request Page 2:
+1. Both operations step and yield `PAGE_FAULT` for Page 2.
+2. If both operations independently call `await store.readPages([2])` and then attempt to call `scheduler.providePage(2, bytes)`:
+   - The first `providePage(2, bytes)` succeeds and transitions Page 2 to `RESIDENT`.
+   - The second `providePage(2, bytes)` would fail if the buffer pool strictly rejects duplicate supplies for non-`LOADING` pages.
+
+#### Recommendation
+Handle this at two levels:
+1. **In `operation-coordinator.ts`:** Maintain a shared in-flight load map:
+   ```typescript
+   const inFlightReads = new Map<number, Promise<Uint8Array | undefined>>();
+   ```
+   If a page is already being fetched by another concurrent operation, the second operation awaits the same promise rather than issuing a duplicate IndexedDB read and duplicate `providePage()` call.
+2. **In WASM Bridge:** Ensure that if `providePage(pageId, bytes)` is called for an already `RESIDENT` page with matching bytes, it returns `StorageResult.Success` idempotently as a defensive safeguard.
+
+---
+
+### 2. Concrete TypeScript `SchedulerBridge` Interface for Phase 3
+
+Because Phase 3 removes operation-level page supply (Open Decision 5), the host interface in [protocol.ts](web/src/protocol.ts) and [wasm-scheduler-bridge.ts](web/src/wasm-scheduler-bridge.ts) changes from the Phase 2 signature:
+
+```typescript
+export interface FlushPageSnapshot {
+  readonly pageId: number;
+  readonly generation: bigint;
+  readonly bytes: Uint8Array;
+}
+
+export interface SchedulerBridge {
+  startOperation(plan: string): string;
+  lastStartResult(): StorageResult;
+  stepOperation(operationId: string): SchedulerStatus;
+  
+  // Page fault handling (Operation reports what it needs, pool accepts bytes)
+  getPendingPageIds(operationId: string): readonly number[];
+  providePage(pageId: number, bytes: Uint8Array): StorageResult;
+  abortPageLoad(pageId: number): StorageResult;
+
+  // Flush handling (Pool-level dirty pages with generation tokens)
+  getDirtyPageIds(): readonly number[];
+  copyDirtyPage(pageId: number): FlushPageSnapshot;
+  finishPageFlush(pageId: number, flushingGeneration: bigint, success: boolean): StorageResult;
+
+  // Diagnostics & Operation lifecycle
+  cancelOperation(operationId: string): void;
+  releaseOperation(operationId: string): StorageResult;
+  getExecutionResults(operationId: string): string;
+  getExecutionError(operationId: string): string;
+}
+```
+
+---
+
+### 3. Inspection Method Signatures for Native Unit Tests
+
+Line 182 requires test inspection methods on `BufferPoolManager`. Specifying the exact signatures avoids ad-hoc naming during Step 1:
+
+```cpp
+// src/include/storage/buffer_pool_manager.hpp
+size_t frame_count() const noexcept;
+size_t resident_count() const noexcept;
+size_t dirty_count() const noexcept;
+size_t free_frame_count() const noexcept;
+
+frame_id_t get_clock_hand() const noexcept;
+std::optional<frame_id_t> find_frame_by_page_id(page_id_t page_id) const noexcept;
+std::optional<FrameDescriptor> get_frame_descriptor(frame_id_t frame_id) const noexcept;
+bool is_page_resident(page_id_t page_id) const noexcept;
+bool is_page_loading(page_id_t page_id) const noexcept;
+uint32_t get_pin_count(page_id_t page_id) const noexcept;
+```
+
+---
+
+### 4. Migration of Existing Phase 2 Unit Tests (`test_operation_scheduler.cpp`)
+
+In [test_operation_scheduler.cpp](tests/test_operation_scheduler.cpp), existing tests directly invoke:
+- `scheduler.provide_pages(page_id, ...)`
+- `scheduler.copy_resident_page(page_id, ...)`
+- `scheduler.get_dirty_pages_for_flush(page_id)`
+- `scheduler.finish_flush(page_id, ...)`
+
+Since Phase 3 replaces these with pool-level methods (`provide_page(page_id, bytes, ...)`, `finish_page_flush(...)`), **Step 6 should explicitly note that [test_operation_scheduler.cpp](tests/test_operation_scheduler.cpp) will be migrated to the new pool-level APIs**.
+
+---
+
+### Verdict
+
+The plan is **fully specified, technically sound, and ready for Step 1 implementation**.
+
+---
+
+# Round 4 Review Comments
+
+The additions in [03_buffer_pool_manager.md](plans/03_buffer_pool_manager.md) make the plan exceptionally robust and production-ready:
+- `FlushBatch` and `flush_batch_id_t` provide deterministic batch boundaries and reject cross-batch or duplicate completions.
+- The C++ native inspection signatures (`frame_count`, `resident_count`, `dirty_count`, `loading_count`, `flushing_count`, `free_frame_count`, etc.) are fully specified.
+- The `SchedulerBridge` TypeScript interface cleanly models pool-level page supply, aborts, and 64-bit generation snapshots.
+- The Shared Host Coordinator architecture explicitly specifies in-flight read deduplication (`Map<number, Promise<Uint8Array | undefined>>`) at the host layer.
+- Migration of `tests/test_operation_scheduler.cpp` to the new pool-level APIs is clearly scheduled in Step 6.
+
+There are 2 fine-grained concurrency nuances to keep in mind during implementation:
+
+### 1. Protect Freshly Loaded Frames from Immediate Eviction
+
+#### The Scenario
+1. Operation 1 faults on absent Page 2. A frame is allocated in `LOADING` state, and Op 1 is recorded as a waiter.
+2. The host reads Page 2 and calls `provide_page(2, bytes, woken_ops)`. Op 1 is added to `woken_ops`, and the frame transitions to `RESIDENT`.
+3. Before the scheduler steps Op 1, suppose another concurrent operation (Op 2) steps and requests missing Page 99 in a pool with 0 free frames.
+4. If the freshly loaded Page 2 has `pin_count == 0`, Clock candidate selection could sweep past it, clear its second-chance bit, and evict Page 2 *before Op 1 ever gets stepped to claim its pin*!
+
+#### Implementation Rule
+To prevent this race:
+- While an operation is in the waiter list for a loading frame, that frame must retain an effective pin count (or `pin_count` is incremented upon registering the waiter).
+- When `provide_page()` transitions the frame from `LOADING -> RESIDENT`, the frame remains pinned (`pin_count = woken_operations.size()`).
+- When Op 1 resumes and calls `pin_page()`, it receives its `pin_token` for the already-accounted pin rather than competing for a zero-pinned frame.
+
+---
+
+### 2. Single Active `FlushBatch` Invariant
+
+#### The Scenario
+Line 277 specifies that `getDirtyPageIds()` and `copyDirtyPage()` describe the active global flush batch, and line 281 requires all pins to be released before entering `FLUSHING`.
+
+#### Implementation Rule
+Clarify in the code that **at most one `FlushBatch` is in flight at any time**:
+- When a flush batch is collected (`collect_dirty_pages_for_flush()`), the buffer pool enters an active flushing state with that `batch_id`.
+- Any subsequent operation that attempts to trigger a flush before the current batch completes returns `BUSY`.
+- The active batch is cleared once every page in the batch has received its `finish_page_flush(batch_id, ...)`.
+
+---
+
+### Ready for Execution
+
+The plan is complete, rigorous, and ready to be executed starting with **Step 1: Frame table and lifecycle foundation**.

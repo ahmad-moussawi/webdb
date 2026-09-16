@@ -126,7 +126,7 @@ Phase 2 establishes asynchronous page delivery and page-batch durability. Buffer
 - [ ] **3.3 Buffer Pool API**
   - `PinPage(page_id_t, out_page)`: Returns `RESIDENT` page pointer, or registers a `PAGE_FAULT` if `ABSENT`.
   - `UnpinPage(page_id_t, bool is_dirty)`: Decrements pin count; sets dirty flag.
-  - `NewPage(out_page_id)`: Allocates new page from free list.
+  - `NewPage(expected_page_id, out_page)`: Allocates and zero-initializes a new `DIRTY` page frame without a host read; durable page-count/free-list publication remains later work.
   - `CollectDirtyPages()`: Gathers dirty frames into batch for the async flush cycle.
 
 ---
