@@ -153,7 +153,12 @@ StorageResult BufferPoolManager::assign_frame(page_id_t page_id,
     if (free_frames_.empty()) return StorageResult::BUFFER_FULL;
 
     const frame_id_t frame_id = free_frames_.back();
-    free_frames_.pop_back();
+    // Insert first: unordered_map::emplace may allocate and throw. Keeping the
+    // free list and descriptor untouched until insertion succeeds preserves the
+    // frame-table invariants if allocation fails.
+    const auto insertion = page_to_frame_.emplace(page_id, frame_id);
+    if (!insertion.second) return StorageResult::INVALID_ARGUMENT;
+
     FrameDescriptor& descriptor = frames_[frame_id].descriptor;
     descriptor.page_id = page_id;
     descriptor.state = state;
@@ -161,7 +166,7 @@ StorageResult BufferPoolManager::assign_frame(page_id_t page_id,
     descriptor.ref_bit = false;
     descriptor.dirty_generation = 0;
     descriptor.flushing_generation = 0;
-    page_to_frame_.emplace(page_id, frame_id);
+    free_frames_.pop_back();
     out_frame_id = frame_id;
     return StorageResult::SUCCESS;
 }

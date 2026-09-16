@@ -71,10 +71,18 @@ void test_buffer_pool_manager() {
                     pool.free_frame_count() == 3,
                 "A loaded page is mapped and removed from the free list");
     frame_id_t duplicate_frame = 0;
+    const size_t free_frames_before_duplicate = pool.free_frame_count();
+    const auto descriptor_before_duplicate = pool.get_frame_descriptor(resident_frame);
     TEST_ASSERT(pool.load_page(FIRST_DATA_PAGE_ID, duplicate_frame) == StorageResult::INVALID_ARGUMENT,
                 "A page cannot be assigned to a second frame");
-    TEST_ASSERT(pool.find_frame_by_page_id(FIRST_DATA_PAGE_ID).value() == resident_frame,
-                "Duplicate assignment preserves the original page mapping");
+    const auto descriptor_after_duplicate = pool.get_frame_descriptor(resident_frame);
+    TEST_ASSERT(pool.find_frame_by_page_id(FIRST_DATA_PAGE_ID).value() == resident_frame &&
+                    pool.free_frame_count() == free_frames_before_duplicate &&
+                    descriptor_before_duplicate.has_value() && descriptor_after_duplicate.has_value() &&
+                    descriptor_after_duplicate->page_id == descriptor_before_duplicate->page_id &&
+                    descriptor_after_duplicate->state == descriptor_before_duplicate->state &&
+                    descriptor_after_duplicate->pin_count == descriptor_before_duplicate->pin_count,
+                "Failed duplicate assignment preserves mapping, descriptor, and free-list state");
 
     frame_id_t loading_frame = 0;
     TEST_ASSERT(pool.begin_page_load(FIRST_DATA_PAGE_ID + 1, loading_frame) == StorageResult::SUCCESS,
