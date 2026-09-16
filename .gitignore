@@ -2,6 +2,8 @@
 /dist/
 /web/dist/
 /web/test-results/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
 node_modules/
 **/CMakeFiles/
 **/CMakeCache.txt
