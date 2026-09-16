@@ -108,6 +108,8 @@ Phase 2 establishes asynchronous page delivery and page-batch durability. Buffer
 ### Phase 3: Buffer Pool Manager with Async I/O Awareness
 **Objective**: Buffer frames with explicit page states, pin tracking during async pauses, and scan-resistant eviction.
 
+> **Detailed implementation plan**: [plans/03_buffer_pool_manager.md](plans/03_buffer_pool_manager.md)
+
 - [ ] **3.1 Page Frame States & Pin Lifecycle**
   - Explicit frame states:
     - `ABSENT`: Frame is unallocated or empty.
