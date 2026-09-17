@@ -615,3 +615,9 @@ The following test cases must be added to `tests/test_buffer_pool_manager.cpp` t
 1. **Unwinding `READ_WRITE` pins via `release_operation_pins`:** Verify that an operation holding a `READ_WRITE` handle has its page marked `DIRTY` with incremented `dirty_generation` when `release_operation_pins(op_id)` is called.
 2. **Monotonic generation increment on subsequent writes:** Verify that two sequential `READ_WRITE` pins on the same page advance `dirty_generation` from $1 \to 2$.
 3. **Explicit foreign-token rejection:** Verify that passing Operation B with Operation A's valid `pin_token` returns `StorageResult::INVALID_ARGUMENT`.
+
+### Follow-up Review: Stale `PageHandle` After External Release
+
+**Feedback: Valid. Fixed.** External `unpin_page()` and `release_operation_pins()` can remove a token without the original RAII object being destroyed. The manager now records the owning `PageHandle*` in each `PinRecord` and invalidates that handle whenever the token is released externally. Invalidated handles report `owns_pin() == false`, and both `data()` and `mutable_data()` return `nullptr`, preventing access through the handle after cancellation or unpinning. Move construction and move assignment update the registered handle pointer so invalidation targets the current owner.
+
+As with any C++ raw pointer API, a caller must not retain a pointer previously returned by `data()` or `mutable_data()` after the handle is released. The handle invalidation prevents access through the handle object; it cannot revoke a raw pointer that the caller copied elsewhere.

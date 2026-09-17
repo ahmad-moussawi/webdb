@@ -47,6 +47,10 @@ PageHandle::PageHandle(PageHandle&& other) noexcept
     other.pin_token_ = 0;
     other.operation_id_ = 0;
     other.access_mode_ = AccessMode::READ_ONLY;
+    if (manager_ != nullptr) {
+        const auto pin_it = manager_->pins_.find(pin_token_);
+        if (pin_it != manager_->pins_.end()) pin_it->second.handle = this;
+    }
 }
 
 PageHandle& PageHandle::operator=(PageHandle&& other) noexcept {
@@ -66,6 +70,10 @@ PageHandle& PageHandle::operator=(PageHandle&& other) noexcept {
     other.pin_token_ = 0;
     other.operation_id_ = 0;
     other.access_mode_ = AccessMode::READ_ONLY;
+    if (manager_ != nullptr) {
+        const auto pin_it = manager_->pins_.find(pin_token_);
+        if (pin_it != manager_->pins_.end()) pin_it->second.handle = this;
+    }
     return *this;
 }
 
@@ -77,6 +85,16 @@ uint8_t* PageHandle::mutable_data() noexcept {
 
 void PageHandle::reset() noexcept {
     if (manager_ != nullptr) manager_->release_pin_token(pin_token_, operation_id_);
+    manager_ = nullptr;
+    page_id_ = INVALID_PAGE_ID;
+    frame_id_ = 0;
+    bytes_ = nullptr;
+    pin_token_ = 0;
+    operation_id_ = 0;
+    access_mode_ = AccessMode::READ_ONLY;
+}
+
+void PageHandle::invalidate_from_manager() noexcept {
     manager_ = nullptr;
     page_id_ = INVALID_PAGE_ID;
     frame_id_ = 0;
@@ -223,6 +241,7 @@ StorageResult BufferPoolManager::pin_page(page_id_t page_id,
     descriptor.ref_bit = true;
     out_handle = PageHandle(this, page_id, *frame_id, token, operation_id, access_mode,
                             get_frame_bytes(*frame_id));
+    pins_.find(token)->second.handle = &out_handle;
 
     return StorageResult::SUCCESS;
 }
@@ -304,6 +323,8 @@ StorageResult BufferPoolManager::release_pin_token(pin_token_t pin_token,
     }
 
     --descriptor.pin_count;
+
+    if (record.handle != nullptr) record.handle->invalidate_from_manager();
 
     if (record.access_mode == AccessMode::READ_WRITE) {
         if (descriptor.state == BufferFrameState::RESIDENT) descriptor.state = BufferFrameState::DIRTY;

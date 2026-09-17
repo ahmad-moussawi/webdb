@@ -50,6 +50,10 @@ public:
     // for ownership validation, and repeated calls are harmless.
     void reset() noexcept;
 
+    // Called by BufferPoolManager when an external unpin or operation-wide
+    // release invalidates this handle before its destructor runs.
+    void invalidate_from_manager() noexcept;
+
     page_id_t page_id() const noexcept { return page_id_; }
     frame_id_t frame_id() const noexcept { return frame_id_; }
     pin_token_t pin_token() const noexcept { return pin_token_; }
@@ -295,6 +299,7 @@ private:
         page_id_t page_id{INVALID_PAGE_ID};
         frame_id_t frame_id{0};
         AccessMode access_mode{AccessMode::READ_ONLY};
+        PageHandle* handle{nullptr};
     };
 
     // Each token identifies exactly one operation-owned pin. The reverse index

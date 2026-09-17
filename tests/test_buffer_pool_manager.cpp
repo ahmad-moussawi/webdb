@@ -101,6 +101,9 @@ void test_buffer_pool_manager() {
         TEST_ASSERT(pool.unpin_page(moved_handle.pin_token(), 100) == StorageResult::SUCCESS &&
                         pool.get_pin_count(FIRST_DATA_PAGE_ID) == 0,
                     "The owning operation can release the exact pin token");
+        TEST_ASSERT(!moved_handle.owns_pin() && moved_handle.data() == nullptr &&
+                        moved_handle.mutable_data() == nullptr,
+                    "External unpin invalidates the handle before it can access reused bytes");
         moved_handle = PageHandle{};
         TEST_ASSERT(pool.get_pin_count(FIRST_DATA_PAGE_ID) == 0,
                     "Destroying or resetting a handle releases its pin");
@@ -133,6 +136,9 @@ void test_buffer_pool_manager() {
         write_handle.mutable_data()[1] = 0x5A;
         TEST_ASSERT(pool.release_operation_pins(103) == StorageResult::SUCCESS,
                     "Operation cleanup releases write pins through the normal token path");
+        TEST_ASSERT(!write_handle.owns_pin() && write_handle.data() == nullptr &&
+                        write_handle.mutable_data() == nullptr,
+                    "Operation-wide release invalidates outstanding handles");
         const auto cleanup_descriptor = pool.get_frame_descriptor(resident_frame);
         TEST_ASSERT(cleanup_descriptor.has_value() && cleanup_descriptor->state == BufferFrameState::DIRTY &&
                         cleanup_descriptor->dirty_generation == 2,
