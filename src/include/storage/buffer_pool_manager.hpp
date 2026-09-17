@@ -13,6 +13,68 @@ namespace webdb {
 
 using frame_id_t = uint32_t;
 using pin_token_t = uint64_t;
+using operation_id_t = uint64_t;
+
+class BufferPoolManager;
+
+enum class AccessMode : uint8_t {
+    // The caller may inspect page bytes but must not mutate them through the
+    // handle. Its mutable_data() accessor returns nullptr.
+    READ_ONLY = 0,
+
+    // The caller may mutate page bytes. Releasing this handle marks the page
+    // DIRTY so a later flush cannot lose the write.
+    READ_WRITE = 1,
+};
+
+class PageHandle {
+public:
+    PageHandle() noexcept = default;
+    ~PageHandle() noexcept;
+
+    PageHandle(const PageHandle&) = delete;
+    PageHandle& operator=(const PageHandle&) = delete;
+
+    PageHandle(PageHandle&& other) noexcept;
+    PageHandle& operator=(PageHandle&& other) noexcept;
+
+    // Returns a read-only view of the pinned page bytes. The pointer remains
+    // valid only while this handle owns its pin.
+    const uint8_t* data() const noexcept;
+
+    // Returns mutable bytes only for a READ_WRITE handle; READ_ONLY handles
+    // return nullptr. The caller must not retain this pointer after release.
+    uint8_t* mutable_data() noexcept;
+
+    // Releases this handle's pin immediately. The stored operation ID is used
+    // for ownership validation, and repeated calls are harmless.
+    void reset() noexcept;
+
+    page_id_t page_id() const noexcept { return page_id_; }
+    frame_id_t frame_id() const noexcept { return frame_id_; }
+    pin_token_t pin_token() const noexcept { return pin_token_; }
+    AccessMode access_mode() const noexcept { return access_mode_; }
+    bool owns_pin() const noexcept { return manager_ != nullptr; }
+
+private:
+    friend class BufferPoolManager;
+
+    PageHandle(BufferPoolManager* manager,
+               page_id_t page_id,
+               frame_id_t frame_id,
+               pin_token_t pin_token,
+               operation_id_t operation_id,
+               AccessMode access_mode,
+               uint8_t* bytes) noexcept;
+
+    BufferPoolManager* manager_{nullptr};
+    page_id_t page_id_{INVALID_PAGE_ID};
+    frame_id_t frame_id_{0};
+    pin_token_t pin_token_{0};
+    operation_id_t operation_id_{0};
+    AccessMode access_mode_{AccessMode::READ_ONLY};
+    uint8_t* bytes_{nullptr};
+};
 
 enum class BufferFrameState : uint8_t {
     ABSENT = 0,
@@ -78,6 +140,7 @@ struct FrameDescriptor {
 
 class BufferPoolManager {
 public:
+    friend class PageHandle;
     // Upper bound on frame_count. This protects native and WASM processes from
     // accidental or hostile configurations that would allocate excessive memory
     // before normal resource checks can run.
@@ -144,6 +207,28 @@ public:
     // currently mapped. A nonzero value makes the page ineligible for eviction.
     uint32_t get_pin_count(page_id_t page_id) const noexcept;
 
+    // Pins a resident page for operation_id and returns a move-only RAII handle.
+    // A missing page begins a load and returns PAGE_NOT_RESIDENT; an existing
+    // LOADING page returns LOAD_IN_PROGRESS. No output handle is modified on
+    // failure. READ_WRITE handles mark the page dirty when released.
+    StorageResult pin_page(page_id_t page_id,
+                           operation_id_t operation_id,
+                           AccessMode access_mode,
+                           PageHandle& out_handle);
+
+    // Releases the exact token owned by operation_id. Foreign-operation,
+    // unknown-token, and already-released tokens are rejected.
+    StorageResult unpin_page(pin_token_t pin_token,
+                             operation_id_t operation_id,
+                             bool is_dirty = false);
+
+    // Marks the exact token's frame dirty without releasing the pin.
+    StorageResult mark_page_dirty(pin_token_t pin_token, operation_id_t operation_id);
+
+    // Releases every pin owned by operation_id. This is idempotent for an
+    // operation with no pins and is used when an operation completes or aborts.
+    StorageResult release_operation_pins(operation_id_t operation_id) noexcept;
+
     // Reserves an ABSENT frame for a page load and transitions it to LOADING.
     // The returned frame ID is stable until the page is released. If the page is
     // already loading, LOAD_IN_PROGRESS is returned; duplicate residency is
@@ -205,6 +290,19 @@ private:
     // released or evicted.
     std::unordered_map<page_id_t, frame_id_t> page_to_frame_;
 
+    struct PinRecord {
+        operation_id_t operation_id{0};
+        page_id_t page_id{INVALID_PAGE_ID};
+        frame_id_t frame_id{0};
+        AccessMode access_mode{AccessMode::READ_ONLY};
+    };
+
+    // Each token identifies exactly one operation-owned pin. The reverse index
+    // lets release_operation_pins() unwind all tokens without scanning frames.
+    std::unordered_map<pin_token_t, PinRecord> pins_;
+    std::unordered_map<operation_id_t, std::vector<pin_token_t>> operation_pins_;
+    pin_token_t next_pin_token_{1};
+
     // Clock replacement cursor. Step 1 initializes it; later steps advance it
     // during bounded second-chance victim selection.
     frame_id_t clock_hand_{0};
@@ -227,6 +325,7 @@ private:
     Frame* find_frame(page_id_t page_id) noexcept;
     const Frame* find_frame(page_id_t page_id) const noexcept;
     static bool is_valid_page_id(page_id_t page_id) noexcept;
+    StorageResult release_pin_token(pin_token_t pin_token, operation_id_t operation_id) noexcept;
 };
 
 } // namespace webdb

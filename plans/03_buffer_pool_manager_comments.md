@@ -507,3 +507,111 @@ Clarify in the code that **at most one `FlushBatch` is in flight at any time**:
 ### Ready for Execution
 
 The plan is complete, rigorous, and ready to be executed starting with **Step 1: Frame table and lifecycle foundation**.
+
+---
+
+# Implementation Issues
+
+This section documents code-level issues, bugs, and edge cases discovered during step-by-step implementation reviews of the buffer pool manager.
+
+## Step 2 Implementation Findings (Pin Tokens & Operation Ownership)
+
+During the review of Step 2 (`src/include/storage/buffer_pool_manager.hpp`, `src/storage/buffer_pool_manager.cpp`, and `tests/test_buffer_pool_manager.cpp`), the following critical bugs and API gaps were identified:
+
+### 1. Critical: `release_operation_pins()` Drops Writes Without Marking Frames `DIRTY`
+
+**Feedback: Valid. Fixed.** The original implementation bypassed `release_pin_token()`, so bulk operation cleanup could drop `READ_WRITE` mutations without marking the frame dirty. `release_operation_pins()` now delegates every token release through the shared dirty-aware path.
+- **Location:** `src/storage/buffer_pool_manager.cpp` (in `release_operation_pins()`)
+- **Bug:** When iterating over an operation's tokens, `release_operation_pins()` decrements descriptor `pin_count` and erases from `pins_`, but never checks `access_mode == AccessMode::READ_WRITE`. It fails to set `descriptor.state = BufferFrameState::DIRTY` and fails to increment `dirty_generation`.
+- **Consequence:** If an operation pins a page with `READ_WRITE`, modifies page bytes, and the scheduler releases operation pins (e.g., on operation completion or abort), the frame remains clean (`RESIDENT`). When the `PageHandle` is subsequently destroyed, its token is already gone from `pins_`, so the write is **silently and permanently dropped**.
+- **Fix:** Delegate all token releases directly through `release_pin_token(token, operation_id)`:
+  ```cpp
+  StorageResult BufferPoolManager::release_operation_pins(operation_id_t operation_id) noexcept {
+      const auto operation_it = operation_pins_.find(operation_id);
+      if (operation_it == operation_pins_.end()) {
+          return StorageResult::SUCCESS;
+      }
+
+      const std::vector<pin_token_t> tokens = operation_it->second;
+      for (const pin_token_t token : tokens) {
+          release_pin_token(token, operation_id);
+      }
+      return StorageResult::SUCCESS;
+  }
+  ```
+
+### 2. Critical: `release_pin_token()` Fails to Increment `dirty_generation` if Frame Is Already `DIRTY`
+
+**Feedback: Valid. Fixed.** A write release must advance the mutation generation regardless of whether the page was clean or already dirty. The implementation now changes `RESIDENT` to `DIRTY` when needed and increments the generation for every `READ_WRITE` release.
+- **Location:** `src/storage/buffer_pool_manager.cpp` (in `release_pin_token()`)
+- **Bug:** The dirty transition logic is guarded by:
+  ```cpp
+  if (record.access_mode == AccessMode::READ_WRITE && descriptor.state == BufferFrameState::RESIDENT) {
+      descriptor.state = BufferFrameState::DIRTY;
+      ++descriptor.dirty_generation;
+      if (descriptor.dirty_generation == 0) ++descriptor.dirty_generation;
+  }
+  ```
+- **Consequence:** If a page is already in `DIRTY` state (from a prior write or concurrent operation), releasing a subsequent `READ_WRITE` pin will evaluate `descriptor.state == RESIDENT` as `false`. The mutation generation is **not incremented**. Consecutive writes will all share `dirty_generation == 1`. When optimistic flushing occurs, a background flush completing for generation 1 would reset `flushing_generation = 0` and transition the page to `RESIDENT`, overwriting and discarding subsequent in-memory mutations.
+- **Fix:** Set state to `DIRTY` if currently `RESIDENT`, but **always** advance `dirty_generation` for `READ_WRITE` releases:
+  ```cpp
+  if (record.access_mode == AccessMode::READ_WRITE) {
+      if (descriptor.state == BufferFrameState::RESIDENT) {
+          descriptor.state = BufferFrameState::DIRTY;
+      }
+      ++descriptor.dirty_generation;
+      if (descriptor.dirty_generation == 0) ++descriptor.dirty_generation;
+  }
+  ```
+
+### 3. Critical: `mark_page_dirty()` Rejects Already-Dirty Pages and Clobbers Generation to 1
+
+**Feedback: Valid. Fixed.** Repeated dirty marking is a legitimate operation, and resetting the generation to `1` would invalidate flush-generation ordering. The method now accepts `RESIDENT` and `DIRTY` pages and increments the generation without allowing zero after wraparound.
+- **Location:** `src/storage/buffer_pool_manager.cpp` (in `mark_page_dirty(page_id_t page_id)`)
+- **Bug:**
+  1. It returns `StorageResult::INVALID_ARGUMENT` if `state != BufferFrameState::RESIDENT`. It is impossible to mark an already-dirty page dirty again after subsequent mutations.
+  2. It hardcodes `descriptor.dirty_generation = 1;` instead of incrementing it monotonically (`++dirty_generation`). If generation was 5, marking it dirty resets it to 1.
+- **Fix:** Allow both `RESIDENT` and `DIRTY` states, and increment `dirty_generation`:
+  ```cpp
+  StorageResult BufferPoolManager::mark_page_dirty(page_id_t page_id) {
+      Frame* frame = find_frame(page_id);
+      if (frame == nullptr || (frame->descriptor.state != BufferFrameState::RESIDENT &&
+                               frame->descriptor.state != BufferFrameState::DIRTY)) {
+          return StorageResult::INVALID_ARGUMENT;
+      }
+      frame->descriptor.state = BufferFrameState::DIRTY;
+      ++frame->descriptor.dirty_generation;
+      if (frame->descriptor.dirty_generation == 0) ++frame->descriptor.dirty_generation;
+      return StorageResult::SUCCESS;
+  }
+  ```
+
+### 4. API Alignment: Token-Based `unpin_page()` and Foreign-Token Rejection
+
+**Feedback: Valid. Fixed.** The page-based overload could release the wrong pin when one operation owned multiple pins on the same page. The public API now accepts the exact `pin_token_t` and operation ID, rejects foreign or unknown tokens, and optionally validates the dirty flag against read-only access.
+- **Context:** The Phase 3 design (lines 160–164 & 525) specifies:
+  - `StorageResult unpin_page(operation_id_t operation_id, pin_token_t pin_token, bool is_dirty);`
+  - `StorageResult mark_page_dirty(operation_id_t operation_id, pin_token_t pin_token);`
+  - Checklist requirement: *"Implement unpin_page() with underflow and foreign-token rejection"*.
+- **Gap:** In the current implementation, `release_pin_token(pin_token, operation_id)` is private. The only public unpin method is `unpin_page(page_id_t page_id, operation_id_t operation_id)`.
+- **Problems:**
+  1. If an operation owns multiple pins on the same page (e.g. nested calls or multiple cursors), `unpin_page(page_id, op_id)` pops the first token in `operation_pins_`, which may not match the caller's specific handle/token.
+  2. Foreign-token rejection cannot be tested with token identifiers directly.
+- **Resolution:** Expose `unpin_page(pin_token_t pin_token, operation_id_t operation_id)` (or with `bool is_dirty = false`) and `mark_page_dirty(pin_token_t pin_token, operation_id_t operation_id)` as public methods.
+
+### 5. RAII Usability: `PageHandle::reset()` Visibility and Operation Context
+
+**Feedback: Valid. Fixed.** Public `reset()` is the expected RAII interface, and passing operation ID `0` weakened ownership verification. `PageHandle` now stores its owning operation ID, validates it during reset, and fully clears moved-from handle metadata.
+- **Issue:** `PageHandle::reset()` is private. To release a handle early, callers had to assign a default-constructed temporary (`moved_handle = PageHandle{}`).
+- **Resolution:**
+  - Make `void reset() noexcept;` public, following standard C++ RAII idioms (`std::unique_ptr::reset()`).
+  - Store `operation_id_` inside `PageHandle` so `reset()` calls `manager_->release_pin_token(pin_token_, operation_id_)` instead of passing 0, ensuring operation-ownership verification on RAII release.
+  - In `PageHandle` move-assignment, ensure `other.page_id_ = INVALID_PAGE_ID`, `other.frame_id_ = 0`, and `other.access_mode_ = AccessMode::READ_ONLY` are reset alongside `manager_`, `bytes_`, and `pin_token_`.
+
+### 6. Missing Unit Test Scenarios
+
+**Feedback: Valid. Added.** Tests now cover write-pin cleanup through `release_operation_pins()`, monotonic generations across sequential writes and repeated dirty marking, exact-token ownership, foreign-token rejection, and double-release behavior.
+The following test cases must be added to `tests/test_buffer_pool_manager.cpp` to validate the fixes:
+1. **Unwinding `READ_WRITE` pins via `release_operation_pins`:** Verify that an operation holding a `READ_WRITE` handle has its page marked `DIRTY` with incremented `dirty_generation` when `release_operation_pins(op_id)` is called.
+2. **Monotonic generation increment on subsequent writes:** Verify that two sequential `READ_WRITE` pins on the same page advance `dirty_generation` from $1 \to 2$.
+3. **Explicit foreign-token rejection:** Verify that passing Operation B with Operation A's valid `pin_token` returns `StorageResult::INVALID_ARGUMENT`.
