@@ -260,7 +260,7 @@ In a standard Volcano iterator model, operators are organized in a tree (`Projec
 ### Why the Bytecode VM Solves This (The SQLite Approach)
 Instead of a tree of polymorphic objects calling each other recursively, the JS Binary Compiler converts the query into a **flat, linear array of numeric bytecode instructions**:
 
-```assembly
+```asm
 0: OP_OPEN_CURSOR  cursor_0, table_root_page (users)
 1: OP_REWIND       cursor_0, eof_label
 2: loop_start:
@@ -373,7 +373,7 @@ db.registerFunction('format_date', (epochMs: number, locale: string): string => 
 
 ### 2. The Bytecode Instruction (`OP_CALL_UDF`)
 When a query contains a UDF filter or projection, the JS compiler emits:
-```assembly
+```asm
 OP_CALL_UDF  udf_id: 1, arg_reg: 2, out_reg: 3
 ```
 * **Query-Level Compilation:** Literal `RegExp` instances are compiled **once** at query compile time, avoiding re-compilation per row.
