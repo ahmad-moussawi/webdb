@@ -5,7 +5,9 @@
   "description": "Ultra-lean browser-native relational database engine",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "demo": "tsc && node dist/examples/demo.js",
+    "playground": "node scripts/serve.js"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",

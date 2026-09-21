@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebDB Interactive Playground & VDBE Inspector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(18, 26, 43, 0.85);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #3b82f6;
+      --accent-glow: rgba(59, 130, 246, 0.35);
+      --cyan: #06b6d4;
+      --emerald: #10b981;
+      --purple: #8b5cf6;
+      --amber: #f59e0b;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --font-mono: 'Fira Code', monospace;
+      --font-sans: 'Inter', system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.12) 0px, transparent 50%);
+      color: var(--text);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-badge {
+      background: linear-gradient(135deg, var(--accent), var(--purple));
+      color: white;
+      font-weight: 700;
+      font-size: 1.25rem;
+      padding: 6px 12px;
+      border-radius: 8px;
+      box-shadow: 0 0 16px var(--accent-glow);
+    }
+
+    .brand h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
+    .brand p { color: var(--text-muted); font-size: 0.85rem; margin-top: 2px; }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .select-pill {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn:hover { filter: brightness(1.15); transform: translateY(-1px); }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid var(--card-border);
+    }
+
+    .grid-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      backdrop-filter: blur(12px);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: 1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge {
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 16px;
+      background: rgba(0, 0, 0, 0.25);
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.8rem;
+    }
+    .control-group label { color: var(--text-muted); }
+    .input-field {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      outline: none;
+      min-width: 110px;
+    }
+
+    /* Terminal Disassembly Box */
+    .terminal-box {
+      background: #060911;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 14px;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.45;
+      color: #e2e8f0;
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 480px;
+      overflow-y: auto;
+    }
+
+    .terminal-box::-webkit-scrollbar { width: 6px; height: 6px; }
+    .terminal-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+    /* Results Table */
+    .table-wrapper {
+      overflow-x: auto;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      max-height: 420px;
+      overflow-y: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+    th {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--card-border);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+    }
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+    .null-pill {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .meta-box {
+      margin-top: 16px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      gap: 16px;
+    }
+    .meta-box span strong { color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="logo-badge">W</div>
+      <div>
+        <h1>WebDB Engine Playground</h1>
+        <p>Ultra-lean Relational Database • Slotted Page Engine • VDBE Bytecode Disassembler</p>
+      </div>
+    </div>
+    <div class="header-controls">
+      <select id="storageSelect" class="select-pill">
+        <option value="memory">Storage: In-Memory VFS</option>
+        <option value="idb">Storage: IndexedDB (Persistent)</option>
+      </select>
+      <button id="seedBtn" class="btn">⚡ Reset & Seed 10 Rows</button>
+    </div>
+  </header>
+
+  <div class="grid-container">
+    <!-- LEFT PANEL: Interactive Queries & Results -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>Query Execution</span>
+          <span id="timingBadge" class="badge">0 ms</span>
+        </div>
+        <button id="runBtn" class="btn btn-secondary">▶ Run Query</button>
+      </div>
+
+      <div class="controls-row">
+        <div class="control-group">
+          <label>Filter: Age Operator</label>
+          <select id="ageOp" class="input-field">
+            <option value=">">&gt; Greater Than</option>
+            <option value=">=">&gt;= Greater or Equal</option>
+            <option value="<">&lt; Less Than</option>
+            <option value="<=">&lt;= Less or Equal</option>
+            <option value="=">= Equals</option>
+            <option value="none">No Filter</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Age Value</label>
+          <input id="ageVal" type="number" class="input-field" value="25" />
+        </div>
+        <div class="control-group">
+          <label>Salary Null Filter (3VL)</label>
+          <select id="salaryNullOp" class="input-field">
+            <option value="all">Any (Include Nulls)</option>
+            <option value="whereNull">whereNull(salary)</option>
+            <option value="whereNotNull">whereNotNull(salary)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Order By</label>
+          <select id="orderCol" class="input-field">
+            <option value="id">id</option>
+            <option value="age">age</option>
+            <option value="salary">salary (SQLite Collation)</option>
+            <option value="name">name</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Direction</label>
+          <select id="orderDir" class="input-field">
+            <option value="asc">ASC (Nulls First)</option>
+            <option value="desc">DESC (Nulls Last)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>Limit</label>
+          <input id="limitVal" type="number" class="input-field" value="10" />
+        </div>
+      </div>
+
+      <div class="table-wrapper">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Age</th>
+              <th>Role</th>
+              <th>Salary</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody">
+            <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">Click "Reset & Seed" to populate sample data</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="meta-box">
+        <span>Rows: <strong id="rowCount">0</strong></span>
+        <span>Table Root Page: <strong id="rootPage">2</strong></span>
+        <span>Page Size: <strong>4096 B</strong></span>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL: Bytecode Disassembly (EXPLAIN) -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>VDBE Bytecode Disassembly</span>
+          <span class="badge">SQLite-Style EXPLAIN</span>
+        </div>
+        <span id="bytecodeSizeBadge" class="badge">0 bytes</span>
+      </div>
+
+      <div id="terminalDisassembly" class="terminal-box">Click "Run Query" or "Reset & Seed" to generate compiled VDBE bytecode.</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { WebDB } from '../dist/src/index.js';
+
+    let db;
+
+    async function initDb() {
+      const storage = document.getElementById('storageSelect').value;
+      db = await WebDB.open({ name: 'playground_db', storage });
+    }
+
+    async function seedData() {
+      await initDb();
+      try {
+        await db.createTable('users', [
+          { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+          { name: 'name', type: 'TEXT', flags: { notNull: true } },
+          { name: 'age', type: 'INT32' },
+          { name: 'role', type: 'TEXT' },
+          { name: 'salary', type: 'FLOAT64' },
+        ]);
+      } catch (e) {
+        // Table already exists if previously created
+      }
+
+      const sampleUsers = [
+        { id: 1, name: 'Alice Chen', age: 29, role: 'Lead Architect', salary: 145000 },
+        { id: 2, name: 'Bob Miller', age: 22, role: 'Junior Dev', salary: 75000 },
+        { id: 3, name: 'Charlie Kim', age: 35, role: 'Staff Engineer', salary: 160000 },
+        { id: 4, name: 'Diana Prince', age: 19, role: 'Intern', salary: null },
+        { id: 5, name: 'Evan Wright', age: 41, role: 'Engineering Director', salary: 195000 },
+        { id: 6, name: 'Fiona Gallagher', age: 27, role: null, salary: 88000 },
+        { id: 7, name: 'George Clark', age: 31, role: 'DevOps Lead', salary: 130000 },
+        { id: 8, name: 'Hannah Abbott', age: null, role: 'Consultant', salary: 110000 },
+        { id: 9, name: 'Ian Malcolm', age: 48, role: 'Chaos Theorist', salary: null },
+        { id: 10, name: 'Julia Roberts', age: 24, role: 'UI/UX Designer', salary: 92000 },
+      ];
+
+      for (const u of sampleUsers) {
+        try {
+          await db.insert('users', u);
+        } catch (e) {}
+      }
+
+      await executeUserQuery();
+    }
+
+    async function executeUserQuery() {
+      if (!db) await initDb();
+
+      let q = db.from('users');
+      const ageOp = document.getElementById('ageOp').value;
+      const ageVal = parseInt(document.getElementById('ageVal').value, 10);
+      const salaryNullOp = document.getElementById('salaryNullOp').value;
+      const orderCol = document.getElementById('orderCol').value;
+      const orderDir = document.getElementById('orderDir').value;
+      const limitVal = parseInt(document.getElementById('limitVal').value, 10);
+
+      if (ageOp !== 'none' && !isNaN(ageVal)) {
+        q = q.where('age', ageOp, ageVal);
+      }
+
+      if (salaryNullOp === 'whereNull') {
+        q = q.whereNull('salary');
+      } else if (salaryNullOp === 'whereNotNull') {
+        q = q.whereNotNull('salary');
+      }
+
+      if (orderCol) {
+        q = q.orderBy(orderCol, orderDir);
+      }
+      if (!isNaN(limitVal)) {
+        q = q.limit(limitVal);
+      }
+
+      // 1. Get Bytecode Disassembly via .explain()
+      const t0 = performance.now();
+      const explainInfo = await q.explain();
+      const tExplain = performance.now();
+
+      // 2. Execute Query
+      const rows = await q.toArray();
+      const tExec = performance.now();
+
+      const totalMs = (tExec - t0).toFixed(2);
+      document.getElementById('timingBadge').innerText = `${totalMs} ms`;
+      document.getElementById('rowCount').innerText = rows.length;
+      document.getElementById('bytecodeSizeBadge').innerText = `${explainInfo.bytecodeSize} bytes`;
+      document.getElementById('terminalDisassembly').innerText = explainInfo.assembly;
+
+      // Render Rows
+      const tbody = document.getElementById('resultsBody');
+      tbody.innerHTML = '';
+
+      if (rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">No matching rows found</td></tr>`;
+        return;
+      }
+
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${r.id}</strong></td>
+          <td>${r.name ?? '<span class="null-pill">NULL</span>'}</td>
+          <td>${r.age !== null ? r.age : '<span class="null-pill">NULL</span>'}</td>
+          <td>${r.role !== null ? r.role : '<span class="null-pill">NULL</span>'}</td>
+          <td>${r.salary !== null ? '$' + Number(r.salary).toLocaleString() : '<span class="null-pill">NULL</span>'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    document.getElementById('seedBtn').addEventListener('click', seedData);
+    document.getElementById('runBtn').addEventListener('click', executeUserQuery);
+    document.getElementById('storageSelect').addEventListener('change', seedData);
+
+    // Initial run
+    seedData();
+  </script>
+</body>
+</html>

@@ -233,3 +233,320 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
   return emitter.toByteArray();
 }
+
+export interface DisassembledInstruction {
+  addr: number;
+  opcode: string;
+  p1: string;
+  p2: string;
+  p3: string;
+  comment: string;
+}
+
+const textDecoder = new TextDecoder();
+
+/**
+ * Disassembles binary bytecode into human-readable instructions.
+ */
+export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): DisassembledInstruction[] {
+  const instructions: DisassembledInstruction[] = [];
+  const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+  let pc = 0;
+
+  const getColName = (idx: number) => {
+    return table?.columns[idx]?.name ? `'${table.columns[idx].name}'` : `col_${idx}`;
+  };
+
+  const fmtAddr = (n: number) => `0x${n.toString(16).padStart(4, '0')}`;
+
+  while (pc < bytecode.byteLength) {
+    const addr = pc;
+    const op = bytecode[pc++];
+
+    switch (op) {
+      case OpCode.OP_HALT:
+        instructions.push({
+          addr,
+          opcode: 'OP_HALT',
+          p1: '',
+          p2: '',
+          p3: '',
+          comment: 'Halt VM execution (STATUS_DONE)',
+        });
+        break;
+
+      case OpCode.OP_OPEN_CURSOR: {
+        const cursor = bytecode[pc++];
+        const rootPage = view.getUint32(pc, true);
+        pc += 4;
+        instructions.push({
+          addr,
+          opcode: 'OP_OPEN_CURSOR',
+          p1: `c[${cursor}]`,
+          p2: `page=${rootPage}`,
+          p3: '',
+          comment: `Open cursor ${cursor} on root page ${rootPage}${table ? ` ('${table.name}')` : ''}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_REWIND: {
+        const cursor = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_REWIND',
+          p1: `c[${cursor}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: '',
+          comment: `Rewind cursor to first row; jump to ${fmtAddr(jumpTarget)} if empty`,
+        });
+        break;
+      }
+
+      case OpCode.OP_NEXT_ROW: {
+        const cursor = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_NEXT_ROW',
+          p1: `c[${cursor}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: '',
+          comment: `Advance cursor to next row; jump to ${fmtAddr(jumpTarget)} if EOF`,
+        });
+        break;
+      }
+
+      case OpCode.OP_COLUMN_INT: {
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_INT',
+          p1: `c[0]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as INT into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_COLUMN_FLOAT: {
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_FLOAT',
+          p1: `c[0]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as FLOAT into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_COLUMN_TEXT: {
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_TEXT',
+          p1: `c[0]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as TEXT into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_IS_NULL: {
+        const colIdx = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_IS_NULL',
+          p1: `c[0]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: fmtAddr(jumpTarget),
+          comment: `If ${getColName(colIdx)} IS NULL -> jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_IS_NOT_NULL: {
+        const colIdx = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_IS_NOT_NULL',
+          p1: `c[0]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: fmtAddr(jumpTarget),
+          comment: `If ${getColName(colIdx)} IS NOT NULL -> jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_EQ:
+      case OpCode.OP_NE:
+      case OpCode.OP_GT:
+      case OpCode.OP_GE:
+      case OpCode.OP_LT:
+      case OpCode.OP_LE: {
+        const opNames: Record<number, string> = {
+          [OpCode.OP_EQ]: 'OP_EQ',
+          [OpCode.OP_NE]: 'OP_NE',
+          [OpCode.OP_GT]: 'OP_GT',
+          [OpCode.OP_GE]: 'OP_GE',
+          [OpCode.OP_LT]: 'OP_LT',
+          [OpCode.OP_LE]: 'OP_LE',
+        };
+        const symbols: Record<number, string> = {
+          [OpCode.OP_EQ]: '==',
+          [OpCode.OP_NE]: '!=',
+          [OpCode.OP_GT]: '>',
+          [OpCode.OP_GE]: '>=',
+          [OpCode.OP_LT]: '<',
+          [OpCode.OP_LE]: '<=',
+        };
+        const regA = bytecode[pc++];
+        const regB = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: opNames[op],
+          p1: `r[${regA}]`,
+          p2: `r[${regB}]`,
+          p3: fmtAddr(jumpTarget),
+          comment: `If r[${regA}] ${symbols[op]} r[${regB}] -> jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_JUMP: {
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_JUMP',
+          p1: fmtAddr(jumpTarget),
+          p2: '',
+          p3: '',
+          comment: `Unconditional jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_INT: {
+        const regIdx = bytecode[pc++];
+        const val = view.getInt32(pc, true);
+        pc += 4;
+        instructions.push({
+          addr,
+          opcode: 'OP_LOAD_INT',
+          p1: `r[${regIdx}]`,
+          p2: `${val}`,
+          p3: '',
+          comment: `Load literal int ${val} into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_FLOAT: {
+        const regIdx = bytecode[pc++];
+        const val = view.getFloat64(pc, true);
+        pc += 8;
+        instructions.push({
+          addr,
+          opcode: 'OP_LOAD_FLOAT',
+          p1: `r[${regIdx}]`,
+          p2: `${val}`,
+          p3: '',
+          comment: `Load literal float ${val} into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_TEXT: {
+        const regIdx = bytecode[pc++];
+        const len = view.getUint16(pc, true);
+        pc += 2;
+        const textBytes = new Uint8Array(bytecode.buffer, bytecode.byteOffset + pc, len);
+        const str = textDecoder.decode(textBytes);
+        pc += len;
+        instructions.push({
+          addr,
+          opcode: 'OP_LOAD_TEXT',
+          p1: `r[${regIdx}]`,
+          p2: `"${str}"`,
+          p3: '',
+          comment: `Load literal text "${str}" into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_NULL: {
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_LOAD_NULL',
+          p1: `r[${regIdx}]`,
+          p2: 'NULL',
+          p3: '',
+          comment: `Set r[${regIdx}] to NULL`,
+        });
+        break;
+      }
+
+      case OpCode.OP_EMIT_ROW: {
+        const cursor = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_EMIT_ROW',
+          p1: `c[${cursor}]`,
+          p2: '',
+          p3: '',
+          comment: `Row passed all filters -> emit to Output Result Buffer`,
+        });
+        break;
+      }
+
+      default:
+        instructions.push({
+          addr,
+          opcode: `OP_UNKNOWN(0x${op.toString(16)})`,
+          p1: '',
+          p2: '',
+          p3: '',
+          comment: 'Unknown opcode',
+        });
+        break;
+    }
+  }
+
+  return instructions;
+}
+
+/**
+ * Formats a list of disassembled instructions into an ASCII table string.
+ */
+export function formatDisassembly(instructions: DisassembledInstruction[]): string {
+  const pad = (s: string, n: number) => s.padEnd(n, ' ');
+  const fmtAddr = (n: number) => `0x${n.toString(16).padStart(4, '0')}`;
+
+  let out = `${pad('ADDR', 8)} ${pad('OPCODE', 18)} ${pad('P1', 12)} ${pad('P2', 20)} ${pad('P3', 10)} COMMENT\n`;
+  out += '-'.repeat(95) + '\n';
+
+  for (const ins of instructions) {
+    out += `${pad(fmtAddr(ins.addr), 8)} ${pad(ins.opcode, 18)} ${pad(ins.p1, 12)} ${pad(ins.p2, 20)} ${pad(ins.p3, 10)} ${ins.comment}\n`;
+  }
+
+  return out;
+}
+

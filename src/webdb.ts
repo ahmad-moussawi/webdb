@@ -40,7 +40,22 @@ import {
   compileQuery,
   ComparisonOp,
   QueryFilter,
+  disassembleBytecode,
+  formatDisassembly,
+  DisassembledInstruction,
 } from './engine/compiler.js';
+
+export interface ExplainOutput {
+  plan: {
+    table: string;
+    rootPageId: number;
+    scanType: 'TableScan';
+    filters: QueryFilter[];
+  };
+  bytecodeSize: number;
+  instructions: DisassembledInstruction[];
+  assembly: string;
+}
 
 export interface WebDbOptions {
   name: string;
@@ -90,6 +105,10 @@ export class QueryBuilder {
     this.sortCol = colName;
     this.sortDir = direction;
     return this;
+  }
+
+  async explain(): Promise<ExplainOutput> {
+    return this.db.explainQuery(this.tableName, this.filters);
   }
 
   async toArray(): Promise<DbRow[]> {
@@ -225,6 +244,30 @@ export class WebDB {
 
   from(tableName: string): QueryBuilder {
     return new QueryBuilder(this, tableName);
+  }
+
+  explainQuery(tableName: string, filters: QueryFilter[]): ExplainOutput {
+    const page1View = new DataView(this.buffer, 0, PAGE_SIZE);
+    const table = findTableByName(page1View, tableName);
+    if (!table) {
+      throw new TableNotFoundError(tableName);
+    }
+
+    const bytecode = compileQuery({ table, filters });
+    const instructions = disassembleBytecode(bytecode, table);
+    const assembly = formatDisassembly(instructions);
+
+    return {
+      plan: {
+        table: table.name,
+        rootPageId: table.rootPageId,
+        scanType: 'TableScan',
+        filters,
+      },
+      bytecodeSize: bytecode.byteLength,
+      instructions,
+      assembly,
+    };
   }
 
   async executeQuery(
