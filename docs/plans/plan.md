@@ -283,7 +283,7 @@ To ensure a rock-solid, focused initial release:
 * **DDL:** `createTable(name, columns)`, `dropTable(name)`, `createIndex(table, column)`
 * **DML:** `insert(table, row)`, `update(table, values).where(...)`, `delete(table).where(...)`
 * **Queries:** `select(cols).from(table).where(col, op, val).whereNull(col).whereNotNull(col).limit(n).offset(n).orderBy(col, 'asc'|'desc')`
-* **Joins:** Single-table queries + simple 2-table nested loop joins (advanced hash joins deferred to V1.1).
+* **Joins & Subqueries:** Single-table queries + simple 2-table nested loop / index joins (3+ table joins, hash joins, and subqueries deferred to V1.1+; see [limitations.md §4.4–4.6](./limitations.md)).
 * **Transactions:** Full ACID `db.transaction(async (tx) => { ... })` with atomic rollback.
 * **UDFs:** `db.registerFunction(name, fn)` for RegExp, Date formatting, and custom math.
 

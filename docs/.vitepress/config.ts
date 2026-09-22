@@ -12,7 +12,7 @@ export default defineConfig({
     nav: [
       { text: 'Getting Started', link: '/getting-started' },
       { text: 'Roadmap & Plans', link: '/plans/plan' },
-      { text: 'Prototype Spec', link: '/plans/prototype' },
+      { text: 'Future Extensions', link: '/plans/future_extensions_roadmap' },
       { text: 'Limitations', link: '/plans/limitations' },
       {
         text: 'Phase Specs',
@@ -44,6 +44,7 @@ export default defineConfig({
           { text: 'Strategic Master Plan', link: '/plans/plan' },
           { text: 'Prototype ("Walking Skeleton")', link: '/plans/prototype' },
           { text: 'System Limits & Invariants', link: '/plans/limitations' },
+          { text: 'Future Extensions & Search Roadmap', link: '/plans/future_extensions_roadmap' },
         ],
       },
       {

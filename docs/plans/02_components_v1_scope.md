@@ -111,8 +111,8 @@ interface WebDbCoreEngine {
    - Inspection: `query.explain()` (high-level plan + VDBE disassembly).
 
 ### 4.2 Explicitly Deferred Features (Scheduled for V1.1+)
-- Multi-table `FULL OUTER JOIN` and `RIGHT JOIN` (only single-table queries and simple 2-table inner/left joins supported in V1).
-- Correlated subqueries and window functions (`OVER (PARTITION BY ...)`).
+- 3+ table joins, `FULL OUTER JOIN`, and `RIGHT JOIN` (only single-table queries and simple 2-table inner/left joins supported in V1; see [limitations.md §4.4–4.6](./limitations.md#_4-4-join-constraints-max-2-tables-inner-and-left-join-only)).
+- Subqueries (uncorrelated scalar, `IN`, `EXISTS`, correlated subqueries) and window functions (`OVER (PARTITION BY ...)`) (deferred to V1.1+; see [limitations.md §4.5–4.6](./limitations.md#_4-5-subqueries-deferred-in-v1)).
 - Dynamic `ALTER TABLE` schema mutations (tables must be recreated in V1).
 - Composite multi-column secondary indexes (single-column secondary indexes only in V1).
 

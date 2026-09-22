@@ -23,7 +23,8 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 | **Query** | Maximum Sort Columns (`ORDER BY`) | `8 columns` | `TooManyOrderByColumnsError` |
 | **Query** | Maximum Group By Columns (`GROUP BY`) | `8 columns` | `TooManyGroupByColumnsError` |
 | **Query** | Secondary Indexes | Single-column only | Composite indexes deferred to V1.1+ |
-| **Query** | Table Joins | Up to 2 tables (`INNER`, `LEFT`) | Right & Full Outer Joins deferred |
+| **Query** | Table Joins | Up to 2 tables (`INNER`, `LEFT`) | 3+ table joins deferred to V1.1 (see §4.4) |
+| **Query** | Subqueries | Deferred in V1 | Uncorrelated scalar, IN/EXISTS, correlated subqueries deferred to V1.1+ (see §4.5) |
 | **Concurrency** | Concurrent Writers | `1 writer` (Web Locks API) | Serialized in FIFO order via browser locks |
 | **Concurrency** | Active Transactions per Connection | `1 transaction` | `TransactionAlreadyActiveError` |
 
@@ -148,15 +149,43 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 * **Status:** Composite multi-column indexes (`createIndex('users', ['org_id', 'created_at'])`) are deferred to V1.1+.
 
 ### 4.4 Join Constraints (Max 2 Tables, INNER and LEFT JOIN Only)
-* **Supported:** Single-table scans, 2-table `INNER JOIN`, and 2-table `LEFT OUTER JOIN`.
+* **Supported in V1:** Single-table queries, 2-table `INNER JOIN`, and 2-table `LEFT OUTER JOIN`.
+* **Execution Strategy:** Nested Loop Join and Indexed Nested Loop Join (outer table sequential scan + inner table B+Tree index seek).
 * **Deferred:** 3+ table join graphs, `RIGHT JOIN`, and `FULL OUTER JOIN`.
+* **Technical Rationale (Why 2 Tables in V1):**
+  1. **Absence of Cost-Based Optimizer (CBO) & Join Ordering:** For 2 tables ($A \bowtie B$), there are only 2 evaluation permutations ($A \to B$ vs $B \to A$). For $N$ tables, there are $N!$ permutations. Without catalog table cardinality statistics and histograms in V1, choosing an unoptimized join order can degrade performance from sub-millisecond to multi-second browser freezes.
+  2. **Nested Loop Performance Cliff:** While 2-table joins with an index on the inner key are $O(M \log N)$, chaining 3+ tables via nested loops without **In-Arena Hash Joins** exhibits quadratic or cubic ($O(R_1 \times R_2 \times R_3)$) execution times. Hash joins are scheduled for V1.1.
+  3. **TypeScript Fluent API & Namespace Resolution:** Arbitrary $N$-way joins require complex table aliasing, multiple `ON` predicate expressions, and multi-namespace column disambiguation (e.g. resolving `id` across 3+ tables) with full TypeScript compile-time typing.
+  4. **Multi-Level `LEFT JOIN` NULL State Tracking:** Chaining multiple outer joins requires tracking NULL-suppression state across subsequent joins without triggering invalid index seeks on generated NULL values.
 
-### 4.5 Aggregations & Analytical Queries
+### 4.5 Subqueries (Deferred in V1)
+* **Status:** Subqueries in `SELECT`, `WHERE`, and `FROM` clauses are deferred to V1.1+.
+* **Architectural Evaluation:**
+  Because WebDB uses a register-based Bytecode Virtual Machine (VDBE), subqueries do not require separate OS threads or processes; they compile directly into the VM instruction stream. However, implementation complexity varies significantly by subquery category:
+  1. **Uncorrelated Scalar Subqueries (`WHERE salary > (SELECT AVG(salary) ...)`):**
+     - *Complexity: Low.* The VM evaluates the subquery once before the main query loop, hoists the result into a scalar register, and evaluates the outer predicate in $O(1)$.
+  2. **Semi-Join & Anti-Join (`IN`, `EXISTS`, `NOT EXISTS`):**
+     - *Complexity: Medium.* `EXISTS` short-circuits on the first inner match. `IN (SELECT ...)` evaluates the subquery once and populates an ephemeral hash set in the Transient Query Arena (`0x420000`) for $O(1)$ outer row probing.
+  3. **Correlated Subqueries (`WHERE x = outer.y`):**
+     - *Complexity: High.* Inner subquery must re-evaluate for every outer row. Requires register namespace isolation and multi-cursor state preservation when asynchronous `STATUS_PAGE_FAULT` suspensions occur.
+  4. **Derived Tables (`FROM (SELECT ...)`):**
+     - *Complexity: High.* Requires subquery flattening into the outer AST or ephemeral table materialization in the Query Arena.
+
+### 4.6 Join & Subquery Evolution Roadmap
+
+| Phase | Target Scope | Join Features | Subquery Features | Implementation Architecture |
+| :--- | :---: | :--- | :--- | :--- |
+| **V1.0** (Current) | Core Engine | 2-table `INNER` & `LEFT JOIN` | None (Deferred) | Nested Loop Join & Index Seek; single register namespace |
+| **V1.1** | Expressive Queries | 3+ Table Joins (Left-Deep manual ordering); In-Arena Hash Joins | Uncorrelated Scalar Subqueries, `EXISTS`, `NOT EXISTS`, `IN (subquery)` | In-Arena Hash Tables (`0x420000`), register hoisting, semi-join short-circuiting |
+| **V1.2** | Analytical Queries | Arbitrary join trees with manual hints | Correlated Subqueries, Derived Tables (`FROM (subquery)`) | Subquery decorrelation heuristics, multi-cursor asynchronous fault preservation |
+| **V2.0** | Enterprise SQL | Cost-Based Optimizer (CBO), `FULL OUTER JOIN` | Advanced subquery unnesting, Cost-based decorrelation | Catalog statistics & histograms, dynamic programming join ordering ($O(3^N)$) |
+
+### 4.7 Aggregations & Analytical Queries
 * **Supported Aggregate Functions:** `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`.
 * **Post-Aggregation Filtering:** `having(...)` clauses evaluated after bucket aggregation.
 * **Deferred:** Window functions (`OVER (PARTITION BY ...)`), `ROLLUP`, `CUBE`, and common table expressions (`WITH ...`).
 
-### 4.6 Schema Mutations (`ALTER TABLE`)
+### 4.8 Schema Mutations (`ALTER TABLE`)
 * **Invariant:** Tables cannot be modified in-place dynamically after creation.
 * **Migration Pattern:** To alter a schema in V1, applications create the new table, migrate data via `insert()`, and drop the old table. Dynamic column addition/removal is scheduled for future catalog revisions.
 
