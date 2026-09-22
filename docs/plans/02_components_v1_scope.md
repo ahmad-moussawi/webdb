@@ -98,11 +98,12 @@ interface WebDbCoreEngine {
    - `update(tableName, values).where(...)`.
    - `delete(tableName).where(...)`.
 4. **Query Operators:**
-   - Projections: `select([...columns])` or all columns.
+   - Projections & Aggregations: `select([...columns])` with aggregate functions (`count()`, `count(col)`, `sum(col)`, `avg(col)`, `min(col)`, `max(col)`).
    - Comparisons: `=`, `!=`, `>`, `>=`, `<`, `<=`.
    - SQLite Null Checks: `whereNull(col)`, `whereNotNull(col)`.
+   - Grouping & Aggregation: `groupBy(col | cols[])` (up to 8 columns max) and `having(...)`.
    - Pagination: `limit(n)`, `offset(n)`.
-   - Sorting: `orderBy(col, 'asc' | 'desc')` (with SQLite null collation).
+   - Sorting: `orderBy(col, 'asc' | 'desc')` or multi-column `orderBy([{ column, direction?, nulls? }, ...])` (max 8 columns, SQLite null collation).
 5. **Transactions:**
    - `await db.transaction(async (tx) => { ... })` with atomic auto-rollback on error.
 6. **Extensibility & Diagnostics:**
@@ -128,6 +129,8 @@ interface WebDbCoreEngine {
 * [ ] **Missing Table Handling:** Executing a query or insert on a non-existent table must throw `TableNotFoundError`.
 * [ ] **Type Coercion & Range Safety:** Passing a floating-point number into an `INT32` column must truncate cleanly to 32-bit signed integer or throw `InvalidDataTypeError` on overflow.
 * [ ] **`NOT NULL` Constraint Guard:** Any attempt to set a `NOT NULL` column to `null` or `undefined` must throw `NotNullConstraintError` immediately before writing dirty bytes.
+* [ ] **Order By Column Ceiling:** Querying with $> 8$ sort columns must throw `TooManyOrderByColumnsError` at compile time.
+* [ ] **Group By Column Ceiling:** Querying with $> 8$ grouping columns must throw `TooManyGroupByColumnsError` at compile time.
 
 ### C. Queue & Concurrency Fail-Fasts
 * [ ] **Exclusive Transaction Lease Starvation:** Non-transaction queries enqueued during an active `db.transaction()` must wait in FIFO order without timing out or throwing lock conflicts.

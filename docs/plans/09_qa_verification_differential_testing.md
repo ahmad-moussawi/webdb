@@ -59,7 +59,7 @@ Because both engines adhere to the identical memory contract:
 * [ ] **Exact 2048-Byte Boundary:** Inserting a row of exactly 2048 bytes succeeds; inserting 2049 bytes throws `RowSizeLimitExceededError`.
 * [ ] **Zero-Byte Page Saturation:** Inserting rows until contiguous free space between slot directory and row data reaches exactly 0 bytes remaining.
 * [ ] **Slot Defragmentation / Compaction:** Deleting alternating rows to fragment page space; inserting a new row that fits only after compacting the page.
-* [ ] **Dynamic Null-Bitmap Scaling:** Verify bitwise null-checking for tables with 1, 8, 9, 16, 17, and 32 columns without offset drift.
+* [ ] **Dynamic Null-Bitmap Scaling:** Verify bitwise null-checking for tables with 1, 8, 9, and 16 columns (rejecting > 16 with `TooManyColumnsError`) without offset drift.
 * [ ] **Corrupted Slot Directory:** Rejecting corrupt slot offsets pointing outside page boundaries.
 
 ### B. B+Tree Structure & Splitting

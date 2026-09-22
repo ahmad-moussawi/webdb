@@ -44,20 +44,26 @@ To deliver an ultra-fast, robust working engine without waiting for all advanced
 * **Bytes 0..99 (File Header):**
   - Bytes `0..5`: Magic bytes `"WEBDB\0"`
   - Bytes `6..7`: Page size (`4096`, uint16)
-  - Bytes `8..11`: Total page count (`total_pages`, uint32)
-  - Bytes `12..15`: Free page head pointer (`free_page_head`, uint32)
-  - Bytes `16..19`: Schema version (`schema_version`, uint32)
+  - Bytes `8..9`: File format version (`file_format_version`, uint16, default `1`)
+  - Bytes `10..11`: Minimum readable version (`min_read_version`, uint16, default `1`)
+  - Bytes `12..15`: Total page count (`total_pages`, uint32)
+  - Bytes `16..19`: Free page head pointer (`free_page_head`, uint32; next free page ID read from bytes 6..9 of each free page)
+  - Bytes `20..23`: Schema version (`schema_version`, uint32)
+  - Bytes `24..27`: Change counter (`change_counter`, uint32)
+  - Bytes `28..31`: Page 1 Checksum (`page_checksum`, uint32, CRC32 with bytes 28..31 zeroed)
+  - Bytes `32..35`: Next catalog page pointer (`next_catalog_page_id`, uint32, 0 in V1)
+  - Bytes `36..99`: Reserved (64 bytes zero-filled)
 * **Bytes 100..4095 (Binary Master Table):**
-  - Up to 8 tables, each supporting up to 16 columns:
+  - Up to 10 tables, each supporting up to 16 columns ($10 \times 344\text{ B} = 3,440\text{ B}$):
     ```
-    TableMeta (offset 100 + table_idx * 480):
+    TableMeta (offset 100 + table_idx * 344, total size 344 bytes):
       uint16_t table_id
-      uint16_t column_count
+      uint16_t column_count (up to 16)
       uint32_t root_page_id
       char     name[16] (null-padded UTF-8)
-      ColumnMeta columns[16]:
+      ColumnMeta columns[16] (16 * 20B = 320B):
         uint8_t  type (1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB)
-        uint8_t  flags (0x1=PRIMARY KEY, 0x2=NOT NULL)
+        uint8_t  flags (0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED)
         uint16_t col_offset (offset in fixed slice)
         char     name[16] (null-padded UTF-8)
     ```
@@ -65,14 +71,16 @@ To deliver an ultra-fast, robust working engine without waiting for all advanced
 ### 3.3 Slotted 4KB Data Page Layout
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ Page Header (12 Bytes):                                                │
+│ Page Header (16 Bytes):                                                │
 │   uint8_t  page_type (0x0D = Leaf Data Page)                           │
 │   uint8_t  reserved (0)                                                │
 │   uint16_t cell_count (Number of rows in page)                         │
 │   uint16_t cell_content_offset (Byte offset of lowest row payload)     │
 │   uint32_t next_page_id (Page link for sequential scan, or 0)          │
+│   uint16_t free_bytes (Fragmented uncompacted hole bytes)              │
+│   uint32_t checksum (CRC32 IEEE 802.3 of full 4KB page)                │
 ├────────────────────────────────────────────────────────────────────────┤
-│ Slot Directory (grows downward):                                       │
+│ Slot Directory (grows downward from offset 16):                        │
 │   uint16_t cell_offsets[cell_count] (Pointers to row starts)           │
 ├────────────────────────────────────────────────────────────────────────┤
 │                      <--- Free Space Area --->                         │
@@ -81,6 +89,8 @@ To deliver an ultra-fast, robust working engine without waiting for all advanced
 │   Row N ... Row 2 ... Row 1                                            │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+* **Slot Shifting on Deletion:** Deleting a row shifts slot directory entries left by 2 bytes (`memmove`), decrements `cell_count--`, and adds the row size to `free_bytes`.
+* **Gap Defragmentation:** When an insert requires space and contiguous free space is insufficient but total free space is sufficient, an in-place compaction collapses all holes to the bottom.
 
 ### 3.4 Row Binary Record Format & Null-Bitmap
 ```

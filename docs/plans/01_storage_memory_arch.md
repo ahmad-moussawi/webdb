@@ -18,7 +18,7 @@ The engine operates entirely within a single flat `ArrayBuffer` provided by a `W
 ```typescript
 const memory = new WebAssembly.Memory({
   initial: 70,  // ~4.48 MB (for default 4 MB page cache)
-  maximum: 320, // ~20.48 MB (ceiling including 16 MB max query arena)
+  maximum: 320, // ~20.48 MB (default ceiling: 4MB cache + 16MB arena; adapts dynamically to maxQueryMemory)
 });
 ```
 
@@ -45,7 +45,8 @@ Offset (Hex)          Size        Region Name                  Purpose
 0x401080 - 0x40127F         512 B `VmContext` Struct & Cursors Execution state + cursors[16]
 0x401280 - 0x41127F      65,536 B Output Result Buffer         Chunked streaming row output (64KB)
 0x411280 - 0x41927F      32,768 B Bytecode Scratchpad          Compiled query bytecode buffer (32KB)
-0x419280 - 0x41FFFF      28,032 B Reserved Alignment Padding   Zero-filled alignment cushion
+0x419280 - 0x41A27F       4,096 B Page Scratchpad (`page_scratchpad`) Dedicated 4KB staging buffer for page compaction & node splits
+0x41A280 - 0x41FFFF      23,936 B Reserved Alignment Padding   Zero-filled alignment cushion
 ─────────────────────────────────────────────────────────────────────────────────────────────
 0x420000 - 0x141FFFF  Up to 16 MB Transient Query Arena        Growable bump allocator for GROUP BY
                                                                hash tables and sort buffers
@@ -74,9 +75,21 @@ Offset (Hex)          Size        Region Name                  Purpose
 - Checked by the JS Cache Controller prior to LRU eviction to force WAL flushing.
 - Cleared monotonically during checkpoint execution when pages are durably written to the main `.db` file.
 
-#### 4. Execution State Struct (`VmContext`, `0x401080..0x40127F`)
+#### 4. Execution State Struct (`VmContext`, `0x401080..0x40127F`, 512 Bytes)
 - Fixed-offset C struct representing the single active query state machine:
 ```c
+typedef struct {
+    uint8_t  type;        // 0=NULL, 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB
+    uint8_t  flags;       // Reserved flags (e.g. 0x1 = CONSTANT/LITERAL)
+    uint16_t len;         // Byte length for TEXT and BLOB payloads
+    uint32_t str_offset;  // Byte offset in shared memory (page or arena) for text/blob
+    union {
+        int32_t  i32;     // 32-bit signed integer
+        int64_t  i64;     // 64-bit signed integer
+        double   f64;     // 64-bit IEEE 754 float
+    } val;                // 8 bytes (8-byte aligned)
+} Register;               // Exact size: 16 bytes
+
 typedef struct {
     uint32_t page_id;      // Database Page ID currently focused
     uint16_t slot_idx;     // Cache slot index (0..1023) holding this page
@@ -84,17 +97,20 @@ typedef struct {
     uint16_t cell_offset;  // Byte offset of the active row payload within the page
     uint8_t  depth;        // B-tree traversal depth (0 = root/leaf)
     uint8_t  flags;        // Cursor status flags (0x1 = EOF, 0x2 = PINNED)
-} Cursor;
+} Cursor;                  // Exact size: 12 bytes
 
 typedef struct {
-    uint32_t pc;            // Bytecode program counter
-    uint32_t status;        // 0=RUNNING, 1=DONE, 2=PAGE_FAULT, 3=BUFFER_FULL, 4=ERROR
-    uint32_t fault_page_id; // Missing page requested during PAGE_FAULT
-    uint32_t result_count;  // Number of rows packed in current output chunk
-    uint32_t result_offset; // Current write offset in Output Result Buffer
-    uint32_t arena_offset;  // Current allocation offset in Transient Query Arena
-    Cursor   cursors[16];   // Active cursors for multi-table joins & subqueries
-} VmContext;
+    uint32_t pc;            // Bytecode program counter (offset 0)
+    uint32_t status;        // 0=RUNNING, 1=DONE, 2=PAGE_FAULT, 3=BUFFER_FULL, 4=ERROR (offset 4)
+    uint32_t fault_page_id; // Missing page requested during PAGE_FAULT (offset 8)
+    uint32_t result_count;  // Number of rows packed in current output chunk (offset 12)
+    uint32_t result_offset; // Current write offset in Output Result Buffer (offset 16)
+    uint32_t arena_offset;  // Current allocation offset in Transient Query Arena (offset 20)
+    Cursor   cursors[16];   // Active cursors for multi-table joins & subqueries (offset 24..215, 192 bytes)
+    Register registers[16]; // Scalar comparison and expression registers (offset 216..471, 256 bytes)
+    uint32_t rows_affected; // Number of mutated/deleted rows for DML operations (offset 472..475)
+    uint8_t  reserved[36];  // Alignment padding to 512 bytes (offset 476..511)
+} VmContext;                // Exact size: 512 bytes
 ```
 
 #### 5. Output Result Buffer (`0x401280..0x41127F`, 64 KB)
@@ -104,12 +120,21 @@ typedef struct {
   - `[uint8_t record_bytes[record_length]]`
 - **Yield Invariant:** If adding a row requires $\text{result\_offset} + 2 + \text{row\_len} > 65,536$, the VM halts and yields `STATUS_BUFFER_FULL`. The JS Host hydrates the chunk into JS objects, resets $\text{result\_offset} = 0$, and resumes the VM.
 
-#### 6. Transient Query Arena (`0x420000..Ceiling`, Up to 16 MB)
-- Sized initially at 256 KB and grown dynamically in 64KB increments via `memory.grow()` up to the configurable ceiling (default 16 MB).
+#### 6. Bytecode Scratchpad (`0x411280..0x41927F`, 32 KB)
+- Dedicated execution buffer where compiled binary query bytecode instructions are loaded by the Host Compiler before calling `vm_step()`.
+- Maximum query bytecode program size is strictly capped at **32 KB**.
+
+#### 7. Page Scratchpad (`0x419280..0x41A27F`, 4,096 Bytes)
+- Pre-allocated 4KB staging buffer dedicated exclusively to the storage engine for **in-place page compaction/defragmentation** and **B+Tree internal/leaf node splitting**.
+- **Zero-Allocation Invariant:** Guarantees that page restructuring never triggers dynamic heap allocations (`malloc`, `new Uint8Array(4096)`), upholding Rule 1 of `06_c_style_rules_v1.md`.
+- **Isolation Guarantee:** Operates entirely outside the active Bytecode Scratchpad (`0x411280`), Result Buffer (`0x401280`), and Transient Query Arena (`0x420000`).
+
+#### 8. Transient Query Arena (`0x420000..Ceiling`, Default 16 MB, Configurable)
+- Sized initially at 256 KB and grown dynamically in 64KB increments via `memory.grow()` up to the configurable ceiling (default 16 MB, configurable via `maxQueryMemory` up to 2 GB in Wasm32).
 - Uses a pure **Bump Allocator** ($\text{arena\_offset} \mathrel{+}= \text{alloc\_size}$) for:
-  - `GROUP BY` open-addressing hash tables.
-  - Sort accumulation buffers for `ORDER BY`.
-- **Fail-Fast OOM Invariant:** If $\text{arena\_offset} + \text{size} > \text{max\_query\_memory}$, the engine immediately yields `STATUS_ERR_ARENA_EXHAUSTED`. The JS Host throws `QueryArenaExhaustedError`. **Silent truncation or dropped aggregation buckets are strictly prohibited.**
+  - `GROUP BY` open-addressing hash tables (`AggBucket[]` 40-byte buckets and packed grouping keys up to 8 columns maximum).
+  - Sort accumulation buffers for unindexed multi-column `ORDER BY` (`SorterEntry[]` array and packed sort keys up to 8 columns maximum).
+- **Fail-Fast OOM Invariant:** If $\text{arena\_offset} + \text{size} > \text{max\_query\_memory}$, the engine immediately yields `STATUS_ERR_ARENA_EXHAUSTED`. The JS Host throws `QueryArenaExhaustedError`. **Silent truncation or dropped aggregation buckets/sort rows are strictly prohibited.**
 - **Instant $O(1)$ Cleanup:** When a query completes or errors, resetting $\text{arena\_offset} = 0$ reclaims 100% of transient memory in 1 CPU instruction with zero memory fragmentation.
 
 ---
@@ -161,15 +186,16 @@ Every database page (Leaf Data, Internal B-Tree, Overflow) is strictly **4096 by
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ Page Header (12 Bytes):                                                │
+│ Page Header (16 Bytes):                                                │
 │   [0]      uint8_t  page_type (0x0D = Leaf Data, 0x0A = Index Page)    │
 │   [1]      uint8_t  reserved (0x00)                                    │
 │   [2..3]   uint16_t cell_count (Number of active rows in page)         │
 │   [4..5]   uint16_t cell_content_offset (Byte offset of lowest record) │
 │   [6..9]   uint32_t next_page_id (Sequential scan link, or 0)          │
 │   [10..11] uint16_t free_bytes (Fragmented uncompacted hole bytes)     │
+│   [12..15] uint32_t checksum (CRC32 IEEE 802.3 of full 4KB page)       │
 ├────────────────────────────────────────────────────────────────────────┤
-│ Slot Directory (grows downward from offset 12):                        │
+│ Slot Directory (grows downward from offset 16):                        │
 │   cell_offsets[0]: uint16_t                                            │
 │   cell_offsets[1]: uint16_t                                            │
 │   ...                                                                  │
@@ -183,16 +209,25 @@ Every database page (Leaf Data, Internal B-Tree, Overflow) is strictly **4096 by
 ```
 
 ### 4.1 Header Offsets & Field Definitions
-- **`page_type` (1 byte, offset 0):** `0x0D` for Leaf Data Page, `0x0A` for Secondary Index Node, `0x00` for Free Page.
-- **`reserved` (1 byte, offset 1):** Alignment padding.
-- **`cell_count` (2 bytes, offset 2, Little-Endian):** Total number of row records stored on this page.
-- **`cell_content_offset` (2 bytes, offset 4, Little-Endian):** Offset of the lowest row payload byte. On an empty page, this equals `4096`.
-- **`next_page_id` (4 bytes, offset 6, Little-Endian):** Pointer to the next sequential leaf data page (enables linear scans without tree re-traversal).
+- **`page_type` (1 byte, offset 0):**
+  - `0x0D`: Table B+Tree Leaf Page (Row Data).
+  - `0x05`: Table B+Tree Interior Page (Integer `rowid` Routing).
+  - `0x0A`: Secondary Index B-Tree Leaf Page (Sorted Index Tuples).
+  - `0x02`: Secondary Index B-Tree Interior Page (Index Routing).
+  - `0x00`: Free / Recycled Page.
+- **`reserved` (1 byte, offset 1):** Alignment padding (0x00).
+- **`cell_count` (2 bytes, offset 2, Little-Endian):** Total number of row records or routing cells stored on this page.
+- **`cell_content_offset` (2 bytes, offset 4, Little-Endian):** Byte offset of the lowest cell payload. On an empty page, this equals `4096`.
+- **`next_page_id / right_child_page_id` (4 bytes, offset 6, Little-Endian):**
+  - *For Leaf Pages (`0x0D`, `0x0A`):* `next_page_id` pointer to the next sequential leaf sibling (enables linear scans without tree re-traversal).
+  - *For Interior Pages (`0x05`, `0x02`):* `right_child_page_id` pointer to the rightmost child subtree (where keys $>$ all keys on this page).
+  - *For Free Pages (`0x00`):* `next_free_page_id` pointer to the next page in the recycled LIFO free list.
 - **`free_bytes` (2 bytes, offset 10, Little-Endian):** Tracks non-contiguous fragmented bytes left by deleted or updated rows.
+- **`checksum` (4 bytes, offset 12, Little-Endian):** CRC32 (IEEE 802.3 polynomial `0xEDB88320`) checksum of the entire 4096-byte page. Computed with bytes `12..15` zeroed out.
 
 ### 4.2 Free Space & Insertion Rules
 1. **Contiguous Free Space:**
-   $$\text{contiguous\_free} = \text{cell\_content\_offset} - (12 + \text{cell\_count} \times 2)$$
+   $$\text{contiguous\_free} = \text{cell\_content\_offset} - (16 + \text{cell\_count} \times 2)$$
 2. **Total Free Space:**
    $$\text{total\_free} = \text{contiguous\_free} + \text{free\_bytes}$$
 3. **Insertion Condition:** To insert a record of length $L$, the page must have:
@@ -200,12 +235,229 @@ Every database page (Leaf Data, Internal B-Tree, Overflow) is strictly **4096 by
 4. **Defragmentation Trigger (On-Demand Page Compaction):**
    - If $\text{contiguous\_free} < L + 2$, but $\text{total\_free} \ge L + 2$:
    - The engine triggers an in-place **Page Compaction**:
-     1. Allocates an ephemeral 4KB scratch buffer.
-     2. Copies active row records contiguously to the bottom of the scratch page.
-     3. Rewrites the slot directory offsets.
+     1. Uses the pre-allocated 4KB **Page Scratchpad** (`0x419280..0x41A27F`) in shared memory (zero dynamic heap allocation).
+     2. Copies active row records contiguously to the bottom of the scratchpad page.
+     3. Rewrites the slot directory offsets starting at offset 16.
      4. Sets $\text{cell\_content\_offset} = 4096 - \sum L_i$ and $\text{free\_bytes} = 0$.
-     5. Copies scratch bytes back to the target page.
+     5. Copies the compacted 4096 bytes back to the target page slot.
    - The record is then inserted without requiring a page split.
+
+### 4.3 Page-Level CRC32 Checksum Lifecycle & Torn-Write Protection
+Data integrity in browser storage engines (OPFS, IndexedDB) requires strict verification against torn writes, incomplete flushes, and storage bit rot.
+
+* **Algorithm:** CRC32 IEEE 802.3 standard (`0xEDB88320` polynomial), calculated across the full 4096 bytes.
+* **In-Memory Write Performance:** While pages reside in the in-memory cache and mutate during active transactions, checksums are **not computed on every row modification**. The page slot is simply flagged in `dirty_mask`.
+* **Serialize / Flush Pipeline (On Disk Write):**
+  1. The page header `checksum` field (`bytes 12..15`) is cleared to `0x00000000`.
+  2. CRC32 is calculated across all 4096 bytes of the page.
+  3. The resulting 32-bit unsigned integer is written to `bytes 12..15` in little-endian order.
+  4. The serialized 4096-byte buffer is passed to `IVfsAdapter.writePage()` or WAL append.
+* **Deserialize / Fetch Pipeline (On Disk Read):**
+  1. The 4096-byte page is retrieved from `IVfsAdapter.readPage()`.
+  2. The stored checksum at `bytes 12..15` is extracted.
+  3. `bytes 12..15` are temporarily zeroed out in memory.
+  4. CRC32 is computed across the 4096-byte buffer.
+  5. If `computedChecksum !== storedChecksum`:
+     - The engine immediately throws `CorruptPageError(pageId, storedChecksum, computedChecksum)`.
+     - Eviction, query processing, and recovery halt immediately, preventing silent corruption propagation.
+
+### 4.4 Row Deletion & Slot Directory Shift (`memmove`)
+When a row at index `cell_idx` is deleted:
+1. **Extract Row Geometry:** Read the target row's length $L$ from its row header and variable-length offset table.
+2. **Shift Slot Directory:** Remove the 2-byte slot entry at offset `16 + (cell_idx * 2)` and shift all subsequent slot directory entries left by 2 bytes using an in-memory `memmove`:
+   $$\text{src} = 16 + (\text{cell\_idx} + 1) \times 2, \quad \text{dst} = 16 + \text{cell\_idx} \times 2, \quad \text{length} = (\text{cell\_count} - 1 - \text{cell\_idx}) \times 2$$
+3. **Update Header Counts:**
+   - Decrement `cell_count--`.
+   - Record the vacated payload bytes as an uncompacted fragmentation hole:
+     $$\text{free\_bytes} \mathrel{+}= L$$
+   - The 2 bytes freed in the slot directory immediately expand $\text{contiguous\_free}$.
+4. **Physical Page WAL Isolation:** Because WebDB uses physical 4KB page logging, intra-page byte shifts are completely transparent to the WAL. On transaction commit, the entire 4KB page is written to `.wal` with its updated CRC32 checksum. No logical delta logging is required.
+5. **Decoupled Foreign Keys & Secondary Indexes:**
+   - Foreign keys reference logical Primary Keys (e.g. `user_id = 42`), **never** physical slot addresses.
+   - Secondary indexes store `(indexed_column_value, primary_key)`.
+   - Shifting slot directory entries leaves logical Primary Keys unchanged, preserving 100% foreign key and secondary index integrity.
+6. **Active Cursor Invariant:** If an active query cursor deletes the row currently under focus (`DELETE WHERE CURRENT OF`), subsequent slot entries slide left into `cell_idx`. The cursor preserves its current `cell_idx` so the next call to `OP_NEXT_ROW` naturally evaluates the next row without skipping.
+
+### 4.5 Row Update Lifecycle & Expansion Mechanics (3 Scenarios)
+Updating an existing row from length $L_{\text{old}}$ to $L_{\text{new}}$ follows a deterministic 3-case taxonomy:
+
+* **Scenario A: Same-Size or Shrinking Update ($L_{\text{new}} \le L_{\text{old}}$):**
+  - The updated record is written directly into the existing byte offset.
+  - If $L_{\text{new}} < L_{\text{old}}$, the remaining bytes are abandoned as a hole:
+    $$\text{free\_bytes} \mathrel{+}= (L_{\text{old}} - L_{\text{new}})$$
+* **Scenario B: Expanding Update Fitting on Current Page ($L_{\text{new}} > L_{\text{old}}$ and $\text{total\_free} \ge L_{\text{new}} - L_{\text{old}}$):**
+  - The old record space is marked as a hole: $\text{free\_bytes} \mathrel{+}= L_{\text{old}}$.
+  - If $\text{contiguous\_free} < L_{\text{new}}$, trigger an **In-Place Page Compaction** (Section 4.2), which reclaims all holes including the abandoned old record.
+  - Allocate the new record from contiguous free space at $\text{cell\_content\_offset} - L_{\text{new}}$.
+  - Update `cell_offsets[cell_idx]` to point to the new byte offset.
+* **Scenario C: Expanding Update Exceeding Page Capacity ($\text{total\_free} < L_{\text{new}} - L_{\text{old}}$):**
+  - Because no single row may exceed 2048 bytes (`RowSizeLimitExceededError`), the updated row is guaranteed to fit on a 4KB page.
+  - **In B-Tree Tables (Phase 2):** Triggers an automatic **B-Tree Leaf Split**. The page splits into two 4KB sibling pages (half the rows move to a newly allocated or recycled page). The updated row is then inserted into its proper sorted location.
+  - **In Sequential Tables (Prototype / V1):** The old row is deleted from the current page (triggering slot `memmove`), and the enlarged row is inserted onto another data page with sufficient free capacity.
+
+### 4.6 Empty Page De-allocation & Recycling Protocol (`free_page_head`)
+When all rows on a data page are deleted (`cell_count == 0`):
+
+1. **Unlink from Sibling Chain:**
+   - The preceding page's `next_page_id` is updated to point to the deleted page's `next_page_id`.
+2. **Convert to Free Page (LIFO Free List Push):**
+   - The page header is reformatted as a Free Page (see §4.7.5 for full binary layout):
+     - `page_type = 0x00` (Free Page, byte offset 0).
+     - `next_free_page_id = Page1.free_page_head` (stored at **byte offset 6..9**, chains the previous free list head).
+     - `cell_count = 0` (bytes 2..3), `cell_content_offset = 0` (bytes 4..5), `free_bytes = 0` (bytes 10..11).
+     - Bytes 16..4095 are zeroed out (or left discarded).
+     - Computes CRC32 checksum across the 4096 bytes and writes to bytes 12..15.
+   - Page 1 header is updated:
+     - `Page1.free_page_head = page_id` (bytes 16..19).
+     - `Page1.change_counter++` (bytes 24..27).
+   - Both the reclaimed page and Page 1 are marked dirty in `dirty_mask`.
+3. **Reclaim on Allocation (LIFO Free List Pop):**
+   - When an `INSERT` or B-Tree split requires a new page:
+     - If `Page1.free_page_head > 0`:
+       - Fetch page at `page_id = Page1.free_page_head`.
+       - Assert `page_type == 0x00` (fail-fast on corruption).
+       - Read its `next_free_page_id` pointer from **byte offset 6..9**.
+       - Set `Page1.free_page_head = popped_page.next_free_page_id`.
+       - Re-initialize the popped page as target type (`page_type = 0x0D`, `cell_content_offset = 4096`, etc.).
+       - Reuses the page immediately **without increasing total database file size**.
+     - Else:
+       - Increment `Page1.total_pages++` and allocate a new page at the end of the file.
+
+### 4.7 Complete B+Tree Hierarchy: Interior Nodes & Secondary Index Formats
+
+WebDB implements a strict B+Tree separation: **Table B+Trees** store row data exclusively in leaves (`0x0D`) and use fixed-width integer routing nodes (`0x05`); **Secondary Index B-Trees** store `(indexed_value, rowid)` in index leaves (`0x0A`) and index interior nodes (`0x02`).
+
+#### 4.7.1 Table Interior Page (`page_type = 0x05`)
+Table internal nodes route traversal by 64-bit integer `rowid`. All cells are fixed-width 12-byte structs:
+
+```c
+typedef struct {
+    uint32_t child_page_id; // Pointer to child page where all keys <= rowid (bytes 0..3)
+    int64_t  rowid;         // 64-bit routing separator key (bytes 4..11)
+} TableInteriorCell;        // Exact size: 12 bytes
+```
+
+* **Header Layout:** Uses the standard 16-byte header with `page_type = 0x05`. Header bytes `6..9` store `right_child_page_id` (pointer to child subtree containing keys $> \text{all keys on this page}$).
+* **Slot Directory:** Sized at `cell_count * 2` bytes starting at offset 16, pointing to the 12-byte cell payloads packed at the bottom of the page.
+* **Capacity & Fan-Out Calculation:**
+  $$\text{Bytes per interior entry} = 12 \text{ bytes (payload)} + 2 \text{ bytes (slot)} = 14 \text{ bytes}$$
+  $$\text{Max entries per 4KB page} = \left\lfloor \frac{4096 - 16 \text{ (header)}}{14} \right\rfloor = \mathbf{291 \text{ child pointers}}$$
+* **Binary Search Traversal Algorithm:**
+  To route a seek for `target_rowid`:
+  1. Binary search the 2-byte slot directory on `cell.rowid` in $O(\log K)$ ($K \le 291$, at most 8 iterations).
+  2. Find the first cell $i$ where $\text{target\_rowid} \le \text{cell}[i].\text{rowid}$.
+  3. If found, traverse to $\text{cell}[i].\text{child\_page\_id}$.
+  4. If $\text{target\_rowid} > \text{cell}[\text{last}].\text{rowid}$, traverse to `right_child_page_id` from header bytes `6..9`.
+
+#### 4.7.2 Secondary Index Leaf Page (`page_type = 0x0A`)
+Secondary indexes map column values to table `rowid`s. Because indexed values can be variable-length `TEXT` or `BLOB`, index leaves use the **slotted page architecture**:
+
+* **Index Leaf Cell Format:**
+  ```c
+  // Packed binary cell inside page
+  typedef struct {
+      uint16_t key_len;           // Length of indexed column payload (2 bytes)
+      uint8_t  key_data[key_len]; // Serialized value (4B INT32, 8B FLOAT64, UTF-8 string, etc.)
+      int64_t  rowid;             // Matching table rowid (8 bytes, Little-Endian)
+  } IndexLeafCell;
+  ```
+* **Ordering & Collation Invariant:**
+  - The slot directory offsets are kept strictly sorted in ascending order of `(key_data, rowid)` following SQLite collation precedence:
+    $$\text{NULL} < -\infty < \text{Numbers (INT/FLOAT)} < \text{TEXT (UTF-8)} < \text{BLOB}$$
+  - For duplicate key values, cells are sub-sorted by `rowid` ascending, ensuring total deterministic ordering and $O(\log N)$ binary search.
+* **Sequential Index Scans:** Header bytes `6..9` store `next_page_id`, linking index leaf siblings for $O(1)$ range scans (`WHERE age >= 21 AND age <= 65`).
+
+#### 4.7.3 Secondary Index Interior Page (`page_type = 0x02`)
+Routes traversal through the secondary index tree:
+* **Index Interior Cell Format:**
+  ```c
+  typedef struct {
+      uint32_t child_page_id;     // Pointer to child page with tuples <= this key (4 bytes)
+      uint16_t key_len;           // Length of indexed column payload (2 bytes)
+      uint8_t  key_data[key_len]; // Serialized separator key value
+      int64_t  rowid;             // 8-byte rowid tie-breaker
+  } IndexInteriorCell;
+  ```
+* Header bytes `6..9` store `right_child_page_id`.
+
+#### 4.7.4 Internal Node Split & Promotion Protocol
+When an internal page (Table Interior `0x05` or Index Interior `0x02`) runs out of free space:
+1. **Allocate Sibling:** A new 4KB page $P_{\text{new}}$ is allocated from `Page1.free_page_head` (or file growth).
+2. **Median Selection & Cell Distribution:**
+   - For Table Interior (`0x05`), the median entry is entry index 145.
+   - Entries $0..144$ remain on the existing page $P_{\text{left}}$.
+   - Entries $146..290$ move to the new sibling page $P_{\text{right}}$.
+3. **Median Key Promotion:**
+   - Entry 145's `rowid` is promoted to the parent internal page with its child pointer set to $P_{\text{right}}$.
+   - Entry 145's `child_page_id` becomes the new `right_child_page_id` of $P_{\text{left}}$.
+4. **Root Node Split (Tree Height Expansion):**
+   - If the root page splits, a new root page is allocated (or the old root is copied to a child and the root page re-initialized as an interior node).
+   - The root points to $P_{\text{left}}$ and $P_{\text{right}}$ with the promoted median key. Tree height increments by 1.
+
+#### 4.7.5 Free / Recycled Page On-Disk Binary Format (`page_type = 0x00`)
+When a page is de-allocated (e.g. after row deletion drops `cell_count` to 0 or a table is dropped), it is formatted as a `FreePage` and linked into the singly linked LIFO freelist headed by `Page1.free_page_head`.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ Free Page Header (16 Bytes, 0x0000 - 0x000F)                           │
+│   Byte 0: page_type = 0x00 (PAGE_TYPE_FREE)                            │
+│   Byte 1: reserved = 0x00                                              │
+│   Bytes 2..3: reserved = 0x0000 (was cell_count)                       │
+│   Bytes 4..5: reserved = 0x0000 (was cell_content_offset)              │
+│   Bytes 6..9: next_free_page_id (uint32_t LE)                          │
+│   Bytes 10..11: reserved = 0x0000 (was free_bytes)                     │
+│   Bytes 12..15: checksum (uint32_t LE CRC32 across 4096 bytes)         │
+├────────────────────────────────────────────────────────────────────────┤
+│ Discarded Payload Area (4080 Bytes, 0x0010 - 0x0FFF)                   │
+│   Unused / zero-filled discarded bytes                                 │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Header Field Definitions & Offsets
+| Byte Offset | Field Name | Type | Value / Description |
+| :---: | :--- | :---: | :--- |
+| `0..0` | `page_type` | `uint8_t` | `0x00` (`PAGE_TYPE_FREE`). |
+| `1..1` | `reserved1` | `uint8_t` | `0x00` (Alignment padding). |
+| `2..3` | `reserved2` | `uint16_t` | `0x0000` (Zeroed). |
+| `4..5` | `reserved3` | `uint16_t` | `0x0000` (Zeroed). |
+| **`6..9`** | **`next_free_page_id`** | **`uint32_t`** | **Page ID of the next recycled free page** in the LIFO chain (`0` marks the freelist tail). Matches the `next_page_id / right_child_page_id` offset of active pages. |
+| `10..11` | `reserved4` | `uint16_t` | `0x0000` (Zeroed). |
+| `12..15` | `checksum` | `uint32_t` | CRC32 IEEE 802.3 checksum of the full 4096-byte page (computed with bytes 12..15 zeroed). |
+| `16..4095` | `unused` | `uint8_t[4080]` | Discarded payload bytes (zero-filled or uncompacted). |
+
+##### C Struct Definition
+```c
+typedef struct {
+    uint8_t  page_type;          // Offset 0: 0x00 (PAGE_TYPE_FREE)
+    uint8_t  reserved1;          // Offset 1: 0x00
+    uint16_t reserved2;          // Offset 2..3: 0x0000
+    uint16_t reserved3;          // Offset 4..5: 0x0000
+    uint32_t next_free_page_id;  // Offset 6..9: Next free page in LIFO chain (0 = tail)
+    uint16_t reserved4;          // Offset 10..11: 0x0000
+    uint32_t checksum;          // Offset 12..15: CRC32 checksum across full 4KB page
+    uint8_t  unused[4080];       // Offset 16..4095: Discarded payload
+} FreePage;                      // Exact size: 4096 bytes
+```
+
+##### Freelist Traversal Algorithm
+To iterate or inspect all recycled pages:
+```typescript
+// Traverse the singly-linked free list from Page 1:
+let currPageId = page1View.getUint32(16, true); // Bytes 16..19: free_page_head
+
+while (currPageId !== 0) {
+  const pageBytes = pager.getPage(currPageId);
+  const pageView = new DataView(pageBytes.buffer, pageBytes.byteOffset);
+  
+  const pageType = pageView.getUint8(0);
+  if (pageType !== 0x00) {
+    throw new CorruptPageError(currPageId, `Expected free page (0x00), got 0x${pageType.toString(16)}`);
+  }
+  
+  const nextFreePageId = pageView.getUint32(6, true); // Bytes 6..9: next_free_page_id
+  currPageId = nextFreePageId;
+}
+```
 
 ---
 
@@ -262,14 +514,18 @@ Page 1 is completely self-contained, allowing any database to be opened and insp
 | :---: | :--- | :---: | :--- |
 | `0..5` | `magic` | `char[6]` | Magic ASCII bytes: `"WEBDB\0"` (`0x57 0x45 0x42 0x44 0x42 0x00`) |
 | `6..7` | `page_size` | `uint16_t` | Rigid page size: `4096` |
-| `8..11` | `total_pages` | `uint32_t` | Total allocated pages in database file |
-| `12..15` | `free_page_head` | `uint32_t` | First page ID in recycled free-page linked list (or 0) |
-| `16..19` | `schema_version` | `uint32_t` | Incremented on every DDL change |
-| `20..23` | `change_counter` | `uint32_t` | Incremented on every committed write transaction |
-| `24..99` | `reserved` | `uint8_t[76]` | Zero-filled reserved space for future WAL checkpoints |
+| `8..9` | `file_format_version` | `uint16_t` | Physical engine format version (`1` for V1); incremented on breaking format changes |
+| `10..11` | `min_read_version` | `uint16_t` | Minimum engine version required to read/parse this database (`1` for V1) |
+| `12..15` | `total_pages` | `uint32_t` | Total allocated pages in database file |
+| `16..19` | `free_page_head` | `uint32_t` | First page ID in recycled free-page linked list (or `0` if empty); traversed via bytes 6..9 (`next_free_page_id`) of each free page (see §4.7.5) |
+| `20..23` | `schema_version` | `uint32_t` | Incremented on every DDL change (`CREATE TABLE`, `DROP TABLE`) |
+| `24..27` | `change_counter` | `uint32_t` | Incremented on every committed write transaction |
+| `28..31` | `page_checksum` | `uint32_t` | CRC32 checksum of Page 1 (computed with bytes 28..31 zeroed) |
+| `32..35` | `next_catalog_page_id` | `uint32_t` | Forward-compatible pointer to next chained catalog page (`0` in V1; allocated when $> 10$ tables in future) |
+| `36..99` | `reserved` | `uint8_t[64]` | Zero-filled reserved space for future checkpoints, flags, and encryption parameters |
 
 ### 6.2 Binary Master Table Layout (Bytes 100..4095)
-Supports up to 10 tables, each with up to 16 columns:
+Supports up to 10 tables in V1, each with up to 16 columns (Page 1 fits $10 \times 344\text{ B} = 3,440\text{ B}$):
 ```c
 typedef struct {
     uint8_t  type;          // 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB
@@ -292,36 +548,81 @@ typedef struct {
   ```
 - Eliminates the need for SQL DDL parsers or JSON catalog files.
 
+### 6.3 Engine Version Compatibility & Fail-Fast Handshake
+WebDB decouples logical schema evolutions from low-level physical disk layout compatibility:
+* **`schema_version` (Bytes 20..23):** Tracks user-level catalog changes. Bytecode compilers and cached prepared statements verify this to trigger query re-compilation.
+* **`file_format_version` (Bytes 8..9):** Tracks the physical database binary layout.
+* **`min_read_version` (Bytes 10..11):** Minimum engine version required to read this file.
+* **Fail-Fast Startup Check:**
+  On database connection / open:
+  ```typescript
+  if (minReadVersion > CURRENT_ENGINE_VERSION) {
+    throw new UnsupportedFormatVersionError(
+      `Database file format requires engine version >= ${minReadVersion}, but running engine is version ${CURRENT_ENGINE_VERSION}`
+    );
+  }
+  ```
+  This immediately halts initialization if a newer database file is accessed by an obsolete engine, preventing catastrophic data corruption.
+
+### 6.4 Master Page Crash Resilience & Failover Strategy (WAL Protocol)
+Page 1 does **not** require complex dual alternating ping-pong pages or separate shadow metadata structures. Instead, WebDB treats Page 1 **uniformly as a regular 4KB page (`page_id = 1`) under the WAL write-ahead protocol**:
+* **Write Isolation:** All modifications to Page 1 (schema DDL, `total_pages`, `change_counter`) write to memory slots and append to the `.wal` file upon transaction commit. The master page in the main `.db` file is never directly modified during active queries or DDL.
+* **Two-Phase Checkpoint Ordering:** During checkpointing, Page 1 is written to the `.db` file along with data pages, followed immediately by `dbSyncHandle.flush()`. The `.wal` file is truncated **only after** `dbSyncHandle.flush()` succeeds.
+* **Torn-Write Self-Healing on Startup:** If a crash or power cut occurs mid-write of Page 1 to the `.db` file, the `.wal` file remains non-empty and intact with the committed Page 1 frame (protected by its own CRC32 checksum). Startup recovery replays the committed Page 1 frame into `.db` before any read operations, cleanly self-healing the database.
+*(See [Phase 4: Transactions & WAL](./04_transactions_acid_wal.md) for the exhaustive Failure Analysis Matrix).*
+
 ---
 
 ## 7. Dual First-Class Storage Engines: OPFS & IndexedDB (`IVfsAdapter`)
 
-WebDB uses a unified abstraction layer where **both OPFS and IndexedDB are first-class engines**:
+WebDB uses a unified abstraction layer where **both OPFS and IndexedDB are first-class engines**, managing both the primary database file/store and the Write-Ahead Log (WAL):
 
 ```typescript
 export interface IVfsAdapter {
   readonly name: 'memory' | 'opfs' | 'idb';
   readonly isSynchronous: boolean;
 
+  // --- Main Database Storage (.db file / 'pages' store) ---
   readPage(pageId: number): Promise<Uint8Array | null>;
   writePage(pageId: number, data: Uint8Array): Promise<void>;
   writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void>;
   flush(): Promise<void>;
   truncate(pageCount: number): Promise<void>;
+
+  // --- Write-Ahead Log Storage (.wal file / 'wal_frames' store) ---
+  readWalHeader(): Promise<Uint8Array | null>;
+  writeWalHeader(header: Uint8Array): Promise<void>;
+  readWalFrame(frameIndex: number): Promise<Uint8Array | null>;
+  readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]>;
+  appendWalFrames(frames: Uint8Array[]): Promise<void>;
+  flushWal(): Promise<void>;
+  truncateWal(frameIndex: number): Promise<void>;
+  getWalFrameCount(): Promise<number>;
+
+  // --- Lifecycle ---
   close(): Promise<void>;
 }
 ```
 
-### 7.1 Backend Characteristics:
+### 7.1 Backend Characteristics & WAL Mapping:
 1. **OPFS (`FileSystemSyncAccessHandle`):**
-   - High-throughput direct block I/O.
-   - Synchronous read/write access in Web Workers.
-   - Requires exclusive lock per file origin.
+   - High-throughput direct block I/O in Dedicated Web Workers.
+   - Manages two files: `<dbname>.db` (for pages) and `<dbname>.wal` (for WAL header + 4,128-byte frames).
+   - `readWalHeader()` reads 32 bytes at offset 0 of `.wal`; `readWalFrame(i)` reads 4,128 bytes at `32 + (i * 4128)`.
+   - `appendWalFrames()` streams frames contiguously to the end of `.wal`.
+   - `flushWal()` calls `walHandle.flush()`.
+   - `truncateWal(0)` calls `walHandle.truncate(0)` resetting the log cleanly after checkpoint.
 2. **IndexedDB (`IndexedDbVfsAdapter`):**
-   - Universal context compatibility: runs on Main Thread, Dedicated Workers, SharedWorkers, ServiceWorkers, and mobile WebViews.
-   - No cross-origin isolation (COOP / COEP) requirement.
-   - 4KB pages stored in an Object Store (`pages`) keyed by numeric `pageId`.
-   - `writePages()` commits all dirty slots in a single `readwrite` transaction.
+   - Universal context compatibility: runs on Main Thread, Dedicated Workers, SharedWorkers, ServiceWorkers, and mobile WebViews without COOP/COEP.
+   - Manages three Object Stores in `webdb_<dbname>`:
+     - `pages`: 4KB database pages keyed by numeric `pageId`.
+     - `wal_meta`: 32-byte WAL header keyed by string `'header'`.
+     - `wal_frames`: 4,128-byte frames keyed by monotonic numeric `frameIndex`.
+   - `appendWalFrames()` commits all frames in a single atomic `readwrite` transaction.
+   - `truncateWal(0)` clears the `wal_frames` and `wal_meta` stores.
+3. **In-Memory (`MemoryVfsAdapter`):**
+   - Zero-dependency testing adapter: `pages: Map<number, Uint8Array>`, `walFrames: Uint8Array[]`, `walHeader: Uint8Array | null`.
+   - Immediate synchronous RAM durability.
 
 ---
 
@@ -333,17 +634,29 @@ export interface IVfsAdapter {
 * [ ] **Zero-Slot Eviction Headroom:** Cache controller must guarantee that at least 16 slots are pinned, leaving $\ge 496$ unpinned eviction slots.
 * [ ] **Double Free / Double Eviction:** Once a dirty slot is marked for eviction, its dirty bit must be cleared atomically upon WAL flush before slot reuse.
 
-### B. Slotted Page Integrity
-* [ ] **Slot Directory Colliding with Payload:** `cell_content_offset` cannot decrement below `12 + (cell_count * 2)`. Attempting to insert into a full page must return `-1` and trigger page allocation.
-* [ ] **Corrupted Slot Pointer:** Any slot directory pointer pointing to $< 12$ or $> 4096$ must trigger an immediate `CorruptPageError`.
+### B. Slotted Page Integrity & Checksums
+* [ ] **Slot Directory Colliding with Payload:** `cell_content_offset` cannot decrement below `16 + (cell_count * 2)`. Attempting to insert into a full page must return `-1` and trigger page allocation.
+* [ ] **Corrupted Slot Pointer:** Any slot directory pointer pointing to $< 16$ or $> 4096$ must trigger an immediate `CorruptPageError`.
+* [ ] **Row Deletion Slot Directory Shift:** Assert deleting row $i$ shifts entries $i+1..N-1$ left by 2 bytes and decrements `cell_count` without altering remaining cell offsets.
+* [ ] **Empty Page Free List LIFO Push/Pop:** When the last row is deleted from a page, verify `page_type` flips to `0x00`, it is pushed to `Page1.free_page_head`, and the next allocation reclaims it.
+* [ ] **Expanding Row Update Reallocation:** Updating a row to a larger size within the same page reclaims old space via `free_bytes` and correctly compacts before insertion if contiguous space is insufficient.
+* [ ] **Row Overflow Leaf Split:** Updating a row such that $L_{\text{new}} - L_{\text{old}} > \text{total\_free}$ safely triggers a leaf split/reallocation without data loss.
+* [ ] **Table Interior Node Capacity (291 entries):** Ensure table interior nodes correctly store up to 291 12-byte cells + 2-byte slot entries, with `right_child_page_id` at header bytes 6..9.
+* [ ] **Internal Node Split & Median Promotion:** Split at exactly median entry (145), promoting median key to parent with sibling pointer, and assigning entry 145's `child_page_id` to left page's `right_child_page_id`.
+* [ ] **Secondary Index Collation Sorting:** Verify secondary index entries in leaf pages are strictly ordered by `(key, rowid)` with SQLite 3VL collation rules.
 * [ ] **Defragmentation Free Space Calculation:** Assert that `free_bytes` accurately tracks deleted hole space and compaction reclaims 100% of contiguous free space.
+* [ ] **Torn-Write & CRC32 Bit-Rot Detection:** Any single flipped byte on disk triggers a CRC32 checksum mismatch on read, immediately throwing `CorruptPageError` before touching the memory slots.
 
 ### C. Row Record & Constraint Fail-Fasts
 * [ ] **Exact 2048-Byte Boundary:** Inserting a row of exactly 2048 bytes succeeds; inserting 2049 bytes throws `RowSizeLimitExceededError`.
 * [ ] **`NOT NULL` Constraint Violation:** Inserting `null` or `undefined` into a `NOT NULL` column immediately throws `NotNullConstraintError`.
-* [ ] **Dynamic Null-Bitmap Alignment:** Verify bitwise null-checking for tables with 1, 8, 9, 16, 17, and 32 columns without offset drift.
+* [ ] **Dynamic Null-Bitmap Alignment:** Verify bitwise null-checking for tables with 1, 8, 9, and 16 columns (rejecting > 16 with `TooManyColumnsError`) without offset drift.
 
-### D. Transient Query Arena Protection
+### D. File Format & Version Compatibility
+* [ ] **Engine Version Fail-Fast:** Opening a file where `min_read_version > CURRENT_ENGINE_VERSION` immediately throws `UnsupportedFormatVersionError` without reading further pages.
+* [ ] **Forward-Compatible Reading:** Opening a file where `file_format_version > CURRENT_ENGINE_VERSION` but `min_read_version <= CURRENT_ENGINE_VERSION` opens successfully in read mode.
+
+### E. Transient Query Arena Protection
 * [ ] **Arena Ceiling Exhaustion:** Verify that pathological `GROUP BY` operations reaching the 16 MB ceiling yield `STATUS_ERR_ARENA_EXHAUSTED` and throw `QueryArenaExhaustedError`.
 * [ ] **Zero-Leak Reset:** Verify that `arena_offset = 0` reclaims 100% of allocated memory without heap retention.
 
@@ -361,7 +674,10 @@ The test suite in `tests/` must enforce 100% pass coverage on these critical mem
    - Delete row 1 and row 3 (creating 800 bytes of non-contiguous holes).
    - Insert a new row of 600 bytes.
    - Assert compaction runs, defragments the page, and inserts the row without error.
-4. **Boundary Limit (2048 Bytes):** Assert exactly 2048 bytes passes; 2049 bytes throws `RowSizeLimitExceededError`.
+4. **Row Deletion & `memmove` Verification:** Insert 4 rows; delete row 1; assert slot directory shifts left, cell count decrements to 3, and rows 0, 2, and 3 remain accessible.
+5. **Empty Page Free List Cycle:** Delete all rows from a page; assert it joins `free_page_head`; insert new rows; assert the empty page is recycled instead of incrementing `total_pages`.
+6. **Expanding Update with Compaction:** Update row with larger payload requiring compaction; assert update succeeds and row is intact.
+7. **Boundary Limit (2048 Bytes):** Assert exactly 2048 bytes passes; 2049 bytes throws `RowSizeLimitExceededError`.
 
 ### Test Suite 2: Schema Catalog & Page 1 Binary Structs (`tests/catalog_binary.test.ts`)
 1. **Magic Bytes Validation:** Corrupt byte 0; assert file open throws `InvalidDatabaseError`.
@@ -376,3 +692,14 @@ The test suite in `tests/` must enforce 100% pass coverage on these critical mem
 1. **Zero-Byte NULL Storage:** Measure raw byte sizes of records; assert rows with `NULL` columns occupy strictly fewer bytes than non-null rows.
 2. **Type Range Safety:** Test min/max boundaries for `INT32` ($-2^{31}$ to $2^{31}-1$), `INT64`, and `FLOAT64`.
 3. **Empty vs. NULL Text:** Verify empty string `""` (length 0, non-null) is distinguished from `NULL`.
+
+### Test Suite 5: Checksum Verification & Version Handshake (`tests/integrity_version.test.ts`)
+1. **CRC32 Checksum Validation on Read:** Write a page to VFS; flip a single bit in storage; call `readPage()`; assert `CorruptPageError` is thrown with mismatched checksum values.
+2. **Page 1 Checksum Verification:** Assert Page 1 has valid CRC32 at bytes 28..31; tamper with table metadata; assert file open fails with `CorruptPageError`.
+3. **Engine Version Rejection:** Write a database file with `min_read_version = 99`; attempt to open; assert `UnsupportedFormatVersionError` is thrown immediately.
+4. **Backward-Compatible Version Acceptance:** Open a database with `file_format_version = 2` but `min_read_version = 1` in version 1 engine; assert file opens successfully.
+
+### Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (`tests/btree_hierarchy.test.ts`)
+1. **Table Interior Node Saturation & Split:** Insert 300 sequential routing entries into a table interior node; assert page splits at entry 145, creates sibling, and promotes median key.
+2. **Binary Search Traversal Verification:** Populate an interior node with 200 keys; test binary search across all keys, boundary values, and keys exceeding maximum (verifying fallback to `right_child_page_id`).
+3. **Secondary Index Slotted Collation:** Insert index cells containing `NULL`, negative numbers, positive numbers, and UTF-8 strings; assert slot directory orders them according to SQLite collation precedence.

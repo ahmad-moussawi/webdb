@@ -11,26 +11,25 @@ async function main() {
   ]);
 
   // Insert sample rows
-  for (let i = 0; i < 100; i++) {
-    await db.insert("users", {
-      id: 100 + 1,
-      name: `Alice ${i}`,
-      age: 30,
-      salary: 120000,
-    });
-    await db.insert("users", {
-      id: 200 + 2,
-      name: `Bob ${i}`,
-      age: 10 + Math.round(Math.random() * 10),
-      salary: 80000,
-    });
-    await db.insert("users", {
-      id: 300 + 3,
-      name: `Charlie ${i}`,
-      age: 35,
-      salary: null,
-    });
-  }
+
+  await db.insert("users", {
+    id: 100 + 1,
+    name: `Alice`,
+    age: 30,
+    salary: 120000,
+  });
+  await db.insert("users", {
+    id: 200 + 2,
+    name: `Bob`,
+    age: 10,
+    salary: 80000,
+  });
+  await db.insert("users", {
+    id: 300 + 3,
+    name: `Charlie`,
+    age: 35,
+    salary: null,
+  });
 
   const query = db
     .from("users")

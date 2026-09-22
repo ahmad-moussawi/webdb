@@ -13,6 +13,7 @@ export default defineConfig({
       { text: 'Getting Started', link: '/getting-started' },
       { text: 'Roadmap & Plans', link: '/plans/plan' },
       { text: 'Prototype Spec', link: '/plans/prototype' },
+      { text: 'Limitations', link: '/plans/limitations' },
       {
         text: 'Phase Specs',
         items: [
@@ -42,6 +43,7 @@ export default defineConfig({
         items: [
           { text: 'Strategic Master Plan', link: '/plans/plan' },
           { text: 'Prototype ("Walking Skeleton")', link: '/plans/prototype' },
+          { text: 'System Limits & Invariants', link: '/plans/limitations' },
         ],
       },
       {
