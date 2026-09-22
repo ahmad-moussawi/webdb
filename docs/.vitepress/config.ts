@@ -5,6 +5,10 @@ export default defineConfig({
   description: 'Ultra-lean browser-native relational database engine with 4KB slotted pages and VDBE execution',
   base: '/webdb/',
 
+  markdown: {
+    math: true,
+  },
+
   head: [
     [
       'script',
