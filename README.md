@@ -5,11 +5,12 @@
 <h1 align="center">WebDB</h1>
 
 <p align="center">
-  <strong>An ultra-lean, browser-native relational database engine built from scratch.</strong>
+  <strong>An ultra-lean (&lt;50 KB Wasm), browser-native relational database engine built from scratch.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/ahmad-moussawi/webdb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/wasm%20size-%3C50%20KB-success.svg?logo=webassembly&logoColor=white" alt="Wasm Size: <50KB" />
   <a href="https://github.com/ahmad-moussawi/webdb"><img src="https://img.shields.io/badge/status-early%20prototype-orange.svg" alt="Status: Prototype" /></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.7-blue?logo=typescript&logoColor=white" alt="TypeScript" /></a>
   <a href="https://vitest.dev/"><img src="https://img.shields.io/badge/tests-15%2F15%20passing-brightgreen?logo=vitest&logoColor=white" alt="Tests" /></a>
@@ -22,19 +23,23 @@ WebDB is a relational database engine designed specifically for modern web brows
 
 ## Why WebDB?
 
-Most SQL solutions in the browser today rely on compiling existing C engines with Emscripten. This approach introduces major drawbacks:
-* **Bundle Bloat:** Compiling desktop engines drags along multi-megabyte binaries, bloated ICU Unicode tables, and heavy runtime shims.
-* **The Async Call-Stack Penalty:** Traditional C engines expect synchronous POSIX file I/O. Bridging them to browser storage (OPFS / IndexedDB) requires Emscripten `Asyncify`, which rewrites every function call, balloons binary size, and severely degrades execution speed.
-* **Ignoring Native Web APIs:** Modern browsers already provide world-class, hardware-accelerated APIs that desktop C engines duplicate from scratch.
+Existing browser SQL solutions compile desktop C engines with Emscripten, causing:
+* **Bundle Bloat:** Multi-megabyte binaries dragging along redundant C shims and heavy ICU tables.
+* **The `Asyncify` Penalty:** Rewriting call stacks to bridge synchronous C code to async browser storage hurts execution speed.
+* **Ignoring Web APIs:** Re-implementing crypto, regex, and date libraries already native to the browser.
 
 ### The WebDB Approach:
-1. **Leverage the Browser Platform:**
-   * **Multi-Lingual Tokenization:** Uses native `Intl.Segmenter` (0 KB bundle cost, zero ICU tables).
-   * **Hardware-Accelerated Encryption:** Uses native Web Crypto (`crypto.subtle`) for transparent AES-256-GCM.
-   * **Multi-Tab Concurrency:** Uses the native Web Locks API (`navigator.locks`) for single-writer coordination.
-   * **Dual First-Class Storage:** Direct block I/O against bare-metal **OPFS** and universal **IndexedDB**.
-2. **Native Async Page Faults:** The VDBE virtual machine is a step-loop state machine. When a page isn't in memory, it cleanly yields `STATUS_PAGE_FAULT` to the JavaScript event loop and resumes execution without call-stack rewrites.
-3. **Strict C-Style Shared Memory:** Zero dynamic runtime heap allocations in the query path. Slotted pages, buffer pools, bytecode, and cursors reside in predictable, pre-allocated memory slices.
+
+1. **Ultra-Lean Wasm Engine (&lt;50 KB):**
+   * **Date & Time:** Delegates to native `Date` and `Intl` via UDFs—zero C date parser bloat.
+   * **Regex & Text:** Uses native `RegExp` and `Intl.Segmenter` for zero-byte Unicode tokenization (no ICU tables).
+   * **Hardware Crypto:** Transparent AES-256-GCM page encryption via native Web Crypto (`crypto.subtle`).
+   * **Multi-Tab Sync:** Single-writer coordination via the native Web Locks API (`navigator.locks`).
+2. **Co-Equal First-Class Storage (OPFS & IndexedDB):**
+   * **OPFS:** Bare-metal block I/O with `FileSystemSyncAccessHandle` for Dedicated Web Workers.
+   * **IndexedDB:** Co-equal first-class engine for Main Thread, ServiceWorkers, and mobile WebViews without COOP/COEP headers.
+3. **Native Async Page Faults:** VDBE step loop yields `STATUS_PAGE_FAULT` on cache misses and resumes cleanly—zero Emscripten `Asyncify` overhead.
+4. **Zero-Heap Shared Memory:** 4KB slotted pages, buffer pools, and cursors reside in pre-allocated slices—0 dynamic runtime heap allocations.
 
 ---
 
