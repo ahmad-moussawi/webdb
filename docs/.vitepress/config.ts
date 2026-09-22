@@ -5,6 +5,24 @@ export default defineConfig({
   description: 'Ultra-lean browser-native relational database engine with 4KB slotted pages and VDBE execution',
   base: '/webdb/',
 
+  head: [
+    [
+      'script',
+      {
+        async: '',
+        src: 'https://www.googletagmanager.com/gtag/js?id=G-SK750XLF2Y',
+      },
+    ],
+    [
+      'script',
+      {},
+      `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-SK750XLF2Y');`,
+    ],
+  ],
+
   themeConfig: {
     logo: '/logo.svg',
     siteTitle: 'WebDB',
