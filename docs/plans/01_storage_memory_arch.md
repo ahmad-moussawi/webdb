@@ -79,10 +79,10 @@ Offset (Hex)          Size        Region Name                  Purpose
 - Fixed-offset C struct representing the single active query state machine:
 ```c
 typedef struct {
-    uint8_t  type;        // 0=NULL, 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB
+    uint8_t  type;        // 0=NULL, 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB, 6=UUID, 7=ULID
     uint8_t  flags;       // Reserved flags (e.g. 0x1 = CONSTANT/LITERAL)
-    uint16_t len;         // Byte length for TEXT and BLOB payloads
-    uint32_t str_offset;  // Byte offset in shared memory (page or arena) for text/blob
+    uint16_t len;         // Byte length for TEXT and BLOB payloads (16 for UUID/ULID)
+    uint32_t str_offset;  // Byte offset in shared memory (page or arena) for text/blob/uuid/ulid
     union {
         int32_t  i32;     // 32-bit signed integer
         int64_t  i64;     // 64-bit signed integer
@@ -482,6 +482,8 @@ while (currPageId !== 0) {
      - `INT32`: 4 bytes (`int32_t`, Little-Endian).
      - `INT64`: 8 bytes (`int64_t`, Little-Endian).
      - `FLOAT64`: 8 bytes (`double`, IEEE 754 Little-Endian).
+     - `UUID`: 16 bytes (`uint8_t[16]`, Big-Endian / network order).
+     - `ULID`: 16 bytes (`uint8_t[16]`, Big-Endian Crockford Base32 timestamp + randomness).
 4. **Variable-Length Offset Table (4 bytes per TEXT/BLOB column):**
    - `uint16_t rel_offset`: Byte offset relative to row start.
    - `uint16_t length`: Byte length of payload.
@@ -497,6 +499,165 @@ while (currPageId !== 0) {
   throw new RowSizeLimitExceededError(size, 2048);
   ```
 - **Rationale:** Prevents rows from spanning multiple pages in V1, eliminating complex overflow chain pointer arithmetic while keeping B-tree balance code ultra-lean. **Silent truncation of user data is strictly prohibited.**
+
+---
+
+### 5.3 Native 128-bit Identity Types: UUID & ULID (Transcoding & Serialization)
+
+WebDB natively stores both `UUID` (type code `6`) and `ULID` (type code `7`) as **fixed-width 16-byte binary slices** (`uint8_t[16]`) directly inside the Fixed-Width Column Slice:
+* **Storage Reduction:** 16 bytes on disk vs 38 bytes for UTF-8 string UUIDs (a **58% reduction** in row and index size).
+* **B+Tree Index Density:** Stores ~170 index keys per 4KB page (vs ~80 for string keys), yielding shallower index trees and fewer disk I/O operations.
+* **Append-Only Write Performance:** Time-ordered IDs (`UUIDv7` and `ULID`) store a 48-bit millisecond timestamp in the high bits, causing new inserts to append to the rightmost leaf of the B+Tree with zero page splits or fragmentation.
+* **Fast Comparisons:** B+Tree indexing uses 16-byte unsigned comparisons (`memcmp`), which execute in a single Wasm SIMD `v128` instruction.
+
+#### Binary Layout (128 bits / 16 bytes, Big-Endian)
+```
+┌───────────────────────────────────────┬───────────────────────────────────────┐
+│       48-bit Timestamp (6 bytes)      │       80-bit Randomness (10 bytes)    │
+└───────────────────────────────────────┴───────────────────────────────────────┘
+0                                       48                                     128 bits
+```
+
+#### Automatic Two-Way Transcoding (Host JS <-> Core Engine)
+Developers interact purely with familiar JavaScript strings (`crypto.randomUUID()` or Crockford Base32). The Host JS Query Builder and Result Hydrator automatically handle lossless two-way translation:
+
+```typescript
+// ==========================================
+// 1. UUID Transcoder (36-char Hex <-> 16 Bytes)
+// ==========================================
+export class UuidCodec {
+  /** Packs a 36-char hyphenated UUID string into 16 raw binary bytes */
+  static encode(uuidStr: string, target: Uint8Array, offset: number = 0): void {
+    const clean = uuidStr.replace(/-/g, '');
+    if (clean.length !== 32) {
+      throw new Error(`Invalid UUID format: "${uuidStr}" (must be 36 characters with hyphens)`);
+    }
+    for (let i = 0; i < 16; i++) {
+      target[offset + i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+    }
+  }
+
+  /** Unpacks 16 raw bytes into canonical 36-char hyphenated UUID string */
+  static decode(source: Uint8Array, offset: number = 0): string {
+    let hex = '';
+    for (let i = 0; i < 16; i++) {
+      hex += source[offset + i].toString(16).padStart(2, '0');
+    }
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  }
+}
+
+// ==========================================
+// 2. ULID Transcoder (26-char Crockford Base32 <-> 16 Bytes)
+// ==========================================
+const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CROCKFORD_DECODE = new Uint8Array(128);
+for (let i = 0; i < CROCKFORD_ALPHABET.length; i++) {
+  CROCKFORD_DECODE[CROCKFORD_ALPHABET.charCodeAt(i)] = i;
+}
+
+export class UlidCodec {
+  /** Packs a 26-character Crockford Base32 string into 16 raw bytes */
+  static encode(ulidStr: string, target: Uint8Array, offset: number = 0): void {
+    if (ulidStr.length !== 26) {
+      throw new Error(`Invalid ULID length: "${ulidStr}" (must be 26 Crockford Base32 characters)`);
+    }
+    const clean = ulidStr.toUpperCase();
+
+    // 1. Parse 48-bit timestamp (first 10 characters = 50 bits; top 2 bits 0)
+    let time = 0;
+    for (let i = 0; i < 10; i++) {
+      time = time * 32 + CROCKFORD_DECODE[clean.charCodeAt(i)];
+    }
+    target[offset + 0] = (time / 0x10000000000) & 0xff;
+    target[offset + 1] = (time / 0x100000000) & 0xff;
+    target[offset + 2] = (time / 0x1000000) & 0xff;
+    target[offset + 3] = (time / 0x10000) & 0xff;
+    target[offset + 4] = (time / 0x100) & 0xff;
+    target[offset + 5] = time & 0xff;
+
+    // 2. Parse 80-bit randomness (remaining 16 characters -> 10 bytes)
+    let randHi = 0n;
+    for (let i = 10; i < 18; i++) {
+      randHi = (randHi << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
+    }
+    let randLo = 0n;
+    for (let i = 18; i < 26; i++) {
+      randLo = (randLo << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
+    }
+    for (let i = 0; i < 5; i++) {
+      target[offset + 6 + i] = Number((randHi >> BigInt((4 - i) * 8)) & 0xffn);
+      target[offset + 11 + i] = Number((randLo >> BigInt((4 - i) * 8)) & 0xffn);
+    }
+  }
+
+  /** Unpacks 16 raw bytes into canonical 26-char Crockford Base32 string */
+  static decode(source: Uint8Array, offset: number = 0): string {
+    // 1. Extract 48-bit timestamp
+    let time = 0;
+    for (let i = 0; i < 6; i++) {
+      time = time * 256 + source[offset + i];
+    }
+    let str = '';
+    for (let i = 9; i >= 0; i--) {
+      str = CROCKFORD_ALPHABET[time % 32] + str;
+      time = Math.floor(time / 32);
+    }
+
+    // 2. Extract 80-bit randomness
+    let randHi = 0n;
+    for (let i = 0; i < 5; i++) {
+      randHi = (randHi << 8n) | BigInt(source[offset + 6 + i]);
+    }
+    let randLo = 0n;
+    for (let i = 0; i < 5; i++) {
+      randLo = (randLo << 8n) | BigInt(source[offset + 11 + i]);
+    }
+    let randPart = '';
+    for (let i = 0; i < 8; i++) {
+      randPart = CROCKFORD_ALPHABET[Number(randLo & 31n)] + randPart;
+      randLo >>= 5n;
+    }
+    for (let i = 0; i < 8; i++) {
+      randPart = CROCKFORD_ALPHABET[Number(randHi & 31n)] + randPart;
+      randHi >>= 5n;
+    }
+    return str + randPart;
+  }
+}
+```
+
+#### End-to-End WebDB Usage Example
+```typescript
+import { WebDB } from '@webdb/core';
+
+const db = await WebDB.open({ name: 'ecommerce', storage: 'opfs' });
+
+// 1. Create table with native 128-bit identity columns
+await db.createTable('orders', [
+  { name: 'id', type: 'ulid', primaryKey: true },       // Stored as 16 bytes -> returns 26-char Base32
+  { name: 'client_uuid', type: 'uuid', notNull: true }, // Stored as 16 bytes -> returns 36-char Hex
+  { name: 'total_amount', type: 'float64', notNull: true },
+]);
+
+// 2. Insert standard strings (or crypto.randomUUID())
+await db.insert('orders', {
+  id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',                   // Automatically packed into 16 bytes
+  client_uuid: crypto.randomUUID(),                     // Automatically packed into 16 bytes
+  total_amount: 149.50,
+});
+
+// 3. Query: seamlessly filters and hydrates back to standard strings
+const order = await db.from('orders')
+  .where('id', '=', '01ARZ3NDEKTSV4RRFFQ69G5FAV')
+  .first();
+
+console.log(order.id);           // "01ARZ3NDEKTSV4RRFFQ69G5FAV" (string)
+console.log(order.client_uuid);  // "550e8400-e29b-41d4-a716-446655440000" (string)
+console.log(order.total_amount); // 149.5 (number)
+```
+
+---
 
 ---
 
@@ -528,7 +689,7 @@ Page 1 is completely self-contained, allowing any database to be opened and insp
 Supports up to 10 tables in V1, each with up to 16 columns (Page 1 fits $10 \times 344\text{ B} = 3,440\text{ B}$):
 ```c
 typedef struct {
-    uint8_t  type;          // 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB
+    uint8_t  type;          // 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB, 6=UUID, 7=ULID
     uint8_t  flags;         // 0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED
     uint16_t col_offset;    // Column offset inside fixed data slice
     char     name[16];      // Column name (null-padded UTF-8)

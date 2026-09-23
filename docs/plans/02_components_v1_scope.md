@@ -90,7 +90,7 @@ interface WebDbCoreEngine {
 1. **Connection & Configuration:**
    - `WebDB.open({ name, storage: 'opfs' | 'idb' | 'auto', cacheSize: '2MB' | '4MB' | '8MB' })`.
 2. **Schema DDL:**
-   - `createTable(name, columns)` (up to 10 tables, up to 16 columns per table in Page 1 catalog).
+   - `createTable(name, columns)` (up to 10 tables, up to 16 columns per table in Page 1 catalog; supports `int32`, `int64`, `float64`, `text`, `blob`, `uuid`, and `ulid`).
    - `dropTable(name)`.
    - `createIndex(tableName, columnName)`.
 3. **Data Mutation (DML):**
