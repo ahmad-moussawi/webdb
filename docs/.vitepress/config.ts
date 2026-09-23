@@ -10,6 +10,7 @@ export default defineConfig({
   },
 
   head: [
+    ['link', { rel: 'icon', href: '/webdb/logo.svg', type: 'image/svg+xml' }],
     [
       'script',
       {
