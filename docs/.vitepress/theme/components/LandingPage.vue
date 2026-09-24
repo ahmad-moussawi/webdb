@@ -1771,16 +1771,17 @@ code {
   margin: 0 0 3rem;
 }
 
-/* USECASES GRID (2-CELL WITH BLACK BORDER & WHITE BACKGROUND) */
+/* USECASES GRID (2-CELL WITH ADAPTIVE BORDER & BACKGROUND) */
 .usecases-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 1px;
-  background: #000000;
-  border: 1px solid #000000;
+  background: var(--vp-c-divider);
+  border: 1px solid var(--vp-c-divider);
 }
 
-:global(.dark) .usecases-grid {
+:global(.dark) .usecases-grid,
+.dark .usecases-grid {
   background: var(--vp-c-divider);
   border-color: var(--vp-c-divider);
 }
@@ -1790,20 +1791,24 @@ code {
   display: flex;
   flex-direction: column;
   position: relative;
-  background: #ffffff;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
   transition: background 0.15s ease;
 }
 
 .usecase-cell:hover {
-  background: #fafafa;
+  background: var(--vp-c-bg-soft);
 }
 
-:global(.dark) .usecase-cell {
+:global(.dark) .usecase-cell,
+.dark .usecase-cell {
   background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
 }
 
-:global(.dark) .usecase-cell:hover {
-  background: var(--vp-c-bg-mute);
+:global(.dark) .usecase-cell:hover,
+.dark .usecase-cell:hover {
+  background: var(--vp-c-bg-soft);
 }
 
 .usecase-cell-header {
@@ -1841,13 +1846,14 @@ code {
   font-size: 0.68rem;
   font-weight: 700;
   padding: 2px 7px;
-  border: 1px solid #000000;
-  background: #ffffff;
-  color: #000000;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-mute);
+  color: var(--vp-c-text-1);
   letter-spacing: 0.5px;
 }
 
-:global(.dark) .usecase-pill {
+:global(.dark) .usecase-pill,
+.dark .usecase-pill {
   border-color: var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
   color: var(--vp-c-text-2);
@@ -1874,12 +1880,17 @@ code {
 .usecase-theme-emerald .usecase-num {
   color: #10b981;
 }
+:global(.dark) .usecase-theme-emerald .usecase-num,
+.dark .usecase-theme-emerald .usecase-num {
+  color: #34d399;
+}
 .usecase-theme-emerald .usecase-icon-box {
   background: rgba(16, 185, 129, 0.08);
   border-color: rgba(16, 185, 129, 0.2);
   color: #10b981;
 }
-:global(.dark) .usecase-theme-emerald .usecase-icon-box {
+:global(.dark) .usecase-theme-emerald .usecase-icon-box,
+.dark .usecase-theme-emerald .usecase-icon-box {
   background: rgba(52, 211, 153, 0.12);
   border-color: rgba(52, 211, 153, 0.3);
   color: #34d399;
@@ -2630,17 +2641,18 @@ code {
   color: var(--vp-c-text-1);
 }
 
-/* ASYNC VFS GRID (2-CELL WITH BLACK BORDER & WHITE BACKGROUND) */
+/* ASYNC VFS GRID (2-CELL WITH ADAPTIVE BORDER & BACKGROUND) */
 .vfs-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 1px;
-  background: #000000;
-  border: 1px solid #000000;
+  background: var(--vp-c-divider);
+  border: 1px solid var(--vp-c-divider);
   margin-bottom: 2.5rem;
 }
 
-:global(.dark) .vfs-grid {
+:global(.dark) .vfs-grid,
+.dark .vfs-grid {
   background: var(--vp-c-divider);
   border-color: var(--vp-c-divider);
 }
@@ -2650,20 +2662,24 @@ code {
   display: flex;
   flex-direction: column;
   position: relative;
-  background: #ffffff;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
   transition: background 0.15s ease;
 }
 
 .vfs-cell:hover {
-  background: #fafafa;
+  background: var(--vp-c-bg-soft);
 }
 
-:global(.dark) .vfs-cell {
+:global(.dark) .vfs-cell,
+.dark .vfs-cell {
   background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
 }
 
-:global(.dark) .vfs-cell:hover {
-  background: var(--vp-c-bg-mute);
+:global(.dark) .vfs-cell:hover,
+.dark .vfs-cell:hover {
+  background: var(--vp-c-bg-soft);
 }
 
 .vfs-cell-header {
@@ -2701,13 +2717,14 @@ code {
   font-size: 0.68rem;
   font-weight: 700;
   padding: 2px 7px;
-  border: 1px solid #000000;
-  background: #ffffff;
-  color: #000000;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-mute);
+  color: var(--vp-c-text-1);
   letter-spacing: 0.5px;
 }
 
-:global(.dark) .vfs-pill {
+:global(.dark) .vfs-pill,
+.dark .vfs-pill {
   border-color: var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
   color: var(--vp-c-text-2);
@@ -2731,15 +2748,21 @@ code {
 
 /* THEME ACCENTS FOR VFS */
 /* OPFS - Emerald */
+.vfs-theme-emerald .usecase-num,
 .vfs-theme-emerald .vfs-num {
   color: #10b981;
+}
+:global(.dark) .vfs-theme-emerald .vfs-num,
+.dark .vfs-theme-emerald .vfs-num {
+  color: #34d399;
 }
 .vfs-theme-emerald .vfs-icon-box {
   background: rgba(16, 185, 129, 0.08);
   border-color: rgba(16, 185, 129, 0.2);
   color: #10b981;
 }
-:global(.dark) .vfs-theme-emerald .vfs-icon-box {
+:global(.dark) .vfs-theme-emerald .vfs-icon-box,
+.dark .vfs-theme-emerald .vfs-icon-box {
   background: rgba(52, 211, 153, 0.12);
   border-color: rgba(52, 211, 153, 0.3);
   color: #34d399;

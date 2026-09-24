@@ -32,3 +32,36 @@
   line-height: 1.25;
 }
 
+/* Ensure dark mode for Landing Page grid cards */
+html.dark .webdb-landing .usecases-grid,
+html.dark .webdb-landing .vfs-grid {
+  background: var(--vp-c-divider) !important;
+  border-color: var(--vp-c-divider) !important;
+}
+
+html.dark .webdb-landing .usecase-cell,
+html.dark .webdb-landing .vfs-cell,
+html.dark .webdb-landing .vfs-cell-custom-highlight {
+  background: var(--vp-c-bg) !important;
+  color: var(--vp-c-text-1) !important;
+}
+
+html.dark .webdb-landing .usecase-cell:hover,
+html.dark .webdb-landing .vfs-cell:hover {
+  background: var(--vp-c-bg-soft) !important;
+}
+
+html.dark .webdb-landing .usecase-title,
+html.dark .webdb-landing .vfs-title {
+  color: var(--vp-c-text-1) !important;
+}
+
+html.dark .webdb-landing .usecase-text,
+html.dark .webdb-landing .vfs-desc {
+  color: var(--vp-c-text-2) !important;
+}
+
+html.dark .webdb-landing .vfs-custom-code {
+  background: var(--vp-c-bg) !important;
+}
+
