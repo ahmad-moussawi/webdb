@@ -629,7 +629,7 @@ const copyCode = () => {
               <div class="boxdraw-box">
                 <span class="c-tl">┌</span><span class="c-tr">┐</span>
                 <span class="c-bl">└</span><span class="c-br">┘</span>
-                <span class="box-text">Fluent Query Builder</span>
+                <span class="box-text">Query Builder</span>
               </div>
 
               <div class="boxdraw-arrow-wrap arrow-red">
@@ -680,7 +680,7 @@ const copyCode = () => {
                 ><span class="c-tr c-green">┐</span>
                 <span class="c-bl c-green">└</span
                 ><span class="c-br c-green">┘</span>
-                <span class="box-text">Fluent Query Builder</span>
+                <span class="box-text">Query Builder</span>
               </div>
 
               <div class="boxdraw-arrow-wrap arrow-direct arrow-green">
