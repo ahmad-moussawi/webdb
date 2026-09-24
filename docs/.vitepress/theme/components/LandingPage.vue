@@ -32,13 +32,7 @@ import { WebDB, HttpVfsAdapter } from "@webdb/core";
 
 // 1. Mount a remote database directly on CDN, S3, or Cloudflare R2
 const db = await WebDB.open({
-  vfs: new HttpVfsAdapter(
-    "https://cdn.example.com/datasets/ecommerce.webdb",
-    {
-      cacheSize: 64, // Keep 64 hot pages in memory (256 KB)
-      maxConcurrentRequests: 4,
-    }
-  ),
+  vfs: new HttpVfsAdapter("/data/ecommerce.db"),
 });
 
 // 2. Traverses B+Tree indexes via targeted 4KB range requests
@@ -155,15 +149,16 @@ const renderedLines = computed(() => {
   return highlighted.split("\n");
 });
 
-const customVfsSnippet = `export class CloudflareKvVfs implements VfsAdapter {
-  async readPage(id: number) {
-    const key = "p" + id;
-    return await kv.get(key);
+const customVfsSnippet = `class CloudflareKvVfs {
+  
+  async readPage(id) {
+    return await kv.get("p" + id);
   }
-  async writePage(id: number, buf: Uint8Array) {
-    const key = "p" + id;
-    await kv.put(key, buf);
+
+  async writePage(id, bytes) {
+    await kv.put("p" + id, bytes);
   }
+
 }`;
 
 const highlightedCustomVfs = computed(() => {
@@ -513,7 +508,7 @@ const copyCode = () => {
             <span class="usecase-num">04</span>
           </div>
           <h3 class="usecase-title">
-            Query Remote Data Without Full Downloads
+            Query Remote Data without Full Downloads
           </h3>
           <p class="usecase-text">
             Host multi-gigabyte catalogs or archives on S3 or Cloudflare R2.
@@ -589,10 +584,9 @@ const copyCode = () => {
         A powerful &lt;50 KB database without sacrificing features
       </h2>
       <p class="section-sub">
-        Most in-browser databases bloat past several megabytes by dragging along
-        legacy C parsers and desktop OS shims. By rethinking the query pipeline
-        specifically for modern TypeScript, we eliminated the dead weight
-        without cutting relational power.
+        By compiling type-safe TypeScript queries directly into engine bytecode,
+        WebDB removes the bloated C SQL parser—delivering a full relational
+        engine in under 50 KB.
       </p>
 
       <!-- INTERACTIVE BOX DRAWING DIAGRAM -->
@@ -608,7 +602,7 @@ const copyCode = () => {
               @click="pipelineMode = 'other'"
             >
               <span class="toggle-dot dot-red"></span>
-              Existing
+              Legacy
             </button>
             <button
               :class="[
@@ -735,49 +729,25 @@ const copyCode = () => {
       <!-- EDITORIAL NARRATIVE -->
       <div class="shortcut-narrative">
         <div class="narrative-block">
-          <h3 class="narrative-heading">Skipping the SQL String Middleman</h3>
+          <h3 class="narrative-heading">Skipping the SQL Middleman</h3>
           <p class="narrative-body">
-            In modern web apps, developers rarely write raw SQL strings—we write
-            type-safe queries using fluent builders (like Drizzle, Kysely, or
-            Prisma) for autocomplete and compile-time validation.
-          </p>
-          <p class="narrative-body">
-            In traditional ported databases, your client library serializes that
-            fluent query into a SQL text string, sends it across the WebAssembly
-            boundary, and runs a heavyweight C parser to turn it right back into
-            an internal syntax tree.
-          </p>
-          <p class="narrative-body">
-            <strong>WebDB eliminates this round-trip completely.</strong> The
-            fluent query builder compiles directly into executable bytecode. By
-            removing the text SQL parser from the WebAssembly binary, we
-            stripped out megabytes of bloat—bringing the entire engine down to
-            <strong>under 50 KB</strong> and eliminating runtime parsing
-            overhead.
+            Ported desktop databases serialize queries into SQL text strings
+            only to re-parse them inside Wasm using a heavy C engine.
+            <strong
+              >WebDB compiles TypeScript queries directly into bytecode</strong
+            >, cutting out the runtime parser and shaving megabytes of binary
+            bloat.
           </p>
         </div>
 
         <div class="narrative-block">
-          <h3 class="narrative-heading">
-            Stripping Desktop Threads for Native Web APIs
-          </h3>
+          <h3 class="narrative-heading">Zero Server Headers Required</h3>
           <p class="narrative-body">
-            Desktop databases like SQLite and PostgreSQL assume multi-core
-            operating systems with blocking disk threads. Porting them to the
-            browser requires Emscripten pthread shims that demand strict
-            <code>COOP</code> (Cross-Origin-Opener-Policy) and
-            <code>COEP</code> server headers.
-          </p>
-          <p class="narrative-body">
-            In production web apps, those headers break OAuth login popups,
-            Stripe payment frames, and third-party embeds.
-          </p>
-          <p class="narrative-body">
-            <strong>WebDB is single-threaded by design.</strong> It respects the
-            browser's event loop and coordinates multi-tab concurrency through
-            the native <code>navigator.locks</code> Web API. It runs seamlessly
-            on static hosting, CDNs, and PWAs with
-            <strong>zero server headers required</strong>.
+            Desktop engines rely on pthread shims requiring strict
+            <code>COOP/COEP</code> isolation headers that break OAuth popups and
+            Stripe payment frames. <strong>WebDB is event-loop native</strong>,
+            coordinating multi-tab concurrency through
+            <code>navigator.locks</code> on any static host or CDN.
           </p>
         </div>
       </div>
@@ -801,9 +771,7 @@ const copyCode = () => {
           <thead>
             <tr>
               <th class="col-feature">Capability</th>
-              <th class="col-legacy">
-                Ported Desktop Engines (SQLite / PGlite)
-              </th>
+              <th class="col-legacy">Legacy Engines (SQLite / PGlite)</th>
               <th class="col-webdb">
                 <div class="webdb-col-header">
                   <span>WebDB</span>
@@ -815,140 +783,111 @@ const copyCode = () => {
           <tbody>
             <tr>
               <td class="row-feature">
-                <div class="feature-title">Binary Size &amp; Cold Startup</div>
-                <div class="feature-desc">
-                  Load time penalty on initial page visit &amp; mobile networks
-                </div>
+                <span class="feature-title">Bundle Size</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-bad">1 MB – 5 MB+ Binary</span>
-                <span class="val-sub"
-                  >Heavy initial download dragging along redundant C parsers,
-                  lexers, and desktop OS shims.</span
-                >
+                <div class="val-bad">1 MB – 5 MB+</div>
+                <div class="val-sub">
+                  Heavy initial download dragging full desktop shims
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">&lt; 50 KB Bundle</span>
-                <span class="val-sub"
-                  >Loads in milliseconds on slow mobile networks. Zero bloated
-                  desktop parsers in Wasm.</span
-                >
+                <div class="val-good">&lt; 50 KB</div>
+                <div class="val-sub">
+                  Instant startup, optimized strictly for web bundles
+                </div>
               </td>
             </tr>
 
             <tr>
               <td class="row-feature">
-                <div class="feature-title">I/O &amp; UI Threading</div>
-                <div class="feature-desc">
-                  How asynchronous browser storage interacts with UI frames
-                </div>
+                <span class="feature-title">I/O Model</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-warn">Emscripten Asyncify tricks</span>
-                <span class="val-sub"
-                  >Tries to make async browser storage look synchronous, risking
-                  UI frame drops and tab stutter.</span
-                >
+                <div class="val-warn">Asyncify Simulation</div>
+                <div class="val-sub">
+                  Simulates synchronous disk I/O, risking UI frame drops
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">Native Non-Blocking I/O</span>
-                <span class="val-sub"
-                  >Built from the ground up for asynchronous browser
-                  storage—zero main-thread blocking or stack hacks.</span
-                >
+                <div class="val-good">Native Non-Blocking</div>
+                <div class="val-sub">
+                  Pure async execution pipeline designed for IndexedDB &amp;
+                  OPFS
+                </div>
               </td>
             </tr>
 
             <tr>
               <td class="row-feature">
-                <div class="feature-title">Server Headers (COOP / COEP)</div>
-                <div class="feature-desc">
-                  Cross-Origin isolation required for desktop threading shims
-                </div>
+                <span class="feature-title">Server Headers</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-bad">Strict headers often required</span>
-                <span class="val-sub"
-                  >Breaks external OAuth popups, Stripe/payment frames, and
-                  embedded cross-origin widgets.</span
-                >
+                <div class="val-bad">COOP / COEP Required</div>
+                <div class="val-sub">
+                  Breaks external OAuth popups, Stripe, and embeds
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">Zero Headers Required</span>
-                <span class="val-sub"
-                  >Runs anywhere out-of-the-box: static hosting, standard CDNs,
-                  GitHub Pages, or PWAs without config.</span
-                >
+                <div class="val-good">Zero Headers</div>
+                <div class="val-sub">
+                  Runs on any static host, CDN, or PWA without config
+                </div>
               </td>
             </tr>
 
             <tr>
               <td class="row-feature">
-                <div class="feature-title">Web Platform Primitives</div>
-                <div class="feature-desc">
-                  Delegation to browser-native engines for crypto, dates, regex
-                </div>
+                <span class="feature-title">Platform Mindset</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-warn">Redundant C duplicates</span>
-                <span class="val-sub"
-                  >Re-implements regex, date arithmetic, and cryptographic
-                  algorithms already built into modern browsers.</span
-                >
+                <div class="val-warn">OS-First Mindset</div>
+                <div class="val-sub">
+                  Assumes POSIX disk, threads, and bundles redundant C code
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">Embraces Web Standards</span>
-                <span class="val-sub"
-                  >Delegates directly to browser-native <code>Intl</code>,
-                  <code>crypto.subtle</code>, <code>Date</code>, and
-                  <code>RegExp</code>.</span
-                >
+                <div class="val-good">Browser-First Mindset</div>
+                <div class="val-sub">
+                  Built ground-up around web primitives: <code>Intl</code>,
+                  <code>crypto</code>, &amp; async I/O
+                </div>
               </td>
             </tr>
 
             <tr>
               <td class="row-feature">
-                <div class="feature-title">Remote S3 / CDN Queries</div>
-                <div class="feature-desc">
-                  Querying large datasets hosted on cloud object storage
-                </div>
+                <span class="feature-title">Custom Storage (VFS)</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-bad">Full database download</span>
-                <span class="val-sub"
-                  >Must transfer the entire multi-gigabyte database file into
-                  browser memory before running queries.</span
-                >
+                <div class="val-warn">Complex C / Wasm Shims</div>
+                <div class="val-sub">
+                  Requires low-level C structs and Emscripten bridging
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">HTTP Range Streaming</span>
-                <span class="val-sub"
-                  >Queries 5GB+ datasets by reading B+Tree index pages on-demand
-                  over HTTP Range (only ~16 KB wire transfer).</span
-                >
+                <div class="val-good">Pure TypeScript</div>
+                <div class="val-sub">
+                  Implement a clean async interface directly in plain TS
+                </div>
               </td>
             </tr>
 
             <tr>
               <td class="row-feature">
-                <div class="feature-title">Memory Management</div>
-                <div class="feature-desc">
-                  Allocation footprint and browser garbage collection
-                </div>
+                <span class="feature-title">Memory Model</span>
               </td>
               <td class="cell-legacy">
-                <span class="val-warn">Heavy upfront linear heap</span>
-                <span class="val-sub"
-                  >Fixed contiguous Wasm memory page allocations with costly GC
-                  memory-copy bridging.</span
-                >
+                <div class="val-warn">Fixed Linear Heap</div>
+                <div class="val-sub">
+                  Monolithic upfront allocation with GC copy overhead
+                </div>
               </td>
               <td class="cell-webdb">
-                <span class="val-good">Adaptive Page Pool</span>
-                <span class="val-sub"
-                  >Dynamically managed LRU cache that scales responsibly with
-                  device memory limits.</span
-                >
+                <div class="val-good">Adaptive Page Pool</div>
+                <div class="val-sub">
+                  Dynamic LRU cache that respects low-memory mobile tabs
+                </div>
               </td>
             </tr>
           </tbody>
@@ -981,12 +920,13 @@ const copyCode = () => {
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
-                stroke-linecap="square"
-                stroke-linejoin="miter"
+                stroke-linecap="round"
+                stroke-linejoin="round"
               >
-                <ellipse cx="12" cy="5" rx="9" ry="3" />
-                <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-                <path d="M3 12a9 3 0 0 0 18 0" />
+                <path
+                  d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                />
+                <polyline points="14 2 14 8 20 8" />
               </svg>
             </div>
             <span class="vfs-num">01</span>
@@ -1012,12 +952,12 @@ const copyCode = () => {
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
-                stroke-linecap="square"
-                stroke-linejoin="miter"
+                stroke-linecap="round"
+                stroke-linejoin="round"
               >
-                <rect width="18" height="18" x="3" y="3" />
-                <path d="M3 9h18" />
-                <path d="M9 21V9" />
+                <ellipse cx="12" cy="5" rx="9" ry="3" />
+                <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+                <path d="M3 12a9 3 0 0 0 18 0" />
               </svg>
             </div>
             <span class="vfs-num">02</span>
@@ -2500,15 +2440,14 @@ code {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
-  font-size: 0.88rem;
-  min-width: 680px;
+  min-width: 640px;
 }
 
 .compare-table thead th {
-  padding: 1.15rem 1.5rem;
-  font-size: 0.74rem;
+  padding: 1.25rem 1.6rem;
+  font-size: 0.86rem;
   font-weight: 700;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
   font-family: var(--vp-font-family-mono);
   border-bottom: 2px solid var(--vp-c-divider);
@@ -2521,15 +2460,15 @@ code {
 }
 
 .col-feature {
-  width: 28%;
+  width: 22%;
 }
 
 .col-legacy {
-  width: 36%;
+  width: 39%;
 }
 
 .col-webdb {
-  width: 36%;
+  width: 39%;
   background: rgba(16, 185, 129, 0.04);
 }
 
@@ -2540,16 +2479,16 @@ code {
 .webdb-col-header {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.65rem;
   color: var(--vp-c-text-1);
 }
 
 .webdb-header-pill {
   font-family: var(--vp-font-family-mono);
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.5px;
-  padding: 2px 7px;
+  padding: 2px 8px;
   background: var(--vp-c-brand-1);
   color: #ffffff;
 }
@@ -2572,8 +2511,8 @@ code {
 }
 
 .compare-table tbody td {
-  padding: 1.25rem 1.5rem;
-  vertical-align: top;
+  padding: 1.25rem 1.6rem;
+  vertical-align: middle;
 }
 
 .row-feature {
@@ -2583,14 +2522,8 @@ code {
 .feature-title {
   font-weight: 700;
   color: var(--vp-c-text-1);
-  font-size: 0.92rem;
-  margin-bottom: 0.25rem;
-}
-
-.feature-desc {
-  font-size: 0.78rem;
-  color: var(--vp-c-text-3);
-  line-height: 1.45;
+  font-size: 1rem;
+  letter-spacing: -0.2px;
 }
 
 .cell-legacy {
@@ -2608,21 +2541,23 @@ code {
 }
 
 .val-bad {
-  display: inline-block;
   font-family: var(--vp-font-family-mono);
-  font-size: 0.82rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: #ef4444;
-  margin-bottom: 0.35rem;
+  letter-spacing: -0.2px;
+  line-height: 1.25;
+  margin-bottom: 0.25rem;
 }
 
 .val-warn {
-  display: inline-block;
   font-family: var(--vp-font-family-mono);
-  font-size: 0.82rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: #d97706;
-  margin-bottom: 0.35rem;
+  letter-spacing: -0.2px;
+  line-height: 1.25;
+  margin-bottom: 0.25rem;
 }
 
 :global(.dark) .val-warn {
@@ -2630,23 +2565,23 @@ code {
 }
 
 .val-good {
-  display: inline-block;
   font-family: var(--vp-font-family-mono);
-  font-size: 0.86rem;
+  font-size: 1.15rem;
   font-weight: 800;
   color: var(--vp-c-brand-1);
-  margin-bottom: 0.35rem;
+  letter-spacing: -0.3px;
+  line-height: 1.2;
+  margin-bottom: 0.25rem;
 }
 
 .val-sub {
-  display: block;
   font-size: 0.82rem;
-  line-height: 1.5;
-  color: var(--vp-c-text-2);
+  line-height: 1.45;
+  color: var(--vp-c-text-3);
 }
 
 .cell-webdb .val-sub {
-  color: var(--vp-c-text-1);
+  color: var(--vp-c-text-2);
 }
 
 /* ASYNC VFS GRID (2-CELL WITH ADAPTIVE BORDER & BACKGROUND) */
@@ -3520,7 +3455,10 @@ code {
     height: 48px;
     padding-left: 1.25rem;
   }
-  .compare-table thead th,
+  .compare-table thead th {
+    padding: 1rem 1rem;
+    font-size: 0.78rem;
+  }
   .compare-table tbody td {
     padding: 1rem 1rem;
   }
