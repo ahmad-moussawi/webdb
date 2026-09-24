@@ -119,13 +119,13 @@ function highlightCode(code: string, tab: string): string {
 
   // Keywords
   html = html.replace(
-    /\b(await|async|const|let|var|function|return|true|false|null|import|from|new)\b/g,
+    /\b(await|async|const|let|var|function|return|true|false|null|import|from|new|export|class|implements)\b/g,
     `<span class="hl-kw">$1</span>`,
   );
 
   // Column / Value Types
   html = html.replace(
-    /\b(UUID|ULID|TEXT|INT32|FLOAT64|VECTOR|BLOB|WebDB|HttpVfsAdapter)\b/g,
+    /\b(UUID|ULID|TEXT|INT32|FLOAT64|VECTOR|BLOB|WebDB|HttpVfsAdapter|VfsAdapter|CloudflareKvVfs|Promise|Uint8Array|number|void|string|boolean)\b/g,
     `<span class="hl-type">$1</span>`,
   );
 
@@ -134,7 +134,7 @@ function highlightCode(code: string, tab: string): string {
 
   // Method Names
   html = html.replace(
-    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open)\b(?=\()/g,
+    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open|readPage|writePage|get|put)\b(?=\()/g,
     `<span class="hl-fn">$1</span>`,
   );
 
@@ -153,6 +153,21 @@ const renderedLines = computed(() => {
     activeTab.value,
   );
   return highlighted.split("\n");
+});
+
+const customVfsSnippet = `export class CloudflareKvVfs implements VfsAdapter {
+  async readPage(id: number) {
+    const key = "p" + id;
+    return await kv.get(key);
+  }
+  async writePage(id: number, buf: Uint8Array) {
+    const key = "p" + id;
+    await kv.put(key, buf);
+  }
+}`;
+
+const highlightedCustomVfs = computed(() => {
+  return highlightCode(customVfsSnippet, "ts");
 });
 
 const httpVfsSnippet = `import { WebDB, HttpVfsAdapter } from "@webdb/core";
@@ -1125,14 +1140,7 @@ const copyCode = () => {
             <div class="mini-code-body">
               <pre
                 class="mini-code"
-              ><code><span class="hl-kw">export class</span> <span class="hl-type">CloudflareKvVfs</span> <span class="hl-kw">implements</span> <span class="hl-type">VfsAdapter</span> {
-  <span class="hl-kw">async</span> <span class="hl-fn">readPage</span>(id: <span class="hl-type">number</span>): <span class="hl-type">Promise</span>&lt;<span class="hl-type">Uint8Array</span>&gt; {
-    <span class="hl-kw">return await</span> kv.get(<span class="hl-str">`p_${id}`</span>, <span class="hl-str">"arrayBuffer"</span>);
-  }
-  <span class="hl-kw">async</span> <span class="hl-fn">writePage</span>(id: <span class="hl-type">number</span>, buf: <span class="hl-type">Uint8Array</span>): <span class="hl-type">Promise</span>&lt;<span class="hl-type">void</span>&gt; {
-    <span class="hl-kw">await</span> kv.put(<span class="hl-str">`p_${id}`</span>, buf);
-  }
-}</code></pre>
+              ><code v-html="highlightedCustomVfs"></code></pre>
             </div>
           </div>
         </div>
