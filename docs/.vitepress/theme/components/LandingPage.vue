@@ -170,170 +170,251 @@ const copyCode = () => {
 
 <template>
   <div class="webdb-landing">
-    <!-- HERO SECTION -->
-    <section class="hero-box">
-      <div class="meta-tag">
-        <span class="status-dot"></span>
-        <code>ENGINE_STATUS: WALKING_SKELETON // V1.0_PROTOTYPE</code>
-        <span class="badge-accent">EARLY_ACCESS</span>
+    <!-- HERO SECTION (OPEN & SPACIOUS) -->
+    <header class="hero-section">
+      <div class="hero-eyebrow">
+        <img :src="withBase('/logo.svg')" alt="WebDB Logo" width="20" height="20" class="eyebrow-logo" />
+        <span class="eyebrow-brand">WebDB</span>
+        <span class="eyebrow-sep">/</span>
+        <span class="eyebrow-status">
+          <span class="status-dot"></span>
+          Early Prototype
+        </span>
       </div>
 
-      <div class="hero-header">
-        <div class="logo-box">
-          <img :src="withBase('/logo.svg')" alt="WebDB Logo" width="72" height="72" />
-        </div>
-        <div class="title-group">
-          <h1 class="hero-title">WebDB</h1>
-          <p class="hero-lead">The Browser-Native Relational Database Engine</p>
-        </div>
-      </div>
+      <h1 class="hero-title">
+        The Browser-Native<br />
+        <span class="hero-accent">Relational Database</span>
+      </h1>
 
-      <p class="hero-desc">
-        Built from scratch in C-style architecture compiling to <strong>&lt;50 KB WebAssembly</strong>.
-        True SQL power, 4KB slotted pages, register-based VDBE execution, and async persistence via OPFS &amp; IndexedDB.
-        <strong>No multi-megabyte bundle bloat. Zero Emscripten Asyncify hacks.</strong>
+      <p class="hero-lead">
+        An ultra-lean &lt;50 KB WebAssembly engine with true SQL power, 4KB slotted pages, 
+        and native async persistence over OPFS &amp; IndexedDB.
       </p>
 
-      <div class="action-strip">
+      <div class="hero-actions">
         <a :href="withBase('/getting-started')" class="btn btn-primary">
-          <span>GET STARTED</span>
+          <span>Get Started</span>
           <span class="btn-arrow">→</span>
         </a>
-        <a :href="withBase('/plans/plan')" class="btn btn-secondary">
-          <span>STRATEGIC PLAN</span>
-        </a>
-        <a href="https://github.com/ahmad-moussawi/webdb" target="_blank" rel="noopener" class="btn btn-ghost">
-          <span>GITHUB ⭐</span>
+        <a href="https://github.com/ahmad-moussawi/webdb" target="_blank" rel="noopener" class="btn btn-secondary">
+          <span>GitHub</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="star-icon">
+            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+          </svg>
         </a>
       </div>
 
-      <!-- METRICS BAR -->
-      <div class="metrics-grid">
-        <div class="metric-card">
-          <div class="metric-label">BINARY SIZE</div>
-          <div class="metric-val">&lt; 50 KB</div>
-          <div class="metric-sub">90%+ smaller than SQLite Wasm</div>
+      <!-- HERO STATS BAR (VIBRANT & DISTINCT) -->
+      <div class="hero-stats">
+        <!-- STAT 1: WASM SIZE -->
+        <div class="stat-card stat-cyan">
+          <div class="stat-card-top">
+            <div class="stat-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect width="16" height="16" x="4" y="4" />
+                <rect width="6" height="6" x="9" y="9" />
+                <path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>
+              </svg>
+            </div>
+            <span class="stat-tag">BINARY</span>
+          </div>
+          <div class="stat-val">&lt; 50 KB</div>
+          <div class="stat-label">Wasm Binary Size</div>
+          <div class="stat-desc">90%+ smaller than SQLite Wasm</div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">ASYNC VFS</div>
-          <div class="metric-val">OPFS + IDB</div>
-          <div class="metric-sub">Native non-blocking async storage</div>
+
+        <!-- STAT 2: ASYNC VFS -->
+        <div class="stat-card stat-emerald">
+          <div class="stat-card-top">
+            <div class="stat-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M3 5v14a9 3 0 0 0 18 0V5"/>
+                <path d="M3 12a9 3 0 0 0 18 0"/>
+              </svg>
+            </div>
+            <span class="stat-tag">STORAGE</span>
+          </div>
+          <div class="stat-val">OPFS + IDB</div>
+          <div class="stat-label">Dual Async VFS</div>
+          <div class="stat-desc">Native non-blocking browser I/O</div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">RUNTIME ALLOCATIONS</div>
-          <div class="metric-val">0 BYTES</div>
-          <div class="metric-sub">Zero-heap hot execution loop</div>
+
+        <!-- STAT 3: ZERO ALLOCS -->
+        <div class="stat-card stat-amber">
+          <div class="stat-card-top">
+            <div class="stat-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="m12 14 4-4"/>
+                <path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+              </svg>
+            </div>
+            <span class="stat-tag">MEMORY</span>
+          </div>
+          <div class="stat-val">0 Bytes</div>
+          <div class="stat-label">Heap Allocations</div>
+          <div class="stat-desc">Zero-heap hot execution loop</div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">BROWSER INTEGRATION</div>
-          <div class="metric-val">100% NATIVE</div>
-          <div class="metric-sub">Zero duplicate C shims</div>
+
+        <!-- STAT 4: NATIVE -->
+        <div class="stat-card stat-violet">
+          <div class="stat-card-top">
+            <div class="stat-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+                <path d="M2 12h20"/>
+              </svg>
+            </div>
+            <span class="stat-tag">STANDARDS</span>
+          </div>
+          <div class="stat-val">100% Native</div>
+          <div class="stat-label">Browser Integration</div>
+          <div class="stat-desc">Direct Web API delegation</div>
         </div>
       </div>
-    </section>
+    </header>
 
-    <!-- SECTION 2: APPLICATION DOMAINS & REAL-WORLD USAGE -->
+    <!-- SECTION 2: TARGET WORKLOADS & REAL-WORLD USAGE -->
     <section class="section-box">
-      <div class="section-label">
-        <span class="bracket">[</span> TARGET WORKLOADS &amp; REAL-WORLD USAGE <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Built for the Modern Browser Experience</h2>
       <p class="section-sub">
         WebDB bridges the gap between fragile key-value stores and heavyweight desktop Wasm ports. Here is where it excels in production web applications:
       </p>
 
       <div class="usecases-grid">
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">01 // OFFLINE-FIRST</span>
-            <span class="usecase-tag">PWA_SYNC</span>
+        <!-- CELL 1: OFFLINE-FIRST -->
+        <div class="usecase-cell usecase-theme-emerald">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="1" y1="1" x2="23" y2="23"/>
+                <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/>
+                <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/>
+                <path d="M10.71 5.05A16 16 0 0 1 22.56 9"/>
+                <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/>
+                <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+                <line x1="12" y1="20" x2="12.01" y2="20"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">01</span>
+              <span class="usecase-pill">OFFLINE_SYNC</span>
+            </div>
           </div>
           <h3 class="usecase-title">Offline-First Web Apps &amp; PWAs</h3>
           <p class="usecase-text">
-            Eliminate spinners and network stalls. Render immediately from local storage, record mutations into the Write-Ahead Log while offline, and seamlessly sync deltas upon reconnection.
+            Eliminate spinners and network stalls. Render immediately from local storage, journal mutations into the Write-Ahead Log while disconnected, and seamlessly synchronize deltas upon reconnection.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; Zero-latency UI + WAL delta sync</code>
-          </div>
         </div>
 
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">02 // LOCAL-FIRST</span>
-            <span class="usecase-tag">COLLAB_SAAS</span>
+        <!-- CELL 2: LOCAL-FIRST -->
+        <div class="usecase-cell usecase-theme-cyan">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">02</span>
+              <span class="usecase-pill">LOCAL_FIRST</span>
+            </div>
           </div>
           <h3 class="usecase-title">Local-First Productivity &amp; SaaS</h3>
           <p class="usecase-text">
-            Build Notion, Linear, or Figma-grade creative suites where user documents reside directly in the browser. Multi-tab concurrency is safely coordinated via Web Locks without server trips.
+            Build Notion, Linear, or Figma-grade creative suites where user documents reside directly in the client. Multi-tab concurrency is safely coordinated via Web Locks without server trips.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; Multi-tab navigator.locks coordination</code>
-          </div>
         </div>
 
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">03 // BROWSER AI</span>
-            <span class="usecase-tag">EMBEDDINGS</span>
+        <!-- CELL 3: BROWSER AI -->
+        <div class="usecase-cell usecase-theme-violet">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">03</span>
+              <span class="usecase-pill">BROWSER_AI</span>
+            </div>
           </div>
-          <h3 class="usecase-title">Client-Side AI &amp; Vector Search</h3>
+          <h3 class="usecase-title">Client-Side AI &amp; Vector Embeddings</h3>
           <p class="usecase-text">
-            Store high-dimensional embeddings generated by WebLLM or Transformers.js. Perform cosine similarity searches with 128-bit Wasm SIMD directly in the browser for instant local RAG.
+            Store high-dimensional vector embeddings generated by WebLLM or Transformers.js. Perform cosine similarity searches with 128-bit Wasm SIMD directly in the browser for instant local RAG.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; 128-dim SIMD vector search in Wasm</code>
-          </div>
         </div>
 
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">04 // CDN STREAMING</span>
-            <span class="usecase-tag">HTTP_RANGE</span>
+        <!-- CELL 4: CDN STREAMING -->
+        <div class="usecase-cell usecase-theme-amber">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                <path d="M12 12v9"/><path d="m8 17 4 4 4-4"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">04</span>
+              <span class="usecase-pill">HTTP_RANGE</span>
+            </div>
           </div>
           <h3 class="usecase-title">Static CDN Dataset Streaming</h3>
           <p class="usecase-text">
-            Host multi-gigabyte catalogs, documentation archives, or geographic datasets as read-only databases on S3 or Cloudflare R2. Query pages on-demand via HTTP Range requests without downloading the entire file.
+            Host multi-gigabyte catalogs, documentation archives, or geographic datasets as read-only databases on S3 or Cloudflare R2. Query pages on-demand via HTTP Range requests without full downloads.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; 4KB page fetch over HTTP Range</code>
-          </div>
         </div>
 
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">05 // PRIVACY-FIRST</span>
-            <span class="usecase-tag">ZERO_KNOWLEDGE</span>
+        <!-- CELL 5: PRIVACY-FIRST -->
+        <div class="usecase-cell usecase-theme-rose">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect width="18" height="11" x="3" y="11" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">05</span>
+              <span class="usecase-pill">ZERO_KNOWLEDGE</span>
+            </div>
           </div>
           <h3 class="usecase-title">Privacy-Centric Personal Vaults</h3>
           <p class="usecase-text">
             Healthcare portals, password managers, financial ledgers, and journaling apps where customer data must never touch your backend unencrypted. The database lives and dies on the client device.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; AES-256-GCM page-level encryption</code>
-          </div>
         </div>
 
-        <div class="usecase-card">
-          <div class="usecase-badge">
-            <span class="usecase-code">06 // EDGE ANALYTICS</span>
-            <span class="usecase-tag">DASHBOARDS</span>
+        <!-- CELL 6: EDGE ANALYTICS -->
+        <div class="usecase-cell usecase-theme-indigo">
+          <div class="usecase-cell-header">
+            <div class="usecase-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <line x1="18" y1="20" x2="18" y2="10"/>
+                <line x1="12" y1="20" x2="12" y2="4"/>
+                <line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+            </div>
+            <div class="usecase-cell-meta">
+              <span class="usecase-num">06</span>
+              <span class="usecase-pill">EDGE_ANALYTICS</span>
+            </div>
           </div>
           <h3 class="usecase-title">In-Browser Analytics &amp; Dashboards</h3>
           <p class="usecase-text">
             Offload complex multi-table aggregations, filtering, and joins from your API servers directly into the user's browser. Transform raw CSVs or JSON payloads into relational tables on the fly.
           </p>
-          <div class="usecase-footer">
-            <code>&gt; Fast in-memory joins &amp; aggregations</code>
-          </div>
         </div>
       </div>
     </section>
 
-    <!-- ARCHITECTURE & PIPELINE (ZERO-AST DATAFLOW) -->
+    <!-- SECTION 3: ARCHITECTURE & PIPELINE (ZERO-AST DATAFLOW) -->
     <section class="section-box">
-      <div class="section-label">
-        <span class="bracket">[</span> ARCHITECTURE &amp; PIPELINE <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Zero-AST Execution Path</h2>
       <p class="section-sub">
         Standard ported databases parse text SQL strings at runtime into heavy ASTs. WebDB's TypeScript query builder compiles directly into flat 16-byte register instructions.
@@ -376,11 +457,8 @@ const copyCode = () => {
       </div>
     </section>
 
-    <!-- THE PROBLEM VS THE SOLUTION (FLAT BENTO BOXES) -->
+    <!-- SECTION 4: THE PROBLEM VS THE SOLUTION -->
     <section class="section-box">
-      <div class="section-label">
-        <span class="bracket">[</span> THE ARCHITECTURAL GAP <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Why Porting Desktop Databases to the Web Fails</h2>
       <p class="section-sub">
         Web developers have been forced to choose between the awkward key-value cursors of IndexedDB or multi-megabyte desktop engines ported with Emscripten. WebDB rethinks the database engine specifically for web runtime constraints.
@@ -463,82 +541,102 @@ const copyCode = () => {
       </div>
     </section>
 
-    <!-- ASYNC VFS ARCHITECTURE & AVAILABLE VFS ADAPTERS -->
+    <!-- SECTION 5: ASYNC VFS ARCHITECTURE & AVAILABLE ADAPTERS -->
     <section class="section-box">
-      <div class="section-label">
-        <span class="bracket">[</span> STORAGE LAYER // ZERO ASYNCIFY <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Async VFS: Storage Built for the Web Platform</h2>
       <p class="section-sub">
         Standard C databases fail in browsers because POSIX assumes synchronous, blocking disk calls (<code>read</code>, <code>write</code>, <code>fsync</code>). WebDB’s VDBE bytecode machine is inherently asynchronous—it suspends execution on page cache misses, triggers non-blocking browser I/O, and resumes the instant the 4KB block arrives. Zero Emscripten stack-unwinding penalty.
       </p>
 
-      <!-- 4 AVAILABLE VFS ADAPTERS GRID -->
+      <!-- 4 AVAILABLE VFS ADAPTERS GRID (2-CELL) -->
       <div class="vfs-grid">
-        <div class="vfs-card">
-          <div class="vfs-header">
-            <span class="vfs-code">ADAPTER 01</span>
-            <span class="vfs-badge vfs-badge-primary">MAX_THROUGHPUT</span>
+        <!-- VFS 1: OPFS -->
+        <div class="vfs-cell vfs-theme-emerald">
+          <div class="vfs-cell-header">
+            <div class="vfs-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M3 5v14a9 3 0 0 0 18 0V5"/>
+                <path d="M3 12a9 3 0 0 0 18 0"/>
+              </svg>
+            </div>
+            <div class="vfs-cell-meta">
+              <span class="vfs-num">01</span>
+              <span class="vfs-pill">OPFS</span>
+            </div>
           </div>
           <h3 class="vfs-title">OPFS VFS</h3>
           <p class="vfs-desc">
-            Direct bare-metal access to the browser's <strong>Origin Private File System</strong> using synchronous access handles (<code>FileSystemSyncAccessHandle</code>) inside dedicated Web Workers. Delivers near-native NVMe read/write throughput with zero serialization overhead.
+            Direct access to the browser's Origin Private File System using <code>FileSystemSyncAccessHandle</code> inside dedicated Web Workers. Delivers near-native NVMe read/write throughput for high-frequency database persistence.
           </p>
-          <div class="vfs-context">
-            <code>ENVIRONMENT: Dedicated Web Workers</code>
-          </div>
         </div>
 
-        <div class="vfs-card">
-          <div class="vfs-header">
-            <span class="vfs-code">ADAPTER 02</span>
-            <span class="vfs-badge">UNIVERSAL</span>
+        <!-- VFS 2: INDEXEDDB -->
+        <div class="vfs-cell vfs-theme-cyan">
+          <div class="vfs-cell-header">
+            <div class="vfs-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect width="18" height="18" x="3" y="3"/>
+                <path d="M3 9h18"/>
+                <path d="M9 21V9"/>
+              </svg>
+            </div>
+            <div class="vfs-cell-meta">
+              <span class="vfs-num">02</span>
+              <span class="vfs-pill">INDEXEDDB</span>
+            </div>
           </div>
           <h3 class="vfs-title">IndexedDB VFS</h3>
           <p class="vfs-desc">
-            Universal browser fallback running everywhere, including main thread contexts and mobile Safari on iOS. Stores rigid 4KB slotted pages as binary <code>ArrayBuffer</code> blobs within an IndexedDB object store.
+            Universal browser fallback running everywhere, including main thread contexts and mobile Safari on iOS. Stores rigid 4KB database pages as binary <code>ArrayBuffer</code> blobs with ACID transactional guarantees.
           </p>
-          <div class="vfs-context">
-            <code>ENVIRONMENT: Main Thread &amp; Mobile Safari</code>
-          </div>
         </div>
 
-        <div class="vfs-card">
-          <div class="vfs-header">
-            <span class="vfs-code">ADAPTER 03</span>
-            <span class="vfs-badge">EPHEMERAL</span>
+        <!-- VFS 3: MEMORY -->
+        <div class="vfs-cell vfs-theme-violet">
+          <div class="vfs-cell-header">
+            <div class="vfs-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect width="16" height="16" x="4" y="4"/>
+                <rect width="6" height="6" x="9" y="9"/>
+                <path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>
+              </svg>
+            </div>
+            <div class="vfs-cell-meta">
+              <span class="vfs-num">03</span>
+              <span class="vfs-pill">IN_MEMORY</span>
+            </div>
           </div>
           <h3 class="vfs-title">Memory VFS</h3>
           <p class="vfs-desc">
-            In-memory volatile page store backed by flat <code>Uint8Array</code> buffers. Delivers sub-millisecond query execution with zero persistence—ideal for automated test suites, transient UI state, and ephemeral analytics sandboxes.
+            In-memory volatile page store backed by flat <code>Uint8Array</code> buffers. Delivers sub-millisecond query execution for unit test fixtures, transient UI states, and isolated sandbox analytics.
           </p>
-          <div class="vfs-context">
-            <code>ENVIRONMENT: Unit Tests &amp; Scratchpads</code>
-          </div>
         </div>
 
-        <div class="vfs-card">
-          <div class="vfs-header">
-            <span class="vfs-code">ADAPTER 04</span>
-            <span class="vfs-badge vfs-badge-accent">STREAMING</span>
+        <!-- VFS 4: HTTP RANGE -->
+        <div class="vfs-cell vfs-theme-amber">
+          <div class="vfs-cell-header">
+            <div class="vfs-icon-box">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                <path d="M12 12v9"/><path d="m8 17 4 4 4-4"/>
+              </svg>
+            </div>
+            <div class="vfs-cell-meta">
+              <span class="vfs-num">04</span>
+              <span class="vfs-pill">HTTP_RANGE</span>
+            </div>
           </div>
           <h3 class="vfs-title">HTTP Range VFS</h3>
           <p class="vfs-desc">
-            Stream read-only databases hosted on static CDNs or S3 buckets. Fetches 4KB pages on-demand using standard HTTP <code>Range: bytes=X-Y</code> headers with zero pre-downloading of the database file.
+            Stream read-only databases hosted on static CDNs or S3 buckets. Fetches 4KB pages on-demand using standard HTTP <code>Range: bytes=X-Y</code> headers with zero pre-downloading overhead.
           </p>
-          <div class="vfs-context">
-            <code>ENVIRONMENT: Static CDNs &amp; Cloudflare R2</code>
-          </div>
         </div>
       </div>
 
       <!-- HTTP VFS SHOWCASE & LIVE EXAMPLE -->
       <div class="http-vfs-box">
         <div class="http-vfs-content">
-          <div class="http-vfs-meta">
-            <span class="tag-accent">DEEP DIVE</span>
-            <code>FEATURE_HIGHLIGHT: HTTP_RANGE_VFS</code>
-          </div>
           <h3 class="http-vfs-title">Query a 5GB Database on S3 Over 16KB of Network</h3>
           <p class="http-vfs-desc">
             Instead of downloading the entire database to the client, <code>HttpVfsAdapter</code> turns static object storage into a serverless query engine. When your query executes, WebDB inspects its B+Tree indexes and requests <em>only the precise 4KB pages required</em>.
@@ -583,18 +681,18 @@ const copyCode = () => {
       </div>
     </section>
 
-    <!-- CORE PILLARS (FLAT SQUARED GRID) -->
+    <!-- SECTION 6: CORE PILLARS -->
     <section class="section-box">
-      <div class="section-label">
-        <span class="bracket">[</span> CORE CAPABILITIES <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Engineered for Offline-First Applications</h2>
+      <p class="section-sub">
+        A low-level relational architecture designed for extreme memory efficiency and predictable browser execution.
+      </p>
 
       <div class="features-grid">
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">01 // STORAGE</span>
-            <span class="feat-tag">DUAL-VFS</span>
+            <span class="feat-code">01</span>
+            <span class="feat-tag">Storage</span>
           </div>
           <h3 class="feat-title">Pluggable Async VFS</h3>
           <p class="feat-text">
@@ -604,8 +702,8 @@ const copyCode = () => {
 
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">02 // EXECUTION</span>
-            <span class="feat-tag">VDBE-VM</span>
+            <span class="feat-code">02</span>
+            <span class="feat-tag">Execution</span>
           </div>
           <h3 class="feat-title">32-Register Bytecode Machine</h3>
           <p class="feat-text">
@@ -615,8 +713,8 @@ const copyCode = () => {
 
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">03 // RELIABILITY</span>
-            <span class="feat-tag">WAL-ACID</span>
+            <span class="feat-code">03</span>
+            <span class="feat-tag">Reliability</span>
           </div>
           <h3 class="feat-title">Physical WAL Crash Recovery</h3>
           <p class="feat-text">
@@ -626,8 +724,8 @@ const copyCode = () => {
 
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">04 // IDENTITY</span>
-            <span class="feat-tag">128-BIT</span>
+            <span class="feat-code">04</span>
+            <span class="feat-tag">Identity</span>
           </div>
           <h3 class="feat-title">Native Binary UUID &amp; ULID</h3>
           <p class="feat-text">
@@ -637,8 +735,8 @@ const copyCode = () => {
 
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">05 // EXTENSIBILITY</span>
-            <span class="feat-tag">UDF-BRIDGE</span>
+            <span class="feat-code">05</span>
+            <span class="feat-tag">Extensibility</span>
           </div>
           <h3 class="feat-title">Synchronous JavaScript UDFs</h3>
           <p class="feat-text">
@@ -648,8 +746,8 @@ const copyCode = () => {
 
         <div class="feat-box">
           <div class="feat-header">
-            <span class="feat-code">06 // FUTURE-READY</span>
-            <span class="feat-tag">SIMD+FTS</span>
+            <span class="feat-code">06</span>
+            <span class="feat-tag">Search</span>
           </div>
           <h3 class="feat-title">Vector &amp; BM25 Hybrid Search</h3>
           <p class="feat-text">
@@ -659,12 +757,12 @@ const copyCode = () => {
       </div>
     </section>
 
-    <!-- INTERACTIVE CODE SHOWCASE -->
+    <!-- SECTION 7: INTERACTIVE CODE SHOWCASE -->
     <section class="section-box code-section">
-      <div class="section-label">
-        <span class="bracket">[</span> DEVELOPER EXPERIENCE <span class="bracket">]</span>
-      </div>
       <h2 class="section-heading">Simple, Type-Safe API</h2>
+      <p class="section-sub">
+        Explore how schema creation, queries, transactions, and virtual machine disassembly work in practice.
+      </p>
 
       <div class="terminal-box">
         <div class="terminal-bar">
@@ -720,10 +818,9 @@ const copyCode = () => {
       </div>
     </section>
 
-    <!-- SUPPORT / CTA BANNER -->
+    <!-- SECTION 8: SUPPORT / CTA BANNER -->
     <section class="support-banner">
       <div class="support-content">
-        <span class="banner-tag">OPEN SOURCE &amp; MIT LICENSED</span>
         <h2 class="banner-title">Help Build the Future of Browser Databases</h2>
         <p class="banner-desc">
           WebDB is an open initiative to give web developers the fast, lightweight database they deserve.
@@ -736,7 +833,10 @@ const copyCode = () => {
             rel="noopener"
             class="btn btn-primary"
           >
-            <span>STAR ON GITHUB ⭐</span>
+            <span>STAR ON GITHUB</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="star-icon">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+            </svg>
           </a>
           <a :href="withBase('/plans/plan')" class="btn btn-secondary">
             <span>READ THE SPECIFICATIONS</span>
@@ -749,117 +849,103 @@ const copyCode = () => {
 
 <style scoped>
 .webdb-landing {
-  max-width: 1140px;
+  max-width: 1160px;
   margin: 0 auto;
-  padding: 2.5rem 1.5rem 5rem;
+  padding: 3.5rem 2rem 8rem;
   font-family: var(--vp-font-family-base);
   color: var(--vp-c-text-1);
-}
-
-/* TYPOGRAPHY & BRACKETS */
-.bracket {
-  color: var(--vp-c-brand-1);
-  font-weight: 700;
 }
 
 code {
   font-family: var(--vp-font-family-mono);
 }
 
-/* HERO SECTION */
-.hero-box {
-  border: 1px solid var(--vp-c-divider);
-  background-color: var(--vp-c-bg-soft);
-  background-image: radial-gradient(var(--vp-c-divider) 1px, transparent 1px);
-  background-size: 20px 20px;
-  padding: 3rem 2.5rem;
-  margin-bottom: 3.5rem;
-  position: relative;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+/* HERO SECTION (OPEN & SPACIOUS) */
+.hero-section {
+  text-align: center;
+  padding: 3.5rem 1rem 5.5rem;
+  max-width: 980px;
+  margin: 0 auto;
 }
 
-.meta-tag {
-  display: flex;
+.hero-eyebrow {
+  display: inline-flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.65rem;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  padding: 0.35rem 0.9rem;
+  font-family: var(--vp-font-family-mono);
   font-size: 0.8rem;
+  margin-bottom: 2rem;
+}
+
+.eyebrow-logo {
+  display: inline-block;
+}
+
+.eyebrow-brand {
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+}
+
+.eyebrow-sep {
+  color: var(--vp-c-text-3);
+  opacity: 0.6;
+}
+
+.eyebrow-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   color: var(--vp-c-text-2);
-  margin-bottom: 1.5rem;
-  flex-wrap: wrap;
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   background-color: #10b981;
   display: inline-block;
   box-shadow: 0 0 8px #10b981;
 }
 
-.badge-accent {
-  background: var(--vp-c-brand-1);
-  color: #fff;
-  padding: 2px 6px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-}
-
-.hero-header {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  margin-bottom: 1.25rem;
-}
-
-.logo-box {
-  border: 1px solid var(--vp-c-divider);
-  padding: 0.5rem;
-  background: var(--vp-c-bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .hero-title {
-  font-size: 3rem;
+  font-size: 3.85rem;
   font-weight: 900;
-  letter-spacing: -1.5px;
-  margin: 0;
-  line-height: 1;
+  letter-spacing: -2.2px;
+  line-height: 1.08;
+  margin: 0 0 1.5rem;
+  color: var(--vp-c-text-1);
+}
+
+.hero-accent {
+  color: var(--vp-c-brand-1);
 }
 
 .hero-lead {
   font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--vp-c-brand-1);
-  margin: 0.4rem 0 0;
-  letter-spacing: -0.3px;
-}
-
-.hero-desc {
-  font-size: 1.05rem;
   line-height: 1.6;
   color: var(--vp-c-text-2);
-  max-width: 840px;
-  margin-bottom: 2rem;
+  max-width: 680px;
+  margin: 0 auto 2.5rem;
+  font-weight: 400;
 }
 
-.action-strip {
+.hero-actions {
   display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 2.5rem;
+  justify-content: center;
+  align-items: center;
+  gap: 1.25rem;
 }
 
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.75rem 1.4rem;
-  font-size: 0.85rem;
+  padding: 0.85rem 1.85rem;
+  font-size: 0.9rem;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
   text-decoration: none;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -878,7 +964,7 @@ code {
 }
 
 .btn-secondary {
-  background: var(--vp-c-bg);
+  background: var(--vp-c-bg-soft);
   color: var(--vp-c-text-1);
   border-color: var(--vp-c-divider);
 }
@@ -888,147 +974,418 @@ code {
   border-color: var(--vp-c-text-2);
 }
 
-.btn-ghost {
-  background: transparent;
-  color: var(--vp-c-text-1);
-  border-color: var(--vp-c-divider);
+.btn-arrow {
+  transition: transform 0.15s ease;
 }
 
-.btn-ghost:hover {
-  border-color: var(--vp-c-brand-1);
-  color: var(--vp-c-brand-1);
+.btn:hover .btn-arrow {
+  transform: translateX(3px);
 }
 
-/* METRICS GRID */
-.metrics-grid {
+.star-icon {
+  display: inline-block;
+  vertical-align: middle;
+  color: #f59e0b;
+  transition: transform 0.2s ease, fill 0.2s ease;
+}
+
+.btn:hover .star-icon {
+  fill: #f59e0b;
+  transform: scale(1.15) rotate(6deg);
+}
+
+/* HERO STATS BAR (VIBRANT & DISTINCT) */
+.hero-stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: var(--vp-c-divider);
+  gap: 1.25rem;
+  margin-top: 5rem;
+  text-align: left;
+}
+
+.stat-card {
   border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  padding: 1.75rem 1.4rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  border-top: 3px solid transparent;
 }
 
-.metric-card {
-  background: var(--vp-c-bg);
-  padding: 1.25rem 1rem;
+.stat-card:hover {
+  transform: translateY(-2px);
 }
 
-.metric-label {
-  font-size: 0.72rem;
+.stat-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+.stat-icon-box {
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+}
+
+.stat-tag {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
   color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
 }
 
-.metric-val {
-  font-size: 1.5rem;
-  font-weight: 800;
-  color: var(--vp-c-brand-1);
-  margin: 0.25rem 0;
+.stat-val {
   font-family: var(--vp-font-family-mono);
+  font-size: 1.65rem;
+  font-weight: 900;
+  letter-spacing: -0.5px;
+  line-height: 1.15;
+  margin-bottom: 0.4rem;
 }
 
-.metric-sub {
-  font-size: 0.75rem;
-  color: var(--vp-c-text-2);
+.stat-label {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+  margin-bottom: 0.35rem;
+}
+
+.stat-desc {
+  font-size: 0.78rem;
+  color: var(--vp-c-text-3);
+  line-height: 1.45;
+}
+
+/* THEMED VIBRANT ACCENTS */
+/* 1. CYAN / SKY */
+.stat-cyan {
+  border-top-color: #0284c7;
+}
+.stat-cyan .stat-icon-box {
+  background: rgba(14, 165, 233, 0.1);
+  border-color: rgba(14, 165, 233, 0.25);
+  color: #0284c7;
+}
+:global(.dark) .stat-cyan {
+  border-top-color: #38bdf8;
+}
+:global(.dark) .stat-cyan .stat-icon-box {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+}
+.stat-cyan .stat-val {
+  color: #0284c7;
+}
+:global(.dark) .stat-cyan .stat-val {
+  color: #38bdf8;
+}
+
+/* 2. EMERALD */
+.stat-emerald {
+  border-top-color: #059669;
+}
+.stat-emerald .stat-icon-box {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.25);
+  color: #059669;
+}
+:global(.dark) .stat-emerald {
+  border-top-color: #34d399;
+}
+:global(.dark) .stat-emerald .stat-icon-box {
+  background: rgba(52, 211, 153, 0.15);
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #34d399;
+}
+.stat-emerald .stat-val {
+  color: #059669;
+}
+:global(.dark) .stat-emerald .stat-val {
+  color: #34d399;
+}
+
+/* 3. AMBER / ORANGE */
+.stat-amber {
+  border-top-color: #d97706;
+}
+.stat-amber .stat-icon-box {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.25);
+  color: #d97706;
+}
+:global(.dark) .stat-amber {
+  border-top-color: #fbbf24;
+}
+:global(.dark) .stat-amber .stat-icon-box {
+  background: rgba(251, 191, 36, 0.15);
+  border-color: rgba(251, 191, 36, 0.35);
+  color: #fbbf24;
+}
+.stat-amber .stat-val {
+  color: #d97706;
+}
+:global(.dark) .stat-amber .stat-val {
+  color: #fbbf24;
+}
+
+/* 4. VIOLET / PURPLE */
+.stat-violet {
+  border-top-color: #7c3aed;
+}
+.stat-violet .stat-icon-box {
+  background: rgba(168, 85, 247, 0.1);
+  border-color: rgba(168, 85, 247, 0.25);
+  color: #7c3aed;
+}
+:global(.dark) .stat-violet {
+  border-top-color: #c084fc;
+}
+:global(.dark) .stat-violet .stat-icon-box {
+  background: rgba(192, 132, 252, 0.15);
+  border-color: rgba(192, 132, 252, 0.35);
+  color: #c084fc;
+}
+.stat-violet .stat-val {
+  color: #7c3aed;
+}
+:global(.dark) .stat-violet .stat-val {
+  color: #c084fc;
 }
 
 /* SECTION CONTAINER */
 .section-box {
-  margin-bottom: 3.5rem;
-}
-
-.section-label {
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--vp-c-brand-1);
-  letter-spacing: 1px;
-  margin-bottom: 0.5rem;
+  margin-bottom: 6rem;
 }
 
 .section-heading {
-  font-size: 1.85rem;
+  font-size: 2.1rem;
   font-weight: 800;
-  letter-spacing: -0.5px;
-  margin: 0 0 0.75rem;
+  letter-spacing: -0.6px;
+  margin: 0 0 0.85rem;
 }
 
 .section-sub {
   color: var(--vp-c-text-2);
-  font-size: 1rem;
-  line-height: 1.6;
+  font-size: 1.05rem;
+  line-height: 1.65;
   max-width: 820px;
-  margin: 0 0 2rem;
+  margin: 0 0 3rem;
 }
 
-/* USE CASES GRID */
+/* USECASES GRID (2-CELL WITH BLACK BORDER & WHITE BACKGROUND) */
 .usecases-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1.25rem;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: #000000;
+  border: 1px solid #000000;
 }
 
-.usecase-card {
-  border: 1px solid var(--vp-c-divider);
-  background: var(--vp-c-bg-soft);
-  padding: 1.5rem;
+:global(.dark) .usecases-grid {
+  background: var(--vp-c-divider);
+  border-color: var(--vp-c-divider);
+}
+
+.usecase-cell {
+  padding: 3rem 2.5rem;
   display: flex;
   flex-direction: column;
-  transition: transform 0.15s ease, border-color 0.15s ease;
+  position: relative;
+  background: #ffffff;
+  transition: background 0.15s ease;
 }
 
-.usecase-card:hover {
-  border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
+.usecase-cell:hover {
+  background: #fafafa;
 }
 
-.usecase-badge {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.72rem;
-  color: var(--vp-c-text-3);
-  margin-bottom: 0.75rem;
-}
-
-.usecase-code {
-  color: var(--vp-c-brand-1);
-  font-weight: 700;
-}
-
-.usecase-tag {
+:global(.dark) .usecase-cell {
   background: var(--vp-c-bg);
-  border: 1px solid var(--vp-c-divider);
-  padding: 1px 6px;
+}
+
+:global(.dark) .usecase-cell:hover {
+  background: var(--vp-c-bg-mute);
+}
+
+.usecase-cell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.usecase-icon-box {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+}
+
+.usecase-cell-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.usecase-num {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.usecase-pill {
+  font-family: var(--vp-font-family-mono);
   font-size: 0.68rem;
   font-weight: 700;
+  padding: 2px 7px;
+  border: 1px solid #000000;
+  background: #ffffff;
+  color: #000000;
+  letter-spacing: 0.5px;
+}
+
+:global(.dark) .usecase-pill {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
   color: var(--vp-c-text-2);
 }
 
 .usecase-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  margin: 0 0 0.5rem;
+  font-size: 1.22rem;
+  font-weight: 800;
   letter-spacing: -0.3px;
+  margin: 0 0 0.85rem;
+  color: var(--vp-c-text-1);
+  line-height: 1.35;
 }
 
 .usecase-text {
-  font-size: 0.88rem;
+  font-size: 0.92rem;
+  line-height: 1.65;
   color: var(--vp-c-text-2);
-  line-height: 1.5;
-  margin: 0 0 1rem;
-  flex: 1;
+  margin: 0;
 }
 
-.usecase-footer {
-  border-top: 1px solid var(--vp-c-divider);
-  padding-top: 0.6rem;
-  font-size: 0.75rem;
-  color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
+/* THEME ACCENTS FOR ICONS & NUMBERS */
+/* Emerald */
+.usecase-theme-emerald .usecase-num {
+  color: #10b981;
+}
+.usecase-theme-emerald .usecase-icon-box {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+:global(.dark) .usecase-theme-emerald .usecase-icon-box {
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.3);
+  color: #34d399;
+}
+
+/* Cyan */
+.usecase-theme-cyan .usecase-num {
+  color: #0284c7;
+}
+:global(.dark) .usecase-theme-cyan .usecase-num {
+  color: #38bdf8;
+}
+.usecase-theme-cyan .usecase-icon-box {
+  background: rgba(14, 165, 233, 0.08);
+  border-color: rgba(14, 165, 233, 0.2);
+  color: #0284c7;
+}
+:global(.dark) .usecase-theme-cyan .usecase-icon-box {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+}
+
+/* Violet */
+.usecase-theme-violet .usecase-num {
+  color: #8b5cf6;
+}
+:global(.dark) .usecase-theme-violet .usecase-num {
+  color: #a78bfa;
+}
+.usecase-theme-violet .usecase-icon-box {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.2);
+  color: #8b5cf6;
+}
+:global(.dark) .usecase-theme-violet .usecase-icon-box {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.3);
+  color: #a78bfa;
+}
+
+/* Amber */
+.usecase-theme-amber .usecase-num {
+  color: #d97706;
+}
+:global(.dark) .usecase-theme-amber .usecase-num {
+  color: #fbbf24;
+}
+.usecase-theme-amber .usecase-icon-box {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.2);
+  color: #d97706;
+}
+:global(.dark) .usecase-theme-amber .usecase-icon-box {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+  color: #fbbf24;
+}
+
+/* Rose */
+.usecase-theme-rose .usecase-num {
+  color: #f43f5e;
+}
+:global(.dark) .usecase-theme-rose .usecase-num {
+  color: #fb7185;
+}
+.usecase-theme-rose .usecase-icon-box {
+  background: rgba(244, 63, 94, 0.08);
+  border-color: rgba(244, 63, 94, 0.2);
+  color: #f43f5e;
+}
+:global(.dark) .usecase-theme-rose .usecase-icon-box {
+  background: rgba(251, 113, 133, 0.12);
+  border-color: rgba(251, 113, 133, 0.3);
+  color: #fb7185;
+}
+
+/* Indigo */
+.usecase-theme-indigo .usecase-num {
+  color: #6366f1;
+}
+:global(.dark) .usecase-theme-indigo .usecase-num {
+  color: #818cf8;
+}
+.usecase-theme-indigo .usecase-icon-box {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.2);
+  color: #6366f1;
+}
+:global(.dark) .usecase-theme-indigo .usecase-icon-box {
+  background: rgba(129, 140, 248, 0.12);
+  border-color: rgba(129, 140, 248, 0.3);
+  color: #818cf8;
 }
 
 /* ZERO-AST PIPELINE BOARD */
@@ -1042,12 +1399,12 @@ code {
 
 .pipeline-step {
   flex: 1;
-  padding: 1.5rem;
+  padding: 1.75rem 1.5rem;
   background: var(--vp-c-bg);
   border-right: 1px solid var(--vp-c-divider);
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 .pipeline-step:last-child {
@@ -1078,7 +1435,7 @@ code {
 }
 
 .step-title {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
   font-weight: 700;
   color: var(--vp-c-text-1);
 }
@@ -1090,23 +1447,23 @@ code {
 }
 
 .step-desc {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   color: var(--vp-c-text-3);
-  line-height: 1.45;
-  margin-top: 0.25rem;
+  line-height: 1.5;
+  margin-top: 0.35rem;
 }
 
 /* COMPARISON CARDS */
 .comparison-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
+  gap: 2rem;
 }
 
 .compare-card {
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
-  padding: 1.75rem;
+  padding: 2.25rem 2rem;
 }
 
 .compare-legacy {
@@ -1118,12 +1475,12 @@ code {
 }
 
 .card-header {
-  margin-bottom: 1.25rem;
+  margin-bottom: 1.5rem;
 }
 
 .tag-danger {
   font-family: var(--vp-font-family-mono);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: #ef4444;
   letter-spacing: 0.5px;
@@ -1131,7 +1488,7 @@ code {
 
 .tag-success {
   font-family: var(--vp-font-family-mono);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: var(--vp-c-brand-1);
   letter-spacing: 0.5px;
@@ -1143,21 +1500,21 @@ code {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 1.1rem;
+  gap: 1.35rem;
 }
 
 .compare-list li {
   display: flex;
-  gap: 0.75rem;
-  font-size: 0.92rem;
-  line-height: 1.5;
+  gap: 0.85rem;
+  font-size: 0.94rem;
+  line-height: 1.55;
   color: var(--vp-c-text-2);
 }
 
 .compare-list li strong {
   color: var(--vp-c-text-1);
   display: block;
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.25rem;
 }
 
 .bullet-cross {
@@ -1172,154 +1529,245 @@ code {
   font-size: 1rem;
 }
 
-/* ASYNC VFS GRID */
+/* ASYNC VFS GRID (2-CELL WITH BLACK BORDER & WHITE BACKGROUND) */
 .vfs-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1.25rem;
-  margin-bottom: 2rem;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: #000000;
+  border: 1px solid #000000;
+  margin-bottom: 2.5rem;
 }
 
-.vfs-card {
-  border: 1px solid var(--vp-c-divider);
-  background: var(--vp-c-bg-soft);
-  padding: 1.5rem;
+:global(.dark) .vfs-grid {
+  background: var(--vp-c-divider);
+  border-color: var(--vp-c-divider);
+}
+
+.vfs-cell {
+  padding: 3rem 2.5rem;
   display: flex;
   flex-direction: column;
-  transition: transform 0.15s ease, border-color 0.15s ease;
+  position: relative;
+  background: #ffffff;
+  transition: background 0.15s ease;
 }
 
-.vfs-card:hover {
-  border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
+.vfs-cell:hover {
+  background: #fafafa;
 }
 
-.vfs-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.72rem;
-  color: var(--vp-c-text-3);
-  margin-bottom: 0.75rem;
-}
-
-.vfs-code {
-  color: var(--vp-c-brand-1);
-  font-weight: 700;
-}
-
-.vfs-badge {
+:global(.dark) .vfs-cell {
   background: var(--vp-c-bg);
-  border: 1px solid var(--vp-c-divider);
-  padding: 1px 6px;
+}
+
+:global(.dark) .vfs-cell:hover {
+  background: var(--vp-c-bg-mute);
+}
+
+.vfs-cell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.vfs-icon-box {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+}
+
+.vfs-cell-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.vfs-num {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.vfs-pill {
+  font-family: var(--vp-font-family-mono);
   font-size: 0.68rem;
   font-weight: 700;
+  padding: 2px 7px;
+  border: 1px solid #000000;
+  background: #ffffff;
+  color: #000000;
+  letter-spacing: 0.5px;
+}
+
+:global(.dark) .vfs-pill {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
   color: var(--vp-c-text-2);
-}
-
-.vfs-badge-primary {
-  color: var(--vp-c-brand-1);
-  border-color: var(--vp-c-brand-1);
-}
-
-.vfs-badge-accent {
-  color: #10b981;
-  border-color: #10b981;
 }
 
 .vfs-title {
-  font-size: 1.15rem;
-  font-weight: 700;
-  margin: 0 0 0.5rem;
+  font-size: 1.22rem;
+  font-weight: 800;
   letter-spacing: -0.3px;
+  margin: 0 0 0.85rem;
+  color: var(--vp-c-text-1);
+  line-height: 1.35;
 }
 
 .vfs-desc {
-  font-size: 0.88rem;
+  font-size: 0.92rem;
+  line-height: 1.65;
   color: var(--vp-c-text-2);
-  line-height: 1.5;
-  margin: 0 0 1rem;
-  flex: 1;
+  margin: 0;
 }
 
-.vfs-context {
-  border-top: 1px solid var(--vp-c-divider);
-  padding-top: 0.6rem;
-  font-size: 0.72rem;
-  color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
+/* THEME ACCENTS FOR VFS */
+/* OPFS - Emerald */
+.vfs-theme-emerald .vfs-num {
+  color: #10b981;
+}
+.vfs-theme-emerald .vfs-icon-box {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+:global(.dark) .vfs-theme-emerald .vfs-icon-box {
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.3);
+  color: #34d399;
+}
+
+/* IDB - Cyan */
+.vfs-theme-cyan .vfs-num {
+  color: #0284c7;
+}
+:global(.dark) .vfs-theme-cyan .vfs-num {
+  color: #38bdf8;
+}
+.vfs-theme-cyan .vfs-icon-box {
+  background: rgba(14, 165, 233, 0.08);
+  border-color: rgba(14, 165, 233, 0.2);
+  color: #0284c7;
+}
+:global(.dark) .vfs-theme-cyan .vfs-icon-box {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+}
+
+/* Memory - Violet */
+.vfs-theme-violet .vfs-num {
+  color: #8b5cf6;
+}
+:global(.dark) .vfs-theme-violet .vfs-num {
+  color: #a78bfa;
+}
+.vfs-theme-violet .vfs-icon-box {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.2);
+  color: #8b5cf6;
+}
+:global(.dark) .vfs-theme-violet .vfs-icon-box {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.3);
+  color: #a78bfa;
+}
+
+/* HTTP Range - Amber */
+.vfs-theme-amber .vfs-num {
+  color: #d97706;
+}
+:global(.dark) .vfs-theme-amber .vfs-num {
+  color: #fbbf24;
+}
+.vfs-theme-amber .vfs-icon-box {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.2);
+  color: #d97706;
+}
+:global(.dark) .vfs-theme-amber .vfs-icon-box {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+  color: #fbbf24;
 }
 
 /* HTTP VFS SHOWCASE BOX */
 .http-vfs-box {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2rem;
-  border: 1px solid var(--vp-c-divider);
-  background: var(--vp-c-bg-soft);
-  padding: 2rem;
+  gap: 2.5rem;
+  border: 1px solid #000000;
+  background: #ffffff;
+  padding: 3rem 2.5rem;
   align-items: start;
 }
 
-.http-vfs-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.75rem;
-  color: var(--vp-c-text-3);
-  margin-bottom: 0.75rem;
-}
-
-.tag-accent {
-  background: var(--vp-c-brand-1);
-  color: #fff;
-  padding: 2px 6px;
-  font-size: 0.68rem;
-  font-weight: 700;
-  font-family: var(--vp-font-family-mono);
+:global(.dark) .http-vfs-box {
+  background: var(--vp-c-bg);
+  border-color: var(--vp-c-divider);
 }
 
 .http-vfs-title {
-  font-size: 1.45rem;
+  font-size: 1.5rem;
   font-weight: 800;
   letter-spacing: -0.5px;
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.85rem;
   line-height: 1.25;
 }
 
 .http-vfs-desc {
-  font-size: 0.92rem;
-  line-height: 1.6;
+  font-size: 0.95rem;
+  line-height: 1.65;
   color: var(--vp-c-text-2);
-  margin: 0 0 1.5rem;
+  margin: 0 0 1.75rem;
 }
 
 /* RANGE REQUEST DIAGRAM */
 .http-range-diagram {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  background: var(--vp-c-bg);
-  border: 1px solid var(--vp-c-divider);
+  gap: 0.65rem;
+  background: #ffffff;
+  border: 1px solid #000000;
   padding: 1.25rem;
+}
+
+:global(.dark) .http-range-diagram {
+  background: var(--vp-c-bg-soft);
+  border-color: var(--vp-c-divider);
 }
 
 .diagram-step {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  padding: 0.75rem 1rem;
+  background: #fafafa;
+  border: 1px solid #000000;
+  padding: 0.85rem 1.1rem;
+}
+
+:global(.dark) .diagram-step {
+  background: var(--vp-c-bg);
+  border-color: var(--vp-c-divider);
 }
 
 .step-label {
   font-family: var(--vp-font-family-mono);
   font-size: 0.7rem;
   font-weight: 700;
-  color: var(--vp-c-brand-1);
+  color: #000000;
   letter-spacing: 0.5px;
+}
+
+:global(.dark) .step-label {
+  color: var(--vp-c-brand-1);
 }
 
 .step-val {
@@ -1329,29 +1777,43 @@ code {
 }
 
 .diagram-arrow {
-  color: var(--vp-c-brand-1);
+  color: #000000;
   font-size: 0.75rem;
   text-align: center;
   line-height: 1;
   opacity: 0.8;
 }
 
+:global(.dark) .diagram-arrow {
+  color: var(--vp-c-brand-1);
+}
+
 /* HTTP VFS CODE EMBED */
 .http-vfs-code-wrap {
-  border: 1px solid var(--vp-c-divider);
-  background: var(--vp-c-bg);
+  border: 1px solid #000000;
+  background: #ffffff;
   overflow: hidden;
+}
+
+:global(.dark) .http-vfs-code-wrap {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg);
 }
 
 .code-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: var(--vp-c-bg-mute);
-  border-bottom: 1px solid var(--vp-c-divider);
-  padding: 0.6rem 1rem;
+  background: #fafafa;
+  border-bottom: 1px solid #000000;
+  padding: 0.85rem 1.25rem;
   font-family: var(--vp-font-family-mono);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
+}
+
+:global(.dark) .code-header {
+  background: var(--vp-c-bg-mute);
+  border-bottom-color: var(--vp-c-divider);
 }
 
 .code-file {
@@ -1362,31 +1824,31 @@ code {
 .code-badge {
   background: var(--vp-c-brand-1);
   color: #fff;
-  padding: 1px 6px;
+  padding: 2px 7px;
   font-size: 0.65rem;
   font-weight: 700;
 }
 
 .http-code-body {
-  padding: 1rem 0.25rem;
+  padding: 1.25rem 0.5rem;
   background: var(--vp-c-bg-soft);
   overflow-x: auto;
   font-family: var(--vp-font-family-mono);
   font-size: 0.82rem;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 /* FEATURES GRID */
 .features-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 1.25rem;
+  gap: 1.5rem;
 }
 
 .feat-box {
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
-  padding: 1.5rem;
+  padding: 2rem 1.75rem;
   transition: transform 0.15s ease, border-color 0.15s ease;
 }
 
@@ -1400,31 +1862,36 @@ code {
   justify-content: space-between;
   align-items: center;
   font-family: var(--vp-font-family-mono);
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--vp-c-text-3);
-  margin-bottom: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.feat-code {
+  color: var(--vp-c-brand-1);
+  font-weight: 700;
 }
 
 .feat-tag {
   background: var(--vp-c-bg);
   border: 1px solid var(--vp-c-divider);
-  padding: 1px 6px;
-  font-size: 0.68rem;
-  color: var(--vp-c-brand-1);
-  font-weight: 700;
+  padding: 2px 7px;
+  font-size: 0.7rem;
+  color: var(--vp-c-text-2);
+  font-weight: 600;
 }
 
 .feat-title {
-  font-size: 1.1rem;
+  font-size: 1.2rem;
   font-weight: 700;
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.65rem;
   letter-spacing: -0.3px;
 }
 
 .feat-text {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   color: var(--vp-c-text-2);
-  line-height: 1.5;
+  line-height: 1.6;
   margin: 0;
 }
 
@@ -1432,7 +1899,7 @@ code {
 .terminal-box {
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
 }
 
 .terminal-bar {
@@ -1453,7 +1920,7 @@ code {
   background: transparent;
   border: none;
   border-right: 1px solid var(--vp-c-divider);
-  padding: 0.65rem 1.1rem;
+  padding: 0.75rem 1.25rem;
   font-family: var(--vp-font-family-mono);
   font-size: 0.78rem;
   font-weight: 600;
@@ -1476,7 +1943,7 @@ code {
 .copy-btn {
   background: transparent;
   border: 1px solid var(--vp-c-divider);
-  padding: 0.3rem 0.75rem;
+  padding: 0.35rem 0.85rem;
   font-family: var(--vp-font-family-mono);
   font-size: 0.72rem;
   font-weight: 700;
@@ -1491,11 +1958,11 @@ code {
 }
 
 .terminal-body {
-  padding: 1.25rem 0.5rem;
+  padding: 1.5rem 0.5rem;
   overflow-x: auto;
   font-family: var(--vp-font-family-mono);
   font-size: 0.88rem;
-  line-height: 1.6;
+  line-height: 1.65;
   background: var(--vp-c-bg-soft);
 }
 
@@ -1506,8 +1973,8 @@ code {
 
 .code-line {
   display: flex;
-  min-height: 1.6em;
-  padding: 0 0.75rem;
+  min-height: 1.65em;
+  padding: 0 0.85rem;
 }
 
 .code-line:hover {
@@ -1519,9 +1986,9 @@ code {
 }
 
 .line-num {
-  width: 2.5rem;
+  width: 2.75rem;
   text-align: right;
-  padding-right: 1.25rem;
+  padding-right: 1.35rem;
   color: var(--vp-c-text-3);
   user-select: none;
   font-size: 0.8rem;
@@ -1600,51 +2067,50 @@ code {
 .support-banner {
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
-  padding: 3rem 2rem;
+  padding: 4.5rem 2.5rem;
   text-align: center;
   position: relative;
 }
 
-.banner-tag {
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--vp-c-brand-1);
-  letter-spacing: 1px;
-}
-
 .banner-title {
-  font-size: 2rem;
+  font-size: 2.25rem;
   font-weight: 800;
-  margin: 0.75rem 0;
-  letter-spacing: -0.5px;
+  margin: 0 0 1rem;
+  letter-spacing: -0.6px;
 }
 
 .banner-desc {
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: var(--vp-c-text-2);
   max-width: 650px;
-  margin: 0 auto 2rem;
-  line-height: 1.6;
+  margin: 0 auto 2.5rem;
+  line-height: 1.65;
 }
 
 .banner-actions {
   display: flex;
   justify-content: center;
-  gap: 1rem;
+  gap: 1.25rem;
   flex-wrap: wrap;
 }
 
 /* RESPONSIVE BREAKPOINTS */
 @media (max-width: 900px) {
   .vfs-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: 1fr;
+  }
+  .vfs-cell {
+    padding: 2.25rem 1.85rem;
   }
   .http-vfs-box {
     grid-template-columns: 1fr;
+    padding: 2.25rem 1.85rem;
   }
   .usecases-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: 1fr;
+  }
+  .usecase-cell {
+    padding: 2.25rem 1.85rem;
   }
   .pipeline-board {
     flex-direction: column;
@@ -1659,7 +2125,7 @@ code {
   .features-grid {
     grid-template-columns: repeat(2, 1fr);
   }
-  .metrics-grid {
+  .hero-stats {
     grid-template-columns: repeat(2, 1fr);
   }
   .comparison-grid {
@@ -1668,23 +2134,48 @@ code {
 }
 
 @media (max-width: 640px) {
+  .webdb-landing {
+    padding: 2rem 1.25rem 5rem;
+  }
+  .hero-section {
+    padding: 2rem 0.5rem 4rem;
+  }
+  .hero-title {
+    font-size: 2.5rem;
+    letter-spacing: -1.2px;
+  }
+  .hero-lead {
+    font-size: 1.05rem;
+  }
+  .hero-actions {
+    flex-direction: column;
+    width: 100%;
+  }
+  .hero-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .hero-stats {
+    grid-template-columns: repeat(2, 1fr);
+    margin-top: 3rem;
+  }
   .vfs-grid {
     grid-template-columns: 1fr;
   }
-  .usecases-grid {
-    grid-template-columns: 1fr;
+  .vfs-cell {
+    padding: 1.85rem 1.35rem;
+  }
+  .http-vfs-box {
+    padding: 1.85rem 1.35rem;
+  }
+  .usecase-cell {
+    padding: 1.85rem 1.35rem;
   }
   .features-grid {
     grid-template-columns: 1fr;
   }
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
-  .hero-title {
-    font-size: 2.25rem;
-  }
-  .hero-box {
-    padding: 1.75rem 1.25rem;
+  .section-box {
+    margin-bottom: 4rem;
   }
 }
 </style>
