@@ -90,7 +90,7 @@ interface WebDbCoreEngine {
 1. **Connection & Configuration:**
    - `WebDB.open({ name, storage: 'opfs' | 'idb' | 'auto', cacheSize: '2MB' | '4MB' | '8MB' })`.
 2. **Schema DDL:**
-   - `createTable(name, columns)` (up to 10 tables, up to 16 columns per table in Page 1 catalog; supports `int32`, `int64`, `float64`, `text`, `blob`, `uuid`, and `ulid`).
+   - `createTable(name, columns)` (up to 16 tables on Page 1 / $\infty$ via chained catalog pages; up to 256 columns per table; identifiers up to 64 characters; supports `int32`, `int64`, `float64`, `text`, `blob`, `uuid`, and `ulid`).
    - `dropTable(name)`.
    - `createIndex(tableName, columnName)`.
 3. **Data Mutation (DML):**
@@ -104,6 +104,8 @@ interface WebDbCoreEngine {
    - Grouping & Aggregation: `groupBy(col | cols[])` (up to 8 columns max) and `having(...)`.
    - Pagination: `limit(n)`, `offset(n)`.
    - Sorting: `orderBy(col, 'asc' | 'desc')` or multi-column `orderBy([{ column, direction?, nulls? }, ...])` (max 8 columns, SQLite null collation).
+   - Table Joins: `join(table, leftCol, rightCol)`, `leftJoin(...)`. Fluent query builder has no syntactic join limit; engine supports up to 16 cursors/tables per frame (`TooManyCursorsError` if exceeded).
+   - Subqueries: Correlated subqueries up to nesting depth 7 (`SubqueryNestingTooDeepError` if exceeded); sequential scalar subqueries unlimited; derived tables via query arena.
 5. **Transactions:**
    - `await db.transaction(async (tx) => { ... })` with atomic auto-rollback on error.
 6. **Extensibility & Diagnostics:**
@@ -111,10 +113,10 @@ interface WebDbCoreEngine {
    - Inspection: `query.explain()` (high-level plan + VDBE disassembly).
 
 ### 4.2 Explicitly Deferred Features (Scheduled for V1.1+)
-- 3+ table joins, `FULL OUTER JOIN`, and `RIGHT JOIN` (only single-table queries and simple 2-table inner/left joins supported in V1; see [limitations.md §4.4–4.6](./limitations.md#_4-4-join-constraints-max-2-tables-inner-and-left-join-only)).
-- Subqueries (uncorrelated scalar, `IN`, `EXISTS`, correlated subqueries) and window functions (`OVER (PARTITION BY ...)`) (deferred to V1.1+; see [limitations.md §4.5–4.6](./limitations.md#_4-5-subqueries-deferred-in-v1)).
+- `FULL OUTER JOIN`, `RIGHT JOIN`, and hash-join acceleration (deferred to V1.1+; see [limitations.md §4.4–4.6](./limitations.md#_4-4-join-constraints-cursor-slot-allocation-query-builder-vs-engine-hard-limit)).
+- Window functions (`OVER (PARTITION BY ...)`), `ROLLUP`, and `CUBE` (deferred to V1.1+; see [limitations.md §4.5–4.6](./limitations.md#_4-5-subqueries-8-frame-correlated-execution-stack)).
 - Dynamic `ALTER TABLE` schema mutations (tables must be recreated in V1).
-- Composite multi-column secondary indexes (single-column secondary indexes only in V1).
+- Composite multi-column secondary indexes (single-column secondary indexes supported in V1; composite deferred to V1.1+ with zero file format changes via reserved `IndexDescriptor` slots; see [limitations.md §4.3](./limitations.md#_4-3-single-column-secondary-indexes-forward-compatible-indexdescriptor-architecture)).
 
 ---
 
@@ -122,8 +124,9 @@ interface WebDbCoreEngine {
 
 ### A. Identifier & Schema Validation
 * [ ] **Case-Insensitive Identifiers:** Table and column names must resolve case-insensitively (e.g. `users`, `USERS`, `Users` resolve to the same table ID).
-* [ ] **Identifier Length Clamping:** Table and column names exceeding 15 ASCII characters must be rejected with `IdentifierTooLongError`.
+* [ ] **Identifier Length Clamping:** Table and column names exceeding 64 characters must be rejected with `IdentifierTooLongError`.
 * [ ] **Duplicate Table / Column Names:** Creating a table with duplicate column names or creating an existing table without `ifNotExists` must throw `TableAlreadyExistsError`.
+* [ ] **Column Ceiling Violation:** Creating a table with $> 256$ column definitions must throw `TooManyColumnsError`.
 
 ### B. Serialization & Constraint Violations
 * [ ] **Missing Table Handling:** Executing a query or insert on a non-existent table must throw `TableNotFoundError`.
@@ -141,6 +144,7 @@ interface WebDbCoreEngine {
 ## 6. Verification & Test Suite (`tests/components_scope.test.ts`)
 
 1. **Schema DDL & Casing:** Create `MyTable`; assert queries against `mytable` succeed.
-2. **Identifier Limits:** Assert table names of 16+ characters throw `IdentifierTooLongError`.
-3. **Queue Serialization:** Dispatch 100 concurrent `Promise.all` read/write queries; assert zero race conditions and 100% deterministic results.
-4. **Transaction Lease Isolation:** Dispatch a write query outside a transaction while a transaction is sleeping; assert write query executes strictly after `COMMIT`.
+2. **Identifier Limits:** Assert table names of 65+ characters throw `IdentifierTooLongError`.
+3. **Column Limits:** Assert creating a table with 257 columns throws `TooManyColumnsError`.
+4. **Queue Serialization:** Dispatch 100 concurrent `Promise.all` read/write queries; assert zero race conditions and 100% deterministic results.
+5. **Transaction Lease Isolation:** Dispatch a write query outside a transaction while a transaction is sleeping; assert write query executes strictly after `COMMIT`.

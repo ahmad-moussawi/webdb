@@ -15,7 +15,7 @@ The C engine is built as a **Freestanding C99** module with zero dependencies on
 ```
 src/c/
 ├── engine.c          # Primary entry point & FFI export definitions
-├── engine.h          # Shared structs (TableMeta, ColumnMeta, VmContext, Cursor)
+├── engine.h          # Shared structs (TableDescriptor, ColumnMeta, VmContext, Cursor)
 ├── page.c            # 4KB Slotted page mechanics, slot directory, compaction
 ├── btree.c           # Table B+Tree and Secondary Index B-Tree traversal/split
 ├── vm.c              # Synchronous Bytecode Virtual Machine (VDBE) step loop

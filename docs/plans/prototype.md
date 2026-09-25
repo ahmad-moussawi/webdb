@@ -24,7 +24,7 @@ To deliver an ultra-fast, robust working engine without waiting for all advanced
 | **B+Tree Balancing** | Multi-level B+Tree with balancing, page splits, and sibling borrowing | **Sequential Slotted Pages / Single-Leaf Tables**: Records fill 4KB pages; next page allocated via Page 1 `total_pages`. Scans sequentially traverse data pages. |
 | **Indexes** | Secondary B-Tree index point seeks and range scans | **Full Table Scans with VM Filtering**: All filters evaluated row-by-row in bytecode VM. |
 | **Crash Recovery (WAL)** | Frame-by-frame WAL logging, LSN tracking, and deduplicated monotonic checkpoints | **Direct Atomic Write-Through**: Batched dirty pages are flushed straight to the `IVfsAdapter` (Memory or IndexedDB) on commit. |
-| **Joins & Aggregations** | 2-table nested loop joins, dynamic query arena hash tables for `GROUP BY` | **Single-table queries only**: `SELECT`, `WHERE`, `ORDER BY` (in-memory), `LIMIT`, `OFFSET`. |
+| **Joins & Aggregations** | Up to 16-table nested loop joins, dynamic query arena hash tables for `GROUP BY` | **Single-table queries only**: `SELECT`, `WHERE`, `ORDER BY` (in-memory), `LIMIT`, `OFFSET`. |
 | **Multi-Tab / Multi-Worker** | `SharedWorker` coordinator & `navigator.locks` leader election | **Single Tab / Single Context**: Runs directly in the calling environment (main thread or worker). |
 
 ---
@@ -53,19 +53,25 @@ To deliver an ultra-fast, robust working engine without waiting for all advanced
   - Bytes `28..31`: Page 1 Checksum (`page_checksum`, uint32, CRC32 with bytes 28..31 zeroed)
   - Bytes `32..35`: Next catalog page pointer (`next_catalog_page_id`, uint32, 0 in V1)
   - Bytes `36..99`: Reserved (64 bytes zero-filled)
-* **Bytes 100..4095 (Binary Master Table):**
-  - Up to 10 tables, each supporting up to 16 columns ($10 \times 344\text{ B} = 3,440\text{ B}$):
+* **Bytes 100..4095 (Master Table Catalog):**
+  - Pre-allocated slots for 16 tables ($16 \times 128\text{ B} = 2,048\text{ B}$), with dedicated 4KB Column Catalog Pages supporting up to 256 columns:
     ```
-    TableMeta (offset 100 + table_idx * 344, total size 344 bytes):
+    TableDescriptor (offset 100 + table_idx * 128, total size 128 bytes):
       uint16_t table_id
-      uint16_t column_count (up to 16)
+      uint16_t column_count (up to 256)
       uint32_t root_page_id
-      char     name[16] (null-padded UTF-8)
-      ColumnMeta columns[16] (16 * 20B = 320B):
-        uint8_t  type (1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB)
-        uint8_t  flags (0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED)
-        uint16_t col_offset (offset in fixed slice)
-        char     name[16] (null-padded UTF-8)
+      uint32_t col_catalog_page_id
+      char     name[64] (null-padded UTF-8)
+      uint32_t flags
+      uint32_t row_count_estimate
+      uint8_t  _reserved[44]
+
+    ColumnMeta (stored on dedicated 4KB catalog pages, 72 bytes each):
+      uint8_t  type (1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB, 6=UUID, 7=ULID)
+      uint8_t  flags (0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED, 0x8=AUTO_INC)
+      uint16_t col_offset (offset in fixed slice)
+      char     name[64] (null-padded UTF-8)
+      uint32_t index_root_page (0 if unindexed)
     ```
 
 ### 3.3 Slotted 4KB Data Page Layout

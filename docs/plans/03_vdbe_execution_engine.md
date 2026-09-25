@@ -62,7 +62,7 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 
 ### 2.1 The Register File & Tagged Union Architecture
 
-Every register operation (`r[reg]`, `regA`, `regB`, `out_reg`) reads and writes to a pre-allocated array of **16 registers** located inline within `VmContext` at byte offsets `216..471`:
+Every register operation (`r[reg]`, `regA`, `regB`, `out_reg`) reads and writes to a pre-allocated array of **64 registers** located inline within the **active `VmFrame`** at byte offsets `224..1247`. The active frame is always `ctx->frames[ctx->depth]`:
 
 ```c
 typedef struct {
@@ -81,8 +81,9 @@ typedef struct {
 #### Register Characteristics:
 1. **Zero-Heap Numeric Storage:** Numbers reside directly in the `val` union (`val.i32`, `val.i64`, `val.f64`). Numeric comparisons execute in pure CPU registers without heap allocations or JS wrapper objects.
 2. **Zero-Copy TEXT/BLOB References:** For variable-length data, `type = 4 (TEXT)` or `5 (BLOB)` records the string byte length in `len` and points `str_offset` directly to the raw UTF-8 bytes residing inside the slotted page cache slot or query arena. String comparisons read directly from shared memory without copying string bytes into registers.
-3. **Register Range & Bounds Check:** The VM enforces $0 \le \text{reg\_idx} < 16$. The binary bytecode compiler validates register indices at compile time, rejecting $\ge 16$. At runtime, `vm_step()` guards against out-of-bounds register access.
-4. **Lifecycle & Reset:** When a query begins or a cursor rewinds, registers are initialized to `type = 0 (NULL)`. Between yielded execution chunks (`STATUS_PAGE_FAULT`, `STATUS_BUFFER_FULL`), register state is permanently preserved in `wasmMemory` with zero stack-saving overhead.
+3. **Register Range & Bounds Check:** The VM enforces $0 \le \text{reg\_idx} < 64$. The binary bytecode compiler validates register indices at compile time, rejecting $\ge 64$. At runtime, `vm_step()` guards against out-of-bounds register access.
+4. **Per-Frame Isolation:** Each `VmFrame` has its own independent 64-register file. Pushing a correlated subquery (`ctx->depth++`) gives the inner query a completely fresh register namespace without disturbing the outer query's live registers.
+5. **Lifecycle & Reset:** When a query begins, a frame is pushed, or a cursor rewinds, registers in the active frame are initialized to `type = 0 (NULL)`. Between yielded execution chunks (`STATUS_PAGE_FAULT`, `STATUS_BUFFER_FULL`), register state is permanently preserved in `wasmMemory` with zero stack-saving overhead.
 
 ---
 
@@ -250,18 +251,18 @@ When sorting on a single indexed column in descending order (`orderBy(indexed_co
 
 WebDB executes all data modification operations through the VDBE step loop using dedicated mutation opcodes:
 
-#### A. Tracking Affected Rows (`ctx->rows_affected`)
-- `VmContext` embeds `uint32_t rows_affected` at byte offset `472`.
+#### A. Tracking Affected Rows (`ctx->frames[ctx->depth].rows_affected`)
+- Each `VmFrame` embeds `uint32_t rows_affected` at byte offset `24..27` within the frame (absolute address `0x4010A0` for root frame 0: `0x401080 + 8 + 24`).
 - Initialized to `0` at query execution start.
-- Incremented every time a row is modified or deleted.
-- When `OP_HALT` is reached, the host retrieves `{ rowsAffected: ctx->rows_affected }`.
+- Incremented every time a row is modified or deleted: `ctx->frames[ctx->depth].rows_affected++`.
+- When `OP_HALT` is reached, the host retrieves `{ rowsAffected: ctx->frames[ctx->depth].rows_affected }`.
 
 #### B. `OP_DELETE_ROW (0x50)` Execution
 1. **Physical Deletion & Compaction:** Invokes slotted-page cell deletion on the active cell pointed to by `cursor` using the contiguous slot directory `memmove` compaction defined in `01_storage_memory_arch.md` §4.2.
 2. **Secondary Index Cleanup:** If the table has secondary indexes, extracts the indexed values from the target row and deletes the corresponding `(indexed_value, rowid)` leaf cells from the index B+Tree (`0x0A`).
 3. **Dirty Page Tracking:** Sets the dirty bit for the current cache slot in `dirty_mask`.
 4. **Empty Page Reclamation:** If `cell_count` drops to 0, unlinks the leaf page from the sibling chain and prepends it to `free_page_head` for zero-waste page recycling.
-5. **Counter:** Increments `ctx->rows_affected++`.
+5. **Counter:** Increments `ctx->frames[ctx->depth].rows_affected++`.
 
 #### C. `OP_UPDATE_FIELD (0x51)` Execution
 1. **Target Inspection:** Reads `cursor`, `col_idx`, and updated value from `r[val_reg]`.
@@ -271,7 +272,7 @@ WebDB executes all data modification operations through the VDBE step loop using
    - **Scenario 2 (Variable-Width Fitting in Page):** Shrinks or expands var-payload; shifts cell directory and payloads via `memmove` compaction.
    - **Scenario 3 (Variable-Width Exceeding Page Free Space):** Deletes cell from current page and re-inserts expanded record into a new page via B+Tree leaf split.
 4. **Dirty Page Tracking:** Sets dirty bit in `dirty_mask`.
-5. **Counter:** Increments `ctx->rows_affected++`.
+5. **Counter:** Increments `ctx->frames[ctx->depth].rows_affected++`.
 
 #### D. `OP_INSERT_ROW (0x52)` Execution
 1. **Record Serialization:** Packs `num_cols` registers (`start_reg .. start_reg + num_cols - 1`) into a binary row record with dynamic Null-Bitmap and var-offset table.
@@ -279,7 +280,7 @@ WebDB executes all data modification operations through the VDBE step loop using
 3. **Slotted Page Insertion:** Inserts record into the table B+Tree leaf under `cursor`. If free space is insufficient, triggers B+Tree leaf split (`0x0D`), creating a new page and updating parent interior nodes (`0x05`).
 4. **Secondary Index Insertion:** For every indexed column, writes `(indexed_value, new_rowid)` to the corresponding index B+Tree (`0x0A`).
 5. **Dirty Page Tracking:** Marks the modified cache slot(s) dirty in `dirty_mask`.
-6. **Counter:** Increments `ctx->rows_affected++`.
+6. **Counter:** Increments `ctx->frames[ctx->depth].rows_affected++`.
 
 ---
 
@@ -287,9 +288,12 @@ WebDB executes all data modification operations through the VDBE step loop using
 
 * [ ] **Infinite Loop Guard:** Malformed bytecode loops jumping backward indefinitely must be trapped by a maximum instruction cycle counter (e.g. 10,000,000 cycles per step call) yielding `STATUS_TIMEOUT`.
 * [ ] **Invalid Jump Offset:** Any jump target pointing outside the `[0, bytecode.byteLength]` range must halt with `STATUS_ERR_INVALID_BYTECODE`.
-* [ ] **Register Index Out-of-Bounds:** Register index $\ge 16$ must be rejected at compile time.
+* [ ] **Register Index Out-of-Bounds:** Register index $\ge 64$ must be rejected at compile time with `TooManyRegistersError`.
 * [ ] **Sort Column Ceiling Exceeded:** Queries with $> 8$ sort keys must throw `TooManyOrderByColumnsError` at compile time.
 * [ ] **Group By Column Ceiling Exceeded:** Queries with $> 8$ grouping keys must throw `TooManyGroupByColumnsError` at compile time.
+* [ ] **Cursor Slot Exhaustion:** Opening more than 16 cursors in a single frame must throw `TooManyCursorsError` at compile time.
+* [ ] **Subquery Nesting Overflow:** Correlated subquery nesting deeper than 7 levels (`ctx->depth` attempting to exceed 7) must throw `SubqueryNestingTooDeepError` at compile time.
+* [ ] **Frame Depth Underflow:** `ctx->depth--` when already at 0 must halt with `STATUS_ERR_INVALID_BYTECODE` (guard against malformed subquery pop opcodes).
 * [ ] **Zero-Length Text/Blob Emission:** Emitting empty strings `""` or 0-byte BLOBs must encode length 0 without corrupting buffer framing.
 
 ---

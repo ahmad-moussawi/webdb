@@ -83,7 +83,7 @@ The implementation of WebDB is organized into 9 self-contained, sequentially ver
 * **Focus:** Explicit query feature scope for V1, strict host-engine FFI interfaces, and fail-fast invariants.
 * **Core Decisions:**
   * Complete single-table query operators (projections, comparisons, arithmetic, `ORDER BY` with multi-column null collation, `GROUP BY`, `HAVING`, `LIMIT`/`OFFSET`).
-  * 2-table joins (`INNER JOIN`, `LEFT JOIN`) supported in V1; 3+ table joins and subqueries explicitly deferred to V1.1+.
+  * Joins (`INNER JOIN`, `LEFT JOIN`) supported up to 16 tables per frame (no query builder limit, engine throws `TooManyCursorsError` if > 16 cursors required); subqueries supported up to depth 7 (`SubqueryNestingTooDeepError`).
   * Strict FFI protocol where engine entry points pass and return only primitive numbers (pointers and status codes).
 * 📖 *Full Technical Specification:* [02_components_v1_scope.md](./02_components_v1_scope.md)
 
@@ -91,7 +91,7 @@ The implementation of WebDB is organized into 9 self-contained, sequentially ver
 * **Focus:** Register-based virtual database engine designed specifically for WebAssembly constraints.
 * **Core Decisions:**
   * Rejection of the classic Volcano iterator model (which incurs high JS/Wasm call-stack overhead and requires dynamic heap allocations).
-  * Adoption of a flat, linear register-based bytecode VM with 32 fixed registers per execution context.
+  * Adoption of an 8-frame execution nesting stack (`VmContext`), with 64 evaluation registers and 16 active cursors per frame.
   * Non-blocking suspension: when a required page is not in the cache, the engine saves its Program Counter and yields `STATUS_PAGE_FAULT` to the host, resuming seamlessly once fetched.
 * 📖 *Full Technical Specification:* [03_vdbe_execution_engine.md](./03_vdbe_execution_engine.md)
 

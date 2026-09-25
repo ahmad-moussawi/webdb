@@ -59,14 +59,14 @@ Because both engines adhere to the identical memory contract:
 * [ ] **Exact 2048-Byte Boundary:** Inserting a row of exactly 2048 bytes succeeds; inserting 2049 bytes throws `RowSizeLimitExceededError`.
 * [ ] **Zero-Byte Page Saturation:** Inserting rows until contiguous free space between slot directory and row data reaches exactly 0 bytes remaining.
 * [ ] **Slot Defragmentation / Compaction:** Deleting alternating rows to fragment page space; inserting a new row that fits only after compacting the page.
-* [ ] **Dynamic Null-Bitmap Scaling:** Verify bitwise null-checking for tables with 1, 8, 9, and 16 columns (rejecting > 16 with `TooManyColumnsError`) without offset drift.
+* [ ] **Dynamic Null-Bitmap Scaling:** Verify bitwise null-checking for tables with 1, 8, 9, 16, 64, 100, and 256 columns (rejecting > 256 with `TooManyColumnsError`) without offset drift.
 * [ ] **Corrupted Slot Directory:** Rejecting corrupt slot offsets pointing outside page boundaries.
 
 ### B. B+Tree Structure & Splitting
 * [ ] **Sequential Ascending Insertions:** Insert keys `1..1000` (stresses right-leaning B-tree splits).
 * [ ] **Sequential Descending Insertions:** Insert keys `1000..1` (stresses left-leaning B-tree splits).
 * [ ] **Random/Hashed Keys:** Insert 5,000 pseudo-random keys (stresses balanced median page splits).
-* [ ] **Root Page Splitting:** Verify root page split increments B-tree height (level 1 to 2, 2 to 3) and updates `TableMeta.root_page_id`.
+* [ ] **Root Page Splitting:** Verify root page split increments B-tree height (level 1 to 2, 2 to 3) and updates `TableDescriptor.root_page_id`.
 * [ ] **Key Deletion & Underflow:** Deleting keys causing page underflow; verify sibling key borrowing and page merging.
 * [ ] **Deep Cursor Traversal:** Iterative cursor descending 4 levels and traversing forward and backward across leaf sibling pointers.
 
