@@ -67,7 +67,9 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
         char     name[64];              // Table name (null-padded UTF-8, max 64 chars)   (offset 12..75, 64B)
         uint32_t flags;                 // Status flags (0x1=ACTIVE, 0x2=SYSTEM)          (offset 76..79, 4B)
         uint32_t row_count_estimate;    // Approximate row count for query optimizer      (offset 80..83, 4B)
-        uint8_t  _reserved[44];         // Reserved padding for future table metadata     (offset 84..127,44B)
+        uint64_t auto_inc_next;         // Next AUTO_INC value (0 = no AUTO_INC column)   (offset 84..91, 8B)
+                                        //  Read, assign to row, then increment on INSERT
+        uint8_t  _reserved[36];         // Reserved padding for future table metadata     (offset 92..127,36B)
     } TableDescriptor;                  // Exact size: 128 bytes (128 % 8 = 0)
     ```
   - **Page 1 Capacity:**
@@ -92,7 +94,8 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
         uint8_t  flags;           // 0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED, 0x8=AUTO_INC     (offset 1,   1B)
         uint16_t col_offset;      // Column offset inside fixed-width data slice                  (offset 2..3, 2B)
         char     name[64];        // Column name (null-padded UTF-8, max 64 chars)                (offset 4..67,64B)
-        uint32_t index_root_page; // B+Tree root Page ID if indexed (0 if unindexed)              (offset 68..71,4B)
+        uint8_t  _reserved[4];    // Reserved (index roots are owned by IndexDescriptor.root_page_id (offset 68..71,4B)
+                                  //  on Page 1; ColumnMeta never stores index root pages)
     } ColumnMeta;                 // Exact size: 72 bytes (72 % 8 = 0, 8-byte aligned)
     ```
   - Each 4KB Column Catalog Page has a 16-byte header (`CatalogPageHeader`), leaving $4,096 - 16 = 4,080$ bytes of payload.

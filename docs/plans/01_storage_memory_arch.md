@@ -416,6 +416,14 @@ Secondary indexes map column values to table `rowid`s. Because indexed values ca
     $$\text{NULL} < -\infty < \text{Numbers (INT/FLOAT)} < \text{TEXT (UTF-8)} < \text{BLOB}$$
   - For duplicate key values, cells are sub-sorted by `rowid` ascending, ensuring total deterministic ordering and $O(\log N)$ binary search.
 - **Sequential Index Scans:** Header bytes `6..9` store `next_page_id`, linking index leaf siblings for $O(1)$ range scans (`WHERE age >= 21 AND age <= 65`).
+- **Binary Search Traversal Algorithm:**
+  Because index leaf cells are variable-length (`2 + key_len + 8` bytes), binary search cannot use pointer arithmetic on fixed-width structs. Instead:
+  1. Read `lo = 0`, `hi = cell_count - 1`.
+  2. At each midpoint `mid`, read `cell_offset = slot_directory[mid]` (2-byte entry at offset `16 + mid * 2`).
+  3. At `cell_offset`: read `key_len` (2 bytes LE), then `key_data[0..key_len-1]`, then `rowid` at `cell_offset + 2 + key_len` (8 bytes LE).
+  4. Compare `(key_data, rowid)` against the search target using the 3VL collation order above.
+  5. Narrow `lo`/`hi` and repeat in $O(\log N)$, at most $\lceil \log_2 N \rceil$ iterations.
+  6. On an exact match for a point lookup, follow `next_page_id` chain to collect duplicate-key entries on sibling pages (required because a single key value can span multiple leaf pages).
 
 #### 4.7.3 Secondary Index Interior Page (`page_type = 0x02`)
 
@@ -770,7 +778,8 @@ typedef struct {
     uint8_t  flags;           // 0x1=PRIMARY KEY, 0x2=NOT NULL, 0x4=INDEXED, 0x8=AUTO_INC     (offset 1,   1B)
     uint16_t col_offset;      // Column byte offset inside fixed-width data slice             (offset 2..3, 2B)
     char     name[64];        // Column name (null-padded UTF-8, max 64 chars)                (offset 4..67,64B)
-    uint32_t index_root_page; // B+Tree root Page ID if column is indexed (0 if unindexed)   (offset 68..71,4B)
+    uint8_t  _reserved[4];    // Reserved (was index_root_page; index roots are owned by     (offset 68..71,4B)
+                              //  IndexDescriptor.root_page_id on Page 1 — single source of truth)
 } ColumnMeta;                 // Exact size: 72 bytes (72 % 8 = 0, 8-byte aligned)
 
 typedef struct {
@@ -781,7 +790,9 @@ typedef struct {
     char     name[64];              // Table name (null-padded UTF-8, max 64 chars)           (offset 12..75, 64B)
     uint32_t flags;                 // Table status flags (0x1=ACTIVE, 0x2=SYSTEM)            (offset 76..79, 4B)
     uint32_t row_count_estimate;    // Approximate row count for query optimizer              (offset 80..83, 4B)
-    uint8_t  _reserved[44];         // Reserved padding for future table metadata & stats     (offset 84..127,44B)
+    uint64_t auto_inc_next;         // Next AUTO_INC value for this table (0 if no AUTO_INC   (offset 84..91, 8B)
+                                    //  column; incremented atomically on every INSERT)
+    uint8_t  _reserved[36];         // Reserved padding for future table metadata & stats     (offset 92..127,36B)
 } TableDescriptor;                  // Exact size: 128 bytes (128 % 8 = 0)
 
 typedef struct {
@@ -819,6 +830,11 @@ typedef struct {
   - Tables with $1 \dots 56$ columns use **1 catalog page** (`next_col_catalog_page_id = 0`).
   - Tables with $57 \dots 256$ columns chain across up to **5 catalog pages** via `next_col_catalog_page_id`.
 - **Zero Schema Migrations on Expansion:** Decoupling columns into dedicated catalog pages and burning fixed 128-byte `IndexDescriptor` slots into Page 1 guarantees 100% forward-compatibility for composite indexes (V1.1+) without altering file layouts or requiring data migrations.
+- **Column Catalog Pre-Loading & Pinning:** On `db.open()`, the engine fetches and **permanently pins** the column catalog page(s) for every active table found in `TableDescriptor` slots. Pinned catalog pages are never candidates for LRU eviction while the table exists — they are only released on `db.close()` or explicit `DROP TABLE`. This guarantees zero page-fault latency during column offset lookups at query compile time.
+- **Cross-Page Column Index Mapping (for `IndexDescriptor.column_indices[]`):** For a 256-column table, a compiler resolving `column_indices[k] = col_idx` to a `ColumnMeta` pointer must use paging arithmetic to find the correct catalog page and in-page slot:
+  $$\text{page\_chain\_idx} = \lfloor \text{col\_idx} / 56 \rfloor, \quad \text{col\_idx\_in\_page} = \text{col\_idx} \bmod 56$$
+  For example, `col_idx = 73` resolves to catalog chain page 1 (columns 56..111), in-page entry 17: `page_ptr = 16 + 17 × 72`.
+
 
 ### 6.3 Engine Version Compatibility & Fail-Fast Handshake
 
