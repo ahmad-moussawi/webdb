@@ -1,10 +1,8 @@
 import {
   PAGE_SIZE,
   RESULT_BUFFER_OFFSET,
-  RESULT_BUFFER_SIZE,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
-  PAGE_SCRATCHPAD_OFFSET,
 } from "./constants.js";
 import {
   ColumnDefinition,
@@ -23,7 +21,6 @@ import {
   readPage1Header,
   createTable as catalogCreateTable,
   loadTableMeta,
-  loadAllTables,
   findTableSlot,
   readTableDescriptor,
   writeTableDescriptor,

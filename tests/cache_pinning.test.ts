@@ -625,6 +625,98 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Attempting to map slot 3 to the same page 5 must throw
     expect(() => pool.setSlotToPage(3, 5)).toThrow(/already resident in slot 2/);
   });
+
+  it('22. Page-to-Slot Binary Hash Table: verifies direct shared memory binary format and lookups', () => {
+    const vfs = new MemoryVfsAdapter();
+    const pool = new BufferPool({ vfs, slotCount: 8 });
+
+    // Page 1 is resident in slot 0 by default
+    expect(pool.getResidentSlot(1)).toBe(0);
+
+    // Map pages to slots
+    pool.setSlotToPage(1, 10);
+    pool.setSlotToPage(2, 20);
+    pool.setSlotToPage(3, 30);
+
+    expect(pool.getResidentSlot(10)).toBe(1);
+    expect(pool.getResidentSlot(20)).toBe(2);
+    expect(pool.getResidentSlot(30)).toBe(3);
+    expect(pool.getResidentSlot(99)).toBe(-1);
+
+    // Verify binary hash table in shared memory: find where page 10 is stored
+    let foundEntry = false;
+    for (let b = 0; b < pool.pageToSlotBuckets; b++) {
+      const offset = pool.pageToSlotOffset + b * 8;
+      const pageId = pool.view.getUint32(offset, true);
+      const slotIdx = pool.view.getUint32(offset + 4, true);
+      if (pageId === 10) {
+        expect(slotIdx).toBe(1);
+        foundEntry = true;
+        break;
+      }
+    }
+    expect(foundEntry).toBe(true);
+
+    // Reassign slot 1 to page 40 -> page 10 deleted, page 40 inserted
+    pool.setSlotToPage(1, 40);
+    expect(pool.getResidentSlot(10)).toBe(-1);
+    expect(pool.getResidentSlot(40)).toBe(1);
+  });
+
+  it('23. Hash Table Backward Shift Deletion: maintains probe chain integrity when deleting collided entries', () => {
+    const vfs = new MemoryVfsAdapter();
+    const pool = new BufferPool({ vfs, slotCount: 32 });
+
+    // Insert 10 pages and record them
+    for (let s = 1; s <= 10; s++) {
+      pool.setSlotToPage(s, 100 + s);
+      expect(pool.getResidentSlot(100 + s)).toBe(s);
+    }
+
+    // Delete every other slot (unmap to page 0)
+    for (let s = 1; s <= 10; s += 2) {
+      pool.setSlotToPage(s, 0);
+      expect(pool.getResidentSlot(100 + s)).toBe(-1);
+    }
+
+    // Remaining slots must STILL be findable despite linear probing backward shifts
+    for (let s = 2; s <= 10; s += 2) {
+      expect(pool.getResidentSlot(100 + s)).toBe(s);
+    }
+  });
+
+  it('24. Direct-Addressing Memory Primitives: verifies scalar and bulk memory accessors', () => {
+    const vfs = new MemoryVfsAdapter();
+    const pool = new BufferPool({ vfs, slotCount: 8 });
+
+    const addr = pool.pageScratchpadOffset;
+
+    // Scalar reads & writes (little-endian)
+    pool.writeUint8(addr + 0, 0x42);
+    expect(pool.readUint8(addr + 0)).toBe(0x42);
+
+    pool.writeUint16(addr + 2, 0x1234);
+    expect(pool.readUint16(addr + 2)).toBe(0x1234);
+
+    pool.writeUint32(addr + 4, 0x89abcdef);
+    expect(pool.readUint32(addr + 4)).toBe(0x89abcdef);
+
+    pool.writeInt32(addr + 8, -424242);
+    expect(pool.readInt32(addr + 8)).toBe(-424242);
+
+    pool.writeFloat64(addr + 16, 3.141592653589793);
+    expect(pool.readFloat64(addr + 16)).toBe(3.141592653589793);
+
+    // Bulk byte operations (fill, set, get)
+    pool.fillBytes(addr, 32, 0xaa);
+    expect(pool.readUint8(addr)).toBe(0xaa);
+    expect(pool.readUint8(addr + 31)).toBe(0xaa);
+
+    const payload = new Uint8Array([1, 2, 3, 4, 5]);
+    pool.setBytes(addr, payload);
+    const slice = pool.getBytes(addr, 5);
+    expect(Array.from(slice)).toEqual([1, 2, 3, 4, 5]);
+  });
 });
 
 

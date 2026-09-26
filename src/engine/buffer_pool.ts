@@ -2,6 +2,7 @@ import {
   PAGE_SIZE,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
+  PAGE_TO_SLOT_BUCKET_SIZE,
   PAGE_TYPE_FREE,
   PAGE_TYPE_CATALOG_PAGE,
   PAGE_HEADER_OFFSET_CHECKSUM,
@@ -14,6 +15,7 @@ import {
   computeBufferPoolOffsets,
 } from "../constants.js";
 import { initPage, initFreePage, getPageType } from "./page.js";
+import { pageTableGet, pageTableSet, pageTableDelete } from "./page_table.js";
 import { IVfsAdapter } from "../storage/vfs.js";
 import { computePageChecksum, computePage1Checksum } from "../storage/crc32.js";
 import { CorruptPageError, QueryArenaExhaustedError } from "../types.js";
@@ -37,6 +39,8 @@ export class BufferPool {
   // Offsets
   readonly slotsEndOffset: number;
   readonly slotToPageOffset: number;
+  readonly pageToSlotOffset: number;
+  readonly pageToSlotBuckets: number;
   readonly dirtyMaskOffset: number;
   readonly vmContextOffset: number;
   readonly resultBufferOffset: number;
@@ -44,8 +48,7 @@ export class BufferPool {
   readonly pageScratchpadOffset: number;
   readonly transientArenaOffset: number;
 
-  // In-memory fast mapping & pinning
-  private pageToSlot = new Map<number, number>();
+  // In-flight concurrency coordination & pinning
   private inFlightFlushes = new Map<number, Promise<void>>();
   private inFlightAcquires = new Map<number, Promise<number>>();
   private allocationLock: Promise<void> = Promise.resolve();
@@ -83,6 +86,8 @@ export class BufferPool {
     );
     this.slotsEndOffset = offsets.slotsEndOffset;
     this.slotToPageOffset = offsets.slotToPageOffset;
+    this.pageToSlotOffset = offsets.pageToSlotOffset;
+    this.pageToSlotBuckets = offsets.pageToSlotBuckets;
     this.dirtyMaskOffset = offsets.dirtyMaskOffset;
     this.vmContextOffset = offsets.vmContextOffset;
     this.resultBufferOffset = offsets.resultBufferOffset;
@@ -106,21 +111,83 @@ export class BufferPool {
     this.view = new DataView(this.buffer);
     this.uint8 = new Uint8Array(this.buffer);
 
-    // Initialize slot-to-page map and dirty mask to zeros
-    new Uint8Array(this.buffer, this.slotToPageOffset, this.slotCount * 4).fill(
+    // Initialize slot-to-page map, page-to-slot hash table, and dirty mask to zeros
+    this.fillBytes(this.slotToPageOffset, this.slotCount * 4, 0);
+    this.fillBytes(
+      this.pageToSlotOffset,
+      this.pageToSlotBuckets * PAGE_TO_SLOT_BUCKET_SIZE,
       0,
     );
-
-    new Uint8Array(
-      this.buffer,
-      this.dirtyMaskOffset,
-      Math.ceil(this.slotCount / 8),
-    ).fill(0);
+    this.fillBytes(this.dirtyMaskOffset, Math.ceil(this.slotCount / 8), 0);
 
     // Page 1 is permanently assigned to slot 0 and pinned
     this.setSlotToPage(0, 1);
-    this.pageToSlot.set(1, 0);
     this.pinCounts[0] = 1;
+  }
+
+  // ==========================================================================
+  // Memory Access Primitives (Little-Endian, Direct-Addressing)
+  // ==========================================================================
+
+  readUint8(address: number): number {
+    return this.uint8[address];
+  }
+
+  writeUint8(address: number, value: number): void {
+    this.uint8[address] = value;
+  }
+
+  readUint16(address: number): number {
+    return this.view.getUint16(address, true);
+  }
+
+  writeUint16(address: number, value: number): void {
+    this.view.setUint16(address, value, true);
+  }
+
+  readUint32(address: number): number {
+    return this.view.getUint32(address, true);
+  }
+
+  writeUint32(address: number, value: number): void {
+    this.view.setUint32(address, value, true);
+  }
+
+  readInt32(address: number): number {
+    return this.view.getInt32(address, true);
+  }
+
+  writeInt32(address: number, value: number): void {
+    this.view.setInt32(address, value, true);
+  }
+
+  readFloat64(address: number): number {
+    return this.view.getFloat64(address, true);
+  }
+
+  writeFloat64(address: number, value: number): void {
+    this.view.setFloat64(address, value, true);
+  }
+
+  /**
+   * Returns a zero-copy byte slice (Uint8Array view) of the specified memory range.
+   */
+  getBytes(address: number, length: number): Uint8Array {
+    return this.uint8.subarray(address, address + length);
+  }
+
+  /**
+   * Copies bytes from a source Uint8Array into memory starting at address.
+   */
+  setBytes(address: number, source: Uint8Array): void {
+    this.uint8.set(source, address);
+  }
+
+  /**
+   * Fills a range of memory with a byte value (default 0) without heap allocation.
+   */
+  fillBytes(address: number, length: number, value: number = 0): void {
+    this.uint8.fill(value, address, address + length);
   }
 
   // ==========================================================================
@@ -167,7 +234,7 @@ export class BufferPool {
 
   getSlotToPage(slotIdx: number): number {
     this.validateSlotIndex(slotIdx);
-    return this.view.getUint32(this.slotToPageOffset + slotIdx * 4, true);
+    return this.readUint32(this.slotToPageOffset + slotIdx * 4);
   }
 
   setSlotToPage(slotIdx: number, pageId: number): void {
@@ -186,8 +253,8 @@ export class BufferPool {
     }
 
     if (pageId > 0) {
-      const existingSlot = this.pageToSlot.get(pageId);
-      if (existingSlot !== undefined && existingSlot !== slotIdx) {
+      const existingSlot = this.getResidentSlot(pageId);
+      if (existingSlot !== -1 && existingSlot !== slotIdx) {
         throw new Error(
           `Cannot map page ${pageId} to slot ${slotIdx}: already resident in slot ${existingSlot}`,
         );
@@ -196,12 +263,23 @@ export class BufferPool {
 
     const old = this.getSlotToPage(slotIdx);
     if (old > 0 && old !== pageId) {
-      this.pageToSlot.delete(old);
+      pageTableDelete(
+        this.view,
+        this.pageToSlotOffset,
+        this.pageToSlotBuckets,
+        old,
+      );
     }
 
-    this.view.setUint32(this.slotToPageOffset + slotIdx * 4, pageId, true);
+    this.writeUint32(this.slotToPageOffset + slotIdx * 4, pageId);
     if (pageId > 0) {
-      this.pageToSlot.set(pageId, slotIdx);
+      pageTableSet(
+        this.view,
+        this.pageToSlotOffset,
+        this.pageToSlotBuckets,
+        pageId,
+        slotIdx,
+      );
     }
   }
 
@@ -250,8 +328,8 @@ export class BufferPool {
 
   pinPage(pageId: number): void {
     this.validatePageId(pageId);
-    const slot = this.pageToSlot.get(pageId);
-    if (slot === undefined) {
+    const slot = this.getResidentSlot(pageId);
+    if (slot === -1) {
       throw new Error(
         `Cannot pin page ${pageId}: page is not resident in buffer pool`,
       );
@@ -262,8 +340,8 @@ export class BufferPool {
   unpinPage(pageId: number): void {
     this.validatePageId(pageId);
     if (pageId === 1) return;
-    const slot = this.pageToSlot.get(pageId);
-    if (slot !== undefined) {
+    const slot = this.getResidentSlot(pageId);
+    if (slot !== -1) {
       this.unpinSlot(slot);
     }
   }
@@ -299,7 +377,7 @@ export class BufferPool {
 
   getPageBytesInSlot(slotIdx: number): Uint8Array {
     this.validateSlotIndex(slotIdx);
-    return new Uint8Array(this.buffer, slotIdx * PAGE_SIZE, PAGE_SIZE);
+    return this.getBytes(slotIdx * PAGE_SIZE, PAGE_SIZE);
   }
 
   getSlotDataView(slotIdx: number): DataView {
@@ -309,11 +387,16 @@ export class BufferPool {
 
   /**
    * Returns resident slot index for a page, or -1 if not currently in cache.
+   * Probes the in-memory binary open-addressing hash table at pageToSlotOffset.
    */
   getResidentSlot(pageId: number): number {
     this.validatePageId(pageId);
-    const slot = this.pageToSlot.get(pageId);
-    return slot !== undefined ? slot : -1;
+    return pageTableGet(
+      this.view,
+      this.pageToSlotOffset,
+      this.pageToSlotBuckets,
+      pageId,
+    );
   }
 
   /**
@@ -343,8 +426,8 @@ export class BufferPool {
     //    preventing split-brain cache states and lost updates.
     // 3. Updates the Clock (Second-Chance) refBit to 1, protecting hot/recently accessed pages from eviction.
     // 4. If requested, atomically increments the slot's pin count before returning to guard against concurrent eviction.
-    const existingSlot = this.pageToSlot.get(pageId);
-    if (existingSlot !== undefined) {
+    const existingSlot = this.getResidentSlot(pageId);
+    if (existingSlot !== -1) {
       this.refBits[existingSlot] = 1;
       if (pin) {
         this.pinSlot(existingSlot);
@@ -384,7 +467,6 @@ export class BufferPool {
         // Read page from VFS
         const diskPage = await this.vfs.readPage(pageId);
         const slotOffset = candidateSlot * PAGE_SIZE;
-        const slotBytes = new Uint8Array(this.buffer, slotOffset, PAGE_SIZE);
 
         if (diskPage) {
           if (diskPage.byteLength !== PAGE_SIZE) {
@@ -415,10 +497,10 @@ export class BufferPool {
             }
           }
 
-          slotBytes.set(diskPage);
+          this.setBytes(slotOffset, diskPage);
         } else {
           // Empty/new unwritten page
-          slotBytes.fill(0);
+          this.fillBytes(slotOffset, PAGE_SIZE, 0);
         }
 
         // Update mappings
@@ -515,7 +597,12 @@ export class BufferPool {
       // Unmap from pageToSlot immediately so concurrent acquirePage(oldPageId)
       // will not obtain this slot while it is being flushed and cleared
       if (oldPageId > 0) {
-        this.pageToSlot.delete(oldPageId);
+        pageTableDelete(
+          this.view,
+          this.pageToSlotOffset,
+          this.pageToSlotBuckets,
+          oldPageId,
+        );
       }
 
       // Never flush a free page during eviction:
@@ -559,15 +646,14 @@ export class BufferPool {
     }
 
     const slotOffset = slotIdx * PAGE_SIZE;
-    const pageBytes = new Uint8Array(this.buffer, slotOffset, PAGE_SIZE);
-    const slotView = new DataView(this.buffer, slotOffset, PAGE_SIZE);
+    const pageBytes = this.getBytes(slotOffset, PAGE_SIZE);
 
     if (pageId === 1) {
       const chk = computePage1Checksum(pageBytes);
-      slotView.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
+      this.writeUint32(slotOffset + HEADER_OFFSET_PAGE_CHECKSUM, chk);
     } else {
       const chk = computePageChecksum(pageBytes);
-      slotView.setUint32(PAGE_HEADER_OFFSET_CHECKSUM, chk, true);
+      this.writeUint32(slotOffset + PAGE_HEADER_OFFSET_CHECKSUM, chk);
     }
 
     const generationAtFlush = this.slotDirtyGenerations[slotIdx];
@@ -735,11 +821,11 @@ export class BufferPool {
         initFreePage(view, 0, oldHead);
 
         // Discard payload to prevent sensitive data leakage
-        new Uint8Array(
-          this.buffer,
+        this.fillBytes(
           slot * PAGE_SIZE + PAGE_HEADER_SIZE,
           PAGE_SIZE - PAGE_HEADER_SIZE,
-        ).fill(0);
+          0,
+        );
 
         // Durably flush free page immediately so on-disk representation is updated
         // and the slot becomes clean (isDirty = false)
@@ -801,11 +887,7 @@ export class BufferPool {
   resetArena(): void {
     if (this.arenaOffset > 0) {
       // Zero out the used portion of the arena to prevent data leakage between queries
-      new Uint8Array(
-        this.buffer,
-        this.transientArenaOffset,
-        this.arenaOffset,
-      ).fill(0);
+      this.fillBytes(this.transientArenaOffset, this.arenaOffset, 0);
       this.arenaOffset = 0;
     }
   }

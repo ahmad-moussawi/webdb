@@ -7,6 +7,7 @@ export * from './storage/opfs.js';
 export * from './storage/crc32.js';
 export * from './engine/codecs.js';
 export * from './engine/buffer_pool.js';
+export * from './engine/page_table.js';
 export * from './engine/page.js';
 export * from './engine/catalog.js';
 export * from './engine/vm.js';

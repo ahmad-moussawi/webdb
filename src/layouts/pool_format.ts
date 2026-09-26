@@ -25,6 +25,21 @@ export const DEFAULT_SLOT_COUNT = 1024;
 export const DEFAULT_PAGE_SLOTS = 1024;
 
 /**
+ * Default number of hash table buckets for page-to-slot mapping (2048, load factor <= 50%).
+ */
+export const DEFAULT_PAGE_TO_SLOT_BUCKETS = 2048;
+
+/**
+ * Size in bytes of each hash table bucket (uint32 page_id + uint32 slot_idx = 8 bytes).
+ */
+export const PAGE_TO_SLOT_BUCKET_SIZE = 8;
+
+/**
+ * Total size in bytes of the page-to-slot hash table (2048 * 8 = 16 KB).
+ */
+export const PAGE_TO_SLOT_SIZE = 16384;
+
+/**
  * Size in bytes allocated for VM execution context state (12 KB).
  */
 export const VM_CONTEXT_SIZE = 12288;
@@ -45,9 +60,9 @@ export const BYTECODE_SIZE = 32768;
 export const PAGE_SCRATCHPAD_SIZE = 4096;
 
 /**
- * Padding bytes to align transient execution arena at boundary 0x420000 (12,160 bytes).
+ * Padding bytes to align transient execution arena at boundary 0x430000 (61,312 bytes).
  */
-export const ALIGNMENT_PADDING_SIZE = 12160;
+export const ALIGNMENT_PADDING_SIZE = 61312;
 
 /**
  * Maximum memory limit in bytes for transient query execution arena (16 MB).
@@ -60,24 +75,26 @@ export const DEFAULT_MAX_QUERY_MEMORY = 16777216;
  * | Memory Address Range | Size   | Region Name       | Description                                    |
  * +----------------------+--------+-------------------+------------------------------------------------+
  * | 0x400000..0x400FFF   | 4096B  | SLOT_TO_PAGE      | Array of 1024 uint32 pageIds mapping slot -... |
- * | 0x401000..0x40107F   | 128B   | DIRTY_MASK        | Bitmask (128 bytes = 1024 bits) tracking di... |
- * | 0x401080..0x40407F   | 12288B | VM_CONTEXT        | Execution context frames for the SQL VM.       |
- * | 0x404080..0x41407F   | 65536B | RESULT_BUFFER     | Output buffer for query result rows.           |
- * | 0x414080..0x41C07F   | 32768B | BYTECODE          | Instruction buffer for compiled bytecode ro... |
- * | 0x41C080..0x41D07F   | 4096B  | PAGE_SCRATCHPAD   | Staging buffer for page compression or I/O ... |
- * | 0x41D080..0x41FFFF   | 12160B | ALIGNMENT_PADDING | Padding aligning transient arena to 0x420000.  |
+ * | 0x401000..0x404FFF   | 16384B | PAGE_TO_SLOT      | Open-addressing hash table (2048 buckets x ... |
+ * | 0x405000..0x40507F   | 128B   | DIRTY_MASK        | Bitmask (128 bytes = 1024 bits) tracking di... |
+ * | 0x405080..0x40807F   | 12288B | VM_CONTEXT        | Execution context frames for the SQL VM.       |
+ * | 0x408080..0x41807F   | 65536B | RESULT_BUFFER     | Output buffer for query result rows.           |
+ * | 0x418080..0x42007F   | 32768B | BYTECODE          | Instruction buffer for compiled bytecode ro... |
+ * | 0x420080..0x42107F   | 4096B  | PAGE_SCRATCHPAD   | Staging buffer for page compression or I/O ... |
+ * | 0x421080..0x42FFFF   | 61312B | ALIGNMENT_PADDING | Padding aligning transient arena to 0x430000.  |
  * +----------------------+--------+-------------------+------------------------------------------------+
- * | Arena Start: 0x420000 | Total Regions: 131072 Bytes                                                |
+ * | Arena Start: 0x430000 | Total Regions: 196608 Bytes                                                |
  * +----------------------------------------------------------------------------------------------------+
  */
 export const DEFAULT_BUFFER_POOL_REGIONS = [
   ["SLOT_TO_PAGE", 4096],
+  ["PAGE_TO_SLOT", 16384],
   ["DIRTY_MASK", 128],
   ["VM_CONTEXT", 12288],
   ["RESULT_BUFFER", 65536],
   ["BYTECODE", 32768],
   ["PAGE_SCRATCHPAD", 4096],
-  ["ALIGNMENT_PADDING", 12160],
+  ["ALIGNMENT_PADDING", 61312],
 ] as const;
 
 /**
@@ -86,44 +103,49 @@ export const DEFAULT_BUFFER_POOL_REGIONS = [
 export const SLOT_TO_PAGE_OFFSET = 4194304; // 0x400000
 
 /**
- * Byte offset 0x401000: Bitmask (128 bytes = 1024 bits) tracking dirty slots.
+ * Byte offset 0x401000: Open-addressing hash table (2048 buckets x 8B) mapping pageId -> slot.
  */
-export const DIRTY_MASK_OFFSET = 4198400; // 0x401000
+export const PAGE_TO_SLOT_OFFSET = 4198400; // 0x401000
 
 /**
- * Byte offset 0x401080: Execution context frames for the SQL VM.
+ * Byte offset 0x405000: Bitmask (128 bytes = 1024 bits) tracking dirty slots.
  */
-export const VM_CONTEXT_OFFSET = 4198528; // 0x401080
+export const DIRTY_MASK_OFFSET = 4214784; // 0x405000
 
 /**
- * Byte offset 0x404080: Output buffer for query result rows.
+ * Byte offset 0x405080: Execution context frames for the SQL VM.
  */
-export const RESULT_BUFFER_OFFSET = 4210816; // 0x404080
+export const VM_CONTEXT_OFFSET = 4214912; // 0x405080
 
 /**
- * Byte offset 0x414080: Instruction buffer for compiled bytecode routines.
+ * Byte offset 0x408080: Output buffer for query result rows.
  */
-export const BYTECODE_OFFSET = 4276352; // 0x414080
+export const RESULT_BUFFER_OFFSET = 4227200; // 0x408080
 
 /**
- * Byte offset 0x41C080: Staging buffer for page compression or I/O reassembly.
+ * Byte offset 0x418080: Instruction buffer for compiled bytecode routines.
  */
-export const PAGE_SCRATCHPAD_OFFSET = 4309120; // 0x41C080
+export const BYTECODE_OFFSET = 4292736; // 0x418080
 
 /**
- * Byte offset 0x41D080: Padding aligning transient arena to 0x420000.
+ * Byte offset 0x420080: Staging buffer for page compression or I/O reassembly.
  */
-export const ALIGNMENT_PADDING_OFFSET = 4313216; // 0x41D080
+export const PAGE_SCRATCHPAD_OFFSET = 4325504; // 0x420080
 
 /**
- * Byte offset 0x420000: Start of dynamic transient query execution arena.
+ * Byte offset 0x421080: Padding aligning transient arena to 0x430000.
  */
-export const TRANSIENT_ARENA_OFFSET = 4325376; // 0x420000
+export const ALIGNMENT_PADDING_OFFSET = 4329600; // 0x421080
 
 /**
- * Total buffer pool and shared Wasm memory allocation in bytes (20.125 MB).
+ * Byte offset 0x430000: Start of dynamic transient query execution arena.
  */
-export const TOTAL_MEMORY_BYTES = 21102592;
+export const TRANSIENT_ARENA_OFFSET = 4390912; // 0x430000
+
+/**
+ * Total buffer pool and shared Wasm memory allocation in bytes (20.1875 MB).
+ */
+export const TOTAL_MEMORY_BYTES = 21168128;
 
 /**
  * Computes memory layout offsets for arbitrary slot counts.
@@ -134,12 +156,19 @@ export function computeBufferPoolOffsets(
 ) {
   const slotsEndOffset = slotCount * PAGE_SIZE;
   const slotToPageBytes = (slotCount * 4 + 7) & ~7;
+  let pageToSlotBuckets = 16;
+  while (pageToSlotBuckets < slotCount * 2) {
+    pageToSlotBuckets <<= 1;
+  }
+  const pageToSlotBytes = pageToSlotBuckets * 8;
   const dirtyMaskBytes = (Math.ceil(slotCount / 8) + 7) & ~7;
 
   if (slotCount === DEFAULT_SLOT_COUNT) {
     return {
       slotsEndOffset,
       slotToPageOffset: SLOT_TO_PAGE_OFFSET,
+      pageToSlotOffset: PAGE_TO_SLOT_OFFSET,
+      pageToSlotBuckets: DEFAULT_PAGE_TO_SLOT_BUCKETS,
       dirtyMaskOffset: DIRTY_MASK_OFFSET,
       vmContextOffset: VM_CONTEXT_OFFSET,
       resultBufferOffset: RESULT_BUFFER_OFFSET,
@@ -150,7 +179,8 @@ export function computeBufferPoolOffsets(
   }
 
   const slotToPageOffset = slotsEndOffset;
-  const dirtyMaskOffset = slotToPageOffset + slotToPageBytes;
+  const pageToSlotOffset = slotToPageOffset + slotToPageBytes;
+  const dirtyMaskOffset = pageToSlotOffset + pageToSlotBytes;
   const vmContextOffset = dirtyMaskOffset + dirtyMaskBytes;
   const resultBufferOffset = vmContextOffset + VM_CONTEXT_SIZE;
   const bytecodeOffset = resultBufferOffset + RESULT_BUFFER_SIZE;
@@ -161,6 +191,8 @@ export function computeBufferPoolOffsets(
   return {
     slotsEndOffset,
     slotToPageOffset,
+    pageToSlotOffset,
+    pageToSlotBuckets,
     dirtyMaskOffset,
     vmContextOffset,
     resultBufferOffset,

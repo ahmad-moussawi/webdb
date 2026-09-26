@@ -36,6 +36,7 @@ import {
   COLUMN_META_SIZE,
   DEFAULT_SLOT_COUNT,
   SLOT_TO_PAGE_OFFSET,
+  PAGE_TO_SLOT_OFFSET,
   DIRTY_MASK_OFFSET,
   VM_CONTEXT_OFFSET,
   RESULT_BUFFER_OFFSET,
@@ -100,12 +101,13 @@ describe("Layout Architecture Tests (tests/layouts.test.ts)", () => {
   it("6. Buffer Pool memory layout aligns with default 1024-slot (4MB) specification", () => {
     expect(DEFAULT_SLOT_COUNT).toBe(1024);
     expect(SLOT_TO_PAGE_OFFSET).toBe(0x400000);
-    expect(DIRTY_MASK_OFFSET).toBe(0x401000);
-    expect(VM_CONTEXT_OFFSET).toBe(0x401080);
-    expect(RESULT_BUFFER_OFFSET).toBe(0x404080);
-    expect(BYTECODE_OFFSET).toBe(0x414080);
-    expect(PAGE_SCRATCHPAD_OFFSET).toBe(0x41c080);
-    expect(TRANSIENT_ARENA_OFFSET).toBe(0x420000);
+    expect(PAGE_TO_SLOT_OFFSET).toBe(0x401000);
+    expect(DIRTY_MASK_OFFSET).toBe(0x405000);
+    expect(VM_CONTEXT_OFFSET).toBe(0x405080);
+    expect(RESULT_BUFFER_OFFSET).toBe(0x408080);
+    expect(BYTECODE_OFFSET).toBe(0x418080);
+    expect(PAGE_SCRATCHPAD_OFFSET).toBe(0x420080);
+    expect(TRANSIENT_ARENA_OFFSET).toBe(0x430000);
   });
 
   it("7. Dynamic buffer pool offset computation correctly offsets non-default slot counts", () => {
@@ -113,6 +115,8 @@ describe("Layout Architecture Tests (tests/layouts.test.ts)", () => {
     expect(custom.slotsEndOffset).toBe(64 * PAGE_SIZE);
     expect(custom.slotToPageOffset).toBe(64 * PAGE_SIZE);
     // 64 slots * 4 bytes = 256 bytes (8-byte aligned)
-    expect(custom.dirtyMaskOffset).toBe(custom.slotToPageOffset + 256);
+    expect(custom.pageToSlotOffset).toBe(custom.slotToPageOffset + 256);
+    // 64 slots -> 128 buckets * 8 bytes = 1024 bytes
+    expect(custom.dirtyMaskOffset).toBe(custom.pageToSlotOffset + 1024);
   });
 });

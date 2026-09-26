@@ -43,16 +43,17 @@ const memory = new WebAssembly.Memory({
 Offset (Hex)          Size        Region Name                  Purpose
 ─────────────────────────────────────────────────────────────────────────────────────────────
 0x000000 - 0x3FFFFF   4,194,304 B Slotted Page Cache Slots     1,024 rigid slots x 4096 bytes
-0x400000 - 0x400FFF       4,096 B Slot-to-Page Map             uint32_t slot_to_page[1024]
-0x401000 - 0x40107F         128 B Dirty Bitmask (`dirty_mask`)      Dynamic bitmask (1 bit per slot)
-0x401080 - 0x40407F      12,288 B `VmContext` Nesting Frame Stack    8-frame execution stack (8 × 1,280B frames + 8B header, reserved to 12KB)
-0x404080 - 0x41407F      65,536 B Output Result Buffer              Chunked streaming row output (64KB)
-0x414080 - 0x41C07F      32,768 B Bytecode Scratchpad               Compiled query bytecode buffer (32KB)
-0x41C080 - 0x41D07F       4,096 B Page Scratchpad (`page_scratchpad`) Dedicated 4KB staging buffer for page compaction & node splits
-0x41D080 - 0x41FFFF       7,936 B Reserved Alignment Padding        Zero-filled alignment cushion
+0x400000 - 0x400FFF       4,096 B Slot-to-Page Direct Array    uint32_t slot_to_page[1024]
+0x401000 - 0x404FFF      16,384 B Page-to-Slot Hash Table      Open-addressing hash table (2,048 buckets x 8B)
+0x405000 - 0x40507F         128 B Dirty Bitmask (`dirty_mask`) Dynamic bitmask (1 bit per slot)
+0x405080 - 0x40807F      12,288 B `VmContext` Nesting Frame Stack 8-frame execution stack (8 × 1,280B frames + 8B header, reserved to 12KB)
+0x408080 - 0x41807F      65,536 B Output Result Buffer         Chunked streaming row output (64KB)
+0x418080 - 0x42007F      32,768 B Bytecode Scratchpad          Compiled query bytecode buffer (32KB)
+0x420080 - 0x42107F       4,096 B Page Scratchpad (`page_scratchpad`) Dedicated 4KB staging buffer for page compaction & node splits
+0x421080 - 0x42FFFF      61,312 B Reserved Alignment Padding   Zero-filled alignment cushion
 ─────────────────────────────────────────────────────────────────────────────────────────────
-0x420000 - 0x141FFFF  Up to 16 MB Transient Query Arena             Growable bump allocator for GROUP BY
-                                                                    hash tables and sort buffers
+0x430000 - 0x142FFFF  Up to 16 MB Transient Query Arena        Growable bump allocator for GROUP BY
+                                                                hash tables and sort buffers
 ```
 
 ---
@@ -71,9 +72,21 @@ Offset (Hex)          Size        Region Name                  Purpose
 - `slot_to_page[i]`:
   - `0`: Slot $i$ is currently free/unallocated.
   - `> 0`: Contains the database `page_id` currently resident in slot $i$.
-- Provides instant $O(1)$ bidirectional mapping between disk pages and memory slots.
+- Maps slot index directly to page ID in $O(1)$ time.
 
-#### 3. Dynamic Dirty Bitmask (`0x401000..0x40107F`)
+#### 3. Page-to-Slot Hash Table (`0x401000..0x404FFF`, 16,384 Bytes)
+
+- Dedicated open-addressing hash table providing instant $O(1)$ page residency lookups: $\text{page\_id} \to \text{slot\_idx}$.
+- **Bucket Count:** 2,048 buckets (power of 2), enforcing a strict load factor $\alpha \le 50\%$ ($1,024 / 2,048$) for an average probe length of $\le 1.5$.
+- **Bucket Layout (8 Bytes):**
+  - `page_id` (`uint32_t LE`, 4 bytes): Disk page identifier. `0` indicates an empty bucket.
+  - `slot_idx` (`uint32_t LE`, 4 bytes): Buffer pool slot index ($0 \le \text{slot\_idx} < \text{slot\_count}$).
+- **Hash Function:** Knuth's multiplicative 32-bit integer hash:
+  $$h = ((\text{page\_id} \times \text{0x9E3779B9}) \oplus ((\text{page\_id} \times \text{0x9E3779B9}) \gg 16)) \ \& \ 2047$$
+- **Probing & Deletion:** Linear probing with backward shift deletion (Robin Hood style), preventing tombstone accumulation and guaranteeing zero degradation over time.
+- **Single Source of Truth:** Read and written directly by both JavaScript Host and compiled WebAssembly, eliminating dual-state synchronization risks.
+
+#### 4. Dynamic Dirty Bitmask (`0x405000..0x40507F`)
 
 - Sized to $\lceil\text{slot\_count} / 8\rceil$ bytes (128 bytes for 1,024 slots).
 - **Bit Invariant:** When any engine write operation modifies bytes in slot $i$, bit $i$ is set:
@@ -89,7 +102,7 @@ Offset (Hex)          Size        Region Name                  Purpose
 >   - **Check Dirty:** `(dirty_mask[byte_idx] & mask) !== 0`
 >   - **Clear Dirty:** `dirty_mask[byte_idx] &= ~mask`
 
-#### 4. Execution Nesting Frame Stack (`VmContext`, `0x401080..0x40407F`, 12,288 Bytes)
+#### 5. Execution Nesting Frame Stack (`VmContext`, `0x405080..0x40807F`, 12,288 Bytes)
 
 Instead of a single flat struct, `VmContext` is an **8-frame nesting stack**. Each `VmFrame` is a fully self-contained execution context (registers, cursors, program counter, status). The `depth` field in the outer `VmContext` selects the currently active frame. Correlated subqueries push `depth++` and get a fresh frame; on completion they pop `depth--` and return their result to the parent frame.
 

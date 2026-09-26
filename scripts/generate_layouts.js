@@ -426,12 +426,19 @@ export function computeBufferPoolOffsets(
 ) {
   const slotsEndOffset = slotCount * PAGE_SIZE;
   const slotToPageBytes = (slotCount * 4 + 7) & ~7;
+  let pageToSlotBuckets = 16;
+  while (pageToSlotBuckets < slotCount * 2) {
+    pageToSlotBuckets <<= 1;
+  }
+  const pageToSlotBytes = pageToSlotBuckets * 8;
   const dirtyMaskBytes = (Math.ceil(slotCount / 8) + 7) & ~7;
 
   if (slotCount === DEFAULT_SLOT_COUNT) {
     return {
       slotsEndOffset,
       slotToPageOffset: SLOT_TO_PAGE_OFFSET,
+      pageToSlotOffset: PAGE_TO_SLOT_OFFSET,
+      pageToSlotBuckets: DEFAULT_PAGE_TO_SLOT_BUCKETS,
       dirtyMaskOffset: DIRTY_MASK_OFFSET,
       vmContextOffset: VM_CONTEXT_OFFSET,
       resultBufferOffset: RESULT_BUFFER_OFFSET,
@@ -442,7 +449,8 @@ export function computeBufferPoolOffsets(
   }
 
   const slotToPageOffset = slotsEndOffset;
-  const dirtyMaskOffset = slotToPageOffset + slotToPageBytes;
+  const pageToSlotOffset = slotToPageOffset + slotToPageBytes;
+  const dirtyMaskOffset = pageToSlotOffset + pageToSlotBytes;
   const vmContextOffset = dirtyMaskOffset + dirtyMaskBytes;
   const resultBufferOffset = vmContextOffset + VM_CONTEXT_SIZE;
   const bytecodeOffset = resultBufferOffset + RESULT_BUFFER_SIZE;
@@ -453,6 +461,8 @@ export function computeBufferPoolOffsets(
   return {
     slotsEndOffset,
     slotToPageOffset,
+    pageToSlotOffset,
+    pageToSlotBuckets,
     dirtyMaskOffset,
     vmContextOffset,
     resultBufferOffset,
