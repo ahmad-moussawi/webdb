@@ -1,0 +1,121 @@
+{
+  "$schema": "./layout_schema.json",
+  "name": "page_format",
+  "description": "Slotted Page & B-tree node layout definitions for WebDB",
+  "criticalWarning": [
+    "CRITICAL WARNING: FROZEN ON-DISK PAGE FORMAT SPECIFICATION",
+    "DO NOT alter the order, types, or byte lengths of existing fields in this",
+    "layout! Changing any field offset will invalidate existing binary databases,",
+    "break cross-version read compatibility, and result in unrecoverable data",
+    "corruption.",
+    "",
+    "Any future extensions MUST use designated reserved bytes or bump",
+    "CURRENT_ENGINE_VERSION and CURRENT_MIN_READ_VERSION."
+  ],
+  "constants": [
+    {
+      "name": "PAGE_SIZE",
+      "value": 4096,
+      "description": "Standard uniform page size in bytes across the entire database engine (4 KB).\nEvery page in the database file and buffer pool is rigidly aligned to this size."
+    },
+    {
+      "name": "MAX_ROW_SIZE",
+      "value": 2048,
+      "description": "Strict maximum size in bytes allowed for a single serialized row record (2 KB).\nEnforces the B-tree invariant that at least two rows fit on a leaf data page\nwithout requiring overflow chaining in the v1 engine."
+    }
+  ],
+  "layouts": [
+    {
+      "id": "SLOTTED_PAGE_HEADER",
+      "baseOffset": 0,
+      "fieldsName": "SLOTTED_PAGE_HEADER_FIELDS",
+      "layoutName": "SLOTTED_PAGE_HEADER_LAYOUT",
+      "sizeName": "PAGE_HEADER_SIZE",
+      "sizeDescription": "Total size in bytes of the standard slotted page header (16 bytes).",
+      "fieldsDescription": "Ordered sequence of fields composing the 16-byte header of all standard\ndata and interior pages (pages 2+).\nDefined as an immutable array of `[fieldName, byteSize]` tuples to guarantee\nstrict byte ordering across all JavaScript/TypeScript runtime engines.",
+      "layoutDescription": "Compiled layout descriptor for the 16-byte slotted page header,\nproviding calculated byte offsets, field sizes, and total header length.",
+      "offsetPrefix": "PAGE_HEADER_OFFSET_",
+      "fields": [
+        {
+          "name": "TYPE",
+          "size": 1,
+          "type": "uint8_t",
+          "description": "Byte offset 0 (uint8_t): Identifies the page structure and role.\nValid types:\n- `0x00` (PAGE_TYPE_FREE): Free/recycled page on the free list.\n- `0x02` (PAGE_TYPE_INDEX_INTERIOR): B-tree index interior node.\n- `0x05` (PAGE_TYPE_TABLE_INTERIOR): B-tree table interior routing node.\n- `0x0A` (PAGE_TYPE_INDEX_LEAF): B-tree index leaf node.\n- `0x0C` (PAGE_TYPE_CATALOG_PAGE): Dedicated column catalog page.\n- `0x0D` (PAGE_TYPE_LEAF_DATA): Table leaf data page storing rows."
+        },
+        {
+          "name": "FLAGS",
+          "size": 1,
+          "type": "uint8_t",
+          "description": "Byte offset 1 (uint8_t): Flags and reserved attributes for this page.\nInitialized to `0x00` in v1."
+        },
+        {
+          "name": "CELL_COUNT",
+          "size": 2,
+          "type": "uint16_t",
+          "description": "Byte offset 2 (uint16_t, little-endian): Number of active records/cells\nstored on this page. Also specifies the count of 2-byte slot directory entries."
+        },
+        {
+          "name": "CONTENT_OFFSET",
+          "size": 2,
+          "type": "uint16_t",
+          "description": "Byte offset 4 (uint16_t, little-endian): Byte offset pointing to the start\nof the lower cell payload boundary. Payloads are allocated from byte 4096\ngrowing upwards toward the slot directory. An empty page has this set to 4096."
+        },
+        {
+          "name": "NEXT_PAGE_ID",
+          "size": 4,
+          "type": "uint32_t",
+          "description": "Byte offset 6 (uint32_t, little-endian): Multifunctional 32-bit pointer:\n- Table Leaf Data (0x0D): Forward sibling pointer (`next_page_id`) linking data pages.\n- Table Interior (0x05): Rightmost child pointer (`right_child_page_id`).\n- Free Page (0x00): Next pageId on the free list chain (`next_free_page_id`)."
+        },
+        {
+          "name": "FREE_BYTES",
+          "size": 2,
+          "type": "uint16_t",
+          "description": "Byte offset 10 (uint16_t, little-endian): Cumulative count of fragmented\nunallocated bytes left behind by deleted or shrunk records. This space is\nreclaimed when page defragmentation (`compactPage`) is invoked."
+        },
+        {
+          "name": "CHECKSUM",
+          "size": 4,
+          "type": "uint32_t",
+          "description": "Byte offset 12 (uint32_t, little-endian): IEEE 802.3 CRC32 checksum computed\nover the entire 4KB page (with bytes 12..15 zeroed during calculation) to detect\ntorn writes or on-disk storage corruption."
+        }
+      ]
+    },
+    {
+      "id": "TABLE_INTERIOR_CELL",
+      "baseOffset": 0,
+      "fieldsName": "TABLE_INTERIOR_CELL_FIELDS",
+      "layoutName": "TABLE_INTERIOR_CELL_LAYOUT",
+      "sizeName": "TABLE_INTERIOR_CELL_SIZE",
+      "sizeDescription": "Total size in bytes of a single table interior cell (12 bytes).\nComposed of a 4-byte child `page_id` and an 8-byte signed `rowid` separator key.",
+      "fieldsDescription": "Ordered sequence of fields composing a single 12-byte routing cell in a\nTable Interior B-tree node (`page_type = 0x05`).",
+      "layoutDescription": "Compiled layout descriptor for the 12-byte table interior cell.",
+      "offsetPrefix": "TABLE_INTERIOR_CELL_OFFSET_",
+      "fields": [
+        {
+          "name": "CHILD_PAGE_ID",
+          "size": 4,
+          "type": "uint32_t",
+          "description": "Byte offset 0 within an interior cell (uint32_t, little-endian):\nThe `page_id` of the child subtree containing keys less than or equal to `rowid`."
+        },
+        {
+          "name": "ROWID",
+          "size": 8,
+          "type": "int64_t",
+          "description": "Byte offset 4 within an interior cell (int64_t, little-endian):\nThe separator `rowid` key. Keys $\\le \\text{rowid}$ route to `child_page_id`;\nkeys $> \\text{rowid}$ continue searching to the right."
+        }
+      ]
+    }
+  ],
+  "postConstants": [
+    {
+      "name": "MAX_TABLE_INTERIOR_CELLS",
+      "value": 291,
+      "description": "Maximum number of 12-byte interior cells that can fit inside one 4KB interior page:\n\\lfloor(4096 - 16) / (12 + 2)\\rfloor = 291 cells (where 2 is the slot directory entry size)."
+    },
+    {
+      "name": "TABLE_INTERIOR_SPLIT_INDEX",
+      "value": 145,
+      "description": "Median split index for interior page splits. When splitting a full 291-cell\ninterior node, entry 145 is promoted to the parent routing node."
+    }
+  ]
+}

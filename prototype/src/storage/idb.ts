@@ -104,7 +104,7 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
     return new Promise<void>((resolve, reject) => {
       const tx = db.transaction('pages', 'readwrite');
       const store = tx.objectStore('pages');
-      const range = IDBKeyRange.lowerBound(pageCount, true);
+      const range = IDBKeyRange.lowerBound(pageCount, false);
       const request = store.delete(range);
 
       request.onsuccess = () => resolve();

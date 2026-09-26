@@ -14,8 +14,8 @@ import {
   getCellCount,
   getCellOffset,
   getNextPageId,
+  getTableLayout,
 } from './page.js';
-import { UuidCodec, UlidCodec } from './codecs.js';
 
 export interface VmCursor {
   pageId: number;
@@ -28,7 +28,7 @@ export interface VmContext {
   status: VmStatus;
   resultCount: number;
   resultOffset: number;
-  registers: (number | bigint | string | Uint8Array | null)[];
+  registers: (number | bigint | string | null)[];
   cursor: VmCursor;
   table: TableMeta | null;
 }
@@ -39,7 +39,7 @@ export function createVmContext(): VmContext {
     status: VmStatus.RUNNING,
     resultCount: 0,
     resultOffset: 0,
-    registers: new Array(64).fill(null),
+    registers: new Array(16).fill(null),
     cursor: {
       pageId: 0,
       cellIdx: 0,
@@ -160,34 +160,20 @@ export function vm_step(
 
         const table = ctx.table!;
         const col = table.columns[colIdx];
-        const nullBitmapBytes = Math.ceil(table.columns.length / 8);
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
+        const { fixedSliceSize, nullBitmapBytes } = getTableLayout(table.columns);
 
+        const nullBitmapOffset = ctx.cursor.rowOffset + 1;
         const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
         const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
 
         if (isNull) {
           ctx.registers[regIdx] = null;
         } else {
-          let fixedOffset = nullBitmapOffset + nullBitmapBytes;
-          for (let i = 0; i < colIdx; i++) {
-            const isNullPrev = (view.getUint8(nullBitmapOffset + (i >> 3)) & (1 << (i & 7))) !== 0;
-            if (!isNullPrev) {
-              const prevCol = table.columns[i];
-              switch (prevCol.type) {
-                case DataType.INT32: fixedOffset += 4; break;
-                case DataType.INT64:
-                case DataType.FLOAT64: fixedOffset += 8; break;
-                case DataType.UUID:
-                case DataType.ULID: fixedOffset += 16; break;
-              }
-            }
-          }
-
+          const fixedSliceOffset = nullBitmapOffset + nullBitmapBytes;
           if (col.type === DataType.INT32) {
-            ctx.registers[regIdx] = view.getInt32(fixedOffset, true);
+            ctx.registers[regIdx] = view.getInt32(fixedSliceOffset + col.colOffset, true);
           } else if (col.type === DataType.INT64) {
-            ctx.registers[regIdx] = Number(view.getBigInt64(fixedOffset, true));
+            ctx.registers[regIdx] = Number(view.getBigInt64(fixedSliceOffset + col.colOffset, true));
           }
         }
         break;
@@ -200,30 +186,18 @@ export function vm_step(
         ctx.pc += 2;
 
         const table = ctx.table!;
-        const nullBitmapBytes = Math.ceil(table.columns.length / 8);
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
+        const col = table.columns[colIdx];
+        const { nullBitmapBytes } = getTableLayout(table.columns);
 
+        const nullBitmapOffset = ctx.cursor.rowOffset + 1;
         const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
         const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
 
         if (isNull) {
           ctx.registers[regIdx] = null;
         } else {
-          let fixedOffset = nullBitmapOffset + nullBitmapBytes;
-          for (let i = 0; i < colIdx; i++) {
-            const isNullPrev = (view.getUint8(nullBitmapOffset + (i >> 3)) & (1 << (i & 7))) !== 0;
-            if (!isNullPrev) {
-              const prevCol = table.columns[i];
-              switch (prevCol.type) {
-                case DataType.INT32: fixedOffset += 4; break;
-                case DataType.INT64:
-                case DataType.FLOAT64: fixedOffset += 8; break;
-                case DataType.UUID:
-                case DataType.ULID: fixedOffset += 16; break;
-              }
-            }
-          }
-          ctx.registers[regIdx] = view.getFloat64(fixedOffset, true);
+          const fixedSliceOffset = nullBitmapOffset + nullBitmapBytes;
+          ctx.registers[regIdx] = view.getFloat64(fixedSliceOffset + col.colOffset, true);
         }
         break;
       }
@@ -235,50 +209,15 @@ export function vm_step(
         ctx.pc += 2;
 
         const table = ctx.table!;
-        const nullBitmapBytes = Math.ceil(table.columns.length / 8);
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
+        const { fixedSliceSize, nullBitmapBytes } = getTableLayout(table.columns);
 
+        const nullBitmapOffset = ctx.cursor.rowOffset + 1;
         const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
         const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
 
         if (isNull) {
           ctx.registers[regIdx] = null;
-        } else if (table.columns[colIdx].type === DataType.UUID || table.columns[colIdx].type === DataType.ULID) {
-          let fixedOffset = nullBitmapOffset + nullBitmapBytes;
-          for (let i = 0; i < colIdx; i++) {
-            const isNullPrev = (view.getUint8(nullBitmapOffset + (i >> 3)) & (1 << (i & 7))) !== 0;
-            if (!isNullPrev) {
-              const prevCol = table.columns[i];
-              switch (prevCol.type) {
-                case DataType.INT32: fixedOffset += 4; break;
-                case DataType.INT64:
-                case DataType.FLOAT64: fixedOffset += 8; break;
-                case DataType.UUID:
-                case DataType.ULID: fixedOffset += 16; break;
-              }
-            }
-          }
-          const slice = new Uint8Array(view.buffer, view.byteOffset + fixedOffset, 16);
-          ctx.registers[regIdx] = table.columns[colIdx].type === DataType.UUID
-            ? UuidCodec.decode(slice, 0)
-            : UlidCodec.decode(slice, 0);
         } else {
-          // Find start of var-offset table
-          let varTableOffset = nullBitmapOffset + nullBitmapBytes;
-          for (let i = 0; i < table.columns.length; i++) {
-            const isNullCol = (view.getUint8(nullBitmapOffset + (i >> 3)) & (1 << (i & 7))) !== 0;
-            if (!isNullCol) {
-              const col = table.columns[i];
-              switch (col.type) {
-                case DataType.INT32: varTableOffset += 4; break;
-                case DataType.INT64:
-                case DataType.FLOAT64: varTableOffset += 8; break;
-                case DataType.UUID:
-                case DataType.ULID: varTableOffset += 16; break;
-              }
-            }
-          }
-
           let varIdx = 0;
           for (let i = 0; i < colIdx; i++) {
             const c = table.columns[i];
@@ -286,7 +225,8 @@ export function vm_step(
               varIdx++;
             }
           }
-
+          const fixedSliceOffset = nullBitmapOffset + nullBitmapBytes;
+          const varTableOffset = fixedSliceOffset + fixedSliceSize;
           const entryOffset = varTableOffset + (varIdx * 4);
           const relOffset = view.getUint16(entryOffset, true);
           const len = view.getUint16(entryOffset + 2, true);
@@ -301,61 +241,13 @@ export function vm_step(
         break;
       }
 
-      case OpCode.OP_COLUMN_BLOB: {
-        const colIdx = bytecode[ctx.pc];
-        const regIdx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-
-        const table = ctx.table!;
-        const nullBitmapBytes = Math.ceil(table.columns.length / 8);
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
-
-        const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
-        const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
-
-        if (isNull) {
-          ctx.registers[regIdx] = null;
-        } else {
-          let varTableOffset = nullBitmapOffset + nullBitmapBytes;
-          for (let i = 0; i < table.columns.length; i++) {
-            const isNullCol = (view.getUint8(nullBitmapOffset + (i >> 3)) & (1 << (i & 7))) !== 0;
-            if (!isNullCol) {
-              const col = table.columns[i];
-              switch (col.type) {
-                case DataType.INT32: varTableOffset += 4; break;
-                case DataType.INT64:
-                case DataType.FLOAT64: varTableOffset += 8; break;
-                case DataType.UUID:
-                case DataType.ULID: varTableOffset += 16; break;
-              }
-            }
-          }
-
-          let varIdx = 0;
-          for (let i = 0; i < colIdx; i++) {
-            const c = table.columns[i];
-            if (c.type === DataType.TEXT || c.type === DataType.BLOB) {
-              varIdx++;
-            }
-          }
-
-          const entryOffset = varTableOffset + (varIdx * 4);
-          const relOffset = view.getUint16(entryOffset, true);
-          const len = view.getUint16(entryOffset + 2, true);
-
-          const blobCopy = new Uint8Array(len);
-          blobCopy.set(new Uint8Array(view.buffer, ctx.cursor.rowOffset + relOffset, len));
-          ctx.registers[regIdx] = blobCopy;
-        }
-        break;
-      }
-
       case OpCode.OP_IS_NULL: {
+        // [OP_IS_NULL] [col_idx: uint8] [jump_target: uint16]
         const colIdx = bytecode[ctx.pc];
         const jumpTarget = codeView.getUint16(ctx.pc + 1, true);
         ctx.pc += 3;
 
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
+        const nullBitmapOffset = ctx.cursor.rowOffset + 1;
         const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
         const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
 
@@ -366,11 +258,12 @@ export function vm_step(
       }
 
       case OpCode.OP_IS_NOT_NULL: {
+        // [OP_IS_NOT_NULL] [col_idx: uint8] [jump_target: uint16]
         const colIdx = bytecode[ctx.pc];
         const jumpTarget = codeView.getUint16(ctx.pc + 1, true);
         ctx.pc += 3;
 
-        const nullBitmapOffset = ctx.cursor.rowOffset + 3;
+        const nullBitmapOffset = ctx.cursor.rowOffset + 1;
         const byteVal = view.getUint8(nullBitmapOffset + (colIdx >> 3));
         const isNull = (byteVal & (1 << (colIdx & 7))) !== 0;
 
@@ -380,7 +273,11 @@ export function vm_step(
         break;
       }
 
+      // SQLite 3VL Comparison Opcodes
+      // In SQLite, if either operand is NULL, the comparison evaluates to UNKNOWN (falsy in WHERE).
+      // If UNKNOWN, the jump condition does NOT pass!
       case OpCode.OP_EQ: {
+        // [OP_EQ] [regA: uint8] [regB: uint8] [jump_target: uint16]
         const regA = bytecode[ctx.pc];
         const regB = bytecode[ctx.pc + 1];
         const jumpTarget = codeView.getUint16(ctx.pc + 2, true);
@@ -509,11 +406,26 @@ export function vm_step(
       }
 
       case OpCode.OP_EMIT_ROW: {
+        // [OP_EMIT_ROW] [cursor_idx: uint8]
         const _cursorIdx = bytecode[ctx.pc];
         ctx.pc += 1;
 
-        // Read row record length directly from row bytes 1..2
-        const totalRowLength = view.getUint16(ctx.cursor.rowOffset + 1, true);
+        // Determine row record length
+        const table = ctx.table!;
+        const { fixedSliceSize, varColCount, nullBitmapBytes } = getTableLayout(table.columns);
+        const headerAndFixedSize = 1 + nullBitmapBytes + fixedSliceSize + (varColCount * 4);
+
+        let totalRowLength = headerAndFixedSize;
+        if (varColCount > 0) {
+          const varTableOffset = ctx.cursor.rowOffset + 1 + nullBitmapBytes + fixedSliceSize;
+          for (let v = 0; v < varColCount; v++) {
+            const relOffset = view.getUint16(varTableOffset + (v * 4), true);
+            const len = view.getUint16(varTableOffset + (v * 4) + 2, true);
+            if (relOffset + len > totalRowLength) {
+              totalRowLength = relOffset + len;
+            }
+          }
+        }
 
         // Check if output buffer has space for 2B length + row record
         const needed = 2 + totalRowLength;
@@ -536,7 +448,7 @@ export function vm_step(
       }
 
       default:
-        throw new Error(`Unknown bytecode opcode: ${op} at PC=${ctx.pc - 1}`);
+        throw new Error(`Unknown VM Opcode: 0x${op.toString(16)} at pc=${ctx.pc - 1}`);
     }
   }
 

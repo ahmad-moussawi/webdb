@@ -3,7 +3,6 @@ import {
   initPage,
   insertRowIntoPage,
   getCellCount,
-  getCellOffset,
   serializeRow,
   deserializeRow,
   getTableLayout,
@@ -20,12 +19,8 @@ import { PAGE_SIZE } from '../src/constants.js';
 describe('Slotted Page & Row Format', () => {
   const table: TableMeta = {
     tableId: 1,
-    flags: 1,
-    rootPageId: 2,
-    colCatalogPageId: 0,
     columnCount: 4,
-    rowCountEstimate: 0,
-    autoIncNext: 1n,
+    rootPageId: 2,
     name: 'users',
     columns: [
       { type: DataType.INT32, flags: ColumnFlag.PRIMARY_KEY | ColumnFlag.NOT_NULL, colOffset: 0, name: 'id' },
@@ -65,8 +60,8 @@ describe('Slotted Page & Row Format', () => {
     expect(slot1).toBe(1);
     expect(getCellCount(view, 0)).toBe(2);
 
-    const offset0 = getCellOffset(view, 0, 0);
-    const offset1 = getCellOffset(view, 0, 1);
+    const offset0 = view.getUint16(12 + 0, true);
+    const offset1 = view.getUint16(12 + 2, true);
 
     const decoded1 = deserializeRow(view, offset0, table);
     const decoded2 = deserializeRow(view, offset1, table);

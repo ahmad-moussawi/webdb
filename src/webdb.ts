@@ -1,258 +1,312 @@
 import {
   PAGE_SIZE,
-  DEFAULT_PAGE_SLOTS,
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
-  TOTAL_MEMORY_BYTES,
-} from './constants.js';
+  DEFAULT_SLOT_COUNT,
+  DEFAULT_MAX_QUERY_MEMORY,
+  PAGE_SCRATCHPAD_OFFSET,
+} from "./constants.js";
 import {
   ColumnDefinition,
   TableMeta,
   DbRow,
   TableNotFoundError,
-} from './types.js';
-import { IVfsAdapter } from './storage/vfs.js';
-import { MemoryVfsAdapter } from './storage/memory.js';
-import { IndexedDbVfsAdapter } from './storage/idb.js';
+  ColumnFlag,
+} from "./types.js";
+import { IVfsAdapter } from "./storage/vfs.js";
+import { MemoryVfsAdapter } from "./storage/memory.js";
+import { IndexedDbVfsAdapter } from "./storage/idb.js";
+import { OpfsVfsAdapter } from "./storage/opfs.js";
+import { BufferPool } from "./engine/buffer_pool.js";
 import {
   initPage1,
   readPage1Header,
-  getTotalPages,
-  setTotalPages,
-  findTableByName,
-  addTableToCatalog,
-} from './engine/catalog.js';
+  createTable as catalogCreateTable,
+  loadTableMeta,
+  loadAllTables,
+  findTableSlot,
+  readTableDescriptor,
+  writeTableDescriptor,
+  listTableDescriptors,
+  IPageProvider,
+  readCatalogPageHeader,
+} from "./engine/catalog.js";
 import {
-  initPage,
   insertRowIntoPage,
   getNextPageId,
   setNextPageId,
   serializeRow,
   deserializeRow,
-} from './engine/page.js';
+} from "./engine/page.js";
 import {
   createVmContext,
   resetVmContext,
   vm_step,
   VmContext,
-} from './engine/vm.js';
+} from "./engine/vm.js";
 import {
   compileQuery,
-  ComparisonOp,
   QueryFilter,
   disassembleBytecode,
   formatDisassembly,
-  DisassembledInstruction,
-} from './engine/compiler.js';
+} from "./engine/compiler.js";
+import {
+  QueryBuilder,
+  ExplainOutput,
+  IDatabaseQueryExecutor,
+  QueryExecutionOptions,
+} from "./query_builder.js";
 
-export interface ExplainOutput {
-  plan: {
-    table: string;
-    rootPageId: number;
-    scanType: 'TableScan';
-    filters: QueryFilter[];
-  };
-  bytecodeSize: number;
-  instructions: DisassembledInstruction[];
-  assembly: string;
-}
+export {
+  QueryBuilder,
+  ExplainOutput,
+  IDatabaseQueryExecutor,
+  QueryExecutionOptions,
+};
 
 export interface WebDbOptions {
   name: string;
-  storage?: 'memory' | 'idb';
+  storage?: "memory" | "idb" | "opfs";
+  vfs?: IVfsAdapter;
+  slotCount?: number;
+  maxQueryMemory?: number;
 }
 
-export class QueryBuilder {
-  private db: WebDB;
-  private tableName: string;
-  private filters: QueryFilter[] = [];
-  private limitCount: number | null = null;
-  private offsetCount: number | null = null;
-  private sortCol: string | null = null;
-  private sortDir: 'asc' | 'desc' = 'asc';
-
-  constructor(db: WebDB, tableName: string) {
-    this.db = db;
-    this.tableName = tableName;
-  }
-
-  where(colName: string, op: ComparisonOp, value: any): this {
-    this.filters.push({ type: 'cmp', colName, op, value });
-    return this;
-  }
-
-  whereNull(colName: string): this {
-    this.filters.push({ type: 'null', colName, isNull: true });
-    return this;
-  }
-
-  whereNotNull(colName: string): this {
-    this.filters.push({ type: 'null', colName, isNull: false });
-    return this;
-  }
-
-  limit(count: number): this {
-    this.limitCount = count;
-    return this;
-  }
-
-  offset(count: number): this {
-    this.offsetCount = count;
-    return this;
-  }
-
-  orderBy(colName: string, direction: 'asc' | 'desc' = 'asc'): this {
-    this.sortCol = colName;
-    this.sortDir = direction;
-    return this;
-  }
-
-  async explain(): Promise<ExplainOutput> {
-    return this.db.explainQuery(this.tableName, this.filters);
-  }
-
-  async toArray(): Promise<DbRow[]> {
-    return this.db.executeQuery(this.tableName, this.filters, {
-      limit: this.limitCount,
-      offset: this.offsetCount,
-      sortCol: this.sortCol,
-      sortDir: this.sortDir,
-    });
-  }
-}
-
-export class WebDB {
-  private vfs: IVfsAdapter;
-  private buffer: ArrayBuffer;
-  private view: DataView;
+export class WebDB implements IDatabaseQueryExecutor {
+  readonly vfs: IVfsAdapter;
+  readonly pool: BufferPool;
   private vmCtx: VmContext;
 
-  private constructor(vfs: IVfsAdapter, buffer: ArrayBuffer) {
+  private constructor(vfs: IVfsAdapter, pool: BufferPool) {
     this.vfs = vfs;
-    this.buffer = buffer;
-    this.view = new DataView(buffer);
+    this.pool = pool;
     this.vmCtx = createVmContext();
   }
 
   static async open(options: WebDbOptions): Promise<WebDB> {
-    const storageType = options.storage || 'memory';
-    const vfs = storageType === 'idb'
-      ? new IndexedDbVfsAdapter(options.name)
-      : new MemoryVfsAdapter();
+    const storageType = options.storage || "memory";
+    let vfs: IVfsAdapter;
+    if (options.vfs) {
+      vfs = options.vfs;
+    } else if (storageType === "idb") {
+      vfs = new IndexedDbVfsAdapter(options.name);
+    } else if (storageType === "opfs") {
+      vfs = new OpfsVfsAdapter(options.name);
+    } else {
+      vfs = new MemoryVfsAdapter();
+    }
 
-    const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
-    const view = new DataView(buffer);
+    const pool = new BufferPool({
+      vfs,
+      slotCount: options.slotCount ?? DEFAULT_SLOT_COUNT,
+      maxQueryMemory: options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY,
+    });
 
-    // Read Page 1 from VFS
+    // Check if Page 1 exists in storage
     const page1Data = await vfs.readPage(1);
     if (!page1Data) {
-      // New database: initialize Page 1
-      initPage1(view);
-      const initialPage1 = new Uint8Array(buffer, 0, PAGE_SIZE);
-      await vfs.writePage(1, initialPage1);
+      // Initialize Page 1 in slot 0
+      initPage1(pool.getSlotDataView(0));
+      pool.markDirty(0);
+      await pool.flushSlot(0);
     } else {
-      // Existing database: copy Page 1 into memory
-      new Uint8Array(buffer, 0, PAGE_SIZE).set(page1Data);
-      readPage1Header(view);
+      // Load Page 1 into slot 0
+      pool.getPageBytesInSlot(0).set(page1Data);
+      pool.clearDirty(0);
+      // Validate Page 1 header & checksum
+      readPage1Header(pool.getSlotDataView(0), true);
 
-      // Load existing pages into buffer
-      const totalPages = getTotalPages(view);
-      for (let p = 2; p <= totalPages; p++) {
-        const pageData = await vfs.readPage(p);
-        if (pageData) {
-          new Uint8Array(buffer, (p - 1) * PAGE_SIZE, PAGE_SIZE).set(pageData);
+      // Section 6.2: Pre-load and permanently pin all column catalog pages for active tables
+      const tableDescriptors = listTableDescriptors(pool.getSlotDataView(0));
+      for (const desc of tableDescriptors) {
+        let catPageId = desc.colCatalogPageId;
+        while (catPageId !== 0) {
+          const slot = await pool.acquireAndPinPage(catPageId);
+          const view = pool.getSlotDataView(slot);
+          const header = readCatalogPageHeader(view, 0);
+          catPageId = header.nextColCatalogPageId;
         }
       }
     }
 
-    return new WebDB(vfs, buffer);
+    return new WebDB(vfs, pool);
   }
 
-  async createTable(name: string, columns: ColumnDefinition[]): Promise<TableMeta> {
-    const page1View = new DataView(this.buffer, 0, PAGE_SIZE);
-    const totalPages = getTotalPages(page1View);
+  async createTable(
+    name: string,
+    columns: ColumnDefinition[],
+  ): Promise<TableMeta> {
+    const page1View = this.pool.getSlotDataView(0);
 
-    // Allocate root page for this table
-    const rootPageId = totalPages + 1;
-    setTotalPages(page1View, rootPageId);
+    // Dynamic pager provider for table creation
+    const pager: IPageProvider = {
+      allocateNewPage: () => {
+        const currentTotal = page1View.getUint32(12, true);
+        const newPageId = currentTotal + 1;
+        page1View.setUint32(12, newPageId, true);
+        this.pool.markDirty(0);
+        return newPageId;
+      },
+      getPageBytes: (pageId: number) => {
+        let slot = this.pool.getResidentSlot(pageId);
+        if (slot === -1) {
+          slot = pageId <= this.pool.slotCount ? pageId - 1 : 1;
+          this.pool.setSlotToPage(slot, pageId);
+        }
+        return this.pool.getPageBytesInSlot(slot);
+      },
+      markPageDirty: (pageId: number) => {
+        const slot = this.pool.getResidentSlot(pageId);
+        if (slot !== -1) {
+          this.pool.markDirty(slot);
+        }
+      },
+    };
 
-    // Initialize the root page (Leaf Data Page)
-    const rootPageOffset = (rootPageId - 1) * PAGE_SIZE;
-    initPage(this.view, rootPageOffset);
+    const table = catalogCreateTable(page1View, pager, name, columns);
 
-    // Add table to Page 1 catalog
-    const table = addTableToCatalog(page1View, name, columns, rootPageId);
+    // Permanently pin column catalog pages for this new table
+    let catPageId = table.colCatalogPageId;
+    while (catPageId !== 0) {
+      const slot = await this.pool.acquireAndPinPage(catPageId);
+      const header = readCatalogPageHeader(this.pool.getSlotDataView(slot), 0);
+      catPageId = header.nextColCatalogPageId;
+    }
 
-    // Flush modified pages to storage
-    await this.vfs.writePage(1, new Uint8Array(this.buffer, 0, PAGE_SIZE));
-    await this.vfs.writePage(rootPageId, new Uint8Array(this.buffer, rootPageOffset, PAGE_SIZE));
-
+    // Flush modified pages
+    await this.pool.flushAllDirty();
     return table;
   }
 
-  async insert(tableName: string, row: DbRow): Promise<void> {
-    const page1View = new DataView(this.buffer, 0, PAGE_SIZE);
-    const table = findTableByName(page1View, tableName);
-    if (!table) {
+  async getTable(tableName: string): Promise<TableMeta> {
+    const page1View = this.pool.getSlotDataView(0);
+    const slotIdx = findTableSlot(page1View, tableName);
+
+    if (slotIdx === -1) {
       throw new TableNotFoundError(tableName);
     }
 
-    const rowBytes = serializeRow(table, row);
+    const desc = readTableDescriptor(page1View, slotIdx)!;
+    let catPageId = desc.colCatalogPageId;
 
-    // Find active page for this table (navigate next_page_id link to tail)
+    while (catPageId !== 0) {
+      await this.pool.acquirePage(catPageId);
+      const slot = this.pool.getResidentSlot(catPageId);
+      const header = readCatalogPageHeader(this.pool.getSlotDataView(slot), 0);
+      catPageId = header.nextColCatalogPageId;
+    }
+
+    const pager = {
+      getPageBytes: (pageId: number) => {
+        const slot = this.pool.getResidentSlot(pageId);
+        if (slot !== -1) return this.pool.getPageBytesInSlot(slot);
+        return new Uint8Array(PAGE_SIZE);
+      },
+    };
+    return loadTableMeta(page1View, pager, tableName);
+  }
+
+  async insert(tableName: string, row: DbRow): Promise<void> {
+    const table = await this.getTable(tableName);
+    const page1View = this.pool.getSlotDataView(0);
+
+    // Auto-Inc handling: if table has AUTO_INC column and row lacks it, assign next
+    const autoIncCol = table.columns.find(
+      (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
+    );
+    if (
+      autoIncCol &&
+      (row[autoIncCol.name] === undefined || row[autoIncCol.name] === null)
+    ) {
+      row[autoIncCol.name] = Number(table.autoIncNext);
+      // Increment autoIncNext on Page 1 TableDescriptor
+      const slotIdx = findTableSlot(page1View, tableName);
+      if (slotIdx !== -1) {
+        const desc = readTableDescriptor(page1View, slotIdx)!;
+        desc.autoIncNext += 1n;
+        writeTableDescriptor(page1View, slotIdx, desc);
+        this.pool.markDirty(0);
+      }
+    }
+
+    const rowBytes = serializeRow(table.columns, row);
+
+    // Navigate to the tail data page for this table
     let currentPageId = table.rootPageId;
-    let pageOffset = (currentPageId - 1) * PAGE_SIZE;
+    let slot = await this.pool.acquirePage(currentPageId);
+    let view = this.pool.getSlotDataView(slot);
 
     while (true) {
-      const nextPageId = getNextPageId(this.view, pageOffset);
+      const nextPageId = getNextPageId(view, 0);
       if (nextPageId === 0) break;
       currentPageId = nextPageId;
-      pageOffset = (currentPageId - 1) * PAGE_SIZE;
+      slot = await this.pool.acquirePage(currentPageId);
+      view = this.pool.getSlotDataView(slot);
     }
 
     // Attempt insertion into current page
-    let slot = insertRowIntoPage(this.view, pageOffset, rowBytes);
-    let dirtyPages = [currentPageId];
+    let insertSlot = insertRowIntoPage(
+      view,
+      0,
+      rowBytes,
+      this.pool.pageScratchpadOffset,
+    );
 
-    if (slot === -1) {
-      // Current page is full: allocate a new page
-      const totalPages = getTotalPages(page1View);
-      const newPageId = totalPages + 1;
-      setTotalPages(page1View, newPageId);
+    if (insertSlot === -1) {
+      // Pin current slot so allocatePage cannot evict it during page expansion
+      this.pool.pinSlot(slot);
+      try {
+        const newPageId = await this.pool.allocateAndPinPage();
+        const newSlot = this.pool.getResidentSlot(newPageId);
+        try {
+          // Link current page -> new page
+          setNextPageId(view, 0, newPageId);
+          this.pool.markDirty(slot);
 
-      const newPageOffset = (newPageId - 1) * PAGE_SIZE;
-      initPage(this.view, newPageOffset);
-
-      // Link current page -> new page
-      setNextPageId(this.view, pageOffset, newPageId);
-
-      // Insert row into new page
-      slot = insertRowIntoPage(this.view, newPageOffset, rowBytes);
-      if (slot === -1) {
-        throw new Error('Unexpected error: row does not fit in empty page');
+          // Insert row into new page
+          const newView = this.pool.getSlotDataView(newSlot);
+          insertSlot = insertRowIntoPage(
+            newView,
+            0,
+            rowBytes,
+            this.pool.pageScratchpadOffset,
+          );
+          if (insertSlot === -1) {
+            throw new Error("Unexpected error: row does not fit in empty page");
+          }
+          this.pool.markDirty(newSlot);
+        } finally {
+          this.pool.unpinSlot(newSlot);
+        }
+      } finally {
+        this.pool.unpinSlot(slot);
       }
-
-      dirtyPages = [1, currentPageId, newPageId];
+    } else {
+      this.pool.markDirty(slot);
     }
 
-    // Persist dirty pages via VFS
-    for (const pId of dirtyPages) {
-      const offset = (pId - 1) * PAGE_SIZE;
-      await this.vfs.writePage(pId, new Uint8Array(this.buffer, offset, PAGE_SIZE));
+    // Update row count estimate
+    const slotIdx = findTableSlot(page1View, tableName);
+    if (slotIdx !== -1) {
+      const desc = readTableDescriptor(page1View, slotIdx)!;
+      desc.rowCountEstimate += 1;
+      writeTableDescriptor(page1View, slotIdx, desc);
+      this.pool.markDirty(0);
     }
+
+    // Durably flush modified pages
+    await this.pool.flushAllDirty();
   }
 
   from(tableName: string): QueryBuilder {
     return new QueryBuilder(this, tableName);
   }
 
-  explainQuery(tableName: string, filters: QueryFilter[]): ExplainOutput {
-    const page1View = new DataView(this.buffer, 0, PAGE_SIZE);
-    const table = findTableByName(page1View, tableName);
-    if (!table) {
-      throw new TableNotFoundError(tableName);
-    }
-
+  async explainQuery(
+    tableName: string,
+    filters: QueryFilter[],
+  ): Promise<ExplainOutput> {
+    const table = await this.getTable(tableName);
     const bytecode = compileQuery({ table, filters });
     const instructions = disassembleBytecode(bytecode, table);
     const assembly = formatDisassembly(instructions);
@@ -261,7 +315,7 @@ export class WebDB {
       plan: {
         table: table.name,
         rootPageId: table.rootPageId,
-        scanType: 'TableScan',
+        scanType: "TableScan",
         filters,
       },
       bytecodeSize: bytecode.byteLength,
@@ -277,39 +331,50 @@ export class WebDB {
       limit: number | null;
       offset: number | null;
       sortCol: string | null;
-      sortDir: 'asc' | 'desc';
-    }
+      sortDir: "asc" | "desc";
+    },
   ): Promise<DbRow[]> {
-    const page1View = new DataView(this.buffer, 0, PAGE_SIZE);
-    const table = findTableByName(page1View, tableName);
-    if (!table) {
-      throw new TableNotFoundError(tableName);
+    const table = await this.getTable(tableName);
+
+    // Pre-load all data pages for this table into buffer pool before running VM
+    let currPageId = table.rootPageId;
+    while (currPageId !== 0) {
+      const slot = await this.pool.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      currPageId = getNextPageId(view, 0);
     }
 
     const bytecode = compileQuery({ table, filters });
 
     resetVmContext(this.vmCtx, table);
-    vm_step(this.vmCtx, this.view, bytecode);
+    vm_step(this.vmCtx, this.pool.view, bytecode);
 
     // Hydrate rows from Output Result Buffer
     let rows: DbRow[] = [];
     let currentOffset = 0;
 
     for (let i = 0; i < this.vmCtx.resultCount; i++) {
-      const rowLen = this.view.getUint16(RESULT_BUFFER_OFFSET + currentOffset, true);
-      const rowOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
+      const rowLen = this.pool.view.getUint16(
+        RESULT_BUFFER_OFFSET + currentOffset,
+        true,
+      );
+      const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
-      const record = deserializeRow(this.view, rowOffset, table);
+      const record = deserializeRow(
+        table.columns,
+        this.pool.view,
+        rowRecordOffset,
+      );
       rows.push(record);
 
       currentOffset += 2 + rowLen;
     }
 
-    // Apply Sorting with SQLite-compatible NULL handling:
+    // Apply Sorting with SQLite-compatible 3VL NULL handling:
     // Collation rule: NULL is smaller than any other value!
     if (options.sortCol) {
       const col = options.sortCol;
-      const asc = options.sortDir === 'asc';
+      const asc = options.sortDir === "asc";
 
       rows.sort((a, b) => {
         const valA = a[col];
@@ -319,13 +384,13 @@ export class WebDB {
         if (valA === null || valA === undefined) return asc ? -1 : 1;
         if (valB === null || valB === undefined) return asc ? 1 : -1;
 
-        if (typeof valA === 'number' && typeof valB === 'number') {
+        if (typeof valA === "number" && typeof valB === "number") {
           return asc ? valA - valB : valB - valA;
         }
-        if (typeof valA === 'string' && typeof valB === 'string') {
+        if (typeof valA === "string" && typeof valB === "string") {
           return asc ? valA.localeCompare(valB) : valB.localeCompare(valA);
         }
-        return (valA as any) > (valB as any) ? (asc ? 1 : -1) : (asc ? -1 : 1);
+        return (valA as any) > (valB as any) ? (asc ? 1 : -1) : asc ? -1 : 1;
       });
     }
 
@@ -343,6 +408,7 @@ export class WebDB {
   }
 
   async close(): Promise<void> {
+    await this.pool.flushAllDirty();
     await this.vfs.close();
   }
 }

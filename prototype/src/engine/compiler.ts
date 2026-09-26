@@ -175,7 +175,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.emitUint8(OpCode.OP_COLUMN_FLOAT);
         emitter.emitUint8(colIdx);
         emitter.emitUint8(regCol);
-      } else if (col.type === DataType.TEXT || col.type === DataType.UUID || col.type === DataType.ULID) {
+      } else if (col.type === DataType.TEXT) {
         emitter.emitUint8(OpCode.OP_COLUMN_TEXT);
         emitter.emitUint8(colIdx);
         emitter.emitUint8(regCol);

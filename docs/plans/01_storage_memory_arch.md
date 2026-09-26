@@ -194,14 +194,45 @@ To ensure that an asynchronous disk fetch never evicts a page currently needed b
   $$\text{Available Eviction Slots} \ge \text{slot\_count} - (\text{max\_depth} \times 16) \ge 512 - 128 = 384 \text{ slots}$$
 - **Zero-Deadlock Invariant:** The cache can **never deadlock or run out of eviction candidates**, because at least 384 slots (or 896 slots in the 4 MB cache) are permanently unpinned and available for replacement even during maximally deep 7-level correlated subqueries.
 
-### 3.3 Eviction Algorithm Flow
+### 3.3 Clock (Second-Chance) Eviction Algorithm Flow
+
+WebDB uses the **Clock (Second-Chance)** page replacement algorithm, which approximates LRU in $O(1)$ amortized time with zero heap allocation and flat bit arrays.
+
+- **State:**
+  - `clock_hand`: Circular index pointer ($0 \le \text{clock\_hand} < \text{slot\_count}$).
+  - `ref_bits`: Array of 1-bit flags (1 bit per slot, indicating recent access).
+  - `pinned_slots`: Set / bitmask of pinned slots (immune to eviction).
+- **On Cache Hit / Page Load:**
+  - Set `ref_bits[slot] = 1`.
+- **Eviction Sweep Algorithm:**
+  1. If any unallocated slot exists (`slot_to_page[S] == 0`), allocate it directly without eviction.
+  2. Otherwise, advance `clock_hand = (clock_hand + 1) % slot_count` (skipping slot 0, which is reserved for Page 1).
+  3. If slot $S$ is **pinned**, advance to the next slot.
+  4. If `ref_bits[S] == 1`:
+     - Clear `ref_bits[S] = 0` (grant a **second chance**).
+     - Advance `clock_hand` and repeat.
+  5. If `ref_bits[S] == 0`:
+     - Select slot $S$ as the eviction candidate.
+     - Advance `clock_hand` and proceed to eviction.
+  6. The sweep completes in at most $2 \times \text{slot\_count}$ steps, mathematically guaranteed by the unpinned headroom in §3.2.
 
 ```
                      [Page Fault Triggered: Missing Page P]
                                        │
                                        ▼
-                       Scan unpinned slots via LRU/Clock
-                 (Skip any slot where slot == cursor[i].slot_idx)
+                       Scan unpinned slots via Clock Sweep
+                        (Advance clock_hand % slot_count)
+                                       │
+                  ┌────────────────────┴────────────────────┐
+                  │ Is slot S pinned?                       │
+                  │   YES ──► Skip to next slot             │
+                  │                                         │
+                  │ Is ref_bits[S] == 1?                    │
+                  │   YES ──► Set ref_bits[S] = 0 (2nd chance)
+                  │           Skip to next slot             │
+                  │                                         │
+                  │ ref_bits[S] == 0 (Candidate Found!)     │
+                  └────────────────────┬────────────────────┘
                                        │
                                        ▼
                          Selected Candidate Slot: S
@@ -216,6 +247,7 @@ To ensure that an asynchronous disk fetch never evicts a page currently needed b
                                 ▼            ▼
                    Async fetch Page P into Slot S from IVfsAdapter
                    Update slot_to_page[S] = P
+                   Set ref_bits[S] = 1
                    Resume VmContext via vm_step()
 ```
 

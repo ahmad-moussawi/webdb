@@ -32,7 +32,7 @@ export class MemoryVfsAdapter implements IVfsAdapter {
 
   async truncate(pageCount: number): Promise<void> {
     for (const key of Array.from(this.pages.keys())) {
-      if (key > pageCount) {
+      if (key >= pageCount) {
         this.pages.delete(key);
       }
     }
@@ -89,6 +89,8 @@ export class MemoryVfsAdapter implements IVfsAdapter {
   }
 
   async close(): Promise<void> {
-    // Memory pages remain resident for database re-open semantics
+    this.pages.clear();
+    this.walFrames = [];
+    this.walHeader = null;
   }
 }

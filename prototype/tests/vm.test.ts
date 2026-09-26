@@ -24,12 +24,8 @@ import {
 describe('Bytecode Virtual Machine (VDBE)', () => {
   const table: TableMeta = {
     tableId: 1,
-    flags: 1,
-    rootPageId: 2,
-    colCatalogPageId: 0,
     columnCount: 3,
-    rowCountEstimate: 0,
-    autoIncNext: 1n,
+    rootPageId: 2,
     name: 'products',
     columns: [
       { type: DataType.INT32, flags: ColumnFlag.PRIMARY_KEY, colOffset: 0, name: 'id' },

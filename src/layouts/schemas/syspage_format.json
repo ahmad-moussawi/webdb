@@ -1,0 +1,135 @@
+{
+  "$schema": "./layout_schema.json",
+  "name": "syspage_format",
+  "description": "System Page (Page 1) and Master Catalog layout definitions for WebDB",
+  "criticalWarning": [
+    "CRITICAL WARNING: FROZEN SYSTEM PAGES & CATALOG SPECIFICATION",
+    "DO NOT modify the order or length of existing fields in Page 1, catalog",
+    "descriptors, or dedicated column catalog pages!",
+    "Changing any layout defined here WILL corrupt existing database files,",
+    "render databases unreadable, and permanently break schema decoding.",
+    "",
+    "Any new metadata fields MUST be appended within designated RESERVED areas",
+    "or versioned via schema migrations."
+  ],
+  "constants": [
+    {
+      "name": "MAX_NAME_LENGTH",
+      "value": 64,
+      "description": "Maximum length in bytes for table and column names (UTF-8, null-padded)."
+    }
+  ],
+  "layouts": [
+    {
+      "id": "SYSPAGE_FILE_HEADER",
+      "baseOffset": 0,
+      "fieldsName": "SYSPAGE_FILE_HEADER_FIELDS",
+      "layoutName": "SYSPAGE_FILE_HEADER_LAYOUT",
+      "sizeName": "FILE_HEADER_SIZE",
+      "sizeDescription": "Total size in bytes of the database file header in Page 1 (100 bytes).",
+      "offsetPrefix": "HEADER_OFFSET_",
+      "fields": [
+        { "name": "MAGIC", "size": 6, "type": "char[6]", "description": "0..5: Magic string identifier 'WEBDB\\0'" },
+        { "name": "PAGE_SIZE", "size": 2, "type": "uint16_t", "description": "6..7: Page size in bytes (4096, uint16 LE)" },
+        { "name": "FILE_FORMAT_VERSION", "size": 2, "type": "uint16_t", "description": "8..9: File format version (uint16 LE)" },
+        { "name": "MIN_READ_VERSION", "size": 2, "type": "uint16_t", "description": "10..11: Minimum engine read version required (uint16 LE)" },
+        { "name": "TOTAL_PAGES", "size": 4, "type": "uint32_t", "description": "12..15: Total number of pages in database file (uint32 LE)" },
+        { "name": "FREE_PAGE_HEAD", "size": 4, "type": "uint32_t", "description": "16..19: Page ID of the first free page in the free list chain (uint32 LE)" },
+        { "name": "SCHEMA_VERSION", "size": 4, "type": "uint32_t", "description": "20..23: User schema version cookie, bumped on DDL (uint32 LE)" },
+        { "name": "CHANGE_COUNTER", "size": 4, "type": "uint32_t", "description": "24..27: Transaction write change counter (uint32 LE)" },
+        { "name": "PAGE_CHECKSUM", "size": 4, "type": "uint32_t", "description": "28..31: CRC32 checksum of Page 1 (uint32 LE)" },
+        { "name": "NEXT_CATALOG_PAGE_ID", "size": 4, "type": "uint32_t", "description": "32..35: Chained catalog page pointer (always 0 in v1, uint32 LE)" },
+        { "name": "NEXT_INDEX_CATALOG_PAGE_ID", "size": 4, "type": "uint32_t", "description": "36..39: Chained index catalog pointer (always 0 in v1, uint32 LE)" },
+        { "name": "RESERVED", "size": 60, "type": "uint8_t[60]", "description": "40..99: Reserved space for future file header extensions (zero-padded)" }
+      ]
+    },
+    {
+      "id": "TABLE_DESCRIPTOR",
+      "baseOffset": 0,
+      "fieldsName": "TABLE_DESCRIPTOR_FIELDS",
+      "layoutName": "TABLE_DESCRIPTOR_LAYOUT",
+      "sizeName": "TABLE_DESCRIPTOR_SIZE",
+      "sizeDescription": "Total size in bytes of a single table descriptor record (128 bytes).",
+      "offsetPrefix": "TABLE_DESCRIPTOR_OFFSET_",
+      "fields": [
+        { "name": "TABLE_ID", "size": 2, "type": "uint16_t", "description": "uint16_t table_id (1-based, 0 = inactive slot)" },
+        { "name": "COLUMN_COUNT", "size": 2, "type": "uint16_t", "description": "uint16_t total columns in table" },
+        { "name": "ROOT_PAGE_ID", "size": 4, "type": "uint32_t", "description": "uint32_t root data pageId" },
+        { "name": "COL_CATALOG_PAGE_ID", "size": 4, "type": "uint32_t", "description": "uint32_t first column catalog pageId" },
+        { "name": "NAME", "size": 64, "type": "char[64]", "description": "64 bytes UTF-8 fixed string (null-padded)" },
+        { "name": "FLAGS", "size": 4, "type": "uint32_t", "description": "uint32_t table flags (WAL, system, etc.)" },
+        { "name": "ROW_COUNT_ESTIMATE", "size": 4, "type": "uint32_t", "description": "uint32_t estimated row count" },
+        { "name": "AUTO_INC_NEXT", "size": 8, "type": "uint64_t", "description": "uint64_t next auto_increment ID" },
+        { "name": "RESERVED", "size": 36, "type": "uint8_t[36]", "description": "36 bytes reserved space (92..127)" }
+      ]
+    },
+    {
+      "id": "INDEX_DESCRIPTOR",
+      "baseOffset": 0,
+      "fieldsName": "INDEX_DESCRIPTOR_FIELDS",
+      "layoutName": "INDEX_DESCRIPTOR_LAYOUT",
+      "sizeName": "INDEX_DESCRIPTOR_SIZE",
+      "sizeDescription": "Total size in bytes of a single index descriptor record (128 bytes).",
+      "offsetPrefix": "INDEX_DESCRIPTOR_OFFSET_",
+      "fields": [
+        { "name": "INDEX_ID", "size": 2, "type": "uint16_t", "description": "uint16_t index_id (1-based, 0 = inactive slot)" },
+        { "name": "TABLE_ID", "size": 2, "type": "uint16_t", "description": "uint16_t target table_id" },
+        { "name": "ROOT_PAGE_ID", "size": 4, "type": "uint32_t", "description": "uint32_t root index pageId" },
+        { "name": "COLUMN_COUNT", "size": 1, "type": "uint8_t", "description": "uint8_t indexed column count (1..8)" },
+        { "name": "FLAGS", "size": 1, "type": "uint8_t", "description": "uint8_t index flags (unique, primary, etc.)" },
+        { "name": "COLUMN_INDICES", "size": 16, "type": "uint16_t[8]", "description": "8 * uint16_t column indices (16 bytes)" },
+        { "name": "COL_DIRECTIONS", "size": 8, "type": "uint8_t[8]", "description": "8 * uint8_t sort directions (8 bytes: 0=ASC, 1=DESC)" },
+        { "name": "NAME", "size": 64, "type": "char[64]", "description": "64 bytes UTF-8 fixed string (null-padded)" },
+        { "name": "RESERVED", "size": 30, "type": "uint8_t[30]", "description": "30 bytes reserved space (98..127)" }
+      ]
+    },
+    {
+      "id": "CATALOG_PAGE_HEADER",
+      "baseOffset": 0,
+      "fieldsName": "CATALOG_PAGE_HEADER_FIELDS",
+      "layoutName": "CATALOG_PAGE_HEADER_LAYOUT",
+      "sizeName": "CATALOG_PAGE_HEADER_SIZE",
+      "sizeDescription": "Total size in bytes of a dedicated column catalog page header (16 bytes).",
+      "offsetPrefix": "CATALOG_PAGE_HEADER_OFFSET_",
+      "fields": [
+        { "name": "PAGE_TYPE", "size": 1, "type": "uint8_t", "description": "uint8_t 0x0C (PAGE_TYPE_CATALOG_PAGE)" },
+        { "name": "FLAGS", "size": 1, "type": "uint8_t", "description": "uint8_t reserved / flags" },
+        { "name": "COL_COUNT_IN_PAGE", "size": 2, "type": "uint16_t", "description": "uint16_t columns stored in this page (0..56)" },
+        { "name": "TABLE_ID", "size": 2, "type": "uint16_t", "description": "uint16_t table_id this page belongs to" },
+        { "name": "START_COL_INDEX", "size": 2, "type": "uint16_t", "description": "uint16_t starting global column index" },
+        { "name": "NEXT_COL_CATALOG_PAGE_ID", "size": 4, "type": "uint32_t", "description": "uint32_t next column catalog pageId (0 = tail)" },
+        { "name": "PAGE_CHECKSUM", "size": 4, "type": "uint32_t", "description": "uint32_t crc32 checksum" }
+      ]
+    },
+    {
+      "id": "COLUMN_META",
+      "baseOffset": 0,
+      "fieldsName": "COLUMN_META_FIELDS",
+      "layoutName": "COLUMN_META_LAYOUT",
+      "sizeName": "COLUMN_META_SIZE",
+      "sizeDescription": "Total size in bytes of a single column metadata record (72 bytes).",
+      "offsetPrefix": "COLUMN_META_OFFSET_",
+      "fields": [
+        { "name": "TYPE", "size": 1, "type": "uint8_t", "description": "uint8_t DataType enum (1..7)" },
+        { "name": "FLAGS", "size": 1, "type": "uint8_t", "description": "uint8_t ColumnFlag bitmask (NOT_NULL, PRIMARY_KEY, etc.)" },
+        { "name": "COL_OFFSET", "size": 2, "type": "uint16_t", "description": "uint16_t fixed-slice offset or var-table index" },
+        { "name": "NAME", "size": 64, "type": "char[64]", "description": "64 bytes UTF-8 column name (null-padded)" },
+        { "name": "RESERVED", "size": 4, "type": "uint8_t[4]", "description": "4 bytes reserved (68..71)" }
+      ]
+    }
+  ],
+  "partitionConstants": [
+    { "name": "MAX_TABLES_SYSPAGE", "value": 16, "description": "Maximum number of table descriptors that fit in Page 1 (16)." },
+    { "name": "MAX_INDEXES_SYSPAGE", "value": 8, "description": "Maximum number of index descriptors that fit in Page 1 (8)." },
+    { "name": "MAX_TABLES_PAGE1", "value": 16, "description": "Alias for MAX_TABLES_SYSPAGE." },
+    { "name": "MAX_INDEXES_PAGE1", "value": 8, "description": "Alias for MAX_INDEXES_SYSPAGE." },
+    { "name": "MASTER_TABLE_OFFSET", "value": 100, "description": "Byte offset where master table descriptors start in Page 1 (byte 100)." },
+    { "name": "INDEX_CATALOG_OFFSET", "value": 2148, "description": "Byte offset where index descriptors start in Page 1 (100 + 16 * 128 = 2148)." },
+    { "name": "NEXT_DESCRIPTOR_CATALOG_PAGE_OFFSET", "value": 3172, "description": "Byte offset for chained descriptor page pointer (2148 + 8 * 128 = 3172)." },
+    { "name": "NEXT_DESCRIPTOR_CATALOG_PAGE_SIZE", "value": 4, "description": "Size in bytes of chained descriptor catalog page pointer (4 bytes)." },
+    { "name": "SYSPAGE_RESERVED_OFFSET", "value": 3176, "description": "Byte offset for Page 1 reserved partition (3172 + 4 = 3176)." },
+    { "name": "SYSPAGE_RESERVED_SIZE", "value": 920, "description": "Size in bytes of Page 1 reserved partition (4096 - 3176 = 920)." },
+    { "name": "MAX_COLUMNS_PER_CATALOG_PAGE", "value": 56, "description": "Maximum column records per catalog page: floor((4096 - 16) / 72) = 56." },
+    { "name": "MAX_COLUMNS_PER_TABLE", "value": 256, "description": "Maximum columns supported per table across all catalog pages (256)." }
+  ]
+}
