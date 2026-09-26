@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { WebDB } from '../src/webdb.js';
+import { WebDB } from '../src/host/api/webdb.js';
 import {
   InvalidDatabaseError,
   DataType,
   ColumnDefinition,
-} from '../src/types.js';
-import { MemoryVfsAdapter } from '../src/storage/memory.js';
+} from '../src/types/index.js';
+import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
 
 describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_binary.test.ts)', () => {
   it('1. Magic Bytes Validation (corrupt byte 0 -> InvalidDatabaseError)', async () => {

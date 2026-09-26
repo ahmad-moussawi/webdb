@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { WebDB } from '../src/webdb.js';
+import { WebDB } from '../src/host/api/webdb.js';
 
 describe('Query Plan & Bytecode Disassembly (EXPLAIN)', () => {
   let db: WebDB;

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { WebDB } from '../src/webdb.js';
-import { NotNullConstraintError } from '../src/types.js';
+import { WebDB } from '../src/host/api/webdb.js';
+import { NotNullConstraintError } from '../src/types/index.js';
 
 describe('SQLite-Compatible NULL Semantics & 3VL', () => {
   let db: WebDB;

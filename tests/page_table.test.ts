@@ -4,9 +4,9 @@ import {
   pageTableGet,
   pageTableSet,
   pageTableDelete,
-} from "../src/engine/page_table.js";
+} from "../src/core/js/page_table.js";
 
-describe("Test Suite: Page Table Binary Hash Table (src/engine/page_table.ts)", () => {
+describe("Test Suite: Page Table Binary Hash Table (src/core/js/page_table.ts)", () => {
   it("computes stable 32-bit hash within bucket mask bounds", () => {
     const mask = 15; // 16 buckets
     const h1 = hashPageId(1, mask);

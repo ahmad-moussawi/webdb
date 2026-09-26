@@ -13,7 +13,7 @@ import {
   TABLE_INTERIOR_SPLIT_INDEX,
   MAX_COLUMNS_PER_TABLE,
   PAGE_HEADER_OFFSET_CHECKSUM,
-} from '../constants.js';
+} from '../../constants.js';
 import {
   DataType,
   ColumnFlag,
@@ -25,8 +25,8 @@ import {
   NotNullConstraintError,
   TooManyColumnsError,
   CorruptPageError,
-} from '../types.js';
-import { computePageChecksum } from '../storage/crc32.js';
+} from '../../types/index.js';
+import { computePageChecksum } from '../../host/storage/crc32.js';
 import { UuidCodec, UlidCodec } from './codecs.js';
 
 const textEncoder = new TextEncoder();

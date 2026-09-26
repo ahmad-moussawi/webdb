@@ -7,14 +7,14 @@ import {
   serializeRow,
   deserializeRow,
   getTableLayout,
-} from '../src/engine/page.js';
+} from '../src/core/js/page.js';
 import {
   DataType,
   ColumnFlag,
   TableMeta,
   RowSizeLimitExceededError,
   NotNullConstraintError,
-} from '../src/types.js';
+} from '../src/types/index.js';
 import { PAGE_SIZE } from '../src/constants.js';
 
 describe('Slotted Page & Row Format', () => {

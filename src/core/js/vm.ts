@@ -3,13 +3,13 @@ import {
   PAGE_HEADER_SIZE,
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
-} from '../constants.js';
+} from '../../constants.js';
 import {
   OpCode,
   VmStatus,
   DataType,
   TableMeta,
-} from '../types.js';
+} from '../../types/index.js';
 import {
   getCellCount,
   getCellOffset,

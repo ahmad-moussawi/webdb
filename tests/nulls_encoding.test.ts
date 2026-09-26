@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   serializeRow,
   deserializeRow,
-} from '../src/engine/page.js';
+} from '../src/core/js/page.js';
 import {
   DataType,
   ColumnFlag,
   TableMeta,
-} from '../src/types.js';
-import { UuidCodec, UlidCodec } from '../src/engine/codecs.js';
+} from '../src/types/index.js';
+import { UuidCodec, UlidCodec } from '../src/core/js/codecs.js';
 
 describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_encoding.test.ts)', () => {
   const table: TableMeta = {

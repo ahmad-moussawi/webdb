@@ -3,19 +3,19 @@ import {
   RESULT_BUFFER_OFFSET,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
-} from "./constants.js";
+} from "../../constants.js";
 import {
   ColumnDefinition,
   TableMeta,
   DbRow,
   TableNotFoundError,
   ColumnFlag,
-} from "./types.js";
-import { IVfsAdapter } from "./storage/vfs.js";
-import { MemoryVfsAdapter } from "./storage/memory.js";
-import { IndexedDbVfsAdapter } from "./storage/idb.js";
-import { OpfsVfsAdapter } from "./storage/opfs.js";
-import { BufferPool } from "./engine/buffer_pool.js";
+} from "../../types/index.js";
+import { IVfsAdapter } from "../storage/vfs.js";
+import { MemoryVfsAdapter } from "../storage/memory.js";
+import { IndexedDbVfsAdapter } from "../storage/idb.js";
+import { OpfsVfsAdapter } from "../storage/opfs.js";
+import { BufferPool } from "../../core/js/buffer_pool.js";
 import {
   initPage1,
   readPage1Header,
@@ -27,26 +27,26 @@ import {
   listTableDescriptors,
   IPageProvider,
   readCatalogPageHeader,
-} from "./engine/catalog.js";
+} from "../../core/js/catalog.js";
 import {
   insertRowIntoPage,
   getNextPageId,
   setNextPageId,
   serializeRow,
   deserializeRow,
-} from "./engine/page.js";
+} from "../../core/js/page.js";
 import {
   createVmContext,
   resetVmContext,
   vm_step,
   VmContext,
-} from "./engine/vm.js";
+} from "../../core/js/vm.js";
 import {
   compileQuery,
   QueryFilter,
   disassembleBytecode,
   formatDisassembly,
-} from "./engine/compiler.js";
+} from "../compiler/compiler.js";
 import {
   QueryBuilder,
   ExplainOutput,

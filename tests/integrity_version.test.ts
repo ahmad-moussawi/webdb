@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { WebDB } from '../src/webdb.js';
+import { WebDB } from '../src/host/api/webdb.js';
 import {
   CorruptPageError,
   UnsupportedFormatVersionError,
-} from '../src/types.js';
-import { MemoryVfsAdapter } from '../src/storage/memory.js';
-import { BufferPool } from '../src/engine/buffer_pool.js';
-import { computePageChecksum, computePage1Checksum } from '../src/storage/crc32.js';
+} from '../src/types/index.js';
+import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
+import { BufferPool } from '../src/core/js/buffer_pool.js';
+import { computePageChecksum, computePage1Checksum } from '../src/host/storage/crc32.js';
 
 describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integrity_version.test.ts)', () => {
   it('1. CRC32 Checksum Validation on Read: Bit flip in storage throws CorruptPageError', async () => {

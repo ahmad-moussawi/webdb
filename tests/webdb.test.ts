@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
-import { WebDB } from '../src/webdb.js';
+import { WebDB } from '../src/host/api/webdb.js';
 
 describe('WebDB End-to-End & Storage Persistence', () => {
   it('creates tables, inserts rows, and queries data with MemoryVfsAdapter', async () => {

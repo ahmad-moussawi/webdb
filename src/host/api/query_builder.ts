@@ -1,9 +1,9 @@
-import { DbRow } from './types.js';
+import { DbRow } from '../../types/index.js';
 import {
   ComparisonOp,
   QueryFilter,
   DisassembledInstruction,
-} from './engine/compiler.js';
+} from '../compiler/compiler.js';
 
 export interface ExplainOutput {
   plan: {

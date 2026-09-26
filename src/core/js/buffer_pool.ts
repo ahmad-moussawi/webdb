@@ -13,12 +13,12 @@ import {
   PAGE_HEADER_OFFSET_TYPE,
   PAGE_HEADER_SIZE,
   computeBufferPoolOffsets,
-} from "../constants.js";
+} from "../../constants.js";
 import { initPage, initFreePage, getPageType } from "./page.js";
 import { pageTableGet, pageTableSet, pageTableDelete } from "./page_table.js";
-import { IVfsAdapter } from "../storage/vfs.js";
-import { computePageChecksum, computePage1Checksum } from "../storage/crc32.js";
-import { CorruptPageError, QueryArenaExhaustedError } from "../types.js";
+import { IVfsAdapter } from "../../host/storage/vfs.js";
+import { computePageChecksum, computePage1Checksum } from "../../host/storage/crc32.js";
+import { CorruptPageError, QueryArenaExhaustedError } from "../../types/index.js";
 
 export interface BufferPoolOptions {
   slotCount?: number;

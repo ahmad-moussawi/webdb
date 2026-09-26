@@ -12,11 +12,11 @@ import {
   getTotalFreeSpace,
   serializeRow,
   deserializeRow,
-} from '../src/engine/page.js';
+} from '../src/core/js/page.js';
 import {
   initPage1,
   readPage1Header,
-} from '../src/engine/catalog.js';
+} from '../src/core/js/catalog.js';
 import {
   PAGE_SIZE,
   PAGE_HEADER_SIZE,
@@ -27,8 +27,8 @@ import {
   ColumnFlag,
   TableMeta,
   RowSizeLimitExceededError,
-} from '../src/types.js';
-import { WebDB } from '../src/webdb.js';
+} from '../src/types/index.js';
+import { WebDB } from '../src/host/api/webdb.js';
 
 describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)', () => {
   const table: TableMeta = {

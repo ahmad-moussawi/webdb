@@ -3,19 +3,19 @@ import {
   createVmContext,
   resetVmContext,
   vm_step,
-} from '../src/engine/vm.js';
+} from '../src/core/js/vm.js';
 import {
   initPage,
   insertRowIntoPage,
   serializeRow,
-} from '../src/engine/page.js';
-import { compileQuery } from '../src/engine/compiler.js';
+} from '../src/core/js/page.js';
+import { compileQuery } from '../src/host/compiler/compiler.js';
 import {
   DataType,
   ColumnFlag,
   TableMeta,
   VmStatus,
-} from '../src/types.js';
+} from '../src/types/index.js';
 import {
   PAGE_SIZE,
   TOTAL_MEMORY_BYTES,

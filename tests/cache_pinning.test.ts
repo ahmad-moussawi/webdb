@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { BufferPool } from "../src/engine/buffer_pool.js";
-import { MemoryVfsAdapter } from "../src/storage/memory.js";
-import { initPage } from "../src/engine/page.js";
+import { BufferPool } from "../src/core/js/buffer_pool.js";
+import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
+import { initPage } from "../src/core/js/page.js";
 import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.js";
 
 describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pinning.test.ts)", () => {

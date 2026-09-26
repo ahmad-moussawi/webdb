@@ -9,14 +9,14 @@ import {
   binarySearchIndexLeaf,
   getCellCount,
   getCellOffset,
-} from '../src/engine/page.js';
+} from '../src/core/js/page.js';
 import {
   PAGE_SIZE,
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_INDEX_LEAF,
   MAX_TABLE_INTERIOR_CELLS,
 } from '../src/constants.js';
-import { DataType } from '../src/types.js';
+import { DataType } from '../src/types/index.js';
 
 describe('Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (tests/btree_hierarchy.test.ts)', () => {
   it('1. Table Interior Node Saturation & Split (splits at entry 145, promotes median key)', () => {

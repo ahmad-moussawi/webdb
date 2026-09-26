@@ -2,7 +2,7 @@ import {
   OpCode,
   DataType,
   TableMeta,
-} from '../types.js';
+} from '../../types/index.js';
 
 export type ComparisonOp = '=' | '!=' | '>' | '>=' | '<' | '<=';
 

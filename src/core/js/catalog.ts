@@ -28,7 +28,7 @@ import {
   CURRENT_MIN_READ_VERSION,
   PAGE_TYPE_CATALOG_PAGE,
   PAGE_TYPE_FREE,
-} from "../constants.js";
+} from "../../constants.js";
 
 import {
   DataType,
@@ -49,9 +49,9 @@ import {
   UnsupportedFormatVersionError,
   InvalidDatabaseError,
   CorruptPageError,
-} from "../types.js";
+} from "../../types/index.js";
 
-import { computePage1Checksum, computePageChecksum } from "../storage/crc32.js";
+import { computePage1Checksum, computePageChecksum } from "../../host/storage/crc32.js";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
