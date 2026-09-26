@@ -297,6 +297,11 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 - **Invariant:** The Write-Ahead Log (.wal file) automatically triggers a synchronous checkpoint and truncation when it accumulates **1,000 frames** (~4.1 MB).
 - **Rationale:** Keeps crash recovery scans fast (<10 ms on database open) and bounds storage expansion in quota-constrained environments.
 
+### 5.4 Abandoned Transaction Timeout (30 Seconds)
+
+- **Invariant:** A transaction holds an exclusive lease on the single active `VmContext` execution slot. If an open transaction remains idle without executing a query, commit, or rollback for **30 seconds**, the Host Transaction Coordinator automatically aborts the transaction, issues an internal `ROLLBACK`, releases the lease, and rejects subsequent operations in that block with `TransactionTimeoutError`.
+- **Rationale:** Prevents dangling transactions (e.g. unhandled Promise rejections, crashed client callbacks, or stalled network requests within transaction blocks) from permanently locking the single-writer FIFO queue and starving other operations.
+
 ---
 
 ## 6. Supported Data Types & Conversions

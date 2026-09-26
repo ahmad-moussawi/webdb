@@ -31,17 +31,19 @@ WebDB strictly separates **Host Orchestration** (dynamic, high-level JavaScript)
 │                                                                             │
 │   Fluent Query Builder ──► Bytecode Compiler ──► Serialized Query FIFO      │
 │   Transaction Lease    ──► Result Hydrator   ──► UDF Host Registry          │
+│   Async I/O Loop (resolves PAGE_FAULT / BUFFER_FULL via IVfsAdapter)        │
 └──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ Shared ArrayBuffer (FFI)
+                                       │ Shared WebAssembly.Memory (Numeric FFI)
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
-│                                ENGINE CORE (C-Style JS in V1 / C-Wasm in V2)│
+│                     ENGINE CORE (C-Style JS in V1 / C-Wasm in V2)           │
 │                                                                             │
 │   ┌─────────────────────┐   ┌──────────────────────┐   ┌────────────────┐   │
-│   │ VDBE Bytecode Loop  │   │  B+Tree & Slotted    │   │ Page Cache &   │   │
-│   │ 32 Register Machine │   │  Page Engine (4KB)   │   │ Free List      │   │
+│   │ VDBE Bytecode Loop  │   │  B+Tree & Slotted    │   │ Buffer Pool &  │   │
+│   │ 64 Register Machine │   │  Page Engine (4KB)   │   │ Hash Table     │   │
+│   │ vm_step(ctx)        │   │  In-Place Compaction │   │ Clock Eviction │   │
 │   └─────────────────────┘   └──────────────────────┘   └────────────────┘   │
 └──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ Block I/O via Unified IVfsAdapter
+                                       │ Pure Block I/O Events (PAGE_FAULT)
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
 │                         DUAL FIRST-CLASS STORAGE ENGINES                    │
 │                                                                             │
@@ -56,12 +58,47 @@ WebDB strictly separates **Host Orchestration** (dynamic, high-level JavaScript)
 | **Query AST & Validation** | Host | TypeScript | Parses fluent calls, validates identifiers, generates query plan |
 | **Bytecode Compiler** | Host | TypeScript | Emits flat binary bytecode instructions (`Uint8Array`) |
 | **Concurrency & Queue** | Host | TypeScript | Serializes queries, manages user Promises, enforces transaction leases |
+| **Async I/O Event Loop** | Host | TypeScript | Drives `vm_step()`, handles `PAGE_FAULT` (reads/writes disk pages), streams `BUFFER_FULL` |
 | **Block Storage (VFS)** | Host | TypeScript | Drives block I/O against OPFS, IndexedDB, or Memory via `IVfsAdapter` |
 | **Result Hydration** | Host | TypeScript | Deserializes output binary row buffers into JavaScript objects |
-| **Bytecode Execution** | Core | C-Style JS / Wasm | Synchronous opcode `switch` loop; zero dynamic allocations |
-| **Slotted Page Layout** | Core | C-Style JS / Wasm | Formats 4KB pages, slot directories, row records, and in-place compaction |
-| **B+Tree Traversal** | Core | C-Style JS / Wasm | Iterative tree search, node splits, cursor navigation |
-| **Filter & Aggregates** | Core | C-Style JS / Wasm | Hardware-speed numeric and string comparisons, grouping, sorting |
+| **Bytecode Execution** | Core | C-Style JS / C | Synchronous opcode `switch` loop; pauses with `STATUS_PAGE_FAULT` on cache miss |
+| **Buffer Pool & Cache** | Core | C-Style JS / C | `page_to_slot` hash table at `0x401000`, slot assignment, pin/unpin, Clock eviction victim choice |
+| **Slotted Page Layout** | Core | C-Style JS / C | Formats 4KB pages, slot directories, row records, and in-place compaction |
+| **B+Tree Traversal** | Core | C-Style JS / C | Iterative tree search, node splits, cursor navigation |
+| **Filter & Aggregates** | Core | C-Style JS / C | Hardware-speed numeric and string comparisons, grouping, sorting |
+
+### Source Code Directory Structure
+
+To guarantee a clean architectural separation and prepare for a frictionless Phase 2 C port, the source repository is organized into distinct **Host** and **Core** boundaries:
+
+```
+src/
+├── host/                    # Host Orchestration Layer (TypeScript)
+│   ├── api/                 # Fluent Query Builder & Database Entry Point (WebDB)
+│   ├── compiler/            # AST -> Binary Bytecode Compiler
+│   ├── storage/             # Asynchronous Block I/O Adapters (Memory, IDB, OPFS) & WAL
+│   └── driver/              # Async State Machine Driver Loop (drives vm_step on PAGE_FAULT)
+│
+├── core/                    # Engine Core State Machine (Zero-Allocation, Deterministic)
+│   ├── js/                  # Phase 1: Pure C-Style TypeScript/JS (to be ported 1:1 to C)
+│   │   ├── vm.ts            # Synchronous VDBE opcode loop (vm_step)
+│   │   ├── buffer_pool.ts   # Cache manager: slot assignment, clock eviction, pinning
+│   │   ├── page_table.ts    # Binary open-addressing hash table (0x401000 page_to_slot)
+│   │   ├── page.ts          # Slotted page engine, row packing, defragmentation
+│   │   ├── btree.ts         # B+tree interior/leaf traversal and node splitting
+│   │   └── catalog.ts       # Page 1 binary schema layout & table descriptors
+│   │
+│   └── c/                   # Phase 2: C Source Code (compiled to wasm32-nostdlib)
+│       ├── vm.c             # Ported VDBE execution loop
+│       ├── buffer_pool.c    # Ported cache manager & clock replacement
+│       ├── page_table.c     # Ported open-addressing hash table
+│       ├── page.c           # Ported slotted page geometry
+│       ├── btree.c          # Ported B+tree traversal
+│       └── catalog.c        # Ported catalog layout
+│
+├── layouts/                 # Shared JSON schemas & build-time generated struct offsets
+└── types/                   # Shared TypeScript interfaces, FFI definitions & error taxonomy
+```
 
 ---
 

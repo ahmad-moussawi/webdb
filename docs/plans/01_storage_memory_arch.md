@@ -9,6 +9,43 @@ The primary objective is to guarantee **absolute memory safety, deterministic ex
 - **V1 (JavaScript/TypeScript Reference Engine):** Implemented using direct `ArrayBuffer` pointer arithmetic and `DataView` with strict C-semantics.
 - **V2 (C/WebAssembly Drop-In Engine):** Compiled with `clang --target=wasm32 -nostdlib` sharing the exact same byte structures and host JS orchestration.
 
+### 1.2 Source Code Directory Structure (Host vs. Core Separation)
+
+WebDB enforces a strict physical separation of source code across two primary layers:
+1. **Host Layer (`src/host/`):** Written in modern TypeScript. Manages asynchronous browser APIs, user promises, compiler AST emission, VFS disk drivers (OPFS / IndexedDB), and the async event loop driver that steps the VM and handles page faults.
+2. **Core Engine (`src/core/`):** Deterministic, zero-dynamic-allocation byte manipulation engine. Structured with two subfolders:
+   - `src/core/js/`: **Phase 1 Reference Engine** written in strict C-style TypeScript/JavaScript. Implements the buffer pool cache management (pin/unpin, Clock eviction, `0x401000` page table), slotted page packing, B+Tree traversal, and synchronous VDBE opcode loop using flat pointer arithmetic. To be ported 1:1 to C.
+   - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean (<50 KB) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
+
+```
+src/
+├── host/                    # Host Orchestration Layer (TypeScript)
+│   ├── api/                 # Fluent Query Builder & Public WebDB Database Entry Point
+│   ├── compiler/            # AST -> Binary Bytecode Compiler
+│   ├── storage/             # Asynchronous Block I/O Adapters (Memory, IDB, OPFS) & WAL
+│   └── driver/              # Async State Machine Driver Loop (drives vm_step on PAGE_FAULT)
+│
+├── core/                    # Engine Core State Machine (Zero-Allocation, Deterministic)
+│   ├── js/                  # Phase 1: Pure C-Style TypeScript/JS (to be ported 1:1 to C)
+│   │   ├── vm.ts            # Synchronous VDBE opcode loop (vm_step)
+│   │   ├── buffer_pool.ts   # Cache manager: slot assignment, clock eviction, pinning
+│   │   ├── page_table.ts    # Binary open-addressing hash table (0x401000 page_to_slot)
+│   │   ├── page.ts          # Slotted page engine, row packing, defragmentation
+│   │   ├── btree.ts         # B+tree interior/leaf traversal and node splitting
+│   │   └── catalog.ts       # Page 1 binary schema layout & table descriptors
+│   │
+│   └── c/                   # Phase 2: C Source Code (compiled to wasm32-nostdlib)
+│       ├── vm.c             # Ported VDBE execution loop
+│       ├── buffer_pool.c    # Ported cache manager & clock replacement
+│       ├── page_table.c     # Ported open-addressing hash table
+│       ├── page.c           # Ported slotted page geometry
+│       ├── btree.c          # Ported B+tree traversal
+│       └── catalog.c        # Ported catalog layout
+│
+├── layouts/                 # Shared JSON schemas & build-time generated struct offsets
+└── types/                   # Shared TypeScript interfaces, FFI definitions & error taxonomy
+```
+
 ---
 
 ## 2. Global Shared Memory Architecture (`WebAssembly.Memory`)
@@ -165,10 +202,10 @@ typedef struct {
 
 **Future Expansion Budget:**
 
-- While each `VmFrame` includes `_padding[32]` for local word-alignment, the structural future expansion budget is the **2,040-byte unallocated cushion** in the reserved `VmContext` memory window ($12{,}288\text{ reserved} - 10{,}248\text{ actual}$ = $2{,}040\text{ bytes spare}$ from `0x403888` to `0x40407F`).
-- If a future engine version requires wider frames (e.g., expanding from 16 to 32 cursors per frame adds $16 \times 12\text{ B} = 192\text{ bytes}$ per frame, which exceeds the local 32-byte frame padding) or deeper frame stacks, the growth is absorbed by this 2,040-byte cushion. The fixed start address of the Output Result Buffer at `0x404080` remains completely undisturbed.
+- While each `VmFrame` includes `_padding[32]` for local word-alignment, the structural future expansion budget is the **2,040-byte unallocated cushion** in the reserved `VmContext` memory window ($12{,}288\text{ reserved} - 10{,}248\text{ actual}$ = $2{,}040\text{ bytes spare}$ from `0x407888` to `0x40807F`).
+- If a future engine version requires wider frames (e.g., expanding from 16 to 32 cursors per frame adds $16 \times 12\text{ B} = 192\text{ bytes}$ per frame, which exceeds the local 32-byte frame padding) or deeper frame stacks, the growth is absorbed by this 2,040-byte cushion. The fixed start address of the Output Result Buffer at `0x408080` remains completely undisturbed.
 
-#### 5. Output Result Buffer (`0x404080..0x41407F`, 64 KB)
+#### 5. Output Result Buffer (`0x408080..0x41807F`, 64 KB)
 
 - Pipelined streaming buffer for query results.
 - **Record Framing Format:**
@@ -176,18 +213,18 @@ typedef struct {
   - `[uint8_t record_bytes[record_length]]`
 - **Yield Invariant:** If adding a row requires $\text{result\_offset} + 2 + \text{row\_len} > 65,536$, the VM halts and yields `STATUS_BUFFER_FULL`. The JS Host hydrates the chunk into JS objects, resets $\text{result\_offset} = 0$, and resumes the VM.
 
-#### 6. Bytecode Scratchpad (`0x414080..0x41C07F`, 32 KB)
+#### 6. Bytecode Scratchpad (`0x418080..0x42007F`, 32 KB)
 
 - Dedicated execution buffer where compiled binary query bytecode instructions are loaded by the Host Compiler before calling `vm_step()`.
 - Maximum query bytecode program size is strictly capped at **32 KB**.
 
-#### 7. Page Scratchpad (`0x41C080..0x41D07F`, 4,096 Bytes)
+#### 7. Page Scratchpad (`0x420080..0x42107F`, 4,096 Bytes)
 
 - Pre-allocated 4KB staging buffer dedicated exclusively to the storage engine for **in-place page compaction/defragmentation** and **B+Tree internal/leaf node splitting**.
 - **Zero-Allocation Invariant:** Guarantees that page restructuring never triggers dynamic heap allocations (`malloc`, `new Uint8Array(4096)`), upholding Rule 1 of `06_c_style_rules_v1.md`.
-- **Isolation Guarantee:** Operates entirely outside the active Bytecode Scratchpad (`0x414080`), Result Buffer (`0x404080`), and Transient Query Arena (`0x420000`).
+- **Isolation Guarantee:** Operates entirely outside the active Bytecode Scratchpad (`0x418080`), Result Buffer (`0x408080`), and Transient Query Arena (`0x430000`).
 
-#### 8. Transient Query Arena (`0x420000..Ceiling`, Default 16 MB, Configurable)
+#### 8. Transient Query Arena (`0x430000..Ceiling`, Default 16 MB, Configurable)
 
 - Sized initially at 256 KB and grown dynamically in 64KB increments via `memory.grow()` up to the configurable ceiling (default 16 MB, configurable via `maxQueryMemory` up to 2 GB in Wasm32).
 - Uses a pure **Bump Allocator** ($\text{arena\_offset} \mathrel{+}= \text{alloc\_size}$) for:
@@ -198,79 +235,135 @@ typedef struct {
 
 ---
 
-## 3. Buffer Pinning Invariant & Eviction Safety
+## 3. Buffer Pool Architecture: State-Machine Driven Eviction Safety
 
-To ensure that an asynchronous disk fetch never evicts a page currently needed by an active query:
+WebDB enforces a strict architectural boundary between **Core Cache Management** (synchronous, deterministic, in-memory state machine) and **Host Block I/O** (asynchronous VFS and WAL persistence):
+
+- **Core Engine Responsibility (`src/core/js/` in Phase 1, `src/core/c/` in Phase 2):**
+  - Instant $O(1)$ cache hit resolution via binary `page_to_slot` open-addressing hash table at `0x401000`.
+  - In-place slot assignment (`assignSlot(slotIdx, pageId)`) and unassignment (`unassignSlot(slotIdx)`).
+  - Cursor slot referencing and active slot pinning/unpinning.
+  - Pure in-memory **Clock (Second-Chance)** eviction algorithm to select replacement candidate slots without crossing host boundaries.
+  - Setting fault parameters (`fault_page_id`, `target_slot`, `flush_page_id`) and yielding `STATUS_PAGE_FAULT` (2) to the host.
+- **Host Driver Responsibility (`src/host/driver/`):**
+  - Driving the `vm_step()` loop and intercepting `STATUS_PAGE_FAULT`.
+  - Performing asynchronous block I/O via `IVfsAdapter` (flushing dirty victim page if `flush_page_id > 0`, reading missing `fault_page_id` into target slot).
+  - Calling `assignSlot(target_slot, fault_page_id)`.
+  - Re-invoking `vm_step()` to resume query execution with zero state loss.
+
+---
 
 ### 3.1 The Pinning Invariant
 
 > **Invariant:** A cache slot $S$ is **STRICTLY PINNED (immune to LRU/Clock eviction)** if it is referenced by any active cursor across any nesting frame in the stack ($0 \le f \le \text{VmContext.depth}$):
 > $$\exists \ f \in [0..\text{VmContext.depth}], \ c \in \text{VmContext.frames}[f].\text{cursors}[0..15] \quad \text{such that} \quad c.\text{slot\_idx} == S \ \land \ c.\text{page\_id} \ne 0$$
 
+- Pinning is verified directly in Core by inspecting cursor slots across active frames or querying the engine pin bitmask.
+- Slot 0 (reserved permanently for Page 1 / database header & catalog) is **always pinned** and never subjected to eviction.
+
 ### 3.2 Mathematical Guarantee of Eviction Headroom
 
 - **Maximum Active Cursors across all 8 frames:** $8 \times 16 = 128$ cursors.
 - **Minimum Cache Slots:** 512 slots (2 MB cache) or 1,024 slots (4 MB cache).
 - **Guaranteed Unpinned Slots:**
-  $$\text{Available Eviction Slots} \ge \text{slot\_count} - (\text{max\_depth} \times 16) \ge 512 - 128 = 384 \text{ slots}$$
-- **Zero-Deadlock Invariant:** The cache can **never deadlock or run out of eviction candidates**, because at least 384 slots (or 896 slots in the 4 MB cache) are permanently unpinned and available for replacement even during maximally deep 7-level correlated subqueries.
+  $$\text{Available Eviction Slots} \ge \text{slot\_count} - (\text{max\_depth} \times 16) - 1 \ge 512 - 128 - 1 = 383 \text{ slots}$$
+- **Zero-Deadlock Invariant:** The cache can **never deadlock or run out of eviction candidates**, because at least 383 slots (or 895 slots in the 4 MB cache) are permanently unpinned and available for replacement even during maximally deep 7-level correlated subqueries.
 
-### 3.3 Clock (Second-Chance) Eviction Algorithm Flow
+---
 
-WebDB uses the **Clock (Second-Chance)** page replacement algorithm, which approximates LRU in $O(1)$ amortized time with zero heap allocation and flat bit arrays.
+### 3.3 State-Machine Driven Cache Access Protocol
 
-- **State:**
-  - `clock_hand`: Circular index pointer ($0 \le \text{clock\_hand} < \text{slot\_count}$).
-  - `ref_bits`: Array of 1-bit flags (1 bit per slot, indicating recent access).
-  - `pinned_slots`: Set / bitmask of pinned slots (immune to eviction).
-- **On Cache Hit / Page Load:**
-  - Set `ref_bits[slot] = 1`.
-- **Eviction Sweep Algorithm:**
-  1. If any unallocated slot exists (`slot_to_page[S] == 0`), allocate it directly without eviction.
-  2. Otherwise, advance `clock_hand = (clock_hand + 1) % slot_count` (skipping slot 0, which is reserved for Page 1).
-  3. If slot $S$ is **pinned**, advance to the next slot.
-  4. If `ref_bits[S] == 1`:
-     - Clear `ref_bits[S] = 0` (grant a **second chance**).
-     - Advance `clock_hand` and repeat.
-  5. If `ref_bits[S] == 0`:
-     - Select slot $S$ as the eviction candidate.
-     - Advance `clock_hand` and proceed to eviction.
-  6. The sweep completes in at most $2 \times \text{slot\_count}$ steps, mathematically guaranteed by the unpinned headroom in §3.2.
+#### 1. Cache Hit Path (Synchronous Core, ~5ns, 0 FFI Crossings)
+1. Core probes the binary open-addressing `page_to_slot` hash table at `0x401000` with target `page_id`.
+2. Hash table returns resident `slot_idx`.
+3. Core sets `ref_bits[slot_idx] = 1`, binds active cursor to `slot_idx`, and immediately proceeds with row reading/writing in the 4KB page.
+
+#### 2. Cache Miss Path (`STATUS_PAGE_FAULT` Yield)
+1. `page_to_slot` lookup returns `0xFFFFFFFF` (page not resident).
+2. Core executes the **Clock Sweep Algorithm** internally to select candidate slot $S$:
+   - If an unallocated slot exists (`slot_to_page[S] == 0`), slot $S$ is selected immediately.
+   - Otherwise, advances `clock_hand = (clock_hand + 1) % slot_count` (skipping slot 0).
+   - Skips pinned slots.
+   - If `ref_bits[S] == 1`, grants second chance (`ref_bits[S] = 0`) and continues sweep.
+   - If `ref_bits[S] == 0`, selects victim slot $S$.
+3. Core unassigns victim slot $S$ via `unassignSlot(S)`:
+   - Removes existing mapping from `page_to_slot` hash table at `0x401000`.
+   - Clears `slot_to_page[S] = 0`.
+4. Core inspects `dirty_mask` for slot $S$:
+   - If dirty bit is set: sets `ctx.flush_page_id = old_page_id`.
+   - If clean: sets `ctx.flush_page_id = 0`.
+5. Core populates fault context:
+   - `ctx.fault_page_id = requested_page_id`
+   - `ctx.target_slot = S`
+   - `ctx.status = STATUS_PAGE_FAULT` (2)
+6. Core returns status `2` to the caller, pausing execution cleanly at current `pc`.
+
+#### 3. Host Asynchronous I/O Resolution Loop (`src/host/driver/`)
+1. Host checks `vm_step()` status; detects `STATUS_PAGE_FAULT`.
+2. **Victim Flush (if dirty):** If `ctx.flush_page_id > 0`, Host writes 4KB block from memory offset $S \times 4096$ to WAL / storage via `IVfsAdapter.writePage()`, then clears dirty bit in `dirty_mask`.
+3. **Target Read:** Host reads 4KB block for `ctx.fault_page_id` from `IVfsAdapter.readPage()` directly into memory offset $S \times 4096$.
+4. **Slot Assignment:** Host invokes `assignSlot(S, ctx.fault_page_id)`:
+   - Validates `page_id > 0`.
+   - Sets `slot_to_page[S] = page_id`.
+   - Inserts `page_id -> S` mapping into `0x401000` hash table.
+   - Sets `ref_bits[S] = 1`.
+5. Host resumes execution by calling `vm_step(ctxOffset)`. The engine resumes at instruction `pc` and hits the newly loaded page in slot $S$.
 
 ```
-                     [Page Fault Triggered: Missing Page P]
-                                       │
-                                       ▼
-                       Scan unpinned slots via Clock Sweep
-                        (Advance clock_hand % slot_count)
-                                       │
-                  ┌────────────────────┴────────────────────┐
-                  │ Is slot S pinned?                       │
-                  │   YES ──► Skip to next slot             │
-                  │                                         │
-                  │ Is ref_bits[S] == 1?                    │
-                  │   YES ──► Set ref_bits[S] = 0 (2nd chance)
-                  │           Skip to next slot             │
-                  │                                         │
-                  │ ref_bits[S] == 0 (Candidate Found!)     │
-                  └────────────────────┬────────────────────┘
-                                       │
-                                       ▼
-                         Selected Candidate Slot: S
-                                       │
-                    Is dirty_mask bit S set (Slot S dirty)?
-                                 /          \
-                               YES          NO
-                               /              \
-             Flush Slot S to WAL               Discard clean slot
-             Clear dirty_mask bit S
-                               \              /
-                                ▼            ▼
-                   Async fetch Page P into Slot S from IVfsAdapter
-                   Update slot_to_page[S] = P
-                   Set ref_bits[S] = 1
-                   Resume VmContext via vm_step()
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ CORE ENGINE (Synchronous C-Style JS in V1 / C-Wasm in V2)                        │
+│                                                                                  │
+│   Instruction demands Page P ──► Probe page_to_slot hash table (0x401000)        │
+│                                    │                                             │
+│                     ┌──────────────┴──────────────┐                              │
+│                     │                             │                              │
+│             [HIT: Resident in S]          [MISS: Page P not resident]            │
+│                     │                             │                              │
+│         Set ref_bits[S] = 1                       ▼                              │
+│         Bind cursor to S              Internal Clock Eviction Sweep              │
+│         Continue execution                        │                              │
+│                                           Candidate Slot S Found                 │
+│                                           unassignSlot(S)                        │
+│                                           Record ctx.flush_page_id (if dirty)    │
+│                                           Record ctx.fault_page_id = P           │
+│                                           Record ctx.target_slot = S             │
+│                                           Set status = STATUS_PAGE_FAULT (2)     │
+│                                                   │                              │
+└───────────────────────────────────────────────────┼──────────────────────────────┘
+                                                    │ Yield numeric status 2
+┌───────────────────────────────────────────────────▼──────────────────────────────┐
+│ HOST DRIVER (Asynchronous JavaScript/TypeScript Orchestration)                   │
+│                                                                                  │
+│   1. Intercept STATUS_PAGE_FAULT                                                 │
+│   2. If ctx.flush_page_id > 0:                                                   │
+│        await vfs.writePage(ctx.flush_page_id, slotBuffer[S])                     │
+│        clearDirty(S)                                                             │
+│   3. await vfs.readPage(ctx.fault_page_id, slotBuffer[S])                        │
+│   4. assignSlot(S, ctx.fault_page_id)                                            │
+│   5. vm_step(ctxOffset)  ─────────► Resumes Core at pc with zero lost state      │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### 3.4 Slot Assignment Invariants: `assignSlot` & `unassignSlot`
+
+To ensure zero dual-state discrepancies between the direct array (`slot_to_page`) and the open-addressing hash table (`page_to_slot`), all slot bindings must strictly use two primitives:
+
+1. **`assignSlot(slotIdx, pageId)`:**
+   - **Validation:** Enforces `pageId > 0` (throws `RangeError` if `pageId === 0` or invalid).
+   - Enforces `0 <= slotIdx < slotCount`.
+   - If slot $S$ was previously assigned to a different page, old mapping is removed first.
+   - Sets `slot_to_page[slotIdx] = pageId`.
+   - Inserts `pageId -> slotIdx` into `page_to_slot` hash table at `0x401000`.
+   - Sets `ref_bits[slotIdx] = 1`.
+
+2. **`unassignSlot(slotIdx)`:**
+   - Enforces `0 <= slotIdx < slotCount`.
+   - If `slot_to_page[slotIdx] > 0`:
+     - Deletes `page_id` from `page_to_slot` hash table using backward-shift deletion (Robin Hood style, preserving zero-tombstone invariant).
+     - Sets `slot_to_page[slotIdx] = 0`.
+   - Clears `ref_bits[slotIdx] = 0`.
 
 ---
 
