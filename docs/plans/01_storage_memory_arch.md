@@ -81,6 +81,14 @@ Offset (Hex)          Size        Region Name                  Purpose
 - Checked by the JS Cache Controller prior to LRU eviction to force WAL flushing.
 - Cleared monotonically during checkpoint execution when pages are durably written to the main `.db` file.
 
+> **Bit Manipulation Details:**
+> - `byte_idx = i >> 3`: Shifting slot index $i$ right by 3 bits computes integer division by 8 ($\lfloor i / 8 \rfloor$), identifying which byte in the bitmask array holds slot $i$'s status (e.g., slots $0..7 \to$ byte 0, slots $8..15 \to$ byte 1).
+> - `mask = 1 << (i & 7)`: The bitwise AND `i & 7` isolates the remainder modulo 8 ($i \pmod 8$, from 0 to 7). Shifting `1` left by this position creates a mask with a single bit set (`0b00000001` to `0b10000000`).
+> - **Standard Operations:**
+>   - **Mark Dirty:** `dirty_mask[byte_idx] |= mask`
+>   - **Check Dirty:** `(dirty_mask[byte_idx] & mask) !== 0`
+>   - **Clear Dirty:** `dirty_mask[byte_idx] &= ~mask`
+
 #### 4. Execution Nesting Frame Stack (`VmContext`, `0x401080..0x40407F`, 12,288 Bytes)
 
 Instead of a single flat struct, `VmContext` is an **8-frame nesting stack**. Each `VmFrame` is a fully self-contained execution context (registers, cursors, program counter, status). The `depth` field in the outer `VmContext` selects the currently active frame. Correlated subqueries push `depth++` and get a fresh frame; on completion they pop `depth--` and return their result to the parent frame.
