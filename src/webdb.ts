@@ -148,7 +148,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         let slot = this.pool.getResidentSlot(pageId);
         if (slot === -1) {
           slot = pageId <= this.pool.slotCount ? pageId - 1 : 1;
-          this.pool.setSlotToPage(slot, pageId);
+          this.pool.assignSlot(slot, pageId);
         }
         return this.pool.getPageBytesInSlot(slot);
       },

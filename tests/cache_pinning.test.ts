@@ -1,11 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { BufferPool } from '../src/engine/buffer_pool.js';
-import { MemoryVfsAdapter } from '../src/storage/memory.js';
-import { initPage } from '../src/engine/page.js';
-import { PAGE_TYPE_CATALOG_PAGE } from '../src/constants.js';
+import { describe, it, expect } from "vitest";
+import { BufferPool } from "../src/engine/buffer_pool.js";
+import { MemoryVfsAdapter } from "../src/storage/memory.js";
+import { initPage } from "../src/engine/page.js";
+import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.js";
 
-describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pinning.test.ts)', () => {
-  it('1. Pinning Immunity: Pinned slots are never evicted under heavy eviction load', async () => {
+describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pinning.test.ts)", () => {
+  it("1. Pinning Immunity: Pinned slots are never evicted under heavy eviction load", async () => {
     const vfs = new MemoryVfsAdapter();
     // Create a small cache of 32 slots for quick saturation and eviction testing
     const pool = new BufferPool({ vfs, slotCount: 32 });
@@ -20,8 +20,8 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     pool.pinSlot(5);
     pool.pinSlot(12);
 
-    const pinnedPageAt5 = pool.getSlotToPage(5);
-    const pinnedPageAt12 = pool.getSlotToPage(12);
+    const pinnedPageAt5 = pool.getAssignedPage(5);
+    const pinnedPageAt12 = pool.getAssignedPage(12);
 
     // Simulate 500 page-fault evictions with new pages 33..532
     for (let p = 33; p <= 532; p++) {
@@ -29,16 +29,16 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     }
 
     // Assert that pinned slots were NEVER evicted
-    expect(pool.getSlotToPage(0)).toBe(1);
-    expect(pool.getSlotToPage(5)).toBe(pinnedPageAt5);
-    expect(pool.getSlotToPage(12)).toBe(pinnedPageAt12);
+    expect(pool.getAssignedPage(0)).toBe(1);
+    expect(pool.getAssignedPage(5)).toBe(pinnedPageAt5);
+    expect(pool.getAssignedPage(12)).toBe(pinnedPageAt12);
 
     expect(pool.isSlotPinned(0)).toBe(true);
     expect(pool.isSlotPinned(5)).toBe(true);
     expect(pool.isSlotPinned(12)).toBe(true);
   });
 
-  it('2. Dirty Mask Synchronization: Sets bit on modification and clears bit on flush', async () => {
+  it("2. Dirty Mask Synchronization: Sets bit on modification and clears bit on flush", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 64 });
 
@@ -60,7 +60,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect((pool.uint8[byteIdx] & bitMask) !== 0).toBe(false);
 
     // Test flush clearing
-    pool.setSlotToPage(slot, 100);
+    pool.assignSlot(slot, 100);
     pool.markDirty(slot);
     expect(pool.isDirty(slot)).toBe(true);
 
@@ -68,7 +68,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.isDirty(slot)).toBe(false);
   });
 
-  it('3. Clock (Second-Chance) Eviction: Recently accessed pages survive sweep via ref_bit second chance', async () => {
+  it("3. Clock (Second-Chance) Eviction: Recently accessed pages survive sweep via ref_bit second chance", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const pool = new BufferPool({ vfs, slotCount: 4 });
@@ -105,13 +105,13 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.getResidentSlot(2)).toBe(slot2); // Page 2 was preserved by second-chance!
   });
 
-  it('4. Boundary & Security Guards: Validates slot indices and page IDs against corruption', async () => {
+  it("4. Boundary & Security Guards: Validates slot indices and page IDs against corruption", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
     // Invalid slot index
-    expect(() => pool.getSlotToPage(-1)).toThrow(/Invalid slot index/);
-    expect(() => pool.getSlotToPage(8)).toThrow(/Invalid slot index/);
+    expect(() => pool.getAssignedPage(-1)).toThrow(/Invalid slot index/);
+    expect(() => pool.getAssignedPage(8)).toThrow(/Invalid slot index/);
     expect(() => pool.markDirty(10)).toThrow(/Invalid slot index/);
     expect(() => pool.pinSlot(-1)).toThrow(/Invalid slot index/);
     expect(() => pool.getSlotDataView(8)).toThrow(/Invalid slot index/);
@@ -123,13 +123,13 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     await expect(pool.acquirePage(-1)).rejects.toThrow(/Invalid page ID/);
 
     // Slot 0 reassign protection
-    expect(() => pool.setSlotToPage(0, 2)).toThrow(/Cannot reassign slot 0/);
+    expect(() => pool.assignSlot(0, 2)).toThrow(/Cannot reassign slot 0/);
 
     // Pinning non-resident page throws
     expect(() => pool.pinPage(99)).toThrow(/not resident/);
   });
 
-  it('5. Reference-Counted Pinning: Multiple pins require matching unpins', async () => {
+  it("5. Reference-Counted Pinning: Multiple pins require matching unpins", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -160,7 +160,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.getPinCount(slot)).toBe(0);
   });
 
-  it('6. FreePage Safety: Prevents reserved page freeing, double-freeing, and pinned page corruption', async () => {
+  it("6. FreePage Safety: Prevents reserved page freeing, double-freeing, and pinned page corruption", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -173,14 +173,18 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     initPage(pool.getSlotDataView(slot3), 0);
 
     // 1. Cannot free Page 1 or 0
-    await expect(pool.freePage(1)).rejects.toThrow(/Cannot free reserved database page/);
+    await expect(pool.freePage(1)).rejects.toThrow(
+      /Cannot free reserved database page/,
+    );
 
     // 2. Cannot free page beyond totalPages (e.g. 10 > 5)
     await expect(pool.freePage(10)).rejects.toThrow(/beyond total pages/);
 
     // 3. Cannot free pinned page
     pool.pinPage(3);
-    await expect(pool.freePage(3)).rejects.toThrow(/Cannot free pinned\/active/);
+    await expect(pool.freePage(3)).rejects.toThrow(
+      /Cannot free pinned\/active/,
+    );
 
     // Unpin and free successfully
     pool.unpinPage(3);
@@ -194,9 +198,13 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     await expect(pool.freePage(3)).rejects.toThrow(/Double-free detected/);
   });
 
-  it('7. Query Arena Safety: 8-byte alignment, expansion, and zero-wiping on reset', () => {
+  it("7. Query Arena Safety: 8-byte alignment, expansion, and zero-wiping on reset", () => {
     const vfs = new MemoryVfsAdapter();
-    const pool = new BufferPool({ vfs, slotCount: 8, maxQueryMemory: 1024 * 1024 });
+    const pool = new BufferPool({
+      vfs,
+      slotCount: 8,
+      maxQueryMemory: 1024 * 1024,
+    });
 
     expect(pool.getArenaOffset()).toBe(0);
 
@@ -216,11 +224,15 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(view.getUint32(ptr1, true)).toBe(0);
 
     // Invalid allocation sizes
-    expect(() => pool.allocateInArena(0)).toThrow(/Invalid arena allocation size/);
-    expect(() => pool.allocateInArena(-10)).toThrow(/Invalid arena allocation size/);
+    expect(() => pool.allocateInArena(0)).toThrow(
+      /Invalid arena allocation size/,
+    );
+    expect(() => pool.allocateInArena(-10)).toThrow(
+      /Invalid arena allocation size/,
+    );
   });
 
-  it('8. System Catalog Immunity: Unpinned PAGE_TYPE_CATALOG_PAGE (0x0C) is never evicted', async () => {
+  it("8. System Catalog Immunity: Unpinned PAGE_TYPE_CATALOG_PAGE (0x0C) is never evicted", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const pool = new BufferPool({ vfs, slotCount: 4 });
@@ -250,19 +262,19 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // slot3 (holding data page 3) should be evicted instead
     expect(slot5).toBe(slot3);
     expect(pool.getResidentSlot(2)).toBe(slot2); // Catalog page was preserved!
-    expect(pool.getResidentSlot(3)).toBe(-1);     // Data page was evicted
+    expect(pool.getResidentSlot(3)).toBe(-1); // Data page was evicted
   });
 
-  it('9. Pin Count Overflow Guard: Throws on 32-bit pin counter overflow', () => {
+  it("9. Pin Count Overflow Guard: Throws on 32-bit pin counter overflow", () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 4 });
 
     // Simulate pin count at 0xFFFFFFFF
-    (pool as any).pinCounts[1] = 0xFFFFFFFF;
+    (pool as any).pinCounts[1] = 0xffffffff;
     expect(() => pool.pinSlot(1)).toThrow(/Pin count overflow on slot 1/);
   });
 
-  it('10. Atomic Pin on Acquire: acquireAndPinPage prevents use-after-evict race conditions', async () => {
+  it("10. Atomic Pin on Acquire: acquireAndPinPage prevents use-after-evict race conditions", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const pool = new BufferPool({ vfs, slotCount: 2 });
@@ -283,7 +295,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(slotB).toBe(1);
   });
 
-  it('11. Atomic Pin on Allocate: allocateAndPinPage protects newly allocated slots from eviction', async () => {
+  it("11. Atomic Pin on Allocate: allocateAndPinPage protects newly allocated slots from eviction", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const pool = new BufferPool({ vfs, slotCount: 2 });
@@ -306,7 +318,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.isSlotPinned(slot)).toBe(false);
   });
 
-  it('12. Clean FreePage Eviction: Freed page is immediately flushed clean, preventing stale writes on eviction', async () => {
+  it("12. Clean FreePage Eviction: Freed page is immediately flushed clean, preventing stale writes on eviction", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 4 });
     pool.getSlotDataView(0).setUint32(12, 3, true); // total_pages = 3
@@ -336,7 +348,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(writeCountForPage2).toBe(0);
   });
 
-  it('13. Stale FreePage Eviction Guard: Eviction never flushes free-page header over recycled page', async () => {
+  it("13. Stale FreePage Eviction Guard: Eviction never flushes free-page header over recycled page", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with 3 slots: slot 0 (Page 1), slots 1..2
     const pool = new BufferPool({ vfs, slotCount: 3 });
@@ -379,10 +391,10 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const recycledSlot = pool.getResidentSlot(2);
     expect(recycledSlot).toBeGreaterThan(0);
     const recycledView = pool.getSlotDataView(recycledSlot);
-    expect(recycledView.getUint8(0)).toBe(0x0D);
+    expect(recycledView.getUint8(0)).toBe(0x0d);
   });
 
-  it('14. Concurrent Acquire Coalescing: Concurrent acquirePage calls for same pageId coalesce without duplicate reads', async () => {
+  it("14. Concurrent Acquire Coalescing: Concurrent acquirePage calls for same pageId coalesce without duplicate reads", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -413,7 +425,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(s4).toBe(s5);
   });
 
-  it('15. Concurrent Eviction Safety: In-flight candidate slot is pinned during VFS read so concurrent eviction cannot steal it', async () => {
+  it("15. Concurrent Eviction Safety: In-flight candidate slot is pinned during VFS read so concurrent eviction cannot steal it", async () => {
     const vfs = new MemoryVfsAdapter();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const pool = new BufferPool({ vfs, slotCount: 2 });
@@ -451,10 +463,10 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     releaseRead3!();
     const slotA = await taskA;
     expect(slotA).toBe(1);
-    expect(pool.getSlotToPage(1)).toBe(3);
+    expect(pool.getAssignedPage(1)).toBe(3);
   });
 
-  it('16. Concurrent Allocate Serialization: Concurrent allocatePage calls never return duplicate page IDs', async () => {
+  it("16. Concurrent Allocate Serialization: Concurrent allocatePage calls never return duplicate page IDs", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 16 });
     pool.getSlotDataView(0).setUint32(12, 1, true); // total_pages = 1
@@ -491,7 +503,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     }
   });
 
-  it('17. Concurrent Free Serialization: Concurrent freePage calls properly maintain free list integrity', async () => {
+  it("17. Concurrent Free Serialization: Concurrent freePage calls properly maintain free list integrity", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 16 });
     pool.getSlotDataView(0).setUint32(12, 10, true); // total_pages = 10
@@ -503,11 +515,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     }
 
     // Concurrently free pages 2, 3, 4
-    await Promise.all([
-      pool.freePage(2),
-      pool.freePage(3),
-      pool.freePage(4),
-    ]);
+    await Promise.all([pool.freePage(2), pool.freePage(3), pool.freePage(4)]);
 
     // Sequentially allocate 3 pages to verify the entire chain was preserved
     const p1 = await pool.allocatePage();
@@ -521,13 +529,15 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(freedSet.has(4)).toBe(true);
   });
 
-  it('18. System Catalog Page Protection: freePage rejects catalog pages and Page 1', async () => {
+  it("18. System Catalog Page Protection: freePage rejects catalog pages and Page 1", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
     pool.getSlotDataView(0).setUint32(12, 5, true); // total_pages = 5
 
     // 1. Cannot free Page 1
-    await expect(pool.freePage(1)).rejects.toThrow(/Cannot free reserved database page/);
+    await expect(pool.freePage(1)).rejects.toThrow(
+      /Cannot free reserved database page/,
+    );
 
     // 2. Format Page 3 as a catalog page (0x0C)
     const slot3 = await pool.acquirePage(3);
@@ -536,10 +546,12 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     pool.markDirty(slot3);
 
     // Attempting to free catalog page must throw
-    await expect(pool.freePage(3)).rejects.toThrow(/Cannot free system catalog page/);
+    await expect(pool.freePage(3)).rejects.toThrow(
+      /Cannot free system catalog page/,
+    );
   });
 
-  it('19. Concurrent Mutation During Flush: Preserves dirty bit if page is modified during async write', async () => {
+  it("19. Concurrent Mutation During Flush: Preserves dirty bit if page is modified during async write", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -577,13 +589,13 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.isDirty(slot2)).toBe(true);
   });
 
-  it('20. Snapshot Isolation on Flush: In-flight buffer mutations do not mutate data sent to storage', async () => {
+  it("20. Snapshot Isolation on Flush: In-flight buffer mutations do not mutate data sent to storage", async () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
     const slot2 = await pool.acquirePage(2);
     const bytes = pool.getPageBytesInSlot(slot2);
-    bytes.fill(0xAA);
+    bytes.fill(0xaa);
     pool.markDirty(slot2);
 
     let capturedData: Uint8Array | null = null;
@@ -605,28 +617,28 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     await new Promise((r) => setTimeout(r, 5));
 
     // Mutate the live buffer to 0xFF while storage is writing
-    bytes.fill(0xFF);
+    bytes.fill(0xff);
 
     releaseWrite!();
     await flushPromise;
 
     // The data received by vfs.writePage must remain 0xAA snapshot (except checksum header)
-    expect(capturedData![100]).toBe(0xAA);
+    expect(capturedData![100]).toBe(0xaa);
   });
 
-  it('21. Duplicate Slot Mapping Protection: setSlotToPage rejects duplicate resident mappings', () => {
+  it("21. Duplicate Slot Mapping Protection: setSlotToPage rejects duplicate resident mappings", () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
     // Map slot 2 to page 5
-    pool.setSlotToPage(2, 5);
+    pool.assignSlot(2, 5);
     expect(pool.getResidentSlot(5)).toBe(2);
 
     // Attempting to map slot 3 to the same page 5 must throw
-    expect(() => pool.setSlotToPage(3, 5)).toThrow(/already resident in slot 2/);
+    expect(() => pool.assignSlot(3, 5)).toThrow(/already resident in slot 2/);
   });
 
-  it('22. Page-to-Slot Binary Hash Table: verifies direct shared memory binary format and lookups', () => {
+  it("22. Page-to-Slot Binary Hash Table: verifies direct shared memory binary format and lookups", () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -634,9 +646,9 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(pool.getResidentSlot(1)).toBe(0);
 
     // Map pages to slots
-    pool.setSlotToPage(1, 10);
-    pool.setSlotToPage(2, 20);
-    pool.setSlotToPage(3, 30);
+    pool.assignSlot(1, 10);
+    pool.assignSlot(2, 20);
+    pool.assignSlot(3, 30);
 
     expect(pool.getResidentSlot(10)).toBe(1);
     expect(pool.getResidentSlot(20)).toBe(2);
@@ -658,24 +670,24 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     expect(foundEntry).toBe(true);
 
     // Reassign slot 1 to page 40 -> page 10 deleted, page 40 inserted
-    pool.setSlotToPage(1, 40);
+    pool.assignSlot(1, 40);
     expect(pool.getResidentSlot(10)).toBe(-1);
     expect(pool.getResidentSlot(40)).toBe(1);
   });
 
-  it('23. Hash Table Backward Shift Deletion: maintains probe chain integrity when deleting collided entries', () => {
+  it("23. Hash Table Backward Shift Deletion: maintains probe chain integrity when deleting collided entries", () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 32 });
 
     // Insert 10 pages and record them
     for (let s = 1; s <= 10; s++) {
-      pool.setSlotToPage(s, 100 + s);
+      pool.assignSlot(s, 100 + s);
       expect(pool.getResidentSlot(100 + s)).toBe(s);
     }
 
     // Delete every other slot (unmap to page 0)
     for (let s = 1; s <= 10; s += 2) {
-      pool.setSlotToPage(s, 0);
+      pool.unassignSlot(s);
       expect(pool.getResidentSlot(100 + s)).toBe(-1);
     }
 
@@ -685,7 +697,7 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     }
   });
 
-  it('24. Direct-Addressing Memory Primitives: verifies scalar and bulk memory accessors', () => {
+  it("24. Direct-Addressing Memory Primitives: verifies scalar and bulk memory accessors", () => {
     const vfs = new MemoryVfsAdapter();
     const pool = new BufferPool({ vfs, slotCount: 8 });
 
@@ -717,7 +729,35 @@ describe('Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const slice = pool.getBytes(addr, 5);
     expect(Array.from(slice)).toEqual([1, 2, 3, 4, 5]);
   });
+
+  it("25. assignSlot and unassignSlot: validates pageId > 0, enforces slot invariants, and vacates slots", () => {
+    const vfs = new MemoryVfsAdapter();
+    const pool = new BufferPool({ vfs, slotCount: 8 });
+
+    // 1. assignSlot requires positive pageId (pageId >= 1)
+    expect(() => pool.assignSlot(1, 0)).toThrow(/positive integer >= 1/);
+    expect(() => pool.assignSlot(1, -5)).toThrow(/positive integer >= 1/);
+
+    // 2. Slot 0 protection
+    expect(() => pool.assignSlot(0, 2)).toThrow(/Cannot reassign slot 0/);
+    expect(() => pool.unassignSlot(0)).toThrow(/Cannot unassign slot 0/);
+
+    // 3. Normal assignSlot
+    pool.assignSlot(2, 50);
+    expect(pool.getAssignedPage(2)).toBe(50);
+    expect(pool.getResidentSlot(50)).toBe(2);
+
+    // 4. Duplicate residency check
+    expect(() => pool.assignSlot(3, 50)).toThrow(/already resident in slot 2/);
+
+    // 5. unassignSlot
+    pool.unassignSlot(2);
+    expect(pool.getAssignedPage(2)).toBe(0);
+    expect(pool.getResidentSlot(50)).toBe(-1);
+
+    // Now slot 3 can be assigned to page 50
+    pool.assignSlot(3, 50);
+    expect(pool.getAssignedPage(3)).toBe(50);
+    expect(pool.getResidentSlot(50)).toBe(3);
+  });
 });
-
-
-

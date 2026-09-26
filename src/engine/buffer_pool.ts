@@ -84,6 +84,7 @@ export class BufferPool {
       this.slotCount,
       this.maxQueryMemory,
     );
+
     this.slotsEndOffset = offsets.slotsEndOffset;
     this.slotToPageOffset = offsets.slotToPageOffset;
     this.pageToSlotOffset = offsets.pageToSlotOffset;
@@ -121,7 +122,7 @@ export class BufferPool {
     this.fillBytes(this.dirtyMaskOffset, Math.ceil(this.slotCount / 8), 0);
 
     // Page 1 is permanently assigned to slot 0 and pinned
-    this.setSlotToPage(0, 1);
+    this.assignSlot(0, 1);
     this.pinCounts[0] = 1;
   }
 
@@ -232,17 +233,22 @@ export class BufferPool {
   // Slot Mapping & Dirty Bitmask
   // ==========================================================================
 
-  getSlotToPage(slotIdx: number): number {
+  getAssignedPage(slotIdx: number): number {
     this.validateSlotIndex(slotIdx);
     return this.readUint32(this.slotToPageOffset + slotIdx * 4);
   }
 
-  setSlotToPage(slotIdx: number, pageId: number): void {
+  /**
+   * Assigns a cache slot to host a positive database page (pageId >= 1).
+   * Enforces single-instance residency and maintains bidirectional synchronization
+   * between slot_to_page and the page_to_slot hash table.
+   */
+  assignSlot(slotIdx: number, pageId: number): void {
     this.validateSlotIndex(slotIdx);
 
-    if (!Number.isInteger(pageId) || pageId < 0) {
+    if (!Number.isInteger(pageId) || pageId <= 0) {
       throw new Error(
-        `Invalid page ID: ${pageId}. Must be a non-negative integer`,
+        `Invalid page ID: ${pageId}. Must be a positive integer >= 1`,
       );
     }
 
@@ -252,16 +258,15 @@ export class BufferPool {
       );
     }
 
-    if (pageId > 0) {
-      const existingSlot = this.getResidentSlot(pageId);
-      if (existingSlot !== -1 && existingSlot !== slotIdx) {
-        throw new Error(
-          `Cannot map page ${pageId} to slot ${slotIdx}: already resident in slot ${existingSlot}`,
-        );
-      }
+    const existingSlot = this.getResidentSlot(pageId);
+    if (existingSlot !== -1 && existingSlot !== slotIdx) {
+      throw new Error(
+        `Cannot map page ${pageId} to slot ${slotIdx}: already resident in slot ${existingSlot}`,
+      );
     }
 
-    const old = this.getSlotToPage(slotIdx);
+    const old = this.getAssignedPage(slotIdx);
+
     if (old > 0 && old !== pageId) {
       pageTableDelete(
         this.view,
@@ -272,15 +277,40 @@ export class BufferPool {
     }
 
     this.writeUint32(this.slotToPageOffset + slotIdx * 4, pageId);
-    if (pageId > 0) {
-      pageTableSet(
+
+    pageTableSet(
+      this.view,
+      this.pageToSlotOffset,
+      this.pageToSlotBuckets,
+      pageId,
+      slotIdx,
+    );
+  }
+
+  /**
+   * Unassigns and vacates a cache slot, removing any previous page mapping from
+   * the page_to_slot hash table and marking the slot empty (0).
+   */
+  unassignSlot(slotIdx: number): void {
+    this.validateSlotIndex(slotIdx);
+
+    if (slotIdx === 0) {
+      throw new Error(
+        `Cannot unassign slot 0: reserved permanently for page 1`,
+      );
+    }
+
+    const old = this.getAssignedPage(slotIdx);
+    if (old > 0) {
+      pageTableDelete(
         this.view,
         this.pageToSlotOffset,
         this.pageToSlotBuckets,
-        pageId,
-        slotIdx,
+        old,
       );
     }
+
+    this.writeUint32(this.slotToPageOffset + slotIdx * 4, 0);
   }
 
   markDirty(slotIdx: number): void {
@@ -451,7 +481,7 @@ export class BufferPool {
       if (
         pageId > 1 &&
         pageId <= this.slotCount &&
-        this.getSlotToPage(pageId - 1) === 0 &&
+        this.getAssignedPage(pageId - 1) === 0 &&
         !this.isSlotPinned(pageId - 1)
       ) {
         candidateSlot = pageId - 1;
@@ -504,7 +534,7 @@ export class BufferPool {
         }
 
         // Update mappings
-        this.setSlotToPage(candidateSlot, pageId);
+        this.assignSlot(candidateSlot, pageId);
         this.refBits[candidateSlot] = 1;
         this.clearDirty(candidateSlot);
 
@@ -549,7 +579,7 @@ export class BufferPool {
 
     // First scan for unallocated, unpinned slots (page_id == 0)
     for (let i = 1; i < totalSlots; i++) {
-      if (this.getSlotToPage(i) === 0 && !this.isSlotPinned(i)) {
+      if (this.getAssignedPage(i) === 0 && !this.isSlotPinned(i)) {
         return i;
       }
     }
@@ -589,7 +619,7 @@ export class BufferPool {
     this.pinSlot(candidate);
 
     try {
-      const oldPageId = this.getSlotToPage(candidate);
+      const oldPageId = this.getAssignedPage(candidate);
       const slotView = this.getSlotDataView(candidate);
       const isFreePage =
         oldPageId > 0 && getPageType(slotView, 0) === PAGE_TYPE_FREE;
@@ -615,7 +645,7 @@ export class BufferPool {
       this.clearDirty(candidate);
 
       if (oldPageId > 0) {
-        this.setSlotToPage(candidate, 0);
+        this.unassignSlot(candidate);
       }
     } finally {
       this.unpinSlot(candidate);
@@ -629,7 +659,7 @@ export class BufferPool {
    */
   async flushSlot(slotIdx: number): Promise<void> {
     this.validateSlotIndex(slotIdx);
-    const pageId = this.getSlotToPage(slotIdx);
+    const pageId = this.getAssignedPage(slotIdx);
     if (pageId === 0) return;
 
     // Await any existing in-flight flush for this page to prevent concurrent write collisions
@@ -806,7 +836,7 @@ export class BufferPool {
         const view = this.getSlotDataView(slot);
         const pageType = getPageType(view, 0);
         if (pageType === PAGE_TYPE_FREE) {
-          this.setSlotToPage(slot, 0);
+          this.unassignSlot(slot);
           throw new Error(
             `Double-free detected: page ${pageId} is already marked free`,
           );
@@ -833,7 +863,7 @@ export class BufferPool {
 
         // Immediately unmap the freed page from the buffer pool so it is no longer resident
         // in cache and cannot be evicted as a stale dirty page
-        this.setSlotToPage(slot, 0);
+        this.unassignSlot(slot);
         this.clearDirty(slot);
         this.refBits[slot] = 0;
 
