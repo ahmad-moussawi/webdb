@@ -1,14 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
-  serializeRow,
-  deserializeRow,
-} from '../src/core/js/page.js';
+  page_serialize_row,
+  page_deserialize_row,
+} from '../src/core/index.js';
 import {
   DataType,
   ColumnFlag,
   TableMeta,
 } from '../src/types/index.js';
-import { UuidCodec, UlidCodec } from '../src/core/js/codecs.js';
 
 describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_encoding.test.ts)', () => {
   const table: TableMeta = {
@@ -49,8 +48,8 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
       text_val: null,
     };
 
-    const fullBytes = serializeRow(table, fullRow);
-    const nullBytes = serializeRow(table, nullRow);
+    const fullBytes = page_serialize_row(table, fullRow);
+    const nullBytes = page_serialize_row(table, nullRow);
 
     // In fullRow: 4B int + 8B big + 8B float + 16B uuid + 4B varTable + 11B text = 51 bytes of payload
     // In nullRow: 0 bytes of fixed payload, 4B varTable (len=0), 0B text payload
@@ -59,7 +58,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
 
     // Assert round-trip deserialization preserves nulls perfectly
     const view = new DataView(nullBytes.buffer);
-    const decoded = deserializeRow(table, view, 0);
+    const decoded = page_deserialize_row(table, view, 0);
 
     expect(decoded.id).toBe(2);
     expect(decoded.int_val).toBeNull();
@@ -99,8 +98,8 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
       uid: uuidStr,
       ulid: ulidStr,
     };
-    const minBytes = serializeRow(testTable, minRow);
-    const minDecoded = deserializeRow(testTable, new DataView(minBytes.buffer), 0);
+    const minBytes = page_serialize_row(testTable, minRow);
+    const minDecoded = page_deserialize_row(testTable, new DataView(minBytes.buffer), 0);
 
     expect(minDecoded.i32).toBe(-2147483648);
     expect(minDecoded.i64).toBe(-9223372036854775808n);
@@ -116,8 +115,8 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
       uid: uuidStr,
       ulid: ulidStr,
     };
-    const maxBytes = serializeRow(testTable, maxRow);
-    const maxDecoded = deserializeRow(testTable, new DataView(maxBytes.buffer), 0);
+    const maxBytes = page_serialize_row(testTable, maxRow);
+    const maxDecoded = page_deserialize_row(testTable, new DataView(maxBytes.buffer), 0);
 
     expect(maxDecoded.i32).toBe(2147483647);
     expect(maxDecoded.i64).toBe(9223372036854775807n);
@@ -145,11 +144,11 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
     const emptyRow = { id: 1, txt: '' }; // Non-null empty string
     const nullRow = { id: 2, txt: null }; // NULL
 
-    const emptyBytes = serializeRow(textTable, emptyRow);
-    const nullBytes = serializeRow(textTable, nullRow);
+    const emptyBytes = page_serialize_row(textTable, emptyRow);
+    const nullBytes = page_serialize_row(textTable, nullRow);
 
-    const emptyDecoded = deserializeRow(textTable, new DataView(emptyBytes.buffer), 0);
-    const nullDecoded = deserializeRow(textTable, new DataView(nullBytes.buffer), 0);
+    const emptyDecoded = page_deserialize_row(textTable, new DataView(emptyBytes.buffer), 0);
+    const nullDecoded = page_deserialize_row(textTable, new DataView(nullBytes.buffer), 0);
 
     expect(emptyDecoded.txt).toBe('');
     expect(emptyDecoded.txt).not.toBeNull();

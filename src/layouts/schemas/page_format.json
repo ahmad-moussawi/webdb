@@ -70,7 +70,7 @@
           "name": "FREE_BYTES",
           "size": 2,
           "type": "uint16_t",
-          "description": "Byte offset 10 (uint16_t, little-endian): Cumulative count of fragmented\nunallocated bytes left behind by deleted or shrunk records. This space is\nreclaimed when page defragmentation (`compactPage`) is invoked."
+          "description": "Byte offset 10 (uint16_t, little-endian): Cumulative count of fragmented\nunallocated bytes left behind by deleted or shrunk records. This space is\nreclaimed when page defragmentation (`page_compact`) is invoked."
         },
         {
           "name": "CHECKSUM",

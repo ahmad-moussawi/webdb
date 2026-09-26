@@ -3,10 +3,8 @@ import {
   MAX_ROW_SIZE,
   PAGE_HEADER_SIZE,
   PAGE_TYPE_FREE,
-  PAGE_TYPE_INDEX_INTERIOR,
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_INDEX_LEAF,
-  PAGE_TYPE_CATALOG_PAGE,
   PAGE_TYPE_LEAF_DATA,
   TABLE_INTERIOR_CELL_SIZE,
   MAX_TABLE_INTERIOR_CELLS,
@@ -24,10 +22,8 @@ import {
   RowSizeLimitExceededError,
   NotNullConstraintError,
   TooManyColumnsError,
-  CorruptPageError,
 } from '../../types/index.js';
-import { computePageChecksum } from '../../host/storage/crc32.js';
-import { UuidCodec, UlidCodec } from './codecs.js';
+import { UuidCodec, UlidCodec } from './codecs.c.js';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -48,7 +44,12 @@ const textDecoder = new TextDecoder();
  * [10..11] uint16_t free_bytes (0)
  * [12..15] uint32_t checksum (0)
  */
-export function initPage(
+
+/**
+ * @export_c
+ * Initializes a 4KB slotted database page header.
+ */
+export function page_init(
   view: DataView,
   pageOffset: number,
   pageType: number = PAGE_TYPE_LEAF_DATA,
@@ -63,7 +64,11 @@ export function initPage(
   view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
 }
 
-export function initFreePage(
+/**
+ * @export_c
+ * Initializes a 4KB free-list page header.
+ */
+export function page_init_free(
   view: DataView,
   pageOffset: number,
   nextFreePageId: number = 0
@@ -77,77 +82,138 @@ export function initFreePage(
   view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
 }
 
-export function getPageType(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns the page type byte from a page header.
+ */
+export function page_get_type(view: DataView, pageOffset: number): number {
   return view.getUint8(pageOffset + 0);
 }
 
-export function setPageType(view: DataView, pageOffset: number, type: number): void {
+/**
+ * @export_c
+ * Sets the page type byte in a page header.
+ */
+export function page_set_type(view: DataView, pageOffset: number, type: number): void {
   view.setUint8(pageOffset + 0, type);
 }
 
-export function getCellCount(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns the number of cells in the page slot directory.
+ */
+export function page_get_cell_count(view: DataView, pageOffset: number): number {
   return view.getUint16(pageOffset + 2, true);
 }
 
-export function setCellCount(view: DataView, pageOffset: number, count: number): void {
+/**
+ * @export_c
+ * Sets the number of cells in the page slot directory.
+ */
+export function page_set_cell_count(view: DataView, pageOffset: number, count: number): void {
   view.setUint16(pageOffset + 2, count, true);
 }
 
-export function getCellContentOffset(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns the byte offset within the page where active cell payloads begin.
+ */
+export function page_get_cell_content_offset(view: DataView, pageOffset: number): number {
   return view.getUint16(pageOffset + 4, true);
 }
 
-export function setCellContentOffset(view: DataView, pageOffset: number, offset: number): void {
+/**
+ * @export_c
+ * Sets the byte offset within the page where active cell payloads begin.
+ */
+export function page_set_cell_content_offset(view: DataView, pageOffset: number, offset: number): void {
   view.setUint16(pageOffset + 4, offset, true);
 }
 
-export function getNextPageId(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns the next page ID (or right child page ID) stored in the page header.
+ */
+export function page_get_next_page_id(view: DataView, pageOffset: number): number {
   return view.getUint32(pageOffset + 6, true);
 }
 
-export function setNextPageId(view: DataView, pageOffset: number, nextPageId: number): void {
+/**
+ * @export_c
+ * Sets the next page ID (or right child page ID) stored in the page header.
+ */
+export function page_set_next_page_id(view: DataView, pageOffset: number, nextPageId: number): void {
   view.setUint32(pageOffset + 6, nextPageId, true);
 }
 
-export function getFreeBytes(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns cumulative fragmented unallocated bytes in the page.
+ */
+export function page_get_free_bytes(view: DataView, pageOffset: number): number {
   return view.getUint16(pageOffset + 10, true);
 }
 
-export function setFreeBytes(view: DataView, pageOffset: number, freeBytes: number): void {
+/**
+ * @export_c
+ * Sets cumulative fragmented unallocated bytes in the page.
+ */
+export function page_set_free_bytes(view: DataView, pageOffset: number, freeBytes: number): void {
   view.setUint16(pageOffset + 10, freeBytes, true);
 }
 
-export function getChecksum(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns the checksum stored at bytes 12..15 in the page header.
+ */
+export function page_get_checksum(view: DataView, pageOffset: number): number {
   return view.getUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, true);
 }
 
-export function setChecksum(view: DataView, pageOffset: number, checksum: number): void {
+/**
+ * @export_c
+ * Sets the checksum stored at bytes 12..15 in the page header.
+ */
+export function page_set_checksum(view: DataView, pageOffset: number, checksum: number): void {
   view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, checksum, true);
 }
 
-export function getCellOffset(view: DataView, pageOffset: number, slotIdx: number): number {
+/**
+ * @export_c
+ * Returns the cell payload offset for the given slot directory index.
+ */
+export function page_get_cell_offset(view: DataView, pageOffset: number, slotIdx: number): number {
   const slotDirOffset = pageOffset + PAGE_HEADER_SIZE + (slotIdx * 2);
   return view.getUint16(slotDirOffset, true);
 }
 
-export function setCellOffset(view: DataView, pageOffset: number, slotIdx: number, cellOffset: number): void {
+/**
+ * @export_c
+ * Sets the cell payload offset for the given slot directory index.
+ */
+export function page_set_cell_offset(view: DataView, pageOffset: number, slotIdx: number, cellOffset: number): void {
   const slotDirOffset = pageOffset + PAGE_HEADER_SIZE + (slotIdx * 2);
   view.setUint16(slotDirOffset, cellOffset, true);
 }
 
-export function getContiguousFreeSpace(view: DataView, pageOffset: number): number {
-  const cellCount = getCellCount(view, pageOffset);
-  const cellContentOffset = getCellContentOffset(view, pageOffset);
+/**
+ * @export_c
+ * Returns contiguous free space between slot directory end and cell content offset.
+ */
+export function page_get_contiguous_free_space(view: DataView, pageOffset: number): number {
+  const cellCount = page_get_cell_count(view, pageOffset);
+  const cellContentOffset = page_get_cell_content_offset(view, pageOffset);
   const slotDirEnd = PAGE_HEADER_SIZE + (cellCount * 2);
   return cellContentOffset - slotDirEnd;
 }
 
-export function getTotalFreeSpace(view: DataView, pageOffset: number): number {
-  return getContiguousFreeSpace(view, pageOffset) + getFreeBytes(view, pageOffset);
+/**
+ * @export_c
+ * Returns total free space on the page (contiguous + fragmented free_bytes).
+ */
+export function page_get_total_free_space(view: DataView, pageOffset: number): number {
+  return page_get_contiguous_free_space(view, pageOffset) + page_get_free_bytes(view, pageOffset);
 }
-
-// Backward-compat alias
-export const getFreeSpace = getContiguousFreeSpace;
 
 // ============================================================================
 // 2. In-Place Page Compaction / Defragmentation (Zero-Allocation via Scratchpad)
@@ -159,20 +225,21 @@ export interface ReplacementCell {
 }
 
 /**
+ * @export_c
  * Defragments a slotted data page using a 4KB staging scratchpad.
  * Collapses fragmented holes to the bottom, rewrites slot directory entries,
  * and sets free_bytes to 0. Optionally replaces a cell in-place during compaction.
  */
-export function compactPage(
+export function page_compact(
   view: DataView,
   pageOffset: number,
   scratchpadOffset?: number,
   replacement?: ReplacementCell
 ): void {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   if (cellCount === 0) {
-    setCellContentOffset(view, pageOffset, PAGE_SIZE);
-    setFreeBytes(view, pageOffset, 0);
+    page_set_cell_content_offset(view, pageOffset, PAGE_SIZE);
+    page_set_free_bytes(view, pageOffset, 0);
     return;
   }
 
@@ -197,8 +264,8 @@ export function compactPage(
         replacementBytes: replacement.rowBytes,
       });
     } else {
-      const offset = getCellOffset(view, pageOffset, i);
-      const len = getRowLength(view, pageOffset + offset);
+      const offset = page_get_cell_offset(view, pageOffset, i);
+      const len = page_get_row_length(view, pageOffset + offset);
       cells.push({ slotIdx: i, offset, length: len });
     }
   }
@@ -268,9 +335,10 @@ export function compactPage(
 }
 
 /**
+ * @export_c
  * Calculates row length in bytes from the serialized row at rowOffset.
  */
-export function getRowLength(view: DataView, rowOffset: number): number {
+export function page_get_row_length(view: DataView, rowOffset: number): number {
   return view.getUint16(rowOffset + 1, true);
 }
 
@@ -279,22 +347,23 @@ export function getRowLength(view: DataView, rowOffset: number): number {
 // ============================================================================
 
 /**
+ * @export_c
  * Inserts a serialized row record into a slotted data page.
  * Returns the slot index (0-indexed) or -1 if the row cannot fit in this page.
  */
-export function insertRowIntoPage(
+export function page_insert_row(
   view: DataView,
   pageOffset: number,
   rowBytes: Uint8Array,
   scratchpadOffset?: number
 ): number {
-  const cellCount = getCellCount(view, pageOffset);
-  const cellContentOffset = getCellContentOffset(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
+  const cellContentOffset = page_get_cell_content_offset(view, pageOffset);
   const neededBytes = rowBytes.byteLength + 2; // payload + 2B slot directory entry
 
   const slotDirEnd = PAGE_HEADER_SIZE + (cellCount * 2);
   const contiguousFree = cellContentOffset - slotDirEnd;
-  const totalFree = contiguousFree + getFreeBytes(view, pageOffset);
+  const totalFree = contiguousFree + page_get_free_bytes(view, pageOffset);
 
   if (neededBytes > totalFree) {
     return -1; // Cannot fit even after defragmentation
@@ -302,11 +371,11 @@ export function insertRowIntoPage(
 
   if (neededBytes > contiguousFree) {
     // In-place compaction collapses all fragmented holes
-    compactPage(view, pageOffset, scratchpadOffset);
+    page_compact(view, pageOffset, scratchpadOffset);
   }
 
-  const currentContentOffset = getCellContentOffset(view, pageOffset);
-  const currentCellCount = getCellCount(view, pageOffset);
+  const currentContentOffset = page_get_cell_content_offset(view, pageOffset);
+  const currentCellCount = page_get_cell_count(view, pageOffset);
 
   // Allocate payload from bottom up
   const newContentOffset = currentContentOffset - rowBytes.byteLength;
@@ -317,31 +386,32 @@ export function insertRowIntoPage(
   uint8.set(rowBytes, absTarget);
 
   // Write new slot directory entry
-  setCellOffset(view, pageOffset, currentCellCount, newContentOffset);
+  page_set_cell_offset(view, pageOffset, currentCellCount, newContentOffset);
 
   // Update page header
-  setCellCount(view, pageOffset, currentCellCount + 1);
-  setCellContentOffset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, pageOffset, currentCellCount + 1);
+  page_set_cell_content_offset(view, pageOffset, newContentOffset);
 
   return currentCellCount;
 }
 
 /**
+ * @export_c
  * Deletes a row from a slotted data page.
  * Shifts subsequent slot directory entries left by 2 bytes (memmove) and increments free_bytes.
  */
-export function deleteRowFromPage(
+export function page_delete_row(
   view: DataView,
   pageOffset: number,
   cellIdx: number
 ): void {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   if (cellIdx < 0 || cellIdx >= cellCount) {
     throw new Error(`Invalid cell index ${cellIdx} for deletion (cellCount=${cellCount})`);
   }
 
-  const offset = getCellOffset(view, pageOffset, cellIdx);
-  const rowLen = getRowLength(view, pageOffset + offset);
+  const offset = page_get_cell_offset(view, pageOffset, cellIdx);
+  const rowLen = page_get_row_length(view, pageOffset + offset);
 
   // Shift slot directory entries left by 2 bytes
   const uint8 = new Uint8Array(view.buffer);
@@ -356,28 +426,29 @@ export function deleteRowFromPage(
   }
 
   // Update header
-  setCellCount(view, pageOffset, cellCount - 1);
-  setFreeBytes(view, pageOffset, getFreeBytes(view, pageOffset) + rowLen);
+  page_set_cell_count(view, pageOffset, cellCount - 1);
+  page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + rowLen);
 }
 
 /**
+ * @export_c
  * Updates an existing row in a slotted data page following the 3 scenarios in §4.5.
  * Returns true if update succeeded on this page, or false if it exceeded page capacity (Scenario C).
  */
-export function updateRowInPage(
+export function page_update_row(
   view: DataView,
   pageOffset: number,
   cellIdx: number,
   newRowBytes: Uint8Array,
   scratchpadOffset?: number
 ): boolean {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   if (cellIdx < 0 || cellIdx >= cellCount) {
     throw new Error(`Invalid cell index ${cellIdx} for update`);
   }
 
-  const oldOffset = getCellOffset(view, pageOffset, cellIdx);
-  const oldLen = getRowLength(view, pageOffset + oldOffset);
+  const oldOffset = page_get_cell_offset(view, pageOffset, cellIdx);
+  const oldLen = page_get_row_length(view, pageOffset + oldOffset);
   const newLen = newRowBytes.byteLength;
   const uint8 = new Uint8Array(view.buffer);
 
@@ -385,34 +456,34 @@ export function updateRowInPage(
   if (newLen <= oldLen) {
     uint8.set(newRowBytes, view.byteOffset + pageOffset + oldOffset);
     if (newLen < oldLen) {
-      setFreeBytes(view, pageOffset, getFreeBytes(view, pageOffset) + (oldLen - newLen));
+      page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + (oldLen - newLen));
     }
     return true;
   }
 
   // Scenario B: Expanding update fitting on current page
-  const totalFree = getTotalFreeSpace(view, pageOffset);
+  const totalFree = page_get_total_free_space(view, pageOffset);
   const neededExtra = newLen - oldLen;
 
   if (totalFree >= neededExtra) {
-    const contiguousFree = getContiguousFreeSpace(view, pageOffset);
+    const contiguousFree = page_get_contiguous_free_space(view, pageOffset);
     if (contiguousFree < newLen) {
       // Compacting directly replaces the old record with the new record,
       // avoiding dead ghost copies and slot directory boundary overflows
-      compactPage(view, pageOffset, scratchpadOffset, { cellIdx, rowBytes: newRowBytes });
+      page_compact(view, pageOffset, scratchpadOffset, { cellIdx, rowBytes: newRowBytes });
       return true;
     }
 
     // Mark old record space as hole
-    setFreeBytes(view, pageOffset, getFreeBytes(view, pageOffset) + oldLen);
+    page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + oldLen);
 
-    const contentOffset = getCellContentOffset(view, pageOffset);
+    const contentOffset = page_get_cell_content_offset(view, pageOffset);
     const newContentOffset = contentOffset - newLen;
     uint8.set(newRowBytes, view.byteOffset + pageOffset + newContentOffset);
 
     // Update slot directory entry
-    setCellOffset(view, pageOffset, cellIdx, newContentOffset);
-    setCellContentOffset(view, pageOffset, newContentOffset);
+    page_set_cell_offset(view, pageOffset, cellIdx, newContentOffset);
+    page_set_cell_content_offset(view, pageOffset, newContentOffset);
     return true;
   }
 
@@ -424,7 +495,11 @@ export function updateRowInPage(
 // 4. Row Record Serialization & Deserialization
 // ============================================================================
 
-export function getTableLayout(tableOrColumns: TableMeta | ColumnMeta[]) {
+/**
+ * @export_c
+ * Calculates null-bitmap bytes, fixed slice size, and variable column count for row layout.
+ */
+export function page_get_table_layout(tableOrColumns: TableMeta | ColumnMeta[]) {
   const columns = Array.isArray(tableOrColumns) ? tableOrColumns : (tableOrColumns as TableMeta).columns;
   const nullBitmapBytes = Math.ceil(columns.length / 8);
   let fixedSliceSize = 0;
@@ -440,6 +515,7 @@ export function getTableLayout(tableOrColumns: TableMeta | ColumnMeta[]) {
 }
 
 /**
+ * @export_c
  * Serializes a user row into WebDB Phase 1 binary format:
  *
  * [0]: Flags (1B: 0x01 = Active)
@@ -451,7 +527,7 @@ export function getTableLayout(tableOrColumns: TableMeta | ColumnMeta[]) {
  *
  * Strict 2048-Byte boundary enforced.
  */
-export function serializeRow(
+export function page_serialize_row(
   tableOrColumns: TableMeta | ColumnMeta[],
   values: Record<string, DbValue>
 ): Uint8Array {
@@ -603,9 +679,10 @@ export function serializeRow(
 }
 
 /**
+ * @export_c
  * Deserializes a row record from a DataView into a user-facing DbRow object.
  */
-export function deserializeRow(
+export function page_deserialize_row(
   arg1: TableMeta | ColumnMeta[] | DataView,
   arg2: DataView | number,
   arg3?: number | TableMeta | ColumnMeta[]
@@ -629,7 +706,6 @@ export function deserializeRow(
   const colCount = columns.length;
   const nullBitmapBytes = Math.ceil(colCount / 8);
 
-  const uint8 = new Uint8Array(view.buffer);
   const nullBitmap = new Uint8Array(view.buffer, view.byteOffset + recordOffset + 3, nullBitmapBytes);
 
   let currentFixedOffset = recordOffset + 3 + nullBitmapBytes;
@@ -730,38 +806,51 @@ export function deserializeRow(
 // 5. Table Interior Page Mechanics (page_type = 0x05, 12-Byte Cells)
 // ============================================================================
 
-export function initInteriorPage(
+/**
+ * @export_c
+ * Initializes a Table Interior Page with rightChildPageId.
+ */
+export function page_init_interior(
   view: DataView,
   pageOffset: number,
   rightChildPageId: number = 0
 ): void {
-  initPage(view, pageOffset, PAGE_TYPE_TABLE_INTERIOR, rightChildPageId);
+  page_init(view, pageOffset, PAGE_TYPE_TABLE_INTERIOR, rightChildPageId);
 }
 
-export function getRightChildPageId(view: DataView, pageOffset: number): number {
+/**
+ * @export_c
+ * Returns right child page ID of a Table Interior Page.
+ */
+export function page_get_right_child_page_id(view: DataView, pageOffset: number): number {
   return view.getUint32(pageOffset + 6, true);
 }
 
-export function setRightChildPageId(view: DataView, pageOffset: number, rightChildPageId: number): void {
+/**
+ * @export_c
+ * Sets right child page ID of a Table Interior Page.
+ */
+export function page_set_right_child_page_id(view: DataView, pageOffset: number, rightChildPageId: number): void {
   view.setUint32(pageOffset + 6, rightChildPageId, true);
 }
 
 /**
+ * @export_c
  * Inserts a 12-byte routing cell into a Table Interior Page.
  * Returns new cell count or -1 if page has reached max entries (291 entries).
  */
-export function insertInteriorCell(
+export function page_insert_interior_cell(
   view: DataView,
   pageOffset: number,
   childPageId: number,
   rowid: bigint
 ): number {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   if (cellCount >= MAX_TABLE_INTERIOR_CELLS) {
     return -1; // Interior page full
   }
 
-  const contentOffset = getCellContentOffset(view, pageOffset);
+  const contentOffset = page_get_cell_content_offset(view, pageOffset);
   const newContentOffset = contentOffset - TABLE_INTERIOR_CELL_SIZE;
 
   // Write 12-byte cell payload
@@ -770,26 +859,27 @@ export function insertInteriorCell(
   view.setBigInt64(targetOffset + 4, rowid, true);
 
   // Write slot directory entry
-  setCellOffset(view, pageOffset, cellCount, newContentOffset);
+  page_set_cell_offset(view, pageOffset, cellCount, newContentOffset);
 
-  setCellCount(view, pageOffset, cellCount + 1);
-  setCellContentOffset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, pageOffset, cellCount + 1);
+  page_set_cell_content_offset(view, pageOffset, newContentOffset);
 
   return cellCount + 1;
 }
 
 /**
+ * @export_c
  * Performs binary search on a Table Interior Page to route traversal for targetRowid.
  * Returns the child_page_id to traverse.
  */
-export function binarySearchInteriorPage(
+export function page_binary_search_interior(
   view: DataView,
   pageOffset: number,
   targetRowid: bigint
 ): number {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   if (cellCount === 0) {
-    return getRightChildPageId(view, pageOffset);
+    return page_get_right_child_page_id(view, pageOffset);
   }
 
   let lo = 0;
@@ -798,7 +888,7 @@ export function binarySearchInteriorPage(
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const cellOffset = getCellOffset(view, pageOffset, mid);
+    const cellOffset = page_get_cell_offset(view, pageOffset, mid);
     const cellRowid = view.getBigInt64(pageOffset + cellOffset + 4, true);
 
     if (targetRowid <= cellRowid) {
@@ -814,18 +904,19 @@ export function binarySearchInteriorPage(
   }
 
   // If targetRowid > all keys on this page, follow right_child_page_id
-  return getRightChildPageId(view, pageOffset);
+  return page_get_right_child_page_id(view, pageOffset);
 }
 
 /**
+ * @export_c
  * Splits a Table Interior Page at median entry (index 145), promoting the median key.
  */
-export function splitInteriorPage(
+export function page_split_interior(
   view: DataView,
   pageOffset: number,
   newPageOffset: number
 ): { medianRowid: bigint; promotedChildPageId: number; rightChildPageId: number } {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   const medianIdx = TABLE_INTERIOR_SPLIT_INDEX; // 145
 
   if (cellCount <= medianIdx) {
@@ -833,25 +924,25 @@ export function splitInteriorPage(
   }
 
   // Read median cell
-  const medianCellOffset = getCellOffset(view, pageOffset, medianIdx);
+  const medianCellOffset = page_get_cell_offset(view, pageOffset, medianIdx);
   const promotedChildPageId = view.getUint32(pageOffset + medianCellOffset, true);
   const medianRowid = view.getBigInt64(pageOffset + medianCellOffset + 4, true);
 
   // Initialize right sibling interior page
-  const oldRightChild = getRightChildPageId(view, pageOffset);
-  initInteriorPage(view, newPageOffset, oldRightChild);
+  const oldRightChild = page_get_right_child_page_id(view, pageOffset);
+  page_init_interior(view, newPageOffset, oldRightChild);
 
   // Copy entries 146..cellCount-1 to new sibling page
   for (let i = medianIdx + 1; i < cellCount; i++) {
-    const offset = getCellOffset(view, pageOffset, i);
+    const offset = page_get_cell_offset(view, pageOffset, i);
     const childId = view.getUint32(pageOffset + offset, true);
     const rId = view.getBigInt64(pageOffset + offset + 4, true);
-    insertInteriorCell(view, newPageOffset, childId, rId);
+    page_insert_interior_cell(view, newPageOffset, childId, rId);
   }
 
   // Left page keeps entries 0..144, and its right_child_page_id becomes median's childPageId
-  setRightChildPageId(view, pageOffset, promotedChildPageId);
-  setCellCount(view, pageOffset, medianIdx);
+  page_set_right_child_page_id(view, pageOffset, promotedChildPageId);
+  page_set_cell_count(view, pageOffset, medianIdx);
 
   return {
     medianRowid,
@@ -864,19 +955,24 @@ export function splitInteriorPage(
 // 6. Secondary Index Leaf Page Mechanics (page_type = 0x0A)
 // ============================================================================
 
-export function initIndexLeafPage(
+/**
+ * @export_c
+ * Initializes a Secondary Index Leaf Page.
+ */
+export function page_init_index_leaf(
   view: DataView,
   pageOffset: number,
   nextPageId: number = 0
 ): void {
-  initPage(view, pageOffset, PAGE_TYPE_INDEX_LEAF, nextPageId);
+  page_init(view, pageOffset, PAGE_TYPE_INDEX_LEAF, nextPageId);
 }
 
 /**
+ * @export_c
  * Compares two index keys according to SQLite 3VL collation order:
  * NULL < -Infinity < Numbers < TEXT (UTF-8) < BLOB
  */
-export function compareIndexKeys(
+export function page_compare_index_keys(
   typeA: DataType,
   valA: any,
   rowidA: bigint,
@@ -921,7 +1017,7 @@ export function compareIndexKeys(
   return rowidA < rowidB ? -1 : (rowidA > rowidB ? 1 : 0);
 }
 
-function decodeIndexCell(
+function page_decode_index_cell(
   view: DataView,
   cellDataOffset: number,
   kLen: number,
@@ -953,9 +1049,10 @@ function decodeIndexCell(
 }
 
 /**
+ * @export_c
  * Inserts a key and rowid into a Secondary Index Leaf Page, maintaining sorted slot directory.
  */
-export function insertIndexLeafCell(
+export function page_insert_index_leaf_cell(
   view: DataView,
   pageOffset: number,
   keyType: DataType,
@@ -991,19 +1088,19 @@ export function insertIndexLeafCell(
   const cellLength = 2 + keyBytes.byteLength + 8;
   const neededBytes = cellLength + 2; // + 2B slot directory entry
 
-  const cellCount = getCellCount(view, pageOffset);
-  const contiguousFree = getContiguousFreeSpace(view, pageOffset);
-  const totalFree = contiguousFree + getFreeBytes(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
+  const contiguousFree = page_get_contiguous_free_space(view, pageOffset);
+  const totalFree = contiguousFree + page_get_free_bytes(view, pageOffset);
 
   if (neededBytes > totalFree) {
     return -1; // Index leaf full
   }
 
   if (neededBytes > contiguousFree) {
-    compactPage(view, pageOffset, scratchpadOffset);
+    page_compact(view, pageOffset, scratchpadOffset);
   }
 
-  const contentOffset = getCellContentOffset(view, pageOffset);
+  const contentOffset = page_get_cell_content_offset(view, pageOffset);
   const newContentOffset = contentOffset - cellLength;
   const targetOffset = pageOffset + newContentOffset;
 
@@ -1020,12 +1117,12 @@ export function insertIndexLeafCell(
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const offset = getCellOffset(view, pageOffset, mid);
+    const offset = page_get_cell_offset(view, pageOffset, mid);
     const existingKLen = view.getUint16(pageOffset + offset, true);
     const rId = view.getBigInt64(pageOffset + offset + 2 + existingKLen, true);
-    const { cellType: midType, cellVal: midVal } = decodeIndexCell(view, pageOffset + offset + 2, existingKLen, keyType);
+    const { cellType: midType, cellVal: midVal } = page_decode_index_cell(view, pageOffset + offset + 2, existingKLen, keyType);
 
-    const cmp = compareIndexKeys(keyType, keyValue, rowid, midType, midVal, rId);
+    const cmp = page_compare_index_keys(keyType, keyValue, rowid, midType, midVal, rId);
     if (cmp < 0) {
       insertSlot = mid;
       hi = mid - 1;
@@ -1047,37 +1144,38 @@ export function insertIndexLeafCell(
   }
 
   // Write new slot entry
-  setCellOffset(view, pageOffset, insertSlot, newContentOffset);
+  page_set_cell_offset(view, pageOffset, insertSlot, newContentOffset);
 
-  setCellCount(view, pageOffset, cellCount + 1);
-  setCellContentOffset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, pageOffset, cellCount + 1);
+  page_set_cell_content_offset(view, pageOffset, newContentOffset);
 
   return insertSlot;
 }
 
 /**
+ * @export_c
  * Binary searches an Index Leaf Page for target key and optional rowid.
  */
-export function binarySearchIndexLeaf(
+export function page_binary_search_index_leaf(
   view: DataView,
   pageOffset: number,
   targetType: DataType,
   targetValue: any,
   targetRowid?: bigint
 ): { found: boolean; slotIdx: number } {
-  const cellCount = getCellCount(view, pageOffset);
+  const cellCount = page_get_cell_count(view, pageOffset);
   let lo = 0;
   let hi = cellCount - 1;
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const offset = getCellOffset(view, pageOffset, mid);
+    const offset = page_get_cell_offset(view, pageOffset, mid);
     const kLen = view.getUint16(pageOffset + offset, true);
     const rId = view.getBigInt64(pageOffset + offset + 2 + kLen, true);
-    const { cellType: midType, cellVal: midVal } = decodeIndexCell(view, pageOffset + offset + 2, kLen, targetType);
+    const { cellType: midType, cellVal: midVal } = page_decode_index_cell(view, pageOffset + offset + 2, kLen, targetType);
 
     const rowidToCompare = targetRowid !== undefined ? targetRowid : rId;
-    const cmp = compareIndexKeys(targetType, targetValue, rowidToCompare, midType, midVal, rId);
+    const cmp = page_compare_index_keys(targetType, targetValue, rowidToCompare, midType, midVal, rId);
 
     if (cmp === 0) {
       return { found: true, slotIdx: mid };

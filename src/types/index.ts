@@ -255,3 +255,6 @@ export class SubqueryNestingTooDeepError extends Error {
     this.name = 'SubqueryNestingTooDeepError';
   }
 }
+
+export * from '../shared/vm_context.js';
+export * from '../shared/page_provider.js';

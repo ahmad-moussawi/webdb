@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   createVmContext,
   resetVmContext,
-  vm_step,
-} from '../src/core/js/vm.js';
+} from '../src/shared/index.js';
 import {
-  initPage,
-  insertRowIntoPage,
-  serializeRow,
-} from '../src/core/js/page.js';
+  vm_step,
+  page_init,
+  page_insert_row,
+  page_serialize_row,
+} from '../src/core/index.js';
 import { compileQuery } from '../src/host/compiler/compiler.js';
 import {
   DataType,
@@ -17,7 +17,6 @@ import {
   VmStatus,
 } from '../src/types/index.js';
 import {
-  PAGE_SIZE,
   TOTAL_MEMORY_BYTES,
 } from '../src/constants.js';
 
@@ -43,15 +42,15 @@ describe('Bytecode Virtual Machine (VDBE)', () => {
     const view = new DataView(buffer);
 
     // Initialize root page at page 2 (offset = (2 - 1) * 4096 = 4096)
-    initPage(view, 4096);
+    page_init(view, 4096);
 
-    const row1 = serializeRow(table, { id: 1, title: 'Laptop', price: 999.99 });
-    const row2 = serializeRow(table, { id: 2, title: 'Mouse', price: 29.50 });
-    const row3 = serializeRow(table, { id: 3, title: 'Keyboard', price: 85.00 });
+    const row1 = page_serialize_row(table, { id: 1, title: 'Laptop', price: 999.99 });
+    const row2 = page_serialize_row(table, { id: 2, title: 'Mouse', price: 29.50 });
+    const row3 = page_serialize_row(table, { id: 3, title: 'Keyboard', price: 85.00 });
 
-    insertRowIntoPage(view, 4096, row1);
-    insertRowIntoPage(view, 4096, row2);
-    insertRowIntoPage(view, 4096, row3);
+    page_insert_row(view, 4096, row1);
+    page_insert_row(view, 4096, row2);
+    page_insert_row(view, 4096, row3);
 
     // Filter: price > 50.00
     const bytecode = compileQuery({

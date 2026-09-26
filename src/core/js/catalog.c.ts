@@ -50,6 +50,7 @@ import {
   InvalidDatabaseError,
   CorruptPageError,
 } from "../../types/index.js";
+import { IPageProvider } from "../../shared/index.js";
 
 import { computePage1Checksum, computePageChecksum } from "../../host/storage/crc32.js";
 
@@ -62,7 +63,11 @@ export const MAGIC_BYTES = new Uint8Array([0x57, 0x45, 0x42, 0x44, 0x42, 0x00]);
 // 1. Page 1 File Header Operations
 // ============================================================================
 
-export function initPage1(view: DataView): void {
+/**
+ * @export_c
+ * Initializes the Page 1 database file header and clears the catalog area.
+ */
+export function catalog_init_page1(view: DataView): void {
   // 1. Magic bytes (one-shot copy via Uint8Array.set / memcpy)
   new Uint8Array(view.buffer, view.byteOffset + HEADER_OFFSET_MAGIC, MAGIC_BYTES.byteLength).set(MAGIC_BYTES);
 
@@ -117,7 +122,11 @@ export function initPage1(view: DataView): void {
   view.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
 }
 
-export function readPage1Header(
+/**
+ * @export_c
+ * Reads and validates the Page 1 database file header.
+ */
+export function catalog_read_page1_header(
   view: DataView,
   verifyChecksum: boolean = false,
 ) {
@@ -170,43 +179,70 @@ export function readPage1Header(
   };
 }
 
-export function getTotalPages(view: DataView): number {
+/**
+ * @export_c
+ */
+export function catalog_get_total_pages(view: DataView): number {
   return view.getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 }
 
-export function setTotalPages(view: DataView, count: number): void {
+/**
+ * @export_c
+ */
+export function catalog_set_total_pages(view: DataView, count: number): void {
   view.setUint32(HEADER_OFFSET_TOTAL_PAGES, count, true);
 }
 
-export function getFreePageHead(view: DataView): number {
+/**
+ * @export_c
+ */
+export function catalog_get_free_page_head(view: DataView): number {
   return view.getUint32(HEADER_OFFSET_FREE_PAGE_HEAD, true);
 }
 
-export function setFreePageHead(view: DataView, pageId: number): void {
+/**
+ * @export_c
+ */
+export function catalog_set_free_page_head(view: DataView, pageId: number): void {
   view.setUint32(HEADER_OFFSET_FREE_PAGE_HEAD, pageId, true);
 }
 
-export function getSchemaVersion(view: DataView): number {
+/**
+ * @export_c
+ */
+export function catalog_get_schema_version(view: DataView): number {
   return view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
 }
 
-export function incrementSchemaVersion(view: DataView): number {
-  const v = getSchemaVersion(view) + 1;
+/**
+ * @export_c
+ */
+export function catalog_increment_schema_version(view: DataView): number {
+  const v = catalog_get_schema_version(view) + 1;
   view.setUint32(HEADER_OFFSET_SCHEMA_VERSION, v, true);
   return v;
 }
 
-export function getChangeCounter(view: DataView): number {
+/**
+ * @export_c
+ */
+export function catalog_get_change_counter(view: DataView): number {
   return view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
 }
 
-export function incrementChangeCounter(view: DataView): number {
-  const c = getChangeCounter(view) + 1;
+/**
+ * @export_c
+ */
+export function catalog_increment_change_counter(view: DataView): number {
+  const c = catalog_get_change_counter(view) + 1;
   view.setUint32(HEADER_OFFSET_CHANGE_COUNTER, c, true);
   return c;
 }
 
-export function updatePage1Checksum(view: DataView): number {
+/**
+ * @export_c
+ */
+export function catalog_update_page1_checksum(view: DataView): number {
   const chk = computePage1Checksum(
     new Uint8Array(view.buffer, view.byteOffset, PAGE_SIZE),
   );
@@ -218,7 +254,10 @@ export function updatePage1Checksum(view: DataView): number {
 // 2. Fixed String Helper Functions
 // ============================================================================
 
-export function writeFixedString(
+/**
+ * @export_c
+ */
+export function catalog_write_fixed_string(
   view: DataView,
   offset: number,
   str: string,
@@ -230,7 +269,10 @@ export function writeFixedString(
   }
 }
 
-export function readFixedString(
+/**
+ * @export_c
+ */
+export function catalog_read_fixed_string(
   view: DataView,
   offset: number,
   maxLen: number,
@@ -244,7 +286,10 @@ export function readFixedString(
   return textDecoder.decode(new Uint8Array(bytes));
 }
 
-export function parseDataType(typeStr: string): DataType {
+/**
+ * @export_c
+ */
+export function catalog_parse_data_type(typeStr: string): DataType {
   switch (typeStr.toUpperCase()) {
     case "INT32":
       return DataType.INT32;
@@ -270,9 +315,10 @@ export function parseDataType(typeStr: string): DataType {
 // ============================================================================
 
 /**
+ * @export_c
  * Reads a TableDescriptor from Page 1 by slot index (0..15).
  */
-export function readTableDescriptor(
+export function catalog_read_table_descriptor(
   view: DataView,
   slotIdx: number,
 ): TableDescriptor | null {
@@ -283,7 +329,7 @@ export function readTableDescriptor(
   const columnCount = view.getUint16(offset + 2, true);
   const rootPageId = view.getUint32(offset + 4, true);
   const colCatalogPageId = view.getUint32(offset + 8, true);
-  const name = readFixedString(view, offset + 12, MAX_NAME_LENGTH);
+  const name = catalog_read_fixed_string(view, offset + 12, MAX_NAME_LENGTH);
   const flags = view.getUint32(offset + 76, true);
   const rowCountEstimate = view.getUint32(offset + 80, true);
   const autoIncNext = view.getBigUint64(offset + 84, true);
@@ -301,9 +347,10 @@ export function readTableDescriptor(
 }
 
 /**
+ * @export_c
  * Writes a TableDescriptor into Page 1 at the specified slot index (0..15).
  */
-export function writeTableDescriptor(
+export function catalog_write_table_descriptor(
   view: DataView,
   slotIdx: number,
   desc: TableDescriptor,
@@ -313,7 +360,7 @@ export function writeTableDescriptor(
   view.setUint16(offset + 2, desc.columnCount, true);
   view.setUint32(offset + 4, desc.rootPageId, true);
   view.setUint32(offset + 8, desc.colCatalogPageId, true);
-  writeFixedString(view, offset + 12, desc.name, MAX_NAME_LENGTH);
+  catalog_write_fixed_string(view, offset + 12, desc.name, MAX_NAME_LENGTH);
   view.setUint32(offset + 76, desc.flags, true);
   view.setUint32(offset + 80, desc.rowCountEstimate, true);
   view.setBigUint64(offset + 84, desc.autoIncNext, true);
@@ -322,20 +369,24 @@ export function writeTableDescriptor(
   uint8.fill(0, offset + 92, offset + TABLE_DESCRIPTOR_SIZE);
 }
 
-export function findTableByName(
+/**
+ * @export_c
+ */
+export function catalog_find_table_by_name(
   view: DataView,
   tableName: string,
 ): TableDescriptor | null {
-  const slot = findTableSlot(view, tableName);
-  return slot !== -1 ? readTableDescriptor(view, slot) : null;
+  const slot = catalog_find_table_slot(view, tableName);
+  return slot !== -1 ? catalog_read_table_descriptor(view, slot) : null;
 }
 
 /**
+ * @export_c
  * Finds the slot index of an existing table by name, or -1 if not found.
  */
-export function findTableSlot(view: DataView, tableName: string): number {
+export function catalog_find_table_slot(view: DataView, tableName: string): number {
   for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = readTableDescriptor(view, i);
+    const desc = catalog_read_table_descriptor(view, i);
     if (
       desc &&
       (desc.flags & TableFlag.ACTIVE) !== 0 &&
@@ -348,11 +399,12 @@ export function findTableSlot(view: DataView, tableName: string): number {
 }
 
 /**
+ * @export_c
  * Finds the first free slot index in Page 1's TableDescriptor array.
  */
-export function findFreeTableSlot(view: DataView): number {
+export function catalog_find_free_table_slot(view: DataView): number {
   for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = readTableDescriptor(view, i);
+    const desc = catalog_read_table_descriptor(view, i);
     if (!desc || (desc.flags & TableFlag.ACTIVE) === 0) {
       return i;
     }
@@ -361,12 +413,13 @@ export function findFreeTableSlot(view: DataView): number {
 }
 
 /**
+ * @export_c
  * Lists all active tables defined on Page 1.
  */
-export function listTableDescriptors(view: DataView): TableDescriptor[] {
+export function catalog_list_table_descriptors(view: DataView): TableDescriptor[] {
   const tables: TableDescriptor[] = [];
   for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = readTableDescriptor(view, i);
+    const desc = catalog_read_table_descriptor(view, i);
     if (desc && (desc.flags & TableFlag.ACTIVE) !== 0) {
       tables.push(desc);
     }
@@ -378,7 +431,10 @@ export function listTableDescriptors(view: DataView): TableDescriptor[] {
 // 4. Index Descriptor Accessors (Page 1: bytes 2148..3171)
 // ============================================================================
 
-export function readIndexDescriptor(
+/**
+ * @export_c
+ */
+export function catalog_read_index_descriptor(
   view: DataView,
   slotIdx: number,
 ): IndexDescriptor | null {
@@ -404,7 +460,7 @@ export function readIndexDescriptor(
     colDirections.push(view.getUint8(offset + 26 + i));
   }
 
-  const name = readFixedString(view, offset + 34, MAX_NAME_LENGTH);
+  const name = catalog_read_fixed_string(view, offset + 34, MAX_NAME_LENGTH);
 
   return {
     indexId,
@@ -418,7 +474,10 @@ export function readIndexDescriptor(
   };
 }
 
-export function writeIndexDescriptor(
+/**
+ * @export_c
+ */
+export function catalog_write_index_descriptor(
   view: DataView,
   slotIdx: number,
   desc: IndexDescriptor,
@@ -439,7 +498,7 @@ export function writeIndexDescriptor(
     view.setUint8(offset + 26 + i, desc.colDirections[i] ?? 0);
   }
 
-  writeFixedString(view, offset + 34, desc.name, MAX_NAME_LENGTH);
+  catalog_write_fixed_string(view, offset + 34, desc.name, MAX_NAME_LENGTH);
 
   const uint8 = new Uint8Array(view.buffer, view.byteOffset);
   uint8.fill(0, offset + 98, offset + INDEX_DESCRIPTOR_SIZE);
@@ -450,9 +509,10 @@ export function writeIndexDescriptor(
 // ============================================================================
 
 /**
+ * @export_c
  * Initializes a 4KB dedicated column catalog page.
  */
-export function initCatalogPage(
+export function catalog_init_page(
   view: DataView,
   pageOffset: number,
   tableId: number,
@@ -472,7 +532,10 @@ export function initCatalogPage(
   uint8.fill(0, pageOffset + CATALOG_PAGE_HEADER_SIZE, pageOffset + PAGE_SIZE);
 }
 
-export function readCatalogPageHeader(
+/**
+ * @export_c
+ */
+export function catalog_read_page_header(
   view: DataView,
   pageOffset: number,
 ): CatalogPageHeader {
@@ -487,7 +550,10 @@ export function readCatalogPageHeader(
   };
 }
 
-export function writeCatalogPageHeader(
+/**
+ * @export_c
+ */
+export function catalog_write_page_header(
   view: DataView,
   pageOffset: number,
   header: CatalogPageHeader,
@@ -502,9 +568,10 @@ export function writeCatalogPageHeader(
 }
 
 /**
+ * @export_c
  * Writes a ColumnMeta entry (72 bytes) into a catalog page at inPageSlot (0..55).
  */
-export function writeColumnMeta(
+export function catalog_write_column_meta(
   view: DataView,
   pageOffset: number,
   inPageSlot: number,
@@ -519,15 +586,16 @@ export function writeColumnMeta(
   view.setUint8(offset + 0, meta.type);
   view.setUint8(offset + 1, meta.flags);
   view.setUint16(offset + 2, meta.colOffset, true);
-  writeFixedString(view, offset + 4, meta.name, MAX_NAME_LENGTH);
+  catalog_write_fixed_string(view, offset + 4, meta.name, MAX_NAME_LENGTH);
   // Clear _reserved[4] at 68..71
   view.setUint32(offset + 68, 0, true);
 }
 
 /**
+ * @export_c
  * Reads a ColumnMeta entry (72 bytes) from a catalog page at inPageSlot (0..55).
  */
-export function readColumnMeta(
+export function catalog_read_column_meta(
   view: DataView,
   pageOffset: number,
   inPageSlot: number,
@@ -537,17 +605,18 @@ export function readColumnMeta(
   const type = view.getUint8(offset + 0) as DataType;
   const flags = view.getUint8(offset + 1);
   const colOffset = view.getUint16(offset + 2, true);
-  const name = readFixedString(view, offset + 4, MAX_NAME_LENGTH);
+  const name = catalog_read_fixed_string(view, offset + 4, MAX_NAME_LENGTH);
 
   return { type, flags, colOffset, name };
 }
 
 /**
+ * @export_c
  * Calculates cross-page column mapping:
  * page_chain_idx = floor(col_idx / 56)
  * col_idx_in_page = col_idx % 56
  */
-export function mapColumnIndexToCatalogLocation(colIdx: number): {
+export function catalog_map_column_location(colIdx: number): {
   pageChainIdx: number;
   colIdxInPage: number;
 } {
@@ -561,16 +630,12 @@ export function mapColumnIndexToCatalogLocation(colIdx: number): {
 // 6. Schema DDL & Metadata Assembler
 // ============================================================================
 
-export interface IPageProvider {
-  allocateNewPage(): number;
-  getPageBytes(pageId: number): Uint8Array;
-  markPageDirty(pageId: number): void;
-}
 
 /**
+ * @export_c
  * Creates a new table, allocating a root data page and dedicated column catalog page(s).
  */
-export function createTable(
+export function catalog_create_table(
   page1View: DataView,
   pager: IPageProvider,
   name: string,
@@ -585,12 +650,12 @@ export function createTable(
   }
 
   // Check if table already exists
-  if (findTableSlot(page1View, name) !== -1) {
+  if (catalog_find_table_slot(page1View, name) !== -1) {
     throw new TableAlreadyExistsError(name);
   }
 
   // Find free slot in Page 1 TableDescriptor slots
-  const slotIdx = findFreeTableSlot(page1View);
+  const slotIdx = catalog_find_free_table_slot(page1View);
 
   if (slotIdx === -1) {
     throw new TooManyTablesError(MAX_TABLES_PAGE1, MAX_TABLES_PAGE1);
@@ -618,7 +683,7 @@ export function createTable(
   for (const def of columnsDef) {
     const type =
       typeof def.type === "string"
-        ? parseDataType(def.type)
+        ? catalog_parse_data_type(def.type)
         : (def.type as DataType);
 
     let flags = 0;
@@ -673,12 +738,12 @@ export function createTable(
     const pageBytes = pager.getPageBytes(pageId);
     const view = new DataView(pageBytes.buffer, pageBytes.byteOffset);
 
-    initCatalogPage(view, 0, tableId, startColIndex, nextPageId);
+    catalog_init_page(view, 0, tableId, startColIndex, nextPageId);
     view.setUint16(2, colCountInThisPage, true); // col_count_in_page
 
     for (let c = 0; c < colCountInThisPage; c++) {
       const col = columns[startColIndex + c];
-      writeColumnMeta(view, 0, c, col);
+      catalog_write_column_meta(view, 0, c, col);
     }
 
     // Set CRC32 checksum
@@ -701,10 +766,10 @@ export function createTable(
     autoIncNext: 1n,
   };
 
-  writeTableDescriptor(page1View, slotIdx, desc);
-  incrementSchemaVersion(page1View);
-  incrementChangeCounter(page1View);
-  updatePage1Checksum(page1View);
+  catalog_write_table_descriptor(page1View, slotIdx, desc);
+  catalog_increment_schema_version(page1View);
+  catalog_increment_change_counter(page1View);
+  catalog_update_page1_checksum(page1View);
 
   return {
     ...desc,
@@ -713,20 +778,21 @@ export function createTable(
 }
 
 /**
+ * @export_c
  * Loads the complete TableMeta (including all columns from chained catalog pages) for a table.
  */
-export function loadTableMeta(
+export function catalog_load_table_meta(
   page1View: DataView,
   pager: { getPageBytes(pageId: number): Uint8Array },
   tableName: string,
 ): TableMeta {
-  const slotIdx = findTableSlot(page1View, tableName);
+  const slotIdx = catalog_find_table_slot(page1View, tableName);
 
   if (slotIdx === -1) {
     throw new TableNotFoundError(tableName);
   }
 
-  const desc = readTableDescriptor(page1View, slotIdx)!;
+  const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
   const columns: ColumnMeta[] = [];
 
   let currentCatPageId = desc.colCatalogPageId;
@@ -735,10 +801,10 @@ export function loadTableMeta(
   while (currentCatPageId !== 0 && loadedCount < desc.columnCount) {
     const pageBytes = pager.getPageBytes(currentCatPageId);
     const view = new DataView(pageBytes.buffer, pageBytes.byteOffset);
-    const header = readCatalogPageHeader(view, 0);
+    const header = catalog_read_page_header(view, 0);
 
     for (let i = 0; i < header.colCountInPage; i++) {
-      const col = readColumnMeta(view, 0, i);
+      const col = catalog_read_column_meta(view, 0, i);
       columns.push(col);
       loadedCount++;
     }
@@ -753,12 +819,13 @@ export function loadTableMeta(
 }
 
 /**
+ * @export_c
  * Loads all active tables and their full schemas from Page 1.
  */
-export function loadAllTables(
+export function catalog_load_all_tables(
   page1View: DataView,
   pager: { getPageBytes(pageId: number): Uint8Array },
 ): TableMeta[] {
-  const descriptors = listTableDescriptors(page1View);
-  return descriptors.map((desc) => loadTableMeta(page1View, pager, desc.name));
+  const descriptors = catalog_list_table_descriptors(page1View);
+  return descriptors.map((desc) => catalog_load_table_meta(page1View, pager, desc.name));
 }

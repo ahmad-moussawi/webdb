@@ -15,32 +15,31 @@ import { IVfsAdapter } from "../storage/vfs.js";
 import { MemoryVfsAdapter } from "../storage/memory.js";
 import { IndexedDbVfsAdapter } from "../storage/idb.js";
 import { OpfsVfsAdapter } from "../storage/opfs.js";
-import { BufferPool } from "../../core/js/buffer_pool.js";
+import { Io } from "../storage/io.js";
+import { IoDriver, createWasmMemory } from "../driver/io_driver.js";
 import {
-  initPage1,
-  readPage1Header,
-  createTable as catalogCreateTable,
-  loadTableMeta,
-  findTableSlot,
-  readTableDescriptor,
-  writeTableDescriptor,
-  listTableDescriptors,
-  IPageProvider,
-  readCatalogPageHeader,
-} from "../../core/js/catalog.js";
-import {
-  insertRowIntoPage,
-  getNextPageId,
-  setNextPageId,
-  serializeRow,
-  deserializeRow,
-} from "../../core/js/page.js";
+  catalog_init_page1,
+  catalog_read_page1_header,
+  catalog_create_table,
+  catalog_load_table_meta,
+  catalog_find_table_slot,
+  catalog_read_table_descriptor,
+  catalog_write_table_descriptor,
+  catalog_list_table_descriptors,
+  catalog_read_page_header,
+  page_insert_row,
+  page_get_next_page_id,
+  page_set_next_page_id,
+  page_serialize_row,
+  page_deserialize_row,
+} from "../../core/index.js";
 import {
   createVmContext,
   resetVmContext,
-  vm_step,
   VmContext,
-} from "../../core/js/vm.js";
+  IPageProvider,
+} from "../../shared/index.js";
+import { vm_step } from "../../core/index.js";
 import {
   compileQuery,
   QueryFilter,
@@ -71,12 +70,22 @@ export interface WebDbOptions {
 
 export class WebDB implements IDatabaseQueryExecutor {
   readonly vfs: IVfsAdapter;
-  readonly pool: BufferPool;
+  readonly io: Io;
+  readonly driver: IoDriver;
+
+  /**
+   * Alias to driver for backwards-compatibility with callers/tests that inspect the buffer pool.
+   */
+  get pool(): IoDriver {
+    return this.driver;
+  }
+
   private vmCtx: VmContext;
 
-  private constructor(vfs: IVfsAdapter, pool: BufferPool) {
+  private constructor(vfs: IVfsAdapter, io: Io, driver: IoDriver) {
     this.vfs = vfs;
-    this.pool = pool;
+    this.io = io;
+    this.driver = driver;
     this.vmCtx = createVmContext();
   }
 
@@ -93,40 +102,42 @@ export class WebDB implements IDatabaseQueryExecutor {
       vfs = new MemoryVfsAdapter();
     }
 
-    const pool = new BufferPool({
-      vfs,
-      slotCount: options.slotCount ?? DEFAULT_SLOT_COUNT,
-      maxQueryMemory: options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY,
-    });
+    const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
+    const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
+    const memory = createWasmMemory(slotCount, maxQueryMemory);
+    const io = new Io({ vfs, memory });
+    const driver = new IoDriver({ io, memory, slotCount, maxQueryMemory });
 
     // Check if Page 1 exists in storage
     const page1Data = await vfs.readPage(1);
     if (!page1Data) {
       // Initialize Page 1 in slot 0
-      initPage1(pool.getSlotDataView(0));
-      pool.markDirty(0);
-      await pool.flushSlot(0);
+      catalog_init_page1(driver.getSlotDataView(0));
+      driver.markDirty(0);
+      await driver.flushSlot(0);
     } else {
       // Load Page 1 into slot 0
-      pool.getPageBytesInSlot(0).set(page1Data);
-      pool.clearDirty(0);
+      driver.getPageBytesInSlot(0).set(page1Data);
+      driver.clearDirty(0);
       // Validate Page 1 header & checksum
-      readPage1Header(pool.getSlotDataView(0), true);
+      catalog_read_page1_header(driver.getSlotDataView(0), true);
 
       // Section 6.2: Pre-load and permanently pin all column catalog pages for active tables
-      const tableDescriptors = listTableDescriptors(pool.getSlotDataView(0));
+      const tableDescriptors = catalog_list_table_descriptors(
+        driver.getSlotDataView(0),
+      );
       for (const desc of tableDescriptors) {
         let catPageId = desc.colCatalogPageId;
         while (catPageId !== 0) {
-          const slot = await pool.acquireAndPinPage(catPageId);
-          const view = pool.getSlotDataView(slot);
-          const header = readCatalogPageHeader(view, 0);
+          const slot = await driver.acquireAndPinPage(catPageId);
+          const view = driver.getSlotDataView(slot);
+          const header = catalog_read_page_header(view, 0);
           catPageId = header.nextColCatalogPageId;
         }
       }
     }
 
-    return new WebDB(vfs, pool);
+    return new WebDB(vfs, io, driver);
   }
 
   async createTable(
@@ -160,36 +171,42 @@ export class WebDB implements IDatabaseQueryExecutor {
       },
     };
 
-    const table = catalogCreateTable(page1View, pager, name, columns);
+    const table = catalog_create_table(page1View, pager, name, columns);
 
     // Permanently pin column catalog pages for this new table
     let catPageId = table.colCatalogPageId;
     while (catPageId !== 0) {
-      const slot = await this.pool.acquireAndPinPage(catPageId);
-      const header = readCatalogPageHeader(this.pool.getSlotDataView(slot), 0);
+      const slot = await this.driver.acquireAndPinPage(catPageId);
+      const header = catalog_read_page_header(
+        this.pool.getSlotDataView(slot),
+        0,
+      );
       catPageId = header.nextColCatalogPageId;
     }
 
     // Flush modified pages
-    await this.pool.flushAllDirty();
+    await this.driver.flushAllDirty();
     return table;
   }
 
   async getTable(tableName: string): Promise<TableMeta> {
     const page1View = this.pool.getSlotDataView(0);
-    const slotIdx = findTableSlot(page1View, tableName);
+    const slotIdx = catalog_find_table_slot(page1View, tableName);
 
     if (slotIdx === -1) {
       throw new TableNotFoundError(tableName);
     }
 
-    const desc = readTableDescriptor(page1View, slotIdx)!;
+    const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
     let catPageId = desc.colCatalogPageId;
 
     while (catPageId !== 0) {
-      await this.pool.acquirePage(catPageId);
+      await this.driver.acquirePage(catPageId);
       const slot = this.pool.getResidentSlot(catPageId);
-      const header = readCatalogPageHeader(this.pool.getSlotDataView(slot), 0);
+      const header = catalog_read_page_header(
+        this.pool.getSlotDataView(slot),
+        0,
+      );
       catPageId = header.nextColCatalogPageId;
     }
 
@@ -200,7 +217,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         return new Uint8Array(PAGE_SIZE);
       },
     };
-    return loadTableMeta(page1View, pager, tableName);
+    return catalog_load_table_meta(page1View, pager, tableName);
   }
 
   async insert(tableName: string, row: DbRow): Promise<void> {
@@ -217,32 +234,32 @@ export class WebDB implements IDatabaseQueryExecutor {
     ) {
       row[autoIncCol.name] = Number(table.autoIncNext);
       // Increment autoIncNext on Page 1 TableDescriptor
-      const slotIdx = findTableSlot(page1View, tableName);
+      const slotIdx = catalog_find_table_slot(page1View, tableName);
       if (slotIdx !== -1) {
-        const desc = readTableDescriptor(page1View, slotIdx)!;
+        const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
         desc.autoIncNext += 1n;
-        writeTableDescriptor(page1View, slotIdx, desc);
+        catalog_write_table_descriptor(page1View, slotIdx, desc);
         this.pool.markDirty(0);
       }
     }
 
-    const rowBytes = serializeRow(table.columns, row);
+    const rowBytes = page_serialize_row(table.columns, row);
 
     // Navigate to the tail data page for this table
     let currentPageId = table.rootPageId;
-    let slot = await this.pool.acquirePage(currentPageId);
+    let slot = await this.driver.acquirePage(currentPageId);
     let view = this.pool.getSlotDataView(slot);
 
     while (true) {
-      const nextPageId = getNextPageId(view, 0);
+      const nextPageId = page_get_next_page_id(view, 0);
       if (nextPageId === 0) break;
       currentPageId = nextPageId;
-      slot = await this.pool.acquirePage(currentPageId);
+      slot = await this.driver.acquirePage(currentPageId);
       view = this.pool.getSlotDataView(slot);
     }
 
     // Attempt insertion into current page
-    let insertSlot = insertRowIntoPage(
+    let insertSlot = page_insert_row(
       view,
       0,
       rowBytes,
@@ -253,16 +270,16 @@ export class WebDB implements IDatabaseQueryExecutor {
       // Pin current slot so allocatePage cannot evict it during page expansion
       this.pool.pinSlot(slot);
       try {
-        const newPageId = await this.pool.allocateAndPinPage();
+        const newPageId = await this.driver.allocateAndPinPage();
         const newSlot = this.pool.getResidentSlot(newPageId);
         try {
           // Link current page -> new page
-          setNextPageId(view, 0, newPageId);
+          page_set_next_page_id(view, 0, newPageId);
           this.pool.markDirty(slot);
 
           // Insert row into new page
           const newView = this.pool.getSlotDataView(newSlot);
-          insertSlot = insertRowIntoPage(
+          insertSlot = page_insert_row(
             newView,
             0,
             rowBytes,
@@ -283,16 +300,16 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     // Update row count estimate
-    const slotIdx = findTableSlot(page1View, tableName);
+    const slotIdx = catalog_find_table_slot(page1View, tableName);
     if (slotIdx !== -1) {
-      const desc = readTableDescriptor(page1View, slotIdx)!;
+      const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
       desc.rowCountEstimate += 1;
-      writeTableDescriptor(page1View, slotIdx, desc);
+      catalog_write_table_descriptor(page1View, slotIdx, desc);
       this.pool.markDirty(0);
     }
 
     // Durably flush modified pages
-    await this.pool.flushAllDirty();
+    await this.driver.flushAllDirty();
   }
 
   from(tableName: string): QueryBuilder {
@@ -336,9 +353,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     // Pre-load all data pages for this table into buffer pool before running VM
     let currPageId = table.rootPageId;
     while (currPageId !== 0) {
-      const slot = await this.pool.acquirePage(currPageId);
+      const slot = await this.driver.acquirePage(currPageId);
       const view = this.pool.getSlotDataView(slot);
-      currPageId = getNextPageId(view, 0);
+      currPageId = page_get_next_page_id(view, 0);
     }
 
     const bytecode = compileQuery({ table, filters });
@@ -357,7 +374,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       );
       const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
-      const record = deserializeRow(
+      const record = page_deserialize_row(
         table.columns,
         this.pool.view,
         rowRecordOffset,
@@ -405,7 +422,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async close(): Promise<void> {
-    await this.pool.flushAllDirty();
+    await this.driver.flushAllDirty();
     await this.vfs.close();
   }
 }

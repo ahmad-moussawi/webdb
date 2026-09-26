@@ -1,13 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
-  initPage,
-  insertRowIntoPage,
-  getCellCount,
-  getCellOffset,
-  serializeRow,
-  deserializeRow,
-  getTableLayout,
-} from '../src/core/js/page.js';
+  page_init,
+  page_insert_row,
+  page_get_cell_count,
+  page_get_cell_offset,
+  page_serialize_row,
+  page_deserialize_row,
+} from '../src/core/index.js';
 import {
   DataType,
   ColumnFlag,
@@ -38,38 +37,38 @@ describe('Slotted Page & Row Format', () => {
   it('initializes an empty slotted page with 4KB size', () => {
     const buffer = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buffer);
-    initPage(view, 0);
+    page_init(view, 0);
 
-    expect(getCellCount(view, 0)).toBe(0);
+    expect(page_get_cell_count(view, 0)).toBe(0);
     expect(view.getUint16(4, true)).toBe(PAGE_SIZE); // cell_content_offset starts at 4096
   });
 
   it('serializes and deserializes records with dynamic null-bitmap', () => {
     const buffer = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buffer);
-    initPage(view, 0);
+    page_init(view, 0);
 
     const row1 = { id: 1, name: 'Alice', age: 30, score: 98.5 };
     const row2 = { id: 2, name: 'Bob', age: null, score: null };
 
-    const bytes1 = serializeRow(table, row1);
-    const bytes2 = serializeRow(table, row2);
+    const bytes1 = page_serialize_row(table, row1);
+    const bytes2 = page_serialize_row(table, row2);
 
     expect(bytes1.byteLength).toBeGreaterThan(0);
     expect(bytes2.byteLength).toBeLessThan(bytes1.byteLength); // Null columns save bytes
 
-    const slot0 = insertRowIntoPage(view, 0, bytes1);
-    const slot1 = insertRowIntoPage(view, 0, bytes2);
+    const slot0 = page_insert_row(view, 0, bytes1);
+    const slot1 = page_insert_row(view, 0, bytes2);
 
     expect(slot0).toBe(0);
     expect(slot1).toBe(1);
-    expect(getCellCount(view, 0)).toBe(2);
+    expect(page_get_cell_count(view, 0)).toBe(2);
 
-    const offset0 = getCellOffset(view, 0, 0);
-    const offset1 = getCellOffset(view, 0, 1);
+    const offset0 = page_get_cell_offset(view, 0, 0);
+    const offset1 = page_get_cell_offset(view, 0, 1);
 
-    const decoded1 = deserializeRow(view, offset0, table);
-    const decoded2 = deserializeRow(view, offset1, table);
+    const decoded1 = page_deserialize_row(view, offset0, table);
+    const decoded2 = page_deserialize_row(view, offset1, table);
 
     expect(decoded1).toEqual({ id: 1, name: 'Alice', age: 30, score: 98.5 });
     expect(decoded2).toEqual({ id: 2, name: 'Bob', age: null, score: null });
@@ -77,7 +76,7 @@ describe('Slotted Page & Row Format', () => {
 
   it('enforces strict NOT NULL constraints at serialization time', () => {
     const invalidRow = { id: 1, name: null, age: 25 }; // name is NOT NULL
-    expect(() => serializeRow(table, invalidRow as any)).toThrow(NotNullConstraintError);
+    expect(() => page_serialize_row(table, invalidRow as any)).toThrow(NotNullConstraintError);
   });
 
   it('enforces strict 2048-byte max row limit with RowSizeLimitExceededError', () => {
@@ -85,6 +84,6 @@ describe('Slotted Page & Row Format', () => {
     const largeName = 'X'.repeat(2100);
     const largeRow = { id: 99, name: largeName, age: 20, score: 50.0 };
 
-    expect(() => serializeRow(table, largeRow)).toThrow(RowSizeLimitExceededError);
+    expect(() => page_serialize_row(table, largeRow)).toThrow(RowSizeLimitExceededError);
   });
 });

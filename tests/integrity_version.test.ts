@@ -5,21 +5,24 @@ import {
   UnsupportedFormatVersionError,
 } from '../src/types/index.js';
 import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
-import { BufferPool } from '../src/core/js/buffer_pool.js';
+import { Io } from '../src/host/storage/io.js';
+import { IoDriver, createWasmMemory } from '../src/host/driver/io_driver.js';
 import { computePageChecksum, computePage1Checksum } from '../src/host/storage/crc32.js';
 
 describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integrity_version.test.ts)', () => {
   it('1. CRC32 Checksum Validation on Read: Bit flip in storage throws CorruptPageError', async () => {
     const vfs = new MemoryVfsAdapter();
-    const pool = new BufferPool({ vfs, slotCount: 32 });
+    const memory = createWasmMemory(32);
+    const io = new Io({ vfs, memory });
+    const driver = new IoDriver({ io, memory, slotCount: 32 });
 
     // Allocate and flush page 2
-    const slot = await pool.acquirePage(2);
-    const view = pool.getSlotDataView(slot);
+    const slot = await driver.acquirePage(2);
+    const view = driver.getSlotDataView(slot);
     view.setUint8(0, 0x0D);
     view.setUint16(2, 5, true); // cell_count = 5
-    pool.markDirty(slot);
-    await pool.flushSlot(slot);
+    driver.markDirty(slot);
+    await driver.flushSlot(slot);
 
     // Tamper with page 2 in VFS storage: flip 1 byte
     const storedPage = await vfs.readPage(2);
@@ -27,11 +30,13 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     storedPage![100] ^= 0x01; // Bit flip!
     await vfs.writePage(2, storedPage!);
 
-    // Create a new BufferPool to force reading from VFS
-    const newPool = new BufferPool({ vfs, slotCount: 32 });
+    // Create a new IoDriver to force reading from VFS
+    const newMemory = createWasmMemory(32);
+    const newIo = new Io({ vfs, memory: newMemory });
+    const newDriver = new IoDriver({ io: newIo, memory: newMemory, slotCount: 32 });
 
     // Acquiring corrupted page must throw CorruptPageError
-    await expect(newPool.acquirePage(2)).rejects.toThrow(CorruptPageError);
+    await expect(newDriver.acquirePage(2)).rejects.toThrow(CorruptPageError);
   });
 
   it('2. Page 1 Checksum Verification: Tampering with metadata throws CorruptPageError', async () => {

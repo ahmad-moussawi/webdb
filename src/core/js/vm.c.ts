@@ -1,6 +1,5 @@
 import {
   PAGE_SIZE,
-  PAGE_HEADER_SIZE,
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
 } from '../../constants.js';
@@ -8,62 +7,27 @@ import {
   OpCode,
   VmStatus,
   DataType,
-  TableMeta,
 } from '../../types/index.js';
 import {
-  getCellCount,
-  getCellOffset,
-  getNextPageId,
-} from './page.js';
-import { UuidCodec, UlidCodec } from './codecs.js';
+  page_get_cell_count,
+  page_get_cell_offset,
+  page_get_next_page_id,
+} from './page.c.js';
+import { UuidCodec, UlidCodec } from './codecs.c.js';
 
-export interface VmCursor {
-  pageId: number;
-  cellIdx: number;
-  rowOffset: number; // Absolute byte offset in view
-}
+import {
+  VmCursor,
+  VmContext,
+  createVmContext,
+  resetVmContext,
+} from '../../shared/index.js';
 
-export interface VmContext {
-  pc: number;
-  status: VmStatus;
-  resultCount: number;
-  resultOffset: number;
-  registers: (number | bigint | string | Uint8Array | null)[];
-  cursor: VmCursor;
-  table: TableMeta | null;
-}
-
-export function createVmContext(): VmContext {
-  return {
-    pc: 0,
-    status: VmStatus.RUNNING,
-    resultCount: 0,
-    resultOffset: 0,
-    registers: new Array(64).fill(null),
-    cursor: {
-      pageId: 0,
-      cellIdx: 0,
-      rowOffset: 0,
-    },
-    table: null,
-  };
-}
-
-export function resetVmContext(ctx: VmContext, table: TableMeta): void {
-  ctx.pc = 0;
-  ctx.status = VmStatus.RUNNING;
-  ctx.resultCount = 0;
-  ctx.resultOffset = 0;
-  ctx.registers.fill(null);
-  ctx.cursor.pageId = 0;
-  ctx.cursor.cellIdx = 0;
-  ctx.cursor.rowOffset = 0;
-  ctx.table = table;
-}
+export { VmCursor, VmContext, createVmContext, resetVmContext };
 
 const textDecoder = new TextDecoder();
 
 /**
+ * @export_c
  * Synchronous Bytecode VM execution step loop.
  * Runs instructions until STATUS_DONE, STATUS_BUFFER_FULL, or an error.
  */
@@ -104,13 +68,13 @@ export function vm_step(
         ctx.pc += 3;
 
         const pageOffset = (ctx.cursor.pageId - 1) * PAGE_SIZE;
-        const cellCount = getCellCount(view, pageOffset);
+        const cellCount = page_get_cell_count(view, pageOffset);
 
         if (cellCount === 0) {
           ctx.pc = jumpTarget;
         } else {
           ctx.cursor.cellIdx = 0;
-          const relCellOffset = getCellOffset(view, pageOffset, 0);
+          const relCellOffset = page_get_cell_offset(view, pageOffset, 0);
           ctx.cursor.rowOffset = pageOffset + relCellOffset;
         }
         break;
@@ -123,23 +87,23 @@ export function vm_step(
         ctx.pc += 3;
 
         const pageOffset = (ctx.cursor.pageId - 1) * PAGE_SIZE;
-        const cellCount = getCellCount(view, pageOffset);
+        const cellCount = page_get_cell_count(view, pageOffset);
 
         ctx.cursor.cellIdx++;
 
         if (ctx.cursor.cellIdx < cellCount) {
-          const relCellOffset = getCellOffset(view, pageOffset, ctx.cursor.cellIdx);
+          const relCellOffset = page_get_cell_offset(view, pageOffset, ctx.cursor.cellIdx);
           ctx.cursor.rowOffset = pageOffset + relCellOffset;
         } else {
           // Check if there is a next page linked for this table
-          const nextPageId = getNextPageId(view, pageOffset);
+          const nextPageId = page_get_next_page_id(view, pageOffset);
           if (nextPageId !== 0) {
             ctx.cursor.pageId = nextPageId;
             ctx.cursor.cellIdx = 0;
             const nextOffset = (nextPageId - 1) * PAGE_SIZE;
-            const nextCount = getCellCount(view, nextOffset);
+            const nextCount = page_get_cell_count(view, nextOffset);
             if (nextCount > 0) {
-              const relCellOffset = getCellOffset(view, nextOffset, 0);
+              const relCellOffset = page_get_cell_offset(view, nextOffset, 0);
               ctx.cursor.rowOffset = nextOffset + relCellOffset;
             } else {
               ctx.pc = jumpTarget; // Empty next page

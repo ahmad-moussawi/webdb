@@ -125,7 +125,7 @@ export const PAGE_HEADER_OFFSET_NEXT_PAGE_ID = 6;
 /**
  * Byte offset 10 (uint16_t, little-endian): Cumulative count of fragmented
  * unallocated bytes left behind by deleted or shrunk records. This space is
- * reclaimed when page defragmentation (`compactPage`) is invoked.
+ * reclaimed when page defragmentation (`page_compact`) is invoked.
  */
 export const PAGE_HEADER_OFFSET_FREE_BYTES = 10;
 
