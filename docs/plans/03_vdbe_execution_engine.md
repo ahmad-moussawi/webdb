@@ -17,6 +17,171 @@ WebDB uses a **Bytecode Virtual Machine (VDBE)**:
 
 ---
 
+### 1.1 The Pure State Machine Architecture (Core ⟷ Host Communication)
+
+#### The Fundamental Problem
+In browser runtimes, disk I/O (Origin Private File System, IndexedDB) is **inherently asynchronous** (`await fileHandle.read(...)`).
+
+However, **WebAssembly / compiled C is strictly synchronous**. C code does not have `await`. A C function cannot block a thread to wait for disk I/O without completely locking the browser tab's UI event loop.
+
+#### The Solution: "Pause by Returning"
+Instead of blocking or attempting stack-saving tricks, **C pauses by simply executing a standard function `return` statement**.
+
+To "pause" execution on a cache miss:
+1. **C records its state in shared linear memory (`wasmMemory`):**
+   - It leaves the instruction pointer (`ctx->pc`) pointing directly at the current instruction (e.g. instruction index `14`).
+   - It writes the missing page identifier to `ctx->fault_page_id` (e.g. `42`).
+   - It sets `ctx->status = STATUS_PAGE_FAULT`.
+2. **C executes `return STATUS_PAGE_FAULT;`**:
+   The C function call stack unwinds completely to depth 0. Control returns immediately to JavaScript. JavaScript is now completely unblocked and can perform asynchronous disk reads with standard `await`.
+
+#### The Shared Memory Notebook (`VmContext`)
+Both JavaScript and C inspect the exact same WebAssembly linear memory (`ArrayBuffer`). The execution state is stored at fixed offset `VM_CONTEXT_OFFSET` (`0x405080`):
+
+```c
+// Stored at 0x405080 in shared linear memory
+typedef struct {
+    uint32_t pc;            // Program counter (current bytecode byte offset)
+    uint32_t status;        // 0=RUNNING, 1=DONE, 2=PAGE_FAULT, 3=BUFFER_FULL, 4=ERROR...
+    uint32_t fault_page_id; // Missing Page ID requested from disk
+    uint32_t result_count;  // Count of emitted rows in current chunk
+    uint32_t result_offset; // Write offset inside the 64KB Result Buffer
+    uint32_t arena_offset;  // Allocation offset in Transient Query Arena
+    uint32_t rows_affected; // Counter for mutated rows (DML)
+    uint32_t reserved;      // Reserved flags
+    Cursor   cursors[16];   // 16 table & index cursors (192 bytes)
+    Register registers[64]; // 64 evaluation registers (1024 bytes)
+    uint8_t  _padding[32];  // Aligns frame to exactly 1,280 bytes
+} VmFrame;
+
+typedef struct {
+    uint8_t  depth;         // Active nesting level (0=root, 1..7=subquery)
+    uint8_t  _pad[7];       // 8-byte alignment
+    VmFrame  frames[8];     // 8-frame nesting stack (10,240 bytes)
+} VmContext;                // Total: 10,248 bytes (within 12,288 byte window)
+```
+
+#### Code Walkthrough: How Core (C) Pauses
+```c
+// src/core/c/vm.c (Conceptual C Implementation)
+
+int vm_step(VmContext* ctx, const uint8_t* bytecode, uint32_t bytecode_len) {
+    VmFrame* frame = &ctx->frames[ctx->depth];
+
+    while (frame->pc < bytecode_len) {
+        uint8_t opcode = bytecode[frame->pc];
+
+        switch (opcode) {
+            case OP_NEXT_ROW: {
+                uint8_t  cursor_idx  = bytecode[frame->pc + 1];
+                uint16_t jump_target = *(uint16_t*)(&bytecode[frame->pc + 2]);
+                Cursor*  cur         = &frame->cursors[cursor_idx];
+
+                // If traversing to next page:
+                uint32_t target_page = cur->page_id;
+
+                // 1. Probe Page Table in shared memory: Is target_page resident in cache?
+                int slot = buf_pool_get_resident_slot(target_page);
+
+                if (slot == -1) {
+                    // CACHE MISS! The page is on disk, not in RAM.
+                    // DO NOT advance frame->pc! It remains pointing at OP_NEXT_ROW.
+                    frame->fault_page_id = target_page;
+                    frame->status        = STATUS_PAGE_FAULT;
+
+                    // Pause by standard C return:
+                    return STATUS_PAGE_FAULT;
+                }
+
+                // CACHE HIT: Bind slot and continue scanning
+                cur->slot_idx = (uint16_t)slot;
+                frame->pc += 4;
+                break;
+            }
+
+            case OP_HALT:
+                frame->status = STATUS_DONE;
+                return STATUS_DONE;
+        }
+    }
+    return STATUS_DONE;
+}
+```
+
+#### Code Walkthrough: How Host (JavaScript) Resumes Execution
+```typescript
+// src/host/driver/io_driver.ts (Host Driver State Machine Orchestrator)
+
+async function stepVmUntilDone(ctx: VmContext, bytecode: Uint8Array): Promise<void> {
+  while (true) {
+    // 1. Invoke synchronous C engine step
+    const status = vm_step(ctxOffset);
+
+    // 2. Query completed successfully
+    if (status === VmStatus.DONE) {
+      break;
+    }
+
+    // 3. Handle Page Fault: missing page must be loaded from VFS
+    if (status === VmStatus.PAGE_FAULT) {
+      const missingPageId = read_u32(view, activeFrameOffset + OFFSET_FAULT_PAGE_ID);
+
+      // Asynchronous disk block read (OPFS / IndexedDB)
+      const pageBytes = await vfs.readPage(missingPageId);
+
+      // Select victim cache slot via Clock Sweep, evicting/flushing if dirty
+      const slot = await ioDriver.acquirePage(missingPageId);
+
+      // Buffer pool and page table now map missingPageId -> slot.
+      // Re-invoking vm_step() resumes AT THE EXACT SAME INSTRUCTION (pc was not advanced)!
+      continue;
+    }
+
+    // 4. Handle Result Buffer Full: 64KB chunk must be drained
+    if (status === VmStatus.BUFFER_FULL) {
+      await hostApi.drainResultBuffer();
+      // Reset result write offset to 0 and continue pulling rows
+      write_u32(view, activeFrameOffset + OFFSET_RESULT_OFFSET, 0);
+      continue;
+    }
+
+    if (status >= VmStatus.ERROR) {
+      throw new Error(`VM execution failed with status code ${status}`);
+    }
+  }
+}
+```
+
+#### State Machine Sequence Diagram
+```
+    JavaScript (Host Layer)                           C / Wasm (Core Layer)
+    -----------------------                           ---------------------
+               │                                                │
+    1. Calls vm_step(ctxOffset) ───────────────────────────────►│ Starts bytecode loop
+               │                                                │
+               │                                                │ Evaluates OP_NEXT_ROW
+               │                                                │ Needs Page 42...
+               │                                                │ Probes Page Table -> MISS!
+               │                                                │ Writes: fault_page_id = 42
+               │                                                │ Writes: status = PAGE_FAULT
+               │                                                │ (Leaves pc unchanged)
+               │                                                │
+    2. Receives return value ◄──────────────────────────────────┘ return STATUS_PAGE_FAULT
+               │
+    3. Async Disk Read:
+       pageData = await vfs.readPage(42)
+       Allocates slot 5 in shared memory
+       Updates Page Table: 42 -> Slot 5
+               │
+    4. Calls vm_step(ctxOffset) again ─────────────────────────►│ Re-reads saved pc
+                                                                │ Evaluates OP_NEXT_ROW again
+                                                                │ Probes Page Table -> HIT in Slot 5!
+                                                                │ Advances pc += 4
+                                                                │ Continues next instruction...
+```
+
+---
+
 ## 2. Complete Opcode Binary Instruction Set
 
 All opcodes are encoded as packed binary bytes in shared memory. Numerical parameters follow Little-Endian byte ordering:
@@ -24,29 +189,32 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 | Range | Opcode Name | Byte (`uint8`) | Operands | Description & Behavior |
 | :--- | :--- | :---: | :--- | :--- |
 | **Cursor / Scan** | **`OP_HALT`** | `0x00` | None | Terminates `vm_step()`; sets status to `STATUS_DONE`. |
-| | **`OP_OPEN_CURSOR`** | `0x01` | `cursor: uint8`, `root_page: uint32` | Binds cursor slot to root Page ID; resets cell index to 0. |
-| | **`OP_REWIND`** | `0x02` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at first cell; jumps to `jump_target` if empty. |
-| | **`OP_NEXT_ROW`** | `0x03` | `cursor: uint8`, `jump_target: uint16` | Advances cell; follows `next_page_id`; jumps on EOF. |
-| | **`OP_COLUMN_INT`** | `0x04` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 32-bit/64-bit int into `r[reg]`; sets NULL if null. |
-| | **`OP_COLUMN_FLOAT`** | `0x05` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 64-bit float into `r[reg]`; sets NULL if null. |
-| | **`OP_COLUMN_TEXT`** | `0x06` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads string pointer & length from row into `r[reg]`. |
-| | **`OP_COLUMN_BLOB`** | `0x07` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads byte slice & length from row into `r[reg]`. |
-| | **`OP_LAST`** | `0x08` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at rightmost leaf cell for reverse scan. |
-| | **`OP_PREV_ROW`** | `0x09` | `cursor: uint8`, `jump_target: uint16` | Decrements cell; follows `prev_page_id`; jumps on BOF. |
-| **Logic / Control** | **`OP_IS_NULL`** | `0x10` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests Null-Bitmap bit; jumps if set (`NULL`). |
-| | **`OP_IS_NOT_NULL`** | `0x11` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests Null-Bitmap bit; jumps if clear (not null). |
+| | **`OP_OPEN_CURSOR`** | `0x01` | `cursor: uint8`, `root_page: uint32` | Binds cursor slot to root Page ID; checks cache residency; resets cell index to 0. |
+| | **`OP_REWIND`** | `0x02` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at first cell; jumps to `jump_target` if page has 0 cells. |
+| | **`OP_NEXT_ROW`** | `0x03` | `cursor: uint8`, `jump_target: uint16` | Advances cell; follows `next_page_id`; yields `STATUS_PAGE_FAULT` on cache miss; jumps on EOF. |
+| | **`OP_COLUMN_INT`** | `0x04` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 32-bit/64-bit int from row into `r[reg]`; sets NULL if null. |
+| | **`OP_COLUMN_FLOAT`** | `0x05` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 64-bit IEEE float from row into `r[reg]`; sets NULL if null. |
+| | **`OP_COLUMN_TEXT`** | `0x06` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads string byte offset & length from row into `r[reg]`. |
+| | **`OP_COLUMN_BLOB`** | `0x07` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads binary byte slice & length from row into `r[reg]`. |
+| | **`OP_COLUMN_UUID`** | `0x0A` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw UUID binary payload into `r[reg]` (`type = 6`). |
+| | **`OP_COLUMN_ULID`** | `0x0B` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw ULID binary payload into `r[reg]` (`type = 7`). |
+| | **`OP_LAST`** | `0x08` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at rightmost leaf cell for reverse B-tree scan. |
+| | **`OP_PREV_ROW`** | `0x09` | `cursor: uint8`, `jump_target: uint16` | Decrements cell; follows `prev_page_id`; yields `STATUS_PAGE_FAULT` on miss; jumps on BOF. |
+| **Logic / Control** | **`OP_IS_NULL`** | `0x10` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if set (`NULL`). |
+| | **`OP_IS_NOT_NULL`** | `0x11` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if clear (not null). |
 | | **`OP_EQ`** | `0x12` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL equality: jumps if `r[A] == r[B]` (both non-null). |
 | | **`OP_NE`** | `0x13` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL inequality: jumps if `r[A] != r[B]` (both non-null). |
 | | **`OP_GT`** | `0x14` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] > r[B]`. |
 | | **`OP_GE`** | `0x15` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] >= r[B]`. |
 | | **`OP_LT`** | `0x16` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] < r[B]`. |
 | | **`OP_LE`** | `0x17` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] <= r[B]`. |
-| | **`OP_JUMP`** | `0x18` | `jump_target: uint16` | Unconditional jump to bytecode target. |
+| | **`OP_JUMP`** | `0x18` | `jump_target: uint16` | Unconditional jump to bytecode target address. |
 | **Data / Output** | **`OP_LOAD_INT`** | `0x20` | `reg: uint8`, `val: int32` | Loads literal signed 32-bit int into `r[reg]`. |
 | | **`OP_LOAD_FLOAT`** | `0x21` | `reg: uint8`, `val: float64` | Loads literal 64-bit float into `r[reg]`. |
 | | **`OP_LOAD_TEXT`** | `0x22` | `reg: uint8`, `len: uint16`, `bytes: [len]` | Loads literal UTF-8 string into `r[reg]`. |
 | | **`OP_LOAD_NULL`** | `0x23` | `reg: uint8` | Sets `r[reg] = NULL` (`type = 0`). |
-| | **`OP_EMIT_ROW`** | `0x24` | `cursor: uint8` | Streams row into 64KB Result Buffer; yields `STATUS_BUFFER_FULL`. |
+| | **`OP_EMIT_ROW`** | `0x24` | `cursor: uint8` | Streams raw serialized row from cursor into 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
+| | **`OP_RESULT_ROW`** | `0x25` | `start_reg: uint8`, `num_cols: uint8` | Serializes projected registers into binary row in 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
 | | **`OP_CALL_UDF`** | `0x28` | `udf_id: uint16`, `arg_reg: uint8`, `out_reg: uint8` | Dispatches registered JS UDF function synchronously. |
 | **Sorter (ORDER BY)** | **`OP_SORTER_OPEN`** | `0x30` | `sorter_id: uint8`, `key_info_idx: uint8` | Initializes Sorter in Transient Query Arena with `KeyInfo`. |
 | | **`OP_SORTER_INSERT`** | `0x31` | `sorter_id: uint8`, `start_reg: uint8`, `num_keys: uint8`, `cursor: uint8` | Appends `SorterEntry` (16B) and sort keys in arena. |
@@ -66,24 +234,62 @@ Every register operation (`r[reg]`, `regA`, `regB`, `out_reg`) reads and writes 
 
 ```c
 typedef struct {
-    uint8_t  type;        // 0=NULL, 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB
+    uint8_t  type;        // 0=NULL, 1=INT32, 2=INT64, 3=FLOAT64, 4=TEXT, 5=BLOB, 6=UUID, 7=ULID
     uint8_t  flags;       // Reserved flags (0x1 = CONSTANT/LITERAL)
-    uint16_t len;         // Byte length for TEXT and BLOB payloads
-    uint32_t str_offset;  // Byte offset in shared memory (page or arena) for text/blob
+    uint16_t len;         // Byte length for TEXT, BLOB, UUID, and ULID payloads (fixed 16 for UUID/ULID)
+    uint32_t str_offset;  // Byte offset in shared memory (page or arena) for text/blob/uuid/ulid
     union {
         int32_t  i32;     // 32-bit signed integer
         int64_t  i64;     // 64-bit signed integer
         double   f64;     // 64-bit IEEE 754 float
+        uint8_t  raw16[8];// Inline direct slice for compact fixed representations
     } val;                // 8 bytes (8-byte aligned)
 } Register;               // Exact size: 16 bytes
 ```
 
-#### Register Characteristics:
+#### Register Characteristics & Supported Types:
 1. **Zero-Heap Numeric Storage:** Numbers reside directly in the `val` union (`val.i32`, `val.i64`, `val.f64`). Numeric comparisons execute in pure CPU registers without heap allocations or JS wrapper objects.
-2. **Zero-Copy TEXT/BLOB References:** For variable-length data, `type = 4 (TEXT)` or `5 (BLOB)` records the string byte length in `len` and points `str_offset` directly to the raw UTF-8 bytes residing inside the slotted page cache slot or query arena. String comparisons read directly from shared memory without copying string bytes into registers.
-3. **Register Range & Bounds Check:** The VM enforces $0 \le \text{reg\_idx} < 64$. The binary bytecode compiler validates register indices at compile time, rejecting $\ge 64$. At runtime, `vm_step()` guards against out-of-bounds register access.
-4. **Per-Frame Isolation:** Each `VmFrame` has its own independent 64-register file. Pushing a correlated subquery (`ctx->depth++`) gives the inner query a completely fresh register namespace without disturbing the outer query's live registers.
-5. **Lifecycle & Reset:** When a query begins, a frame is pushed, or a cursor rewinds, registers in the active frame are initialized to `type = 0 (NULL)`. Between yielded execution chunks (`STATUS_PAGE_FAULT`, `STATUS_BUFFER_FULL`), register state is permanently preserved in `wasmMemory` with zero stack-saving overhead.
+2. **Zero-Copy TEXT & BLOB References:** For variable-length data, `type = 4 (TEXT)` or `5 (BLOB)` records the byte length in `len` and points `str_offset` directly to the raw UTF-8 / binary bytes residing inside the slotted page cache slot or query arena. String comparisons read directly from shared memory via `memcmp` without copying string bytes into registers.
+3. **Fixed-Length Binary UUID & ULID Types:** `type = 6 (UUID)` and `type = 7 (ULID)` represent binary 16-byte identifiers (`len = 16`). `str_offset` points directly to the 16 bytes in page storage or literal arena memory. Lexicographical comparisons operate directly via 16-byte `memcmp`.
+4. **Register Range & Bounds Check:** The VM enforces $0 \le \text{reg\_idx} < 64$. The binary bytecode compiler validates register indices at compile time, rejecting $\ge 64$. At runtime, `vm_step()` guards against out-of-bounds register access.
+5. **Per-Frame Isolation:** Each `VmFrame` has its own independent 64-register file. Pushing a correlated subquery (`ctx->depth++`) gives the inner query a completely fresh register namespace without disturbing the outer query's live registers.
+6. **Lifecycle & Reset:** When a query begins, a frame is pushed, or a cursor rewinds, registers in the active frame are initialized to `type = 0 (NULL)`. Between yielded execution chunks (`STATUS_PAGE_FAULT`, `STATUS_BUFFER_FULL`), register state is permanently preserved in `wasmMemory` with zero stack-saving overhead.
+
+### 2.2 Cursor Layout & Buffer Pool Slot Resolution
+
+Each `VmFrame` embeds an array of **16 cursors** (`cursors[0..15]`, total 192 bytes at frame offset `32..223`). A cursor maintains the operational navigation state across B+Tree tables and indexes:
+
+```c
+typedef struct {
+    uint32_t page_id;      // Database Page ID currently focused (0 = uninitialized, 0xFFFFFFFF = arena)
+    uint16_t slot_idx;     // Buffer pool cache slot index (0..slot_count - 1) holding this page
+    uint16_t cell_idx;     // Slot directory index within the page (0..cell_count - 1)
+    uint16_t cell_offset;  // Byte offset of the active cell payload within the page
+    uint8_t  btree_depth;  // B-Tree traversal depth (0 = leaf)
+    uint8_t  flags;        // 0x01 = EOF, 0x02 = PINNED, 0x04 = ARENA_CURSOR
+} Cursor;                  // Exact size: 12 bytes
+```
+
+#### Slot Resolution Invariant:
+Whenever an instruction navigates to a `page_id` (`OP_OPEN_CURSOR`, `OP_NEXT_ROW`, `OP_PREV_ROW`):
+1. The VM probes the hash table using `buf_pool_get_resident_slot(page_id)`.
+2. **Hit:** `slot_idx` is updated in the cursor, and cell access proceeds immediately at `slot_idx * PAGE_SIZE`.
+3. **Miss:** The VM sets `frame->fault_page_id = page_id`, sets `frame->status = STATUS_PAGE_FAULT`, and immediately returns without advancing `pc`.
+
+### 2.3 Virtual Machine Status Codes
+
+The status field in each `VmFrame` communicates execution state between Core and Host:
+
+| Code (`uint32`) | Identifier | Meaning | Host Action Required |
+| :---: | :--- | :--- | :--- |
+| `0` | **`STATUS_RUNNING`** | VM instruction execution is currently in progress. | Internal VM state. |
+| `1` | **`STATUS_DONE`** | Query completed successfully. | Read rows/mutations, release locks. |
+| `2` | **`STATUS_PAGE_FAULT`** | Missing page encountered during scan/seek. | Read `fault_page_id`, load from VFS into cache slot, re-invoke `vm_step()`. |
+| `3` | **`STATUS_BUFFER_FULL`** | 64KB Result Buffer is full of serialized rows. | Drain rows to JS objects, reset `result_offset = 0`, re-invoke `vm_step()`. |
+| `4` | **`STATUS_ERROR`** | Internal engine execution error occurred. | Inspect error code, reject query Promise. |
+| `5` | **`STATUS_TIMEOUT`** | Instruction cycle limit (10,000,000 cycles) exceeded. | Abort query with `QueryTimeoutError`. |
+| `6` | **`STATUS_ERR_ARENA_EXHAUSTED`** | Transient Query Arena exceeded `maxQueryMemory` (16MB). | Reject query with `QueryArenaExhaustedError`. |
+| `7` | **`STATUS_ERR_INVALID_BYTECODE`** | Corrupt opcode or jump target out-of-bounds. | Abort query with `InvalidBytecodeError`. |
 
 ---
 
@@ -111,7 +317,7 @@ In SQL and WebDB, `NULL` represents missing or unknown data. Register comparison
 The Bytecode VM does not materialize whole result sets in memory. Instead, it operates as a high-performance **Chunked Pull Stream**:
 
 ```
-[VM executes bytecode] ──► OP_EMIT_ROW copies row into 64KB Result Buffer
+[VM executes bytecode] ──► OP_EMIT_ROW / OP_RESULT_ROW writes row into 64KB Result Buffer
                                       │
                Has Result Buffer reached 64KB capacity?
                                      / \
@@ -124,13 +330,31 @@ The Bytecode VM does not materialize whole result sets in memory. Instead, it op
   Host JS calls vm_step() to pull next batch
 ```
 
+### 4.1 Record Framing Format (`0x408080..0x41807F`, 64 KB)
+Rows are packed contiguously into the Output Result Buffer using length-prefixed binary framing:
+- `[record_length: uint16]` (2 bytes, Little-Endian)
+- `[record_bytes: uint8[record_length]]` (raw serialized binary row payload)
+
+### 4.2 Emission Opcodes
+1. **`OP_EMIT_ROW (0x24, cursor: uint8)`**:
+   Copies the raw serialized record currently focused under `cursor` directly from its page cache slot into the Result Buffer.
+2. **`OP_RESULT_ROW (0x25, start_reg: uint8, num_cols: uint8)`**:
+   Serializes `num_cols` projected registers (`start_reg .. start_reg + num_cols - 1`) into a dynamic binary row with Null-Bitmap and variable-offset table directly into the Result Buffer.
+
+### 4.3 Buffer Full Invariant
+If adding the next row requires `result_offset + 2 + record_len > 65,536` bytes:
+- The VM leaves `frame->pc` positioned at the emission instruction (or current loop cycle).
+- The VM sets `frame->status = STATUS_BUFFER_FULL`.
+- `vm_step()` returns `STATUS_BUFFER_FULL`.
+- The Host JS drains all complete records, resets `result_offset = 0` and `result_count = 0`, and re-invokes `vm_step()`.
+
 - **Guaranteed Bounded Memory:** Regardless of whether a table has 100 rows or 10,000,000 rows, memory consumption for the result pipeline remains strictly bounded at **64 KB**.
 
 ---
 
 ## 5. Transient Query Arena, Aggregations & Sorter Architecture
 
-The Transient Query Arena (`0x420000..Ceiling`, default 16 MB, configurable via `maxQueryMemory` up to 2 GB) provides ultra-fast bump-allocated scratch memory for aggregations (`GROUP BY`) and sorting (`ORDER BY`).
+The Transient Query Arena (`0x430000..Ceiling`, default 16 MB, configurable via `maxQueryMemory` up to 2 GB) provides ultra-fast bump-allocated scratch memory for aggregations (`GROUP BY`) and sorting (`ORDER BY`).
 
 ### 5.1 Hash Aggregations (`GROUP BY` without Index)
 
@@ -252,7 +476,7 @@ When sorting on a single indexed column in descending order (`orderBy(indexed_co
 WebDB executes all data modification operations through the VDBE step loop using dedicated mutation opcodes:
 
 #### A. Tracking Affected Rows (`ctx->frames[ctx->depth].rows_affected`)
-- Each `VmFrame` embeds `uint32_t rows_affected` at byte offset `24..27` within the frame (absolute address `0x4010A0` for root frame 0: `0x401080 + 8 + 24`).
+- Each `VmFrame` embeds `uint32_t rows_affected` at byte offset `24..27` within the frame (absolute address `0x4050A0` for root frame 0: `0x405080 + 8 + 24`).
 - Initialized to `0` at query execution start.
 - Incremented every time a row is modified or deleted: `ctx->frames[ctx->depth].rows_affected++`.
 - When `OP_HALT` is reached, the host retrieves `{ rowsAffected: ctx->frames[ctx->depth].rows_affected }`.
