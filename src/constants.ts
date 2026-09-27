@@ -1,5 +1,5 @@
 // Re-export all layout-computed offsets and structures
-export * from "./layouts/index.js";
+export * from "./layouts/index.ts";
 
 // Engine Versions
 export const CURRENT_ENGINE_VERSION = 1;
@@ -9,9 +9,9 @@ export const CURRENT_MIN_READ_VERSION = 1;
 export const PAGE_TYPE_FREE = 0x00;
 export const PAGE_TYPE_INDEX_INTERIOR = 0x02;
 export const PAGE_TYPE_TABLE_INTERIOR = 0x05;
-export const PAGE_TYPE_INDEX_LEAF = 0x0A;
-export const PAGE_TYPE_CATALOG_PAGE = 0x0C;
-export const PAGE_TYPE_LEAF_DATA = 0x0D;
+export const PAGE_TYPE_INDEX_LEAF = 0x0a;
+export const PAGE_TYPE_CATALOG_PAGE = 0x0c;
+export const PAGE_TYPE_LEAF_DATA = 0x0d;
 
 // VmContext Frame Limits
 export const VM_FRAME_SIZE = 1280;

@@ -11,19 +11,19 @@ import {
   PAGE_HEADER_OFFSET_TYPE,
   PAGE_HEADER_SIZE,
   computeBufferPoolOffsets,
-} from "../../constants.js";
+} from "../../constants.ts";
 
 export type BufferPoolOffsets = ReturnType<typeof computeBufferPoolOffsets>;
 
-import { IVfsAdapter } from "../storage/vfs.js";
-import { Io } from "../storage/io.js";
-import { read_u32, write_u32, read_u8, memset } from "../../shared/index.js";
+import { IVfsAdapter } from "../storage/vfs.ts";
+import { Io } from "../storage/io.ts";
+import { read_u32, write_u32, read_u8, memset } from "../../shared/index.ts";
 import {
   CorruptPageError,
   QueryArenaExhaustedError,
   VmStatus,
   VmContext,
-} from "../../types/index.js";
+} from "../../types/index.ts";
 import {
   page_init,
   page_init_free,
@@ -40,7 +40,7 @@ import {
   buf_pool_unpin_slot,
   buf_pool_is_pinned,
   buf_pool_select_eviction_victim,
-} from "../../core/index.js";
+} from "../../core/index.ts";
 
 // ============================================================================
 // Helper to create Wasm Memory

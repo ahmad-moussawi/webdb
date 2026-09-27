@@ -6,14 +6,14 @@ import {
   PAGE_TYPE_FREE,
   PAGE_TYPE_CATALOG_PAGE,
   computeBufferPoolOffsets,
-} from "../../constants.js";
-import { page_get_type } from "./page.c.js";
+} from "../../constants.ts";
+import { page_get_type } from "./page.c.ts";
 import {
   page_table_get,
   page_table_set,
   page_table_delete,
-} from "./page_table.c.js";
-import { QueryArenaExhaustedError } from "../../types/index.js";
+} from "./page_table.c.ts";
+import { QueryArenaExhaustedError } from "../../types/index.ts";
 import {
   memcpy,
   memset,
@@ -31,7 +31,7 @@ import {
   set_bit,
   clear_bit,
   c_assert,
-} from "../../shared/c_runtime.js";
+} from "../../shared/c_runtime.ts";
 
 // ============================================================================
 // C-Style Functional Primitives (Drop-In C Port Reference Implementation)

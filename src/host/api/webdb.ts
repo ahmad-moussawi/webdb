@@ -3,7 +3,7 @@ import {
   RESULT_BUFFER_OFFSET,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
-} from "../../constants.js";
+} from "../../constants.ts";
 import {
   ColumnDefinition,
   TableMeta,
@@ -13,13 +13,16 @@ import {
   VmStatus,
   QueryTimeoutError,
   InvalidBytecodeError,
-} from "../../types/index.js";
-import { IVfsAdapter } from "../storage/vfs.js";
-import { MemoryVfsAdapter } from "../storage/memory.js";
-import { IndexedDbVfsAdapter } from "../storage/idb.js";
-import { OpfsVfsAdapter } from "../storage/opfs.js";
-import { Io } from "../storage/io.js";
-import { BufferPoolDriver, createWasmMemory } from "../driver/buffer_pool_driver.js";
+} from "../../types/index.ts";
+import { IVfsAdapter } from "../storage/vfs.ts";
+import { MemoryVfsAdapter } from "../storage/memory.ts";
+import { IndexedDbVfsAdapter } from "../storage/idb.ts";
+import { OpfsVfsAdapter } from "../storage/opfs.ts";
+import { Io } from "../storage/io.ts";
+import {
+  BufferPoolDriver,
+  createWasmMemory,
+} from "../driver/buffer_pool_driver.ts";
 import {
   catalog_init_page1,
   catalog_read_page1_header,
@@ -35,26 +38,26 @@ import {
   page_set_next_page_id,
   page_serialize_row,
   page_deserialize_row,
-} from "../../core/index.js";
+} from "../../core/index.ts";
 import {
   createVmContext,
   resetVmContext,
   VmContext,
   IPageProvider,
-} from "../../shared/index.js";
-import { vm_step } from "../../core/index.js";
+} from "../../shared/index.ts";
+import { vm_step } from "../../core/index.ts";
 import {
   compileQuery,
   QueryFilter,
   disassembleBytecode,
   formatDisassembly,
-} from "../compiler/compiler.js";
+} from "../compiler/compiler.ts";
 import {
   QueryBuilder,
   type ExplainOutput,
   type IDatabaseQueryExecutor,
   type QueryExecutionOptions,
-} from "./query_builder.js";
+} from "./query_builder.ts";
 
 export {
   QueryBuilder,
@@ -109,7 +112,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
     const memory = createWasmMemory(slotCount, maxQueryMemory);
     const io = new Io({ vfs, memory });
-    const driver = new BufferPoolDriver({ io, memory, slotCount, maxQueryMemory });
+    const driver = new BufferPoolDriver({
+      io,
+      memory,
+      slotCount,
+      maxQueryMemory,
+    });
 
     // Check if Page 1 exists in storage
     const page1Data = await vfs.readPage(1);

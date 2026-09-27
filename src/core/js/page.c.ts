@@ -11,7 +11,7 @@ import {
   TABLE_INTERIOR_SPLIT_INDEX,
   MAX_COLUMNS_PER_TABLE,
   PAGE_HEADER_OFFSET_CHECKSUM,
-} from "../../constants.js";
+} from "../../constants.ts";
 import {
   DataType,
   ColumnFlag,
@@ -22,8 +22,8 @@ import {
   RowSizeLimitExceededError,
   NotNullConstraintError,
   TooManyColumnsError,
-} from "../../types/index.js";
-import { UuidCodec, UlidCodec } from "./codecs.c.js";
+} from "../../types/index.ts";
+import { UuidCodec, UlidCodec } from "./codecs.c.ts";
 
 const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();

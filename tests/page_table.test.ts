@@ -4,7 +4,7 @@ import {
   page_table_get,
   page_table_set,
   page_table_delete,
-} from "../src/core/js/page_table.c.js";
+} from "../src/core/js/page_table.c.ts";
 
 describe("Test Suite: Page Table Binary Hash Table (src/core/js/page_table.c.ts)", () => {
   it("computes stable 32-bit hash within bucket mask bounds", () => {

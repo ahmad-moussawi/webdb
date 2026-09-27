@@ -1,4 +1,4 @@
-import { WebDB } from "../src/index.js";
+import { WebDB } from "../src/index.ts";
 
 async function main() {
   const db = await WebDB.open({ name: "demo_db", storage: "memory" });

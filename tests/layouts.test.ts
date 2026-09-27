@@ -44,7 +44,7 @@ import {
   PAGE_SCRATCHPAD_OFFSET,
   TRANSIENT_ARENA_OFFSET,
   computeBufferPoolOffsets,
-} from "../src/layouts/index.js";
+} from "../src/layouts/index.ts";
 
 describe("Layout Architecture Tests (tests/layouts.test.ts)", () => {
   it("1. Slotted Page Header Layout matches 16-byte specification", () => {

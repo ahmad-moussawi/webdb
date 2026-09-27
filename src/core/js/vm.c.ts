@@ -6,22 +6,22 @@ import {
   PAGE_TO_SLOT_SIZE,
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
-} from "../../constants.js";
-import { OpCode, VmStatus, DataType, ColumnMeta } from "../../types/index.js";
+} from "../../constants.ts";
+import { OpCode, VmStatus, DataType, ColumnMeta } from "../../types/index.ts";
 import {
   page_get_cell_count,
   page_get_cell_offset,
   page_get_next_page_id,
-} from "./page.c.js";
-import { buf_pool_get_resident_slot } from "./buffer_pool.c.js";
-import { UuidCodec, UlidCodec } from "./codecs.c.js";
+} from "./page.c.ts";
+import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
+import { UuidCodec, UlidCodec } from "./codecs.c.ts";
 
 import {
   type VmCursor,
   type VmContext,
   createVmContext,
   resetVmContext,
-} from "../../shared/index.js";
+} from "../../shared/index.ts";
 
 export { createVmContext, resetVmContext };
 export type { VmCursor, VmContext };
@@ -129,12 +129,11 @@ export function sql_like_match(str: string, pattern: string): boolean {
   while (s < s_len) {
     if (
       p < p_len &&
-      (pattern[p] === '_' ||
-        pattern[p].toLowerCase() === str[s].toLowerCase())
+      (pattern[p] === "_" || pattern[p].toLowerCase() === str[s].toLowerCase())
     ) {
       s++;
       p++;
-    } else if (p < p_len && pattern[p] === '%') {
+    } else if (p < p_len && pattern[p] === "%") {
       star_p = p++;
       star_s = s;
     } else if (star_p !== -1) {
@@ -145,7 +144,7 @@ export function sql_like_match(str: string, pattern: string): boolean {
     }
   }
 
-  while (p < p_len && pattern[p] === '%') {
+  while (p < p_len && pattern[p] === "%") {
     p++;
   }
 
@@ -745,7 +744,7 @@ export function vm_step(
       /**
        * OP_NE (0x13)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) inequality check: r[reg_a] != r[reg_b].
+       * Three-Valued Logic (3VL) inequality check: r[reg_a] !== r[reg_b].
        */
       case OpCode.OP_NE: {
         const reg_a = bytecode[ctx.pc];
@@ -878,17 +877,17 @@ export function vm_step(
        * 3VL SQL LIKE: jumps to jump_target if r[reg_str] matches r[reg_pat].
        */
       case OpCode.OP_STR_LIKE: {
-        const regStr = bytecode[ctx.pc];
-        const regPat = bytecode[ctx.pc + 1];
+        const reg_str = bytecode[ctx.pc];
+        const reg_pat = bytecode[ctx.pc + 1];
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
         if (jump_target > code_len) {
           ctx.status = VmStatus.INVALID_BYTECODE;
           return VmStatus.INVALID_BYTECODE;
         }
-        const val_str = ctx.registers[regStr];
-        const val_pat = ctx.registers[regPat];
-        if (val_str == null || val_pat == null) {
+        const val_str = ctx.registers[reg_str];
+        const val_pat = ctx.registers[reg_pat];
+        if (val_str === null || val_pat === null) {
           break; // 3VL UNKNOWN: do not jump
         }
         if (sql_like_match(String(val_str), String(val_pat))) {
@@ -903,17 +902,17 @@ export function vm_step(
        * 3VL SQL NOT LIKE: jumps to jump_target if r[reg_str] does NOT match r[reg_pat].
        */
       case OpCode.OP_STR_NOT_LIKE: {
-        const regStr = bytecode[ctx.pc];
-        const regPat = bytecode[ctx.pc + 1];
+        const reg_str = bytecode[ctx.pc];
+        const reg_pat = bytecode[ctx.pc + 1];
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
         if (jump_target > code_len) {
           ctx.status = VmStatus.INVALID_BYTECODE;
           return VmStatus.INVALID_BYTECODE;
         }
-        const val_str = ctx.registers[regStr];
-        const val_pat = ctx.registers[regPat];
-        if (val_str == null || val_pat == null) {
+        const val_str = ctx.registers[reg_str];
+        const val_pat = ctx.registers[reg_pat];
+        if (val_str === null || val_pat === null) {
           break; // 3VL UNKNOWN: do not jump
         }
         if (!sql_like_match(String(val_str), String(val_pat))) {
@@ -928,17 +927,17 @@ export function vm_step(
        * 3VL Substring search: jumps to jump_target if r[reg_str] contains r[reg_sub].
        */
       case OpCode.OP_STR_CONTAINS: {
-        const regStr = bytecode[ctx.pc];
-        const regSub = bytecode[ctx.pc + 1];
+        const reg_str = bytecode[ctx.pc];
+        const reg_sub = bytecode[ctx.pc + 1];
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
         if (jump_target > code_len) {
           ctx.status = VmStatus.INVALID_BYTECODE;
           return VmStatus.INVALID_BYTECODE;
         }
-        const val_str = ctx.registers[regStr];
-        const val_sub = ctx.registers[regSub];
-        if (val_str == null || val_sub == null) {
+        const val_str = ctx.registers[reg_str];
+        const val_sub = ctx.registers[reg_sub];
+        if (val_str === null || val_sub === null) {
           break; // 3VL UNKNOWN: do not jump
         }
         if (String(val_str).includes(String(val_sub))) {
@@ -953,17 +952,17 @@ export function vm_step(
        * 3VL Prefix check: jumps to jump_target if r[reg_str] starts with r[reg_pfx].
        */
       case OpCode.OP_STR_STARTS_WITH: {
-        const regStr = bytecode[ctx.pc];
-        const regPfx = bytecode[ctx.pc + 1];
+        const reg_str = bytecode[ctx.pc];
+        const reg_pfx = bytecode[ctx.pc + 1];
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
         if (jump_target > code_len) {
           ctx.status = VmStatus.INVALID_BYTECODE;
           return VmStatus.INVALID_BYTECODE;
         }
-        const val_str = ctx.registers[regStr];
-        const val_pfx = ctx.registers[regPfx];
-        if (val_str == null || val_pfx == null) {
+        const val_str = ctx.registers[reg_str];
+        const val_pfx = ctx.registers[reg_pfx];
+        if (val_str === null || val_pfx === null) {
           break; // 3VL UNKNOWN: do not jump
         }
         if (String(val_str).startsWith(String(val_pfx))) {
@@ -978,17 +977,17 @@ export function vm_step(
        * 3VL Suffix check: jumps to jump_target if r[reg_str] ends with r[reg_sfx].
        */
       case OpCode.OP_STR_ENDS_WITH: {
-        const regStr = bytecode[ctx.pc];
-        const regSfx = bytecode[ctx.pc + 1];
+        const reg_str = bytecode[ctx.pc];
+        const reg_sfx = bytecode[ctx.pc + 1];
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
         if (jump_target > code_len) {
           ctx.status = VmStatus.INVALID_BYTECODE;
           return VmStatus.INVALID_BYTECODE;
         }
-        const val_str = ctx.registers[regStr];
-        const val_sfx = ctx.registers[regSfx];
-        if (val_str == null || val_sfx == null) {
+        const val_str = ctx.registers[reg_str];
+        const val_sfx = ctx.registers[reg_sfx];
+        if (val_str === null || val_sfx === null) {
           break; // 3VL UNKNOWN: do not jump
         }
         if (String(val_str).endsWith(String(val_sfx))) {
@@ -1102,11 +1101,12 @@ export function vm_step(
        * Converts string in r[src_reg] to lowercase and stores into r[dest_reg].
        */
       case OpCode.OP_STR_LOWER: {
-        const srcReg = bytecode[ctx.pc];
-        const destReg = bytecode[ctx.pc + 1];
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
         ctx.pc += 2;
-        const val = ctx.registers[srcReg];
-        ctx.registers[destReg] = val != null ? String(val).toLowerCase() : null;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null ? String(val).toLowerCase() : null;
         break;
       }
 
@@ -1116,11 +1116,12 @@ export function vm_step(
        * Converts string in r[src_reg] to uppercase and stores into r[dest_reg].
        */
       case OpCode.OP_STR_UPPER: {
-        const srcReg = bytecode[ctx.pc];
-        const destReg = bytecode[ctx.pc + 1];
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
         ctx.pc += 2;
-        const val = ctx.registers[srcReg];
-        ctx.registers[destReg] = val != null ? String(val).toUpperCase() : null;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null ? String(val).toUpperCase() : null;
         break;
       }
 
@@ -1130,11 +1131,11 @@ export function vm_step(
        * Computes UTF-8 / character length of string in r[src_reg] and stores into r[dest_reg] (int32).
        */
       case OpCode.OP_STR_LENGTH: {
-        const srcReg = bytecode[ctx.pc];
-        const destReg = bytecode[ctx.pc + 1];
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
         ctx.pc += 2;
-        const val = ctx.registers[srcReg];
-        ctx.registers[destReg] = val != null ? String(val).length : null;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] = val !== null ? String(val).length : null;
         break;
       }
 
@@ -1144,25 +1145,25 @@ export function vm_step(
        * 1-indexed SQL SUBSTR. Extracts substring from r[src_reg] starting at r[start_reg] for r[len_reg] characters.
        */
       case OpCode.OP_STR_SUBSTR: {
-        const srcReg = bytecode[ctx.pc];
-        const startReg = bytecode[ctx.pc + 1];
-        const lenReg = bytecode[ctx.pc + 2];
-        const destReg = bytecode[ctx.pc + 3];
+        const src_reg = bytecode[ctx.pc];
+        const start_reg = bytecode[ctx.pc + 1];
+        const len_reg = bytecode[ctx.pc + 2];
+        const dest_reg = bytecode[ctx.pc + 3];
         ctx.pc += 4;
-        const val = ctx.registers[srcReg];
-        const start = ctx.registers[startReg];
-        const len = ctx.registers[lenReg];
-        if (val == null || start == null) {
-          ctx.registers[destReg] = null;
+        const val = ctx.registers[src_reg];
+        const start = ctx.registers[start_reg];
+        const len = ctx.registers[len_reg];
+        if (val === null || start === null) {
+          ctx.registers[dest_reg] = null;
           break;
         }
         const str = String(val);
-        const sIdx = Math.max(0, Number(start) - 1);
-        if (len == null) {
-          ctx.registers[destReg] = str.slice(sIdx);
+        const s_idx = Math.max(0, Number(start) - 1);
+        if (len === null) {
+          ctx.registers[dest_reg] = str.slice(s_idx);
         } else {
           const l = Math.max(0, Number(len));
-          ctx.registers[destReg] = str.slice(sIdx, sIdx + l);
+          ctx.registers[dest_reg] = str.slice(s_idx, s_idx + l);
         }
         break;
       }

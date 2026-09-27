@@ -1,4 +1,4 @@
-import { PAGE_TO_SLOT_BUCKET_SIZE } from "../../constants.js";
+import { PAGE_TO_SLOT_BUCKET_SIZE } from "../../constants.ts";
 
 /**
  * Knuth's 32-bit multiplicative hash constant: floor(2^32 / phi).

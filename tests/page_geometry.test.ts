@@ -14,19 +14,19 @@ import {
   page_deserialize_row,
   catalog_init_page1,
   catalog_read_page1_header,
-} from "../src/core/index.js";
+} from "../src/core/index.ts";
 import {
   PAGE_SIZE,
   PAGE_HEADER_SIZE,
   PAGE_TYPE_LEAF_DATA,
-} from "../src/constants.js";
+} from "../src/constants.ts";
 import {
   DataType,
   ColumnFlag,
   TableMeta,
   RowSizeLimitExceededError,
-} from "../src/types/index.js";
-import { WebDB } from "../src/host/api/webdb.js";
+} from "../src/types/index.ts";
+import { WebDB } from "../src/host/api/webdb.ts";
 
 describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)", () => {
   const table: TableMeta = {

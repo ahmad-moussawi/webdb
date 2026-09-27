@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { BufferPool } from "../src/core/js/buffer_pool.c.js";
-import { Io } from "../src/host/storage/io.js";
+import { BufferPool } from "../src/core/js/buffer_pool.c.ts";
+import { Io } from "../src/host/storage/io.ts";
 import {
   BufferPoolDriver,
   createWasmMemory,
-} from "../src/host/driver/buffer_pool_driver.js";
-import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
-import { page_init } from "../src/core/index.js";
-import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.js";
+} from "../src/host/driver/buffer_pool_driver.ts";
+import { MemoryVfsAdapter } from "../src/host/storage/memory.ts";
+import { page_init } from "../src/core/index.ts";
+import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.ts";
 
 describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pinning.test.ts)", () => {
   it("1. Pinning Immunity: Pinned slots are never evicted under heavy eviction load", async () => {

@@ -1,3 +1,3 @@
-export * from "./page_format.js";
-export * from "./syspage_format.js";
-export * from "./pool_format.js";
+export * from "./page_format.ts";
+export * from "./syspage_format.ts";
+export * from "./pool_format.ts";

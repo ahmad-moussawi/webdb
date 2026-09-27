@@ -2,11 +2,11 @@ import {
   PAGE_SIZE,
   PAGE_HEADER_OFFSET_CHECKSUM,
   HEADER_OFFSET_PAGE_CHECKSUM,
-} from "../../constants.js";
-import { IVfsAdapter } from "./vfs.js";
-import { computePageChecksum, computePage1Checksum } from "./crc32.js";
-import { CorruptPageError } from "../../types/index.js";
-import { read_u32, write_u32 } from "../../shared/c_runtime.js";
+} from "../../constants.ts";
+import { IVfsAdapter } from "./vfs.ts";
+import { computePageChecksum, computePage1Checksum } from "./crc32.ts";
+import { CorruptPageError } from "../../types/index.ts";
+import { read_u32, write_u32 } from "../../shared/c_runtime.ts";
 
 export interface IoOptions {
   vfs: IVfsAdapter;

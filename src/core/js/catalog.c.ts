@@ -26,7 +26,7 @@ import {
   CURRENT_ENGINE_VERSION,
   CURRENT_MIN_READ_VERSION,
   PAGE_TYPE_CATALOG_PAGE,
-} from "../../constants.js";
+} from "../../constants.ts";
 
 import {
   DataType,
@@ -45,13 +45,13 @@ import {
   UnsupportedFormatVersionError,
   InvalidDatabaseError,
   CorruptPageError,
-} from "../../types/index.js";
-import { IPageProvider } from "../../shared/index.js";
+} from "../../types/index.ts";
+import { IPageProvider } from "../../shared/index.ts";
 
 import {
   computePage1Checksum,
   computePageChecksum,
-} from "../../host/storage/crc32.js";
+} from "../../host/storage/crc32.ts";
 
 const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();
