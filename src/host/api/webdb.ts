@@ -51,16 +51,16 @@ import {
 } from "../compiler/compiler.js";
 import {
   QueryBuilder,
-  ExplainOutput,
-  IDatabaseQueryExecutor,
-  QueryExecutionOptions,
+  type ExplainOutput,
+  type IDatabaseQueryExecutor,
+  type QueryExecutionOptions,
 } from "./query_builder.js";
 
 export {
   QueryBuilder,
-  ExplainOutput,
-  IDatabaseQueryExecutor,
-  QueryExecutionOptions,
+  type ExplainOutput,
+  type IDatabaseQueryExecutor,
+  type QueryExecutionOptions,
 };
 
 export interface WebDbOptions {

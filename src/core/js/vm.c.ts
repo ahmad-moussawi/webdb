@@ -17,13 +17,14 @@ import { buf_pool_get_resident_slot } from "./buffer_pool.c.js";
 import { UuidCodec, UlidCodec } from "./codecs.c.js";
 
 import {
-  VmCursor,
-  VmContext,
+  type VmCursor,
+  type VmContext,
   createVmContext,
   resetVmContext,
 } from "../../shared/index.js";
 
-export { VmCursor, VmContext, createVmContext, resetVmContext };
+export { createVmContext, resetVmContext };
+export type { VmCursor, VmContext };
 
 const text_decoder = new TextDecoder();
 

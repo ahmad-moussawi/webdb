@@ -3,15 +3,28 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Ultra-lean browser-native relational database engine",
+  "main": "./dist/webdb.umd.cjs",
+  "module": "./dist/webdb.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/webdb.js",
+      "require": "./dist/webdb.umd.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "generate:layouts": "node scripts/generate_layouts.js",
     "prebuild": "node scripts/generate_layouts.js",
-    "build": "tsc",
+    "build": "vite build",
     "pretest": "node scripts/generate_layouts.js",
     "test": "vitest run",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "demo": "tsc && node dist/examples/demo.js",
+    "demo": "vite-node examples/demo.ts",
     "playground": "node scripts/serve.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
@@ -23,6 +36,8 @@
     "markdown-it-mathjax3": "^4.3.2",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.70.1",
+    "vite": "^5.4.21",
+    "vite-plugin-dts": "^5.1.1",
     "vitepress": "^1.5.0",
     "vitest": "^3.0.0"
   }
