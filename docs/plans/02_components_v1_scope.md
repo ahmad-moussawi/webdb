@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary & Orchestration Boundary
 
-WebDB enforces a strict architectural boundary between **Host Orchestration (JavaScript/TypeScript)** and the **Engine Core (Strict C-Style JS in V1, Compiled C/Wasm in V2)**. 
+WebDB enforces a strict architectural boundary between **Host Orchestration (JavaScript/TypeScript)** and the **Engine Core (Strict C-Style JS in V1, Compiled C/Wasm in V2)**.
 
 All asynchronous operations (disk I/O, IndexedDB transactions, OPFS sync handles, microtask scheduling, and user Promise resolution) remain exclusively in the **Host Layer**. The **Engine Core** is a pure, synchronous, deterministic byte-manipulation state machine that accepts raw memory offsets, loops over binary bytecode, and returns numeric status codes.
 
@@ -35,20 +35,20 @@ All asynchronous operations (disk I/O, IndexedDB transactions, OPFS sync handles
 
 ### 2.1 Detailed Component Breakdown
 
-| Component Name | Layer | V1 Implementation | V2 Implementation | Invariants & Responsibilities |
-| :--- | :--- | :--- | :--- | :--- |
-| **Fluent Query Builder** | Host | TypeScript (`src/host/api/`) | TypeScript (`src/host/api/`) | Validates table/column names; builds query AST; enforces type constraints before bytecode emission. |
-| **Binary Bytecode Compiler** | Host | TypeScript (`src/host/compiler/`) | TypeScript (`src/host/compiler/`) | Translates query AST into flat `Uint8Array` bytecode; resolves column names to numeric indices; emits jump labels. |
-| **Async FIFO Query Queue** | Host | TypeScript (`src/host/driver/`) | TypeScript (`src/host/driver/`) | Strictly serializes execution through the single active `VmContext`. Manages user `Promise` resolution. |
-| **Async I/O Driver Loop** | Host | TypeScript (`src/host/driver/`) | TypeScript (`src/host/driver/`) | Drives synchronous `vm_step()`, handles `PAGE_FAULT` by calling VFS to read/write pages, streams rows on `BUFFER_FULL`. |
-| **Transaction Coordinator** | Host | TypeScript (`src/host/driver/`) | TypeScript (`src/host/driver/`) | Enforces **Exclusive Transaction Lease**; manages `BEGIN`, `COMMIT`, `ROLLBACK`; writes WAL commit markers. |
-| **IO Orchestrator (`io`)** | Host | TypeScript (`src/host/storage/io.ts`) | TypeScript (`src/host/storage/io.ts`) | Drives block I/O against OPFS (`FileSystemSyncAccessHandle`) or IndexedDB Object Stores via `IVfsAdapter`; coordinates page acquires, flushes, and free list. |
-| **Result Hydrator** | Host | TypeScript (`src/host/api/`) | TypeScript (`src/host/api/`) | Deserializes binary row records from the Output Result Buffer into JavaScript objects (`Record<string, any>`). |
-| **VM Execution Loop** | Core | C-Style JS (`src/core/js/`) | C / Wasm (`src/core/c/`) | Synchronous `while` loop running `switch (opcode)`. Manipulates `ArrayBuffer` directly without dynamic allocations. |
-| **Buffer Pool & Cache** | Core | C-Style JS (`src/core/js/`) | C / Wasm (`src/core/c/`) | Open-addressing `page_to_slot` hash table (0x401000); pin/unpin tracking; Clock eviction victim choice; dirty mask. |
-| **Slotted Page Engine** | Core | C-Style JS (`src/core/js/`) | C / Wasm (`src/core/c/`) | Reads/writes 4KB pages; slot directory pointer arithmetic; dynamic null-bitmap checking; 2048B limit enforcement. |
-| **B+Tree Traverser** | Core | C-Style JS (`src/core/js/`) | C / Wasm (`src/core/c/`) | Iterative tree search using `cursors[16]` stack; searches sorted keys; advances across leaf sibling pointers. |
-| **Result Marshaller** | Core | C-Style JS (`src/core/js/`) | C / Wasm (`src/core/c/`) | Copies filtered rows into Output Result Buffer; yields `STATUS_BUFFER_FULL` when 64KB capacity is reached. |
+| Component Name               | Layer | V1 Implementation                     | V2 Implementation                     | Invariants & Responsibilities                                                                                                                                 |
+| :--------------------------- | :---- | :------------------------------------ | :------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Fluent Query Builder**     | Host  | TypeScript (`src/host/api/`)          | TypeScript (`src/host/api/`)          | Validates table/column names; builds query AST; enforces type constraints before bytecode emission.                                                           |
+| **Binary Bytecode Compiler** | Host  | TypeScript (`src/host/compiler/`)     | TypeScript (`src/host/compiler/`)     | Translates query AST into flat `Uint8Array` bytecode; resolves column names to numeric indices; emits jump labels.                                            |
+| **Async FIFO Query Queue**   | Host  | TypeScript (`src/host/driver/`)       | TypeScript (`src/host/driver/`)       | Strictly serializes execution through the single active `VmContext`. Manages user `Promise` resolution.                                                       |
+| **Async I/O Driver Loop**    | Host  | TypeScript (`src/host/driver/`)       | TypeScript (`src/host/driver/`)       | Drives synchronous `vm_step()`, handles `PAGE_FAULT` by calling VFS to read/write pages, streams rows on `BUFFER_FULL`.                                       |
+| **Transaction Coordinator**  | Host  | TypeScript (`src/host/driver/`)       | TypeScript (`src/host/driver/`)       | Enforces **Exclusive Transaction Lease**; manages `BEGIN`, `COMMIT`, `ROLLBACK`; writes WAL commit markers.                                                   |
+| **IO Orchestrator (`io`)**   | Host  | TypeScript (`src/host/storage/io.ts`) | TypeScript (`src/host/storage/io.ts`) | Drives block I/O against OPFS (`FileSystemSyncAccessHandle`) or IndexedDB Object Stores via `IVfsAdapter`; coordinates page acquires, flushes, and free list. |
+| **Result Hydrator**          | Host  | TypeScript (`src/host/api/`)          | TypeScript (`src/host/api/`)          | Deserializes binary row records from the Output Result Buffer into JavaScript objects (`Record<string, any>`).                                                |
+| **VM Execution Loop**        | Core  | C-Style JS (`src/core/js/`)           | C / Wasm (`src/core/c/`)              | Synchronous `while` loop running `switch (opcode)`. Manipulates `ArrayBuffer` directly without dynamic allocations.                                           |
+| **Buffer Pool & Cache**      | Core  | C-Style JS (`src/core/js/`)           | C / Wasm (`src/core/c/`)              | Open-addressing `page_to_slot` hash table (0x401000); pin/unpin tracking; Clock eviction victim choice; dirty mask.                                           |
+| **Slotted Page Engine**      | Core  | C-Style JS (`src/core/js/`)           | C / Wasm (`src/core/c/`)              | Reads/writes 4KB pages; slot directory pointer arithmetic; dynamic null-bitmap checking; 2048B limit enforcement.                                             |
+| **B+Tree Traverser**         | Core  | C-Style JS (`src/core/js/`)           | C / Wasm (`src/core/c/`)              | Iterative tree search using `cursors[16]` stack; searches sorted keys; advances across leaf sibling pointers.                                                 |
+| **Result Marshaller**        | Core  | C-Style JS (`src/core/js/`)           | C / Wasm (`src/core/c/`)              | Copies filtered rows into Output Result Buffer; yields `STATUS_BUFFER_FULL` when 64KB capacity is reached.                                                    |
 
 ---
 
@@ -64,17 +64,17 @@ interface WebDbCoreEngine {
    * Explicitly passes all fixed-offset memory regions so the C engine needs zero hardcoded magic numbers.
    */
   vm_init(
-    cacheOffset: number,           // 0x000000: Start of 4KB slotted page cache
-    slotCount: number,             // e.g. 1024
-    slotToPageOffset: number,      // 0x400000: uint32_t slot_to_page[slotCount]
-    pageToSlotOffset: number,      // 0x401000: Open-addressing hash table (2048 x 8B)
-    pageToSlotBuckets: number,     // e.g. 2048
-    dirtyMaskOffset: number,       // 0x405000: Dynamic bitmask (slotCount / 8 bytes)
-    vmCtxOffset: number,           // 0x405080: 8-frame VmContext nesting stack (12KB)
-    resultBufOffset: number,       // 0x408080: Output result buffer (64KB)
-    bytecodeOffset: number,        // 0x418080: Compiled bytecode instruction buffer (32KB)
-    pageScratchOffset: number,     // 0x420080: Dedicated 4KB staging buffer for page compaction
-    transientArenaOffset: number   // 0x430000: Aligned start of growable transient arena
+    cacheOffset: number, // 0x000000: Start of 4KB slotted page cache
+    slotCount: number, // e.g. 1024
+    slotToPageOffset: number, // 0x400000: uint32_t slot_to_page[slotCount]
+    pageToSlotOffset: number, // 0x401000: Open-addressing hash table (2048 x 8B)
+    pageToSlotBuckets: number, // e.g. 2048
+    dirtyMaskOffset: number, // 0x405000: Dynamic bitmask (slotCount / 8 bytes)
+    vmCtxOffset: number, // 0x405080: 8-frame VmContext nesting stack (12KB)
+    resultBufOffset: number, // 0x408080: Output result buffer (64KB)
+    bytecodeOffset: number, // 0x418080: Compiled bytecode instruction buffer (32KB)
+    pageScratchOffset: number, // 0x420080: Dedicated 4KB staging buffer for page compaction
+    transientArenaOffset: number, // 0x430000: Aligned start of growable transient arena
   ): void;
 
   /**
@@ -107,6 +107,7 @@ interface WebDbCoreEngine {
 ## 4. Explicit V1 Query Scope & Limitations
 
 ### 4.1 Fully Supported Scope in V1
+
 1. **Connection & Configuration:**
    - `WebDB.open({ name, storage: 'opfs' | 'idb' | 'auto', cacheSize: '2MB' | '4MB' | '8MB' })`.
 2. **Schema DDL:**
@@ -147,6 +148,7 @@ interface WebDbCoreEngine {
      ```
 
 ### 4.2 Explicitly Deferred Features (Scheduled for V1.1+)
+
 - `FULL OUTER JOIN`, `RIGHT JOIN`, and hash-join acceleration (deferred to V1.1+; see [limitations.md §4.4–4.6](./limitations.md#_4-4-join-constraints-cursor-slot-allocation-query-builder-vs-engine-hard-limit)).
 - Window functions (`OVER (PARTITION BY ...)`), `ROLLUP`, and `CUBE` (deferred to V1.1+; see [limitations.md §4.5–4.6](./limitations.md#_4-5-subqueries-8-frame-correlated-execution-stack)).
 - Dynamic `ALTER TABLE` schema mutations (tables must be recreated in V1).
@@ -157,26 +159,29 @@ interface WebDbCoreEngine {
 ## 5. Exhaustive Edge Cases & Failure Modes
 
 ### A. Identifier & Schema Validation
-* [ ] **Case-Insensitive Identifiers:** Table and column names must resolve case-insensitively (e.g. `users`, `USERS`, `Users` resolve to the same table ID).
-* [ ] **Identifier Length Clamping:** Table and column names exceeding 64 characters must be rejected with `IdentifierTooLongError`.
-* [ ] **Duplicate Table / Column Names:** Creating a table with duplicate column names or creating an existing table without `ifNotExists` must throw `TableAlreadyExistsError`.
-* [ ] **Column Ceiling Violation:** Creating a table with $> 256$ column definitions must throw `TooManyColumnsError`.
-* [ ] **Cascade Drop on Active Indexes:** Executing `dropTable(name)` on a table with active secondary indexes automatically cascade-drops all associated indexes, recycles their B+Tree pages to the free-page list, and zeroes their `IndexDescriptor` slots in Page 1.
+
+- [ ] **Case-Sensitive Identifiers:** Table and column names are strictly case-sensitive (e.g. `users`, `USERS`, and `Users` are distinct identifiers), preserving exact casing for TypeScript/JavaScript object property mapping and O(1) byte comparisons in C/Wasm.
+- [ ] **Identifier Length Clamping:** Table and column names exceeding 64 characters must be rejected with `IdentifierTooLongError`.
+- [ ] **Duplicate Table / Column Names:** Creating a table with duplicate column names or creating an existing table without `ifNotExists` must throw `TableAlreadyExistsError`.
+- [ ] **Column Ceiling Violation:** Creating a table with $> 256$ column definitions must throw `TooManyColumnsError`.
+- [ ] **Cascade Drop on Active Indexes:** Executing `dropTable(name)` on a table with active secondary indexes automatically cascade-drops all associated indexes, recycles their B+Tree pages to the free-page list, and zeroes their `IndexDescriptor` slots in Page 1.
 
 ### B. Serialization, Constraints & Auto-Increment
-* [ ] **Missing Table Handling:** Executing a query or insert on a non-existent table must throw `TableNotFoundError`.
-* [ ] **Type Coercion & Range Safety:** Passing a floating-point number into an `INT32` column must truncate cleanly to 32-bit signed integer or throw `InvalidDataTypeError` on overflow.
-* [ ] **`NOT NULL` Constraint Guard:** Any attempt to set a `NOT NULL` column to `null` or `undefined` must throw `NotNullConstraintError` immediately before writing dirty bytes.
-* [ ] **`AUTO_INC` Column Semantics on `INSERT`:**
+
+- [ ] **Missing Table Handling:** Executing a query or insert on a non-existent table must throw `TableNotFoundError`.
+- [ ] **Type Coercion & Range Safety:** Passing a floating-point number into an `INT32` column must truncate cleanly to 32-bit signed integer or throw `InvalidDataTypeError` on overflow.
+- [ ] **`NOT NULL` Constraint Guard:** Any attempt to set a `NOT NULL` column to `null` or `undefined` must throw `NotNullConstraintError` immediately before writing dirty bytes.
+- [ ] **`AUTO_INC` Column Semantics on `INSERT`:**
   - If omitted or explicitly passed as `null`/`undefined`: auto-assigns current `auto_inc_next` and increments `auto_inc_next++` in `TableDescriptor`.
   - If explicitly provided with an integer value $V$: assigns $V$, and advances `auto_inc_next = max(auto_inc_next, V + 1n)`.
   - If `auto_inc_next` reaches $2^{63}-1$ (`INT64_MAX`): throws `IntegerOverflowError`.
-* [ ] **Order By Column Ceiling:** Querying with $> 8$ sort columns must throw `TooManyOrderByColumnsError` at compile time.
-* [ ] **Group By Column Ceiling:** Querying with $> 8$ grouping columns must throw `TooManyGroupByColumnsError` at compile time.
+- [ ] **Order By Column Ceiling:** Querying with $> 8$ sort columns must throw `TooManyOrderByColumnsError` at compile time.
+- [ ] **Group By Column Ceiling:** Querying with $> 8$ grouping columns must throw `TooManyGroupByColumnsError` at compile time.
 
 ### C. Queue & Concurrency Fail-Fasts
-* [ ] **Exclusive Transaction Lease Starvation:** Non-transaction queries enqueued during an active `db.transaction()` must wait in FIFO order without timing out or throwing lock conflicts.
-* [ ] **Abandoned Transaction Timeout (30 Seconds):** If user transaction code hangs on an unresolved network `Promise` inside `db.transaction()`, the JS Host must timeout after 30 seconds, automatically trigger `ROLLBACK`, release the lease, and unblock the queue.
+
+- [ ] **Exclusive Transaction Lease Starvation:** Non-transaction queries enqueued during an active `db.transaction()` must wait in FIFO order without timing out or throwing lock conflicts.
+- [ ] **Abandoned Transaction Timeout (30 Seconds):** If user transaction code hangs on an unresolved network `Promise` inside `db.transaction()`, the JS Host must timeout after 30 seconds, automatically trigger `ROLLBACK`, release the lease, and unblock the queue.
 
 ---
 
