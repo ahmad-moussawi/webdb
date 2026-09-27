@@ -6,15 +6,15 @@ import {
 } from '../src/types/index.js';
 import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
 import { Io } from '../src/host/storage/io.js';
-import { IoDriver, createWasmMemory } from '../src/host/driver/io_driver.js';
-import { computePageChecksum, computePage1Checksum } from '../src/host/storage/crc32.js';
+import { BufferPoolDriver, createWasmMemory } from '../src/host/driver/buffer_pool_driver.js';
+import { computePage1Checksum } from '../src/host/storage/crc32.js';
 
 describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integrity_version.test.ts)', () => {
   it('1. CRC32 Checksum Validation on Read: Bit flip in storage throws CorruptPageError', async () => {
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(32);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 32 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 32 });
 
     // Allocate and flush page 2
     const slot = await driver.acquirePage(2);
@@ -30,10 +30,10 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     storedPage![100] ^= 0x01; // Bit flip!
     await vfs.writePage(2, storedPage!);
 
-    // Create a new IoDriver to force reading from VFS
+    // Create a new BufferPoolDriver to force reading from VFS
     const newMemory = createWasmMemory(32);
     const newIo = new Io({ vfs, memory: newMemory });
-    const newDriver = new IoDriver({ io: newIo, memory: newMemory, slotCount: 32 });
+    const newDriver = new BufferPoolDriver({ io: newIo, memory: newMemory, slotCount: 32 });
 
     // Acquiring corrupted page must throw CorruptPageError
     await expect(newDriver.acquirePage(2)).rejects.toThrow(CorruptPageError);

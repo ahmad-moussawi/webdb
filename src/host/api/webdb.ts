@@ -16,7 +16,7 @@ import { MemoryVfsAdapter } from "../storage/memory.js";
 import { IndexedDbVfsAdapter } from "../storage/idb.js";
 import { OpfsVfsAdapter } from "../storage/opfs.js";
 import { Io } from "../storage/io.js";
-import { IoDriver, createWasmMemory } from "../driver/io_driver.js";
+import { BufferPoolDriver, createWasmMemory } from "../driver/buffer_pool_driver.js";
 import {
   catalog_init_page1,
   catalog_read_page1_header,
@@ -71,18 +71,18 @@ export interface WebDbOptions {
 export class WebDB implements IDatabaseQueryExecutor {
   readonly vfs: IVfsAdapter;
   readonly io: Io;
-  readonly driver: IoDriver;
+  readonly driver: BufferPoolDriver;
 
   /**
-   * Alias to driver for backwards-compatibility with callers/tests that inspect the buffer pool.
+   * Alias to driver for callers/tests that inspect the buffer pool.
    */
-  get pool(): IoDriver {
+  get pool(): BufferPoolDriver {
     return this.driver;
   }
 
   private vmCtx: VmContext;
 
-  private constructor(vfs: IVfsAdapter, io: Io, driver: IoDriver) {
+  private constructor(vfs: IVfsAdapter, io: Io, driver: BufferPoolDriver) {
     this.vfs = vfs;
     this.io = io;
     this.driver = driver;
@@ -106,7 +106,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
     const memory = createWasmMemory(slotCount, maxQueryMemory);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount, maxQueryMemory });
+    const driver = new BufferPoolDriver({ io, memory, slotCount, maxQueryMemory });
 
     // Check if Page 1 exists in storage
     const page1Data = await vfs.readPage(1);

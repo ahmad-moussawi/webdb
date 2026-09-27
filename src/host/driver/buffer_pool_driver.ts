@@ -71,7 +71,7 @@ export function createWasmMemory(
 // Async I/O Driver Loop (Host Layer)
 // ============================================================================
 
-export interface IoDriverOptions {
+export interface BufferPoolDriverOptions {
   vfs?: IVfsAdapter;
   io?: Io;
   memory?: WebAssembly.Memory;
@@ -85,13 +85,13 @@ export interface IoDriverOptions {
 }
 
 /**
- * Async I/O Driver Loop.
+ * Async Buffer Pool Driver Loop.
  *
  * Implemented 100% in TypeScript on the Host Layer.
  * Interacts with the C Engine purely through shared WebAssembly.Memory and layout offsets.
  * Does NOT import or invoke any C-layer classes.
  */
-export class IoDriver {
+export class BufferPoolDriver {
   readonly io: Io;
   readonly wasmMemory: WebAssembly.Memory;
   readonly buffer: ArrayBuffer;
@@ -132,7 +132,7 @@ export class IoDriver {
     return this.clock_hand;
   }
 
-  constructor(options: IoDriverOptions) {
+  constructor(options: BufferPoolDriverOptions) {
     this.slotCount =
       options.slotCount ?? options.pool?.slotCount ?? DEFAULT_SLOT_COUNT;
 
@@ -145,7 +145,7 @@ export class IoDriver {
 
     if (!memory) {
       throw new Error(
-        "IoDriver requires a valid WebAssembly.Memory (or pool with wasmMemory)",
+        "BufferPoolDriver requires a valid WebAssembly.Memory (or pool with wasmMemory)",
       );
     }
 
@@ -179,7 +179,7 @@ export class IoDriver {
     } else if (options.vfs) {
       this.io = new Io({ vfs: options.vfs, memory: this.wasmMemory });
     } else {
-      throw new Error("IoDriver requires either an Io instance or IVfsAdapter");
+      throw new Error("BufferPoolDriver requires either an Io instance or IVfsAdapter");
     }
 
     // Initialize slot-to-page map, page-to-slot hash table, and dirty mask to zeros

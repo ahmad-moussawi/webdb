@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { BufferPool } from "../src/core/js/buffer_pool.c.js";
 import { Io } from "../src/host/storage/io.js";
-import { IoDriver, createWasmMemory } from "../src/host/driver/io_driver.js";
+import { BufferPoolDriver, createWasmMemory } from "../src/host/driver/buffer_pool_driver.js";
 import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
 import { page_init } from "../src/core/index.js";
 import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.js";
@@ -12,7 +12,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Create a small cache of 32 slots for quick saturation and eviction testing
     const memory = createWasmMemory(32);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 32 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 32 });
     const pool = driver;
 
     // Fill all 32 slots with pages 1..32
@@ -47,7 +47,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(64);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 64 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 64 });
     const pool = driver;
 
     const slot = 19;
@@ -81,7 +81,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 4 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
     const pool = driver;
 
     // Acquire pages 1..4 (filling all 4 slots)
@@ -124,7 +124,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
 
     // Invalid slot index
@@ -180,7 +180,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
 
     // Initialize Page 1 total_pages = 5
@@ -252,7 +252,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 4 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
     const pool = driver;
 
     await driver.acquirePage(1);
@@ -297,7 +297,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 2 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 2 });
     const pool = driver;
 
     // Acquire and atomically pin Page 2 in slot 1
@@ -321,7 +321,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 2 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 2 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 1, true); // total_pages = 1
 
@@ -346,7 +346,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 4 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 3, true); // total_pages = 3
 
@@ -380,7 +380,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with 3 slots: slot 0 (Page 1), slots 1..2
     const memory = createWasmMemory(3);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 3 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 3 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 2, true); // total_pages = 2
 
@@ -428,7 +428,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
 
     let readCount = 0;
@@ -463,7 +463,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 2 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 2 });
     const pool = driver;
 
     // Page 2 in slot 1
@@ -506,7 +506,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(16);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 16 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 16 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 1, true); // total_pages = 1
 
@@ -546,7 +546,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(16);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 16 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 16 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 10, true); // total_pages = 10
 
@@ -575,7 +575,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
     pool.getSlotDataView(0).setUint32(12, 5, true); // total_pages = 5
 
@@ -600,7 +600,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
 
     const slot2 = await driver.acquirePage(2);
@@ -641,7 +641,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const vfs = new MemoryVfsAdapter();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
-    const driver = new IoDriver({ io, memory, slotCount: 8 });
+    const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
     const pool = driver;
 
     const slot2 = await driver.acquirePage(2);
