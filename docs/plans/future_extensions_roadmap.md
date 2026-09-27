@@ -304,10 +304,82 @@ const db = await WebDB.open({
 
 ---
 
-## 8. Phased Implementation Roadmap
+## 8. Vectorized User-Defined Functions (Batched UDF Evaluation)
+
+### 8.1 The Row-by-Row FFI Bottleneck
+
+While standard scalar functions (math, string formatting, collation) are implemented natively inside C/Wasm, applications frequently require custom **User-Defined Functions (UDFs)** written in JavaScript (e.g. domain validation, custom business formulas, application-specific parsing).
+
+Executing a JavaScript callback on a row-by-row basis in large sequential scans (e.g. 100,000 rows) causes three critical performance bottlenecks:
+1. **Wasm ⟷ JS Boundary Transitions:** Calling an imported JavaScript function from Wasm incurs a foreign-function context switch on every single row (100,000 round-trips).
+2. **Garbage Collection (GC) Thrashing:** Text in WebDB resides as raw UTF-8 bytes in slotted page memory. Passing a string to a JS function forces the engine to decode and allocate a JavaScript `String` object on the V8/SpiderMonkey heap for every evaluated row, triggering browser garbage collection pauses.
+3. **Register Spilling:** Calling outside Wasm prevents the JIT compiler from keeping registers alive across loop iterations.
+
+### 8.2 Execution Scenarios & Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Scenario A: Projection UDF (SELECT my_udf(col))                │
+│                                                                                        │
+│   [VM Filters & Scans] ──► [64KB Result Buffer] ──► [Host JS Drains Chunk]            │
+│                                                                 │                      │
+│                                            (Fast JS Map Loop over 500-1,000 rows)      │
+│                                                                 ▼                      │
+│                                                        [Returned to User]              │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Scenario B: Filter UDF (WHERE my_udf(col) = true)              │
+│                                                                                        │
+│   [VM Scans 64 Rows] ────► [Arena Vector Buffer] ────► [Host JS Batch Evaluation]      │
+│                                                                 │                      │
+│   [Emits Matching Rows] ◄── [Resume vm_step()] ◄────── [64-bit Selection Bitmask]      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### A. Scenario A: Projection UDFs (`SELECT my_udf(col)`) — Zero VM Overhead
+When UDFs appear in the `SELECT` projection list, the VM evaluates the query filters and emits raw serialized rows into the **64KB Result Buffer**.
+- When Host JavaScript drains the buffer chunk (e.g. 500–1,000 rows), JS applies the UDF transformation in a single tight JavaScript loop.
+- **VM Impact:** Zero modifications to `vm_step()`; zero Wasm-to-JS calls during the scan.
+
+#### B. Scenario B: Filter UDFs (`WHERE my_udf(col) = true`) — Vectorized State Machine
+When a UDF is used as a filter predicate, the VM cannot make an emit/skip decision on row 1 until the UDF evaluates. To avoid row-by-row FFI calls, WebDB employs a **Vectorized Pause-by-Return** architecture:
+
+1. **Arena Vector Accumulation:**
+   - As `vm_step()` iterates, instead of calling JS immediately, it buffers row references and extracted arguments (up to $N = 64$ entries) into a pre-allocated vector in the **Transient Query Arena** (`0x430000`).
+2. **Pause via Return (`STATUS_UDF_BATCH`):**
+   - When the vector fills 64 entries (or hits EOF / page boundary), the VM records the batch descriptor, sets `ctx->status = STATUS_UDF_BATCH`, and returns control immediately to JavaScript.
+3. **Batch Execution in Host JS:**
+   - JavaScript invokes the user-registered UDF in a single batch:
+     ```typescript
+     // Dispatched once for 64 rows instead of 64 individual FFI calls:
+     const selectionBitmask = dispatchUdfBatch(udfId, arenaVectorSlice);
+     ```
+   - Host JS writes a **64-bit bitmask** (`uint64_t`, 8 bytes) directly into shared memory where bit $i = 1$ indicates that row $i$ passed the filter.
+4. **Resumption:**
+   - Host JS calls `vm_step()`.
+   - The VM reads the 64-bit mask from shared memory into a single CPU register and branches on each bit, emitting only the passing rows into the Result Buffer.
+
+### 8.3 Performance & Trade-Off Matrix
+
+| Metric | Row-by-Row UDF (`OP_CALL_UDF`) | Batched Vectorized UDF (64 Rows) | Native C Builtin (`OP_LIKE`, math) |
+| :--- | :---: | :---: | :---: |
+| **FFI Boundary Transitions (100k rows)** | 100,000 calls | **1,562 calls (64x reduction)** | **0** |
+| **JS Heap Allocations** | 100,000 string objects | 100,000 string objects | **0 (Zero-copy raw bytes)** |
+| **100k Scan Execution Time** | ~150 – 250 ms | **~20 – 40 ms** | **~2 – 4 ms** |
+| **Implementation Complexity** | Low | Medium (Vector buffer + bitmask) | Low (10–25 lines C per op) |
+
+### 8.4 Architectural Guideline
+- **Standard Primitives in Native C:** Core string and math filters (`LIKE`, `CONTAINS`, `STARTS_WITH`, `LOWER`, `UPPER`, `SUBSTR`, `ABS`, `ROUND`) must be implemented directly as native C/Wasm opcodes (< 200 bytes Wasm each, zero heap allocation, ~GB/s throughput).
+- **Batched Vectorization for Extension UDFs:** Custom user-defined business logic should be dispatched in 64-row vectorized batches using `STATUS_UDF_BATCH` to eliminate 98.4% of foreign-function call overhead.
+
+---
+
+## 9. Phased Implementation Roadmap
 
 | Milestone       | Target Version | Focus Area                                | Key Architectural Deliverables                                                                                                                                                                                                                                                         |
 | :-------------- | :------------: | :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Milestone 1** |    **V1.1**    | **Semi-Structured, Vectors & Encryption** | • `EncryptedVfsAdapter` (AES-256-GCM via Web Crypto)<br>• `JSON` Text type + `jsonExtract()` VDBE scalar opcode<br>• `VECTOR<float32, D>` column ($D \le 384$ or quantized $D \le 1536$)<br>• Wasm SIMD `v128` Cosine/L2 distance kernel<br>• Flat KNN Top-$K$ Min-Heap in Query Arena |
-| **Milestone 2** |    **V1.2**    | **Full-Text & Fuzzy Search**              | • Host `Intl.Segmenter` tokenizer pipeline<br>• B+Tree Inverted Index (`0x0A`) with term frequencies<br>• BM25 relevance scorer in Wasm<br>• Trigram index generation for accelerated `LIKE '%substr%'`<br>• Row Overflow Pages (`page_type = 0x0C`)                                   |
+| **Milestone 2** |    **V1.2**    | **Full-Text, Fuzzy & Vectorized UDFs**    | • Host `Intl.Segmenter` tokenizer pipeline<br>• B+Tree Inverted Index (`0x0A`) with term frequencies<br>• BM25 relevance scorer in Wasm<br>• Trigram index generation for accelerated `LIKE '%substr%'`<br>• Row Overflow Pages (`page_type = 0x0C`)<br>• Vectorized UDF batching (`STATUS_UDF_BATCH` + 64-bit selection bitmask) |
 | **Milestone 3** |    **V2.0**    | **Hybrid Platform & ANN Graphs**          | • Reciprocal Rank Fusion (RRF) engine<br>• Graph-based HNSW vector index pages (`page_type = 0x0B`)<br>• `JSONB` binary TLV storage<br>• Multi-column composite secondary indexes                                                                                                      |
+
