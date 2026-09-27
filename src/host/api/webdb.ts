@@ -10,9 +10,11 @@ import {
   DbRow,
   TableNotFoundError,
   ColumnFlag,
+  DataType,
   VmStatus,
   QueryTimeoutError,
   InvalidBytecodeError,
+  QueryArenaExhaustedError,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
@@ -49,6 +51,9 @@ import { vm_step } from "../../core/index.ts";
 import {
   compileQuery,
   QueryFilter,
+  SortKey,
+  AggExpr,
+  QueryPlan,
   disassembleBytecode,
   formatDisassembly,
 } from "../compiler/compiler.ts";
@@ -330,9 +335,20 @@ export class WebDB implements IDatabaseQueryExecutor {
   async explainQuery(
     tableName: string,
     filters: QueryFilter[],
+    options?: {
+      orderBy?: SortKey[];
+      groupBy?: string[];
+      aggregates?: AggExpr[];
+    },
   ): Promise<ExplainOutput> {
     const table = await this.getTable(tableName);
-    const bytecode = compileQuery({ table, filters });
+    const bytecode = compileQuery({
+      table,
+      filters,
+      orderBy: options?.orderBy,
+      groupBy: options?.groupBy,
+      aggregates: options?.aggregates,
+    });
     const instructions = disassembleBytecode(bytecode, table);
     const assembly = formatDisassembly(instructions);
 
@@ -342,6 +358,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         rootPageId: table.rootPageId,
         scanType: "TableScan",
         filters,
+        orderBy: options?.orderBy,
+        groupBy: options?.groupBy,
+        aggregates: options?.aggregates,
       },
       bytecodeSize: bytecode.byteLength,
       instructions,
@@ -352,12 +371,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   async executeQuery(
     tableName: string,
     filters: QueryFilter[],
-    options: {
-      limit: number | null;
-      offset: number | null;
-      sortCol: string | null;
-      sortDir: "asc" | "desc";
-    },
+    options: QueryExecutionOptions,
   ): Promise<DbRow[]> {
     const table = await this.getTable(tableName);
 
@@ -369,11 +383,58 @@ export class WebDB implements IDatabaseQueryExecutor {
       currPageId = page_get_next_page_id(view, 0);
     }
 
-    const bytecode = compileQuery({ table, filters });
+    let orderBy = options.orderBy;
+    if (!orderBy && options.sortCol) {
+      orderBy = [{ colName: options.sortCol, direction: options.sortDir }];
+    }
+
+    const plan: QueryPlan = {
+      table,
+      filters,
+      orderBy,
+      groupBy: options.groupBy,
+      aggregates: options.aggregates,
+    };
+
+    const bytecode = compileQuery(plan);
 
     resetVmContext(this.vmCtx, table);
+    if (plan.keyInfos) {
+      this.vmCtx.keyInfos = plan.keyInfos;
+    }
 
-    // Execute query with support for chunked Result Buffer streaming and Page Faults
+    // Determine output columns for page_deserialize_row
+    let outputColumns = table.columns;
+    if (plan.aggregates && plan.aggregates.length > 0) {
+      outputColumns = [];
+      const groupByCols = plan.groupBy ?? [];
+      for (const gColName of groupByCols) {
+        const col = table.columns.find((c) => c.name === gColName);
+        if (col) {
+          outputColumns.push(col);
+        } else {
+          outputColumns.push({
+            name: gColName,
+            type: DataType.TEXT,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          });
+        }
+      }
+      for (let j = 0; j < plan.aggregates.length; j++) {
+        const agg = plan.aggregates[j];
+        const aggName =
+          agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+        const aggType = agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
+        outputColumns.push({
+          name: aggName,
+          type: aggType,
+          flags: ColumnFlag.NONE,
+          colOffset: 0,
+        });
+      }
+    }
+
     let rows: DbRow[] = [];
     while (true) {
       const status = vm_step(this.vmCtx, this.pool.view, bytecode);
@@ -388,7 +449,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
         const record = page_deserialize_row(
-          table.columns,
+          outputColumns,
           this.pool.view,
           rowRecordOffset,
         );
@@ -406,6 +467,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       } else if (status === VmStatus.PAGE_FAULT) {
         await this.driver.acquirePage(this.vmCtx.fault_page_id);
         this.vmCtx.status = VmStatus.RUNNING;
+      } else if (status === VmStatus.ARENA_EXHAUSTED) {
+        this.vmCtx.arenaOffset = 0;
+        throw new QueryArenaExhaustedError();
       } else if (status === VmStatus.TIMEOUT) {
         throw new QueryTimeoutError();
       } else if (status === VmStatus.INVALID_BYTECODE) {
@@ -415,37 +479,13 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    // Apply Sorting with SQLite-compatible 3VL NULL handling:
-    // Collation rule: NULL is smaller than any other value!
-    if (options.sortCol) {
-      const col = options.sortCol;
-      const asc = options.sortDir === "asc";
-
-      rows.sort((a, b) => {
-        const valA = a[col];
-        const valB = b[col];
-
-        if (valA === valB) return 0;
-        if (valA === null || valA === undefined) return asc ? -1 : 1;
-        if (valB === null || valB === undefined) return asc ? 1 : -1;
-
-        if (typeof valA === "number" && typeof valB === "number") {
-          return asc ? valA - valB : valB - valA;
-        }
-        if (typeof valA === "string" && typeof valB === "string") {
-          return asc ? valA.localeCompare(valB) : valB.localeCompare(valA);
-        }
-        return (valA as any) > (valB as any) ? (asc ? 1 : -1) : asc ? -1 : 1;
-      });
-    }
-
     // Apply Offset
     if (options.offset && options.offset > 0) {
       rows = rows.slice(options.offset);
     }
 
     // Apply Limit
-    if (options.limit !== null && options.limit >= 0) {
+    if (options.limit !== null && options.limit !== undefined && options.limit >= 0) {
       rows = rows.slice(0, options.limit);
     }
 

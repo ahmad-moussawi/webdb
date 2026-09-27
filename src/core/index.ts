@@ -46,7 +46,7 @@ export {
   page_compare_index_keys,
   page_insert_index_leaf_cell,
   page_binary_search_index_leaf,
-} from './js/page.c.js';
+} from "./js/page.c.js";
 
 // ============================================================================
 // Page Table Operations (@export_c)
@@ -56,7 +56,7 @@ export {
   page_table_get,
   page_table_set,
   page_table_delete,
-} from './js/page_table.c.js';
+} from "./js/page_table.c.js";
 
 // ============================================================================
 // Buffer Pool Operations (@export_c)
@@ -76,7 +76,7 @@ export {
   buf_pool_is_pinned,
   buf_pool_find_victim,
   buf_pool_select_eviction_victim,
-} from './js/buffer_pool.c.js';
+} from "./js/buffer_pool.c.js";
 
 // ============================================================================
 // Virtual Machine Execution Loop (@export_c)
@@ -84,7 +84,9 @@ export {
 export {
   vm_step,
   sql_like_match,
-} from './js/vm.c.js';
+  compare_sorter_keys,
+  fnv1a_32,
+} from "./js/vm.c.js";
 
 // ============================================================================
 // Schema Catalog Operations (@export_c)
@@ -121,4 +123,4 @@ export {
   catalog_create_table,
   catalog_load_table_meta,
   catalog_load_all_tables,
-} from './js/catalog.c.js';
+} from "./js/catalog.c.js";

@@ -1,9 +1,10 @@
 import "fake-indexeddb/auto";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, assert } from "vitest";
 import { createVmContext, resetVmContext } from "../src/shared/index.js";
 import {
   vm_step,
   sql_like_match,
+  compare_sorter_keys,
   page_init,
   page_insert_row,
   page_serialize_row,
@@ -17,6 +18,8 @@ import {
   TableMeta,
   OpCode,
   VmStatus,
+  TooManyOrderByColumnsError,
+  TooManyGroupByColumnsError,
 } from "../src/types/index.js";
 import {
   TOTAL_MEMORY_BYTES,
@@ -723,6 +726,526 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
         .toArray();
       expect(nonApples).toHaveLength(2);
       expect(nonApples.map((g) => g.id)).toEqual([2, 3]);
+    });
+  });
+
+  describe("Milestone 5: In-Arena Sorter (ORDER BY) & Aggregations (GROUP BY + COUNT, SUM, AVG, MIN, MAX)", () => {
+    it("enforces multi-column KeyInfo collation with SQLite NULL semantics (NULLS_FIRST/LAST)", () => {
+      // 1. ASC: NULL is smaller than non-null -> NULLS_FIRST (cmp = -1)
+      expect(
+        compare_sorter_keys([null], [10], {
+          numKeys: 1,
+          directions: [0],
+          nullOrders: [0],
+        }),
+      ).toBe(-1);
+      expect(
+        compare_sorter_keys([10], [null], {
+          numKeys: 1,
+          directions: [0],
+          nullOrders: [0],
+        }),
+      ).toBe(1);
+
+      // 2. DESC: NULL is smaller than non-null -> in DESC, NULL comes last (cmp = 1)
+      expect(
+        compare_sorter_keys([null], [10], {
+          numKeys: 1,
+          directions: [1],
+          nullOrders: [1],
+        }),
+      ).toBe(1);
+      expect(
+        compare_sorter_keys([10], [null], {
+          numKeys: 1,
+          directions: [1],
+          nullOrders: [1],
+        }),
+      ).toBe(-1);
+
+      // 3. Explicit NULLS_LAST override on ASC
+      expect(
+        compare_sorter_keys([null], [10], {
+          numKeys: 1,
+          directions: [0],
+          nullOrders: [1],
+        }),
+      ).toBe(1);
+
+      // 4. Both NULL -> equal for this column
+      expect(
+        compare_sorter_keys([null, "alpha"], [null, "beta"], {
+          numKeys: 2,
+          directions: [0, 0],
+          nullOrders: [0, 0],
+        }),
+      ).toBe(-1);
+
+      // 5. Multi-column priority: col 1 ASC, col 2 DESC
+      const keyInfo = {
+        numKeys: 2,
+        directions: [0, 1], // col 0 ASC, col 1 DESC
+        nullOrders: [0, 1],
+      };
+      // Different col 0 -> col 0 decides ("Dept A" < "Dept B")
+      expect(
+        compare_sorter_keys(["Dept A", 100], ["Dept B", 50], keyInfo),
+      ).toBe(-1);
+      // Same col 0 -> col 1 decides in DESC (200 > 100 -> -1 in DESC)
+      expect(
+        compare_sorter_keys(["Dept A", 200], ["Dept A", 100], keyInfo),
+      ).toBe(-1);
+      expect(
+        compare_sorter_keys(["Dept A", 100], ["Dept A", 200], keyInfo),
+      ).toBe(1);
+    });
+
+    it("enforces hard compile-time ceilings: max 8 sort columns and max 8 grouping columns", () => {
+      const dummyTable: TableMeta = {
+        tableId: 1,
+        flags: 1,
+        rootPageId: 2,
+        colCatalogPageId: 0,
+        columnCount: 1,
+        rowCountEstimate: 0,
+        autoIncNext: 1n,
+        name: "test",
+        columns: [
+          {
+            name: "c",
+            type: DataType.INT32,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          },
+        ],
+      };
+
+      // 9 sort columns -> throws TooManyOrderByColumnsError
+      expect(() =>
+        compileQuery({
+          table: dummyTable,
+          filters: [],
+          orderBy: Array.from({ length: 9 }, () => ({ colName: "c" })),
+        }),
+      ).toThrow(TooManyOrderByColumnsError);
+
+      // 8 sort columns -> succeeds
+      expect(() =>
+        compileQuery({
+          table: dummyTable,
+          filters: [],
+          orderBy: Array.from({ length: 8 }, () => ({ colName: "c" })),
+        }),
+      ).not.toThrow();
+
+      // 9 group columns -> throws TooManyGroupByColumnsError
+      expect(() =>
+        compileQuery({
+          table: dummyTable,
+          filters: [],
+          groupBy: Array.from({ length: 9 }, () => "c"),
+        }),
+      ).toThrow(TooManyGroupByColumnsError);
+
+      // 8 group columns -> succeeds
+      expect(() =>
+        compileQuery({
+          table: dummyTable,
+          filters: [],
+          groupBy: Array.from({ length: 8 }, () => "c"),
+        }),
+      ).not.toThrow();
+    });
+
+    it("sorts rows in-arena using OP_SORTER_OPEN, OP_SORTER_INSERT, OP_SORTER_SORT, OP_SORTER_NEXT", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+
+      const tableMeta: TableMeta = {
+        tableId: 10,
+        flags: 1,
+        rootPageId: 2,
+        colCatalogPageId: 0,
+        columnCount: 3,
+        rowCountEstimate: 0,
+        autoIncNext: 5n,
+        name: "scores",
+        columns: [
+          {
+            name: "id",
+            type: DataType.INT32,
+            flags: ColumnFlag.PRIMARY_KEY,
+            colOffset: 0,
+          },
+          {
+            name: "name",
+            type: DataType.TEXT,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          },
+          {
+            name: "score",
+            type: DataType.FLOAT64,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          },
+        ],
+      };
+
+      page_init(view, 4096);
+
+      // Insert unsorted rows with a NULL score
+      const rowsToInsert = [
+        { id: 1, name: "Charlie", score: 50.5 },
+        { id: 2, name: "Alice", score: 98.0 },
+        { id: 3, name: "Dave", score: null },
+        { id: 4, name: "Bob", score: 75.0 },
+      ];
+
+      for (const r of rowsToInsert) {
+        const serialized = page_serialize_row(tableMeta.columns, r);
+        page_insert_row(view, 4096, serialized);
+      }
+
+      // Compile query: ORDER BY score ASC (Dave/NULL should be first, then Charlie 50.5, Bob 75.0, Alice 98.0)
+      const plan = {
+        table: tableMeta,
+        filters: [],
+        keyInfos: [],
+        orderBy: [{ colName: "score", direction: "asc" as const }],
+      };
+      const bytecode = compileQuery(plan);
+
+      const ctx = createVmContext();
+      resetVmContext(ctx, tableMeta);
+      ctx.keyInfos = plan.keyInfos ?? [];
+
+      const status = vm_step(ctx, view, bytecode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.resultCount).toBe(4);
+
+      // Hydrate emitted rows
+      const hydrated: any[] = [];
+      let offset = 0;
+      for (let i = 0; i < ctx.resultCount; i++) {
+        const rowLen = view.getUint16(RESULT_BUFFER_OFFSET + offset, true);
+        const record = page_deserialize_row(
+          tableMeta.columns,
+          view,
+          RESULT_BUFFER_OFFSET + offset + 2,
+        );
+        hydrated.push(record);
+        offset += 2 + rowLen;
+      }
+
+      expect(hydrated.map((r) => r.name)).toEqual([
+        "Dave",
+        "Charlie",
+        "Bob",
+        "Alice",
+      ]);
+      expect(hydrated[0].score).toBeNull();
+      expect(hydrated[1].score).toBe(50.5);
+      expect(hydrated[2].score).toBe(75.0);
+      expect(hydrated[3].score).toBe(98.0);
+    });
+
+    it("executes in-arena hash aggregations (GROUP BY + COUNT, SUM, AVG, MIN, MAX) with NULL group collapsing", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+
+      const tableMeta: TableMeta = {
+        tableId: 20,
+        flags: 1,
+        rootPageId: 2,
+        colCatalogPageId: 0,
+        columnCount: 3,
+        rowCountEstimate: 0,
+        autoIncNext: 7n,
+        name: "employees",
+        columns: [
+          {
+            name: "id",
+            type: DataType.INT32,
+            flags: ColumnFlag.PRIMARY_KEY,
+            colOffset: 0,
+          },
+          {
+            name: "dept",
+            type: DataType.TEXT,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          },
+          {
+            name: "salary",
+            type: DataType.FLOAT64,
+            flags: ColumnFlag.NONE,
+            colOffset: 0,
+          },
+        ],
+      };
+
+      page_init(view, 4096);
+
+      const dataset = [
+        { id: 1, dept: "Eng", salary: 100.0 },
+        { id: 2, dept: "Eng", salary: 200.0 },
+        { id: 3, dept: "HR", salary: 50.0 },
+        { id: 4, dept: "Eng", salary: 300.0 },
+        { id: 5, dept: null, salary: 80.0 },
+        { id: 6, dept: null, salary: 120.0 },
+      ];
+
+      for (const r of dataset) {
+        const serialized = page_serialize_row(tableMeta.columns, r);
+        page_insert_row(view, 4096, serialized);
+      }
+
+      const plan = {
+        table: tableMeta,
+        filters: [],
+        groupBy: ["dept"],
+        aggregates: [
+          { func: "count" as const, colName: "*", alias: "count" },
+          { func: "sum" as const, colName: "salary", alias: "total" },
+          { func: "avg" as const, colName: "salary", alias: "average" },
+          { func: "min" as const, colName: "salary", alias: "min_sal" },
+          { func: "max" as const, colName: "salary", alias: "max_sal" },
+        ],
+      };
+
+      const bytecode = compileQuery(plan);
+      const ctx = createVmContext();
+      resetVmContext(ctx, tableMeta);
+      ctx.outputColumns = (bytecode as any).outputColumns;
+
+      const status = vm_step(ctx, view, bytecode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.resultCount).toBe(3); // "Eng", "HR", and null (all NULL dept rows collapse to single bucket!)
+
+      // Use output columns for deserialization
+      const outputCols = (bytecode as any).outputColumns;
+
+      const groups: any[] = [];
+      let offset = 0;
+      for (let i = 0; i < ctx.resultCount; i++) {
+        const rowLen = view.getUint16(RESULT_BUFFER_OFFSET + offset, true);
+        const record = page_deserialize_row(
+          outputCols,
+          view,
+          RESULT_BUFFER_OFFSET + offset + 2,
+        );
+        groups.push(record);
+        offset += 2 + rowLen;
+      }
+
+      const eng = groups.find((g) => g.dept === "Eng");
+      expect(eng).toBeDefined();
+      expect(eng.count).toBe(3);
+      expect(eng.total).toBe(600.0);
+      expect(eng.average).toBe(200.0);
+      expect(eng.min_sal).toBe(100.0);
+      expect(eng.max_sal).toBe(300.0);
+
+      const hr = groups.find((g) => g.dept === "HR");
+      expect(hr).toBeDefined();
+      expect(hr.count).toBe(1);
+      expect(hr.total).toBe(50.0);
+      expect(hr.average).toBe(50.0);
+      expect(hr.min_sal).toBe(50.0);
+      expect(hr.max_sal).toBe(50.0);
+
+      const nullGroup = groups.find(
+        (g) => g.dept === null || g.dept === undefined,
+      );
+      expect(nullGroup).toBeDefined();
+      expect(nullGroup.count).toBe(2);
+      expect(nullGroup.total).toBe(200.0);
+      expect(nullGroup.average).toBe(100.0);
+      expect(nullGroup.min_sal).toBe(80.0);
+      expect(nullGroup.max_sal).toBe(120.0);
+    });
+
+    it("dynamically doubles open-addressing hash table at 70% load factor (> 716 buckets)", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+      const ctx = createVmContext();
+      resetVmContext(ctx);
+
+      // OP_AGG_INIT: agg_id = 0, start_key_reg = 0, num_keys = 1, mode = 0 (hash)
+      const codeInit = new Uint8Array([
+        OpCode.OP_AGG_INIT,
+        0,
+        0,
+        1,
+        0,
+        OpCode.OP_HALT,
+      ]);
+      expect(vm_step(ctx, view, codeInit)).toBe(VmStatus.DONE);
+
+      const agg = ctx.aggregators[0];
+      expect(agg.capacity).toBe(1024);
+      expect(agg.occupiedCount).toBe(0);
+
+      // Insert 716 distinct keys (at 70% load factor threshold)
+      for (let i = 0; i < 716; i++) {
+        ctx.registers[0] = `group_key_${i}`;
+        ctx.pc = 0;
+        const codeStep = new Uint8Array([
+          OpCode.OP_AGG_STEP,
+          0,
+          0,
+          1,
+          255,
+          0,
+          OpCode.OP_HALT,
+        ]);
+        expect(vm_step(ctx, view, codeStep)).toBe(VmStatus.DONE);
+      }
+
+      // Should still be capacity 1024
+      expect(agg.capacity).toBe(1024);
+      expect(agg.occupiedCount).toBe(716);
+
+      // Insert key 717 -> exceeds 70% threshold (716.8) -> triggers table doubling to 2048!
+      ctx.registers[0] = "group_key_716";
+      ctx.pc = 0;
+      const codeTrigger = new Uint8Array([
+        OpCode.OP_AGG_STEP,
+        0,
+        0,
+        1,
+        255,
+        0,
+        OpCode.OP_HALT,
+      ]);
+      expect(vm_step(ctx, view, codeTrigger)).toBe(VmStatus.DONE);
+
+      expect(agg.capacity).toBe(2048);
+      expect(agg.occupiedCount).toBe(717);
+    });
+
+    it("enforces fail-fast 16MB arena limit yielding STATUS_ERR_ARENA_EXHAUSTED and O(1) memory reset", async () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+      const ctx = createVmContext();
+      resetVmContext(ctx);
+
+      // Artificially configure a tight query memory limit (60 KB)
+      ctx.maxQueryMemory = 60 * 1024;
+
+      // 1. Initial table takes 1024 * 40B = 40.96 KB
+      const codeInit = new Uint8Array([OpCode.OP_AGG_INIT, 0, 0, 1, 0]);
+      expect(vm_step(ctx, view, codeInit)).toBe(VmStatus.DONE);
+      expect(ctx.arenaOffset).toBe(40960);
+
+      // 2. Filling past 716 triggers doubling attempt requiring another 2048 * 40B = 81.92 KB
+      // Total needed: 40.96 KB + 81.92 KB = 122.88 KB > 60 KB maxQueryMemory
+      for (let i = 0; i < 716; i++) {
+        ctx.registers[0] = `k_${i}`;
+        ctx.pc = 0;
+        const codeStep = new Uint8Array([OpCode.OP_AGG_STEP, 0, 0, 1, 255, 0]);
+        vm_step(ctx, view, codeStep);
+      }
+
+      // Key 717 triggers doubling -> must halt with ARENA_EXHAUSTED
+      ctx.registers[0] = "k_716";
+      ctx.pc = 0;
+      const codeTrigger = new Uint8Array([OpCode.OP_AGG_STEP, 0, 0, 1, 255, 0]);
+      const status = vm_step(ctx, view, codeTrigger);
+      expect(status).toBe(VmStatus.ARENA_EXHAUSTED);
+
+      // Verify O(1) recovery via resetVmContext (or OP_HALT)
+      resetVmContext(ctx);
+      expect(ctx.arenaOffset).toBe(0);
+    });
+
+    it("executes end-to-end multi-column sort and aggregations via WebDB & QueryBuilder", async () => {
+      const db = await WebDB.open({
+        name: "milestone5_e2e_db",
+        storage: "memory",
+      });
+
+      await db.createTable("products", [
+        { name: "id", type: "INT32", flags: { primaryKey: true } },
+        { name: "category", type: "TEXT" },
+        { name: "price", type: "FLOAT64" },
+        { name: "rating", type: "FLOAT64" },
+      ]);
+
+      await db.insert("products", {
+        id: 1,
+        category: "Electronics",
+        price: 299.99,
+        rating: 4.5,
+      });
+      await db.insert("products", {
+        id: 2,
+        category: "Electronics",
+        price: 99.99,
+        rating: 4.8,
+      });
+      await db.insert("products", {
+        id: 3,
+        category: "Books",
+        price: 19.99,
+        rating: 4.9,
+      });
+      await db.insert("products", {
+        id: 4,
+        category: "Books",
+        price: 29.99,
+        rating: 4.2,
+      });
+      await db.insert("products", {
+        id: 5,
+        category: "Electronics",
+        price: 99.99,
+        rating: 4.1,
+      });
+
+      // 1. Multi-column Order By: category ASC, price ASC, rating DESC
+      const sorted = await db
+        .from("products")
+        .orderBy([
+          { colName: "category", direction: "asc" },
+          { colName: "price", direction: "asc" },
+          { colName: "rating", direction: "desc" },
+        ])
+        .toArray();
+
+      expect(sorted).toHaveLength(5);
+      expect(sorted.map((p) => p.id)).toEqual([3, 4, 2, 5, 1]);
+      // Books (19.99, 29.99), Electronics (99.99 rating 4.8, 99.99 rating 4.1, 299.99)
+
+      // 2. Group By with Aggregates: Category, count(*), sum(price), avg(price), min(price), max(price)
+      const aggResults = await db
+        .from("products")
+        .groupBy("category")
+        .count("*", "item_count")
+        .sum("price", "total_price")
+        .avg("price", "avg_price")
+        .min("price", "min_price")
+        .max("price", "max_price")
+        .toArray();
+
+      expect(aggResults).toHaveLength(2);
+
+      const books = aggResults.find((a) => a.category === "Books");
+      expect(books).toBeDefined();
+      expect(books!.item_count).toBe(2);
+      expect(books!.total_price).toBeCloseTo(49.98);
+      expect(books!.avg_price).toBeCloseTo(24.99);
+      expect(books!.min_price).toBe(19.99);
+      expect(books!.max_price).toBe(29.99);
+
+      const elec = aggResults.find((a) => a.category === "Electronics");
+      expect(elec).toBeDefined();
+      expect(elec!.item_count).toBe(3);
+      expect(elec!.total_price).toBeCloseTo(499.97);
+      expect(elec!.avg_price).toBeCloseTo(166.6566, 2);
+      expect(elec!.min_price).toBe(99.99);
+      expect(elec!.max_price).toBe(299.99);
     });
   });
 });
