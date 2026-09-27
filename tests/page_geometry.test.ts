@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from "vitest";
 import {
   page_init,
   page_insert_row,
@@ -14,38 +14,53 @@ import {
   page_deserialize_row,
   catalog_init_page1,
   catalog_read_page1_header,
-} from '../src/core/index.js';
+} from "../src/core/index.js";
 import {
   PAGE_SIZE,
   PAGE_HEADER_SIZE,
   PAGE_TYPE_LEAF_DATA,
-} from '../src/constants.js';
+} from "../src/constants.js";
 import {
   DataType,
   ColumnFlag,
   TableMeta,
   RowSizeLimitExceededError,
-} from '../src/types/index.js';
-import { WebDB } from '../src/host/api/webdb.js';
+} from "../src/types/index.js";
+import { WebDB } from "../src/host/api/webdb.js";
 
-describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)', () => {
+describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)", () => {
   const table: TableMeta = {
     tableId: 1,
     columnCount: 3,
     rootPageId: 2,
     colCatalogPageId: 3,
-    name: 'items',
+    name: "items",
     flags: 1,
     rowCountEstimate: 0,
     autoIncNext: 1n,
     columns: [
-      { type: DataType.INT32, flags: ColumnFlag.PRIMARY_KEY, colOffset: 0, name: 'id' },
-      { type: DataType.TEXT, flags: ColumnFlag.NOT_NULL, colOffset: 0, name: 'payload' },
-      { type: DataType.INT32, flags: ColumnFlag.NONE, colOffset: 4, name: 'extra' },
+      {
+        type: DataType.INT32,
+        flags: ColumnFlag.PRIMARY_KEY,
+        colOffset: 0,
+        name: "id",
+      },
+      {
+        type: DataType.TEXT,
+        flags: ColumnFlag.NOT_NULL,
+        colOffset: 0,
+        name: "payload",
+      },
+      {
+        type: DataType.INT32,
+        flags: ColumnFlag.NONE,
+        colOffset: 4,
+        name: "extra",
+      },
     ],
   };
 
-  it('1. Empty Page Initialization', () => {
+  it("1. Empty Page Initialization", () => {
     // Test Page 1 initialization
     const p1Buf = new ArrayBuffer(PAGE_SIZE);
     const p1View = new DataView(p1Buf);
@@ -67,16 +82,22 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(page_get_cell_count(dataView, 0)).toBe(0);
     expect(page_get_cell_content_offset(dataView, 0)).toBe(PAGE_SIZE);
     expect(page_get_free_bytes(dataView, 0)).toBe(0);
-    expect(page_get_contiguous_free_space(dataView, 0)).toBe(PAGE_SIZE - PAGE_HEADER_SIZE);
+    expect(page_get_contiguous_free_space(dataView, 0)).toBe(
+      PAGE_SIZE - PAGE_HEADER_SIZE,
+    );
   });
 
-  it('2. Sequential Fill & Split Trigger (returns -1 when full)', () => {
+  it("2. Sequential Fill & Split Trigger (returns -1 when full)", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init(view, 0);
 
     // Each row ~500 bytes -> 8 rows would need 4000 bytes + 16 bytes slots + 16 bytes header = 4032 bytes
-    const row = page_serialize_row(table, { id: 1, payload: 'A'.repeat(500), extra: 10 });
+    const row = page_serialize_row(table, {
+      id: 1,
+      payload: "A".repeat(500),
+      extra: 10,
+    });
     let count = 0;
     while (true) {
       const slot = page_insert_row(view, 0, row);
@@ -90,18 +111,18 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(page_insert_row(view, 0, row)).toBe(-1);
   });
 
-  it('3. Defragmentation & In-Place Compaction', () => {
+  it("3. Defragmentation & In-Place Compaction", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init(view, 0);
 
     // Insert 5 rows of ~400 bytes each (~2000 bytes)
     const rows = [
-      page_serialize_row(table, { id: 0, payload: '0'.repeat(380), extra: 0 }),
-      page_serialize_row(table, { id: 1, payload: '1'.repeat(380), extra: 1 }),
-      page_serialize_row(table, { id: 2, payload: '2'.repeat(380), extra: 2 }),
-      page_serialize_row(table, { id: 3, payload: '3'.repeat(380), extra: 3 }),
-      page_serialize_row(table, { id: 4, payload: '4'.repeat(380), extra: 4 }),
+      page_serialize_row(table, { id: 0, payload: "0".repeat(380), extra: 0 }),
+      page_serialize_row(table, { id: 1, payload: "1".repeat(380), extra: 1 }),
+      page_serialize_row(table, { id: 2, payload: "2".repeat(380), extra: 2 }),
+      page_serialize_row(table, { id: 3, payload: "3".repeat(380), extra: 3 }),
+      page_serialize_row(table, { id: 4, payload: "4".repeat(380), extra: 4 }),
     ];
 
     for (const r of rows) {
@@ -117,7 +138,11 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(page_get_free_bytes(view, 0)).toBeGreaterThan(700);
 
     // Insert a new row of 600 bytes
-    const bigRow = page_serialize_row(table, { id: 99, payload: 'B'.repeat(580), extra: 99 });
+    const bigRow = page_serialize_row(table, {
+      id: 99,
+      payload: "B".repeat(580),
+      extra: 99,
+    });
     const slot = page_insert_row(view, 0, bigRow);
 
     expect(slot).toBe(3); // Successfully inserted
@@ -135,15 +160,31 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(page_deserialize_row(table, view, offBig).id).toBe(99);
   });
 
-  it('4. Row Deletion & memmove Verification', () => {
+  it("4. Row Deletion & memmove Verification", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init(view, 0);
 
-    const r0 = page_serialize_row(table, { id: 10, payload: 'row10', extra: 1 });
-    const r1 = page_serialize_row(table, { id: 20, payload: 'row20', extra: 2 });
-    const r2 = page_serialize_row(table, { id: 30, payload: 'row30', extra: 3 });
-    const r3 = page_serialize_row(table, { id: 40, payload: 'row40', extra: 4 });
+    const r0 = page_serialize_row(table, {
+      id: 10,
+      payload: "row10",
+      extra: 1,
+    });
+    const r1 = page_serialize_row(table, {
+      id: 20,
+      payload: "row20",
+      extra: 2,
+    });
+    const r2 = page_serialize_row(table, {
+      id: 30,
+      payload: "row30",
+      extra: 3,
+    });
+    const r3 = page_serialize_row(table, {
+      id: 40,
+      payload: "row40",
+      extra: 4,
+    });
 
     page_insert_row(view, 0, r0);
     page_insert_row(view, 0, r1);
@@ -157,25 +198,40 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(page_get_cell_count(view, 0)).toBe(3);
 
     // Remaining slots 0, 1, 2 must correspond to id: 10, 30, 40
-    const d0 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 0));
-    const d1 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 1));
-    const d2 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 2));
+    const d0 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 0),
+    );
+    const d1 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 1),
+    );
+    const d2 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 2),
+    );
 
     expect(d0.id).toBe(10);
     expect(d1.id).toBe(30);
     expect(d2.id).toBe(40);
   });
 
-  it('5. Empty Page Free List Cycle', async () => {
-    const db = await WebDB.open({ name: 'test_freelist_cycle', storage: 'memory' });
-    await db.createTable('t1', [
-      { name: 'id', type: 'INT32', flags: { primaryKey: true } },
-      { name: 'val', type: 'TEXT' },
+  it("5. Empty Page Free List Cycle", async () => {
+    const db = await WebDB.open({
+      name: "test_freelist_cycle",
+      storage: "memory",
+    });
+    await db.createTable("t1", [
+      { name: "id", type: "INT32", flags: { primaryKey: true } },
+      { name: "val", type: "TEXT" },
     ]);
 
     // Insert enough rows to fill multiple pages
     for (let i = 1; i <= 30; i++) {
-      await db.insert('t1', { id: i, val: 'X'.repeat(500) });
+      await db.insert("t1", { id: i, val: "X".repeat(500) });
     }
 
     const initialTotal = db.pool.getSlotDataView(0).getUint32(12, true);
@@ -192,45 +248,69 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(db.pool.getSlotDataView(0).getUint32(12, true)).toBe(initialTotal);
   });
 
-  it('6. Expanding Update with Compaction', () => {
+  it("6. Expanding Update with Compaction", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init(view, 0);
 
-    const r0 = page_serialize_row(table, { id: 1, payload: 'short', extra: 1 });
-    const r1 = page_serialize_row(table, { id: 2, payload: 'another_short', extra: 2 });
+    const r0 = page_serialize_row(table, { id: 1, payload: "short", extra: 1 });
+    const r1 = page_serialize_row(table, {
+      id: 2,
+      payload: "another_short",
+      extra: 2,
+    });
     page_insert_row(view, 0, r0);
     page_insert_row(view, 0, r1);
 
     // Update row 0 to larger payload
-    const updatedR0 = page_serialize_row(table, { id: 1, payload: 'much_longer_payload_expanding_row', extra: 1 });
+    const updatedR0 = page_serialize_row(table, {
+      id: 1,
+      payload: "much_longer_payload_expanding_row",
+      extra: 1,
+    });
     const success = page_update_row(view, 0, 0, updatedR0);
 
     expect(success).toBe(true);
-    const d0 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 0));
-    expect(d0.payload).toBe('much_longer_payload_expanding_row');
+    const d0 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 0),
+    );
+    expect(d0.payload).toBe("much_longer_payload_expanding_row");
   });
 
-  it('7. Boundary Limit (2048 Bytes)', () => {
+  it("7. Boundary Limit (2048 Bytes)", () => {
     // Exactly 2048 bytes must pass
     // Row header: 1B flag + 2B len + 1B nullmap + 4B fixed (id) + 4B fixed (extra) + 4B varTable = 16B
     // 2048 - 16 = 2032 payload bytes
-    const exact2048 = page_serialize_row(table, { id: 1, payload: 'A'.repeat(2032), extra: 5 });
+    const exact2048 = page_serialize_row(table, {
+      id: 1,
+      payload: "A".repeat(2032),
+      extra: 5,
+    });
     expect(exact2048.byteLength).toBe(2048);
 
     // 2049 bytes must throw RowSizeLimitExceededError
     expect(() => {
-      page_serialize_row(table, { id: 1, payload: 'A'.repeat(2033), extra: 5 });
+      page_serialize_row(table, { id: 1, payload: "A".repeat(2033), extra: 5 });
     }).toThrow(RowSizeLimitExceededError);
   });
 
-  it('8. Repeated Expanding In-Place Updates: free_bytes and totalFree accounting integrity', () => {
+  it("8. Repeated Expanding In-Place Updates: free_bytes and totalFree accounting integrity", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init(view, 0);
 
-    const r0 = page_serialize_row(table, { id: 1, payload: 'A'.repeat(50), extra: 1 });
-    const r1 = page_serialize_row(table, { id: 2, payload: 'B'.repeat(50), extra: 2 });
+    const r0 = page_serialize_row(table, {
+      id: 1,
+      payload: "A".repeat(50),
+      extra: 1,
+    });
+    const r1 = page_serialize_row(table, {
+      id: 2,
+      payload: "B".repeat(50),
+      extra: 2,
+    });
     page_insert_row(view, 0, r0);
     page_insert_row(view, 0, r1);
 
@@ -240,8 +320,18 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     // Perform multiple sequential expanding updates on row 0
     for (let step = 1; step <= 5; step++) {
       const nextLen = currentPayloadLen + 30;
-      const updatedRow = page_serialize_row(table, { id: 1, payload: 'A'.repeat(nextLen), extra: 1 });
-      const expansion = updatedRow.byteLength - page_serialize_row(table, { id: 1, payload: 'A'.repeat(currentPayloadLen), extra: 1 }).byteLength;
+      const updatedRow = page_serialize_row(table, {
+        id: 1,
+        payload: "A".repeat(nextLen),
+        extra: 1,
+      });
+      const expansion =
+        updatedRow.byteLength -
+        page_serialize_row(table, {
+          id: 1,
+          payload: "A".repeat(currentPayloadLen),
+          extra: 1,
+        }).byteLength;
 
       const ok = page_update_row(view, 0, 0, updatedRow);
       expect(ok).toBe(true);
@@ -259,33 +349,71 @@ describe('Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
 
     // Fill contiguous space with two rows <= 2048 bytes so contiguousFree becomes smaller than largeRow (450 bytes),
     // forcing compaction to reclaim the accumulated fragmented holes (free_bytes)
-    page_insert_row(view, 0, page_serialize_row(table, { id: 98, payload: 'X'.repeat(1200), extra: 98 }));
-    page_insert_row(view, 0, page_serialize_row(table, { id: 99, payload: 'Y'.repeat(1200), extra: 99 }));
+    page_insert_row(
+      view,
+      0,
+      page_serialize_row(table, {
+        id: 98,
+        payload: "X".repeat(1200),
+        extra: 98,
+      }),
+    );
+    page_insert_row(
+      view,
+      0,
+      page_serialize_row(table, {
+        id: 99,
+        payload: "Y".repeat(1200),
+        extra: 99,
+      }),
+    );
 
     // Now contiguousFree is 728 bytes, but free_bytes has accumulated > 500 bytes.
     // An expanding update needing 866 bytes (> 728 contiguous) forces compaction!
     expect(page_get_contiguous_free_space(view, 0)).toBeLessThan(800);
     expect(page_get_free_bytes(view, 0)).toBeGreaterThan(500);
 
-    const largeRow = page_serialize_row(table, { id: 1, payload: 'A'.repeat(850), extra: 1 });
+    const largeRow = page_serialize_row(table, {
+      id: 1,
+      payload: "A".repeat(850),
+      extra: 1,
+    });
     const ok = page_update_row(view, 0, 0, largeRow);
     expect(ok).toBe(true);
 
     // After compaction: all holes are reclaimed, free_bytes MUST be 0
     expect(page_get_free_bytes(view, 0)).toBe(0);
-    expect(page_get_total_free_space(view, 0)).toBe(page_get_contiguous_free_space(view, 0));
+    expect(page_get_total_free_space(view, 0)).toBe(
+      page_get_contiguous_free_space(view, 0),
+    );
 
     // Verify both row 0 and row 1 are uncorrupted
-    const d0 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 0));
-    expect(d0.payload).toBe('A'.repeat(850));
-    const d1 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, 1));
-    expect(d1.payload).toBe('B'.repeat(50));
+    const d0 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 0),
+    );
+    expect(d0.payload).toBe("A".repeat(850));
+    const d1 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, 1),
+    );
+    expect(d1.payload).toBe("B".repeat(50));
 
     // Page must remain healthy: inserting a new row succeeds without corruption
-    const r2 = page_serialize_row(table, { id: 3, payload: 'C'.repeat(50), extra: 3 });
+    const r2 = page_serialize_row(table, {
+      id: 3,
+      payload: "C".repeat(50),
+      extra: 3,
+    });
     const slot2 = page_insert_row(view, 0, r2);
     expect(slot2).toBe(4);
-    const d2 = page_deserialize_row(table, view, page_get_cell_offset(view, 0, slot2));
-    expect(d2.payload).toBe('C'.repeat(50));
+    const d2 = page_deserialize_row(
+      table,
+      view,
+      page_get_cell_offset(view, 0, slot2),
+    );
+    expect(d2.payload).toBe("C".repeat(50));
   });
 });

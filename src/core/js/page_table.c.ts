@@ -43,11 +43,11 @@ export function page_table_get(
 
   for (let probe = 0; probe < bucket_count; probe++) {
     const offset = base_offset + idx * PAGE_TO_SLOT_BUCKET_SIZE;
-    const entryPageId = view.getUint32(offset, true);
-    if (entryPageId === 0) {
+    const entry_page_id = view.getUint32(offset, true);
+    if (entry_page_id === 0) {
       return -1;
     }
-    if (entryPageId === page_id) {
+    if (entry_page_id === page_id) {
       return view.getUint32(offset + 4, true);
     }
     idx = (idx + 1) & mask;
@@ -77,8 +77,8 @@ export function page_table_set(
 
   for (let probe = 0; probe < bucket_count; probe++) {
     const offset = base_offset + idx * PAGE_TO_SLOT_BUCKET_SIZE;
-    const entryPageId = view.getUint32(offset, true);
-    if (entryPageId === 0 || entryPageId === page_id) {
+    const entry_page_id = view.getUint32(offset, true);
+    if (entry_page_id === 0 || entry_page_id === page_id) {
       view.setUint32(offset, page_id, true);
       view.setUint32(offset + 4, slot_idx, true);
       return;
@@ -112,11 +112,11 @@ export function page_table_delete(
   let found = false;
   for (let probe = 0; probe < bucket_count; probe++) {
     const offset = base_offset + i * PAGE_TO_SLOT_BUCKET_SIZE;
-    const entryPageId = view.getUint32(offset, true);
-    if (entryPageId === 0) {
+    const entry_page_id = view.getUint32(offset, true);
+    if (entry_page_id === 0) {
       return false; // Key not found
     }
-    if (entryPageId === page_id) {
+    if (entry_page_id === page_id) {
       found = true;
       break;
     }
@@ -131,25 +131,25 @@ export function page_table_delete(
   let j = i;
   while (true) {
     j = (j + 1) & mask;
-    const jOffset = base_offset + j * PAGE_TO_SLOT_BUCKET_SIZE;
-    const jPageId = view.getUint32(jOffset, true);
-    if (jPageId === 0) {
+    const j_offset = base_offset + j * PAGE_TO_SLOT_BUCKET_SIZE;
+    const j_page_id = view.getUint32(j_offset, true);
+    if (j_page_id === 0) {
       break;
     }
-    const k = page_table_hash(jPageId, mask);
+    const k = page_table_hash(j_page_id, mask);
     // Entry at j can be moved back to i if i lies between its natural hash k and current slot j (cyclically)
     if (((i - k) & mask) < ((j - k) & mask)) {
-      const jSlotIdx = view.getUint32(jOffset + 4, true);
-      const iOffset = base_offset + i * PAGE_TO_SLOT_BUCKET_SIZE;
-      view.setUint32(iOffset, jPageId, true);
-      view.setUint32(iOffset + 4, jSlotIdx, true);
+      const j_slot_idx = view.getUint32(j_offset + 4, true);
+      const i_offset = base_offset + i * PAGE_TO_SLOT_BUCKET_SIZE;
+      view.setUint32(i_offset, j_page_id, true);
+      view.setUint32(i_offset + 4, j_slot_idx, true);
       i = j;
     }
   }
 
   // Clear the final vacated slot
-  const clearOffset = base_offset + i * PAGE_TO_SLOT_BUCKET_SIZE;
-  view.setUint32(clearOffset, 0, true);
-  view.setUint32(clearOffset + 4, 0, true);
+  const clear_offset = base_offset + i * PAGE_TO_SLOT_BUCKET_SIZE;
+  view.setUint32(clear_offset, 0, true);
+  view.setUint32(clear_offset + 4, 0, true);
   return true;
 }

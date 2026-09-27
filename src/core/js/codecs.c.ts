@@ -8,11 +8,15 @@
 // ==========================================
 export class UuidCodec {
   /** Packs a 36-char hyphenated UUID string into 16 raw binary bytes */
-  static encode(uuidStr: string, target: Uint8Array, offset: number = 0): void {
-    const clean = uuidStr.replace(/-/g, "");
+  static encode(
+    uuid_str: string,
+    target: Uint8Array,
+    offset: number = 0,
+  ): void {
+    const clean = uuid_str.replace(/-/g, "");
     if (clean.length !== 32) {
       throw new Error(
-        `Invalid UUID format: "${uuidStr}" (must be 36 characters with hyphens)`,
+        `Invalid UUID format: "${uuid_str}" (must be 36 characters with hyphens)`,
       );
     }
     for (let i = 0; i < 16; i++) {
@@ -41,13 +45,17 @@ for (let i = 0; i < CROCKFORD_ALPHABET.length; i++) {
 
 export class UlidCodec {
   /** Packs a 26-character Crockford Base32 string into 16 raw bytes */
-  static encode(ulidStr: string, target: Uint8Array, offset: number = 0): void {
-    if (ulidStr.length !== 26) {
+  static encode(
+    ulid_str: string,
+    target: Uint8Array,
+    offset: number = 0,
+  ): void {
+    if (ulid_str.length !== 26) {
       throw new Error(
-        `Invalid ULID length: "${ulidStr}" (must be 26 Crockford Base32 characters)`,
+        `Invalid ULID length: "${ulid_str}" (must be 26 Crockford Base32 characters)`,
       );
     }
-    const clean = ulidStr.toUpperCase();
+    const clean = ulid_str.toUpperCase();
 
     // 1. Parse 48-bit timestamp (first 10 characters = 50 bits; top 2 bits 0)
     let time = 0;
@@ -62,17 +70,19 @@ export class UlidCodec {
     target[offset + 5] = time & 0xff;
 
     // 2. Parse 80-bit randomness (remaining 16 characters -> 10 bytes)
-    let randHi = 0n;
+    let rand_hi = 0n;
     for (let i = 10; i < 18; i++) {
-      randHi = (randHi << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
+      rand_hi = (rand_hi << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
     }
-    let randLo = 0n;
+    let rand_lo = 0n;
     for (let i = 18; i < 26; i++) {
-      randLo = (randLo << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
+      rand_lo = (rand_lo << 5n) | BigInt(CROCKFORD_DECODE[clean.charCodeAt(i)]);
     }
     for (let i = 0; i < 5; i++) {
-      target[offset + 6 + i] = Number((randHi >> BigInt((4 - i) * 8)) & 0xffn);
-      target[offset + 11 + i] = Number((randLo >> BigInt((4 - i) * 8)) & 0xffn);
+      target[offset + 6 + i] = Number((rand_hi >> BigInt((4 - i) * 8)) & 0xffn);
+      target[offset + 11 + i] = Number(
+        (rand_lo >> BigInt((4 - i) * 8)) & 0xffn,
+      );
     }
   }
 
@@ -90,23 +100,23 @@ export class UlidCodec {
     }
 
     // 2. Extract 80-bit randomness
-    let randHi = 0n;
+    let rand_hi = 0n;
     for (let i = 0; i < 5; i++) {
-      randHi = (randHi << 8n) | BigInt(source[offset + 6 + i]);
+      rand_hi = (rand_hi << 8n) | BigInt(source[offset + 6 + i]);
     }
-    let randLo = 0n;
+    let rand_lo = 0n;
     for (let i = 0; i < 5; i++) {
-      randLo = (randLo << 8n) | BigInt(source[offset + 11 + i]);
+      rand_lo = (rand_lo << 8n) | BigInt(source[offset + 11 + i]);
     }
-    let randPart = "";
+    let rand_part = "";
     for (let i = 0; i < 8; i++) {
-      randPart = CROCKFORD_ALPHABET[Number(randLo & 31n)] + randPart;
-      randLo >>= 5n;
+      rand_part = CROCKFORD_ALPHABET[Number(rand_lo & 31n)] + rand_part;
+      rand_lo >>= 5n;
     }
     for (let i = 0; i < 8; i++) {
-      randPart = CROCKFORD_ALPHABET[Number(randHi & 31n)] + randPart;
-      randHi >>= 5n;
+      rand_part = CROCKFORD_ALPHABET[Number(rand_hi & 31n)] + rand_part;
+      rand_hi >>= 5n;
     }
-    return str + randPart;
+    return str + rand_part;
   }
 }

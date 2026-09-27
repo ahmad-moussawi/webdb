@@ -24,14 +24,36 @@ export default tseslint.config(
     },
   },
   {
-    // C-Style Zero-Allocation rules enforced strictly on the core storage & VM engine
-    files: [
-      'src/engine/vm.ts',
-      'src/engine/page.ts',
-      'src/engine/buffer_pool.ts',
-      'src/storage/crc32.ts',
-    ],
+    // C-Style Zero-Allocation rules enforced strictly on all *.c.ts files
+    files: ['**/*.c.ts'],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     rules: {
+      '@typescript-eslint/naming-convention': [
+        'warn',
+        {
+          selector: 'default',
+          format: ['snake_case', 'UPPER_CASE'],
+          leadingUnderscore: 'allow',
+          trailingUnderscore: 'allow',
+        },
+        {
+          selector: 'typeLike',
+          format: ['PascalCase', 'snake_case', 'UPPER_CASE'],
+        },
+        {
+          selector: 'property',
+          format: null,
+        },
+        {
+          selector: 'import',
+          format: null,
+        },
+      ],
       'no-restricted-syntax': [
         'error',
         // 1. Ban Array higher-order methods in hot paths (.map, .filter, .forEach, .reduce, etc.)

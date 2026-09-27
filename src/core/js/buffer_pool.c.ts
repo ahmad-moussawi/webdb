@@ -13,9 +13,7 @@ import {
   page_table_set,
   page_table_delete,
 } from "./page_table.c.js";
-import {
-  QueryArenaExhaustedError,
-} from "../../types/index.js";
+import { QueryArenaExhaustedError } from "../../types/index.js";
 import {
   memcpy,
   memset,
@@ -329,11 +327,7 @@ export function buf_pool_select_eviction_victim(
     dirty_mask_offset,
     candidate_slot,
   );
-  const slot_view = new DataView(
-    buffer,
-    candidate_slot * PAGE_SIZE,
-    PAGE_SIZE,
-  );
+  const slot_view = new DataView(buffer, candidate_slot * PAGE_SIZE, PAGE_SIZE);
   const is_free_page =
     old_page_id > 0 && page_get_type(slot_view, 0) === PAGE_TYPE_FREE;
   const flush_page_id =
@@ -380,56 +374,6 @@ export class BufferPool {
   private clock_hand: number = 0;
   private arena_offset: number = 0;
 
-  // CamelCase property aliases for host callers
-  get slotCount(): number {
-    return this.slot_count;
-  }
-  get maxQueryMemory(): number {
-    return this.max_query_memory;
-  }
-  get wasmMemory(): WebAssembly.Memory {
-    return this.wasm_memory;
-  }
-  get slotsEndOffset(): number {
-    return this.slots_end_offset;
-  }
-  get slotToPageOffset(): number {
-    return this.slot_to_page_offset;
-  }
-  get pageToSlotOffset(): number {
-    return this.page_to_slot_offset;
-  }
-  get pageToSlotBuckets(): number {
-    return this.page_to_slot_buckets;
-  }
-  get dirtyMaskOffset(): number {
-    return this.dirty_mask_offset;
-  }
-  get vmContextOffset(): number {
-    return this.vm_context_offset;
-  }
-  get resultBufferOffset(): number {
-    return this.result_buffer_offset;
-  }
-  get bytecodeOffset(): number {
-    return this.bytecode_offset;
-  }
-  get pageScratchpadOffset(): number {
-    return this.page_scratchpad_offset;
-  }
-  get transientArenaOffset(): number {
-    return this.transient_arena_offset;
-  }
-  get pinCounts(): Uint32Array {
-    return this.pin_counts;
-  }
-  get refBits(): Uint8Array {
-    return this.ref_bits;
-  }
-  get clockHand(): number {
-    return this.clock_hand;
-  }
-
   constructor(options?: BufferPoolOptions) {
     this.slot_count = options?.slotCount ?? DEFAULT_SLOT_COUNT;
 
@@ -439,8 +383,7 @@ export class BufferPool {
       );
     }
 
-    this.max_query_memory =
-      options?.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
+    this.max_query_memory = options?.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
 
     if (
       !Number.isInteger(this.max_query_memory) ||
@@ -563,47 +506,6 @@ export class BufferPool {
     memset(this.uint8, address, val, length);
   }
 
-  // CamelCase wrappers
-  readUint8(address: number): number {
-    return this.read_u8(address);
-  }
-  writeUint8(address: number, value: number): void {
-    this.write_u8(address, value);
-  }
-  readUint16(address: number): number {
-    return this.read_u16(address);
-  }
-  writeUint16(address: number, value: number): void {
-    this.write_u16(address, value);
-  }
-  readUint32(address: number): number {
-    return this.read_u32(address);
-  }
-  writeUint32(address: number, value: number): void {
-    this.write_u32(address, value);
-  }
-  readInt32(address: number): number {
-    return this.read_i32(address);
-  }
-  writeInt32(address: number, value: number): void {
-    this.write_i32(address, value);
-  }
-  readFloat64(address: number): number {
-    return this.read_f64(address);
-  }
-  writeFloat64(address: number, value: number): void {
-    this.write_f64(address, value);
-  }
-  getBytes(address: number, length: number): Uint8Array {
-    return this.get_bytes(address, length);
-  }
-  setBytes(address: number, source: Uint8Array): void {
-    this.set_bytes(address, source);
-  }
-  fillBytes(address: number, length: number, value: number = 0): void {
-    this.fill_bytes(address, length, value);
-  }
-
   // ==========================================================================
   // Validation Helpers
   // ==========================================================================
@@ -707,26 +609,6 @@ export class BufferPool {
     return buf_pool_is_dirty(this.uint8, this.dirty_mask_offset, slot_idx);
   }
 
-  // CamelCase wrappers
-  getAssignedPage(slotIdx: number): number {
-    return this.get_assigned_page(slotIdx);
-  }
-  assignSlot(slotIdx: number, pageId: number): void {
-    this.assign_slot(slotIdx, pageId);
-  }
-  unassignSlot(slotIdx: number): void {
-    this.unassign_slot(slotIdx);
-  }
-  markDirty(slotIdx: number): void {
-    this.mark_dirty(slotIdx);
-  }
-  clearDirty(slotIdx: number): void {
-    this.clear_dirty(slotIdx);
-  }
-  isDirty(slotIdx: number): boolean {
-    return this.is_dirty(slotIdx);
-  }
-
   // ==========================================================================
   // Pinning Invariant (Reference Counted)
   // ==========================================================================
@@ -781,32 +663,6 @@ export class BufferPool {
     this.ref_bits[slot_idx] = val ? 1 : 0;
   }
 
-  // CamelCase wrappers
-  pinSlot(slotIdx: number): void {
-    this.pin_slot(slotIdx);
-  }
-  unpinSlot(slotIdx: number): void {
-    this.unpin_slot(slotIdx);
-  }
-  pinPage(pageId: number): void {
-    this.pin_page(pageId);
-  }
-  unpinPage(pageId: number): void {
-    this.unpin_page(pageId);
-  }
-  isSlotPinned(slotIdx: number): boolean {
-    return this.is_pinned(slotIdx);
-  }
-  getPinCount(slotIdx: number): number {
-    return this.get_pin_count(slotIdx);
-  }
-  getRefBit(slotIdx: number): number {
-    return this.get_ref_bit(slotIdx);
-  }
-  setRefBit(slotIdx: number, val: number): void {
-    this.set_ref_bit(slotIdx, val);
-  }
-
   // ==========================================================================
   // Page Access & Resident Lookups
   // ==========================================================================
@@ -836,20 +692,6 @@ export class BufferPool {
     );
   }
 
-  // CamelCase wrappers
-  getSlotOffset(slotIdx: number): number {
-    return this.get_slot_offset(slotIdx);
-  }
-  getPageBytesInSlot(slotIdx: number): Uint8Array {
-    return this.get_page_bytes_in_slot(slotIdx);
-  }
-  getSlotDataView(slotIdx: number): DataView {
-    return this.get_slot_data_view(slotIdx);
-  }
-  getResidentSlot(pageId: number): number {
-    return this.get_resident_slot(pageId);
-  }
-
   find_eviction_candidate_slot(): number {
     const res = buf_pool_find_victim(
       this.buffer,
@@ -863,20 +705,12 @@ export class BufferPool {
     return res.candidate_slot;
   }
 
-  findEvictionCandidateSlot(): number {
-    return this.find_eviction_candidate_slot();
-  }
-
   // ==========================================================================
   // Transient Query Arena
   // ==========================================================================
 
   get_arena_offset(): number {
     return this.arena_offset;
-  }
-
-  getArenaOffset(): number {
-    return this.get_arena_offset();
   }
 
   alloc_arena(size: number): number {
@@ -907,22 +741,10 @@ export class BufferPool {
     return current;
   }
 
-  allocateInArena(size: number): number {
-    return this.alloc_arena(size);
-  }
-
-  allocArena(size: number): number {
-    return this.alloc_arena(size);
-  }
-
   reset_arena(): void {
     if (this.arena_offset > 0) {
       this.fill_bytes(this.transient_arena_offset, this.arena_offset, 0);
       this.arena_offset = 0;
     }
-  }
-
-  resetArena(): void {
-    this.reset_arena();
   }
 }

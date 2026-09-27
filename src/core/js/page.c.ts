@@ -11,7 +11,7 @@ import {
   TABLE_INTERIOR_SPLIT_INDEX,
   MAX_COLUMNS_PER_TABLE,
   PAGE_HEADER_OFFSET_CHECKSUM,
-} from '../../constants.js';
+} from "../../constants.js";
 import {
   DataType,
   ColumnFlag,
@@ -22,11 +22,11 @@ import {
   RowSizeLimitExceededError,
   NotNullConstraintError,
   TooManyColumnsError,
-} from '../../types/index.js';
-import { UuidCodec, UlidCodec } from './codecs.c.js';
+} from "../../types/index.js";
+import { UuidCodec, UlidCodec } from "./codecs.c.js";
 
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+const text_encoder = new TextEncoder();
+const text_decoder = new TextDecoder();
 
 // ============================================================================
 // 1. Slotted Page Initialization & Header Accessors (16-Byte Header)
@@ -51,17 +51,17 @@ const textDecoder = new TextDecoder();
  */
 export function page_init(
   view: DataView,
-  pageOffset: number,
-  pageType: number = PAGE_TYPE_LEAF_DATA,
-  nextPageId: number = 0
+  page_offset: number,
+  page_type: number = PAGE_TYPE_LEAF_DATA,
+  next_page_id: number = 0,
 ): void {
-  view.setUint8(pageOffset + 0, pageType);
-  view.setUint8(pageOffset + 1, 0);
-  view.setUint16(pageOffset + 2, 0, true);
-  view.setUint16(pageOffset + 4, PAGE_SIZE, true);
-  view.setUint32(pageOffset + 6, nextPageId, true);
-  view.setUint16(pageOffset + 10, 0, true);
-  view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
+  view.setUint8(page_offset + 0, page_type);
+  view.setUint8(page_offset + 1, 0);
+  view.setUint16(page_offset + 2, 0, true);
+  view.setUint16(page_offset + 4, PAGE_SIZE, true);
+  view.setUint32(page_offset + 6, next_page_id, true);
+  view.setUint16(page_offset + 10, 0, true);
+  view.setUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
 }
 
 /**
@@ -70,149 +70,203 @@ export function page_init(
  */
 export function page_init_free(
   view: DataView,
-  pageOffset: number,
-  nextFreePageId: number = 0
+  page_offset: number,
+  next_free_page_id: number = 0,
 ): void {
-  view.setUint8(pageOffset + 0, PAGE_TYPE_FREE);
-  view.setUint8(pageOffset + 1, 0);
-  view.setUint16(pageOffset + 2, 0, true);
-  view.setUint16(pageOffset + 4, 0, true);
-  view.setUint32(pageOffset + 6, nextFreePageId, true);
-  view.setUint16(pageOffset + 10, 0, true);
-  view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
+  view.setUint8(page_offset + 0, PAGE_TYPE_FREE);
+  view.setUint8(page_offset + 1, 0);
+  view.setUint16(page_offset + 2, 0, true);
+  view.setUint16(page_offset + 4, 0, true);
+  view.setUint32(page_offset + 6, next_free_page_id, true);
+  view.setUint16(page_offset + 10, 0, true);
+  view.setUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, 0, true);
 }
 
 /**
  * @export_c
  * Returns the page type byte from a page header.
  */
-export function page_get_type(view: DataView, pageOffset: number): number {
-  return view.getUint8(pageOffset + 0);
+export function page_get_type(view: DataView, page_offset: number): number {
+  return view.getUint8(page_offset + 0);
 }
 
 /**
  * @export_c
  * Sets the page type byte in a page header.
  */
-export function page_set_type(view: DataView, pageOffset: number, type: number): void {
-  view.setUint8(pageOffset + 0, type);
+export function page_set_type(
+  view: DataView,
+  page_offset: number,
+  type: number,
+): void {
+  view.setUint8(page_offset + 0, type);
 }
 
 /**
  * @export_c
  * Returns the number of cells in the page slot directory.
  */
-export function page_get_cell_count(view: DataView, pageOffset: number): number {
-  return view.getUint16(pageOffset + 2, true);
+export function page_get_cell_count(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint16(page_offset + 2, true);
 }
 
 /**
  * @export_c
  * Sets the number of cells in the page slot directory.
  */
-export function page_set_cell_count(view: DataView, pageOffset: number, count: number): void {
-  view.setUint16(pageOffset + 2, count, true);
+export function page_set_cell_count(
+  view: DataView,
+  page_offset: number,
+  count: number,
+): void {
+  view.setUint16(page_offset + 2, count, true);
 }
 
 /**
  * @export_c
  * Returns the byte offset within the page where active cell payloads begin.
  */
-export function page_get_cell_content_offset(view: DataView, pageOffset: number): number {
-  return view.getUint16(pageOffset + 4, true);
+export function page_get_cell_content_offset(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint16(page_offset + 4, true);
 }
 
 /**
  * @export_c
  * Sets the byte offset within the page where active cell payloads begin.
  */
-export function page_set_cell_content_offset(view: DataView, pageOffset: number, offset: number): void {
-  view.setUint16(pageOffset + 4, offset, true);
+export function page_set_cell_content_offset(
+  view: DataView,
+  page_offset: number,
+  offset: number,
+): void {
+  view.setUint16(page_offset + 4, offset, true);
 }
 
 /**
  * @export_c
  * Returns the next page ID (or right child page ID) stored in the page header.
  */
-export function page_get_next_page_id(view: DataView, pageOffset: number): number {
-  return view.getUint32(pageOffset + 6, true);
+export function page_get_next_page_id(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint32(page_offset + 6, true);
 }
 
 /**
  * @export_c
  * Sets the next page ID (or right child page ID) stored in the page header.
  */
-export function page_set_next_page_id(view: DataView, pageOffset: number, nextPageId: number): void {
-  view.setUint32(pageOffset + 6, nextPageId, true);
+export function page_set_next_page_id(
+  view: DataView,
+  page_offset: number,
+  next_page_id: number,
+): void {
+  view.setUint32(page_offset + 6, next_page_id, true);
 }
 
 /**
  * @export_c
  * Returns cumulative fragmented unallocated bytes in the page.
  */
-export function page_get_free_bytes(view: DataView, pageOffset: number): number {
-  return view.getUint16(pageOffset + 10, true);
+export function page_get_free_bytes(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint16(page_offset + 10, true);
 }
 
 /**
  * @export_c
  * Sets cumulative fragmented unallocated bytes in the page.
  */
-export function page_set_free_bytes(view: DataView, pageOffset: number, freeBytes: number): void {
-  view.setUint16(pageOffset + 10, freeBytes, true);
+export function page_set_free_bytes(
+  view: DataView,
+  page_offset: number,
+  free_bytes: number,
+): void {
+  view.setUint16(page_offset + 10, free_bytes, true);
 }
 
 /**
  * @export_c
  * Returns the checksum stored at bytes 12..15 in the page header.
  */
-export function page_get_checksum(view: DataView, pageOffset: number): number {
-  return view.getUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, true);
+export function page_get_checksum(view: DataView, page_offset: number): number {
+  return view.getUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, true);
 }
 
 /**
  * @export_c
  * Sets the checksum stored at bytes 12..15 in the page header.
  */
-export function page_set_checksum(view: DataView, pageOffset: number, checksum: number): void {
-  view.setUint32(pageOffset + PAGE_HEADER_OFFSET_CHECKSUM, checksum, true);
+export function page_set_checksum(
+  view: DataView,
+  page_offset: number,
+  checksum: number,
+): void {
+  view.setUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, checksum, true);
 }
 
 /**
  * @export_c
  * Returns the cell payload offset for the given slot directory index.
  */
-export function page_get_cell_offset(view: DataView, pageOffset: number, slotIdx: number): number {
-  const slotDirOffset = pageOffset + PAGE_HEADER_SIZE + (slotIdx * 2);
-  return view.getUint16(slotDirOffset, true);
+export function page_get_cell_offset(
+  view: DataView,
+  page_offset: number,
+  slot_idx: number,
+): number {
+  const slot_dir_offset = page_offset + PAGE_HEADER_SIZE + slot_idx * 2;
+  return view.getUint16(slot_dir_offset, true);
 }
 
 /**
  * @export_c
  * Sets the cell payload offset for the given slot directory index.
  */
-export function page_set_cell_offset(view: DataView, pageOffset: number, slotIdx: number, cellOffset: number): void {
-  const slotDirOffset = pageOffset + PAGE_HEADER_SIZE + (slotIdx * 2);
-  view.setUint16(slotDirOffset, cellOffset, true);
+export function page_set_cell_offset(
+  view: DataView,
+  page_offset: number,
+  slot_idx: number,
+  cell_offset: number,
+): void {
+  const slot_dir_offset = page_offset + PAGE_HEADER_SIZE + slot_idx * 2;
+  view.setUint16(slot_dir_offset, cell_offset, true);
 }
 
 /**
  * @export_c
  * Returns contiguous free space between slot directory end and cell content offset.
  */
-export function page_get_contiguous_free_space(view: DataView, pageOffset: number): number {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  const cellContentOffset = page_get_cell_content_offset(view, pageOffset);
-  const slotDirEnd = PAGE_HEADER_SIZE + (cellCount * 2);
-  return cellContentOffset - slotDirEnd;
+export function page_get_contiguous_free_space(
+  view: DataView,
+  page_offset: number,
+): number {
+  const cell_count = page_get_cell_count(view, page_offset);
+  const cell_content_offset = page_get_cell_content_offset(view, page_offset);
+  const slot_dir_end = PAGE_HEADER_SIZE + cell_count * 2;
+  return cell_content_offset - slot_dir_end;
 }
 
 /**
  * @export_c
  * Returns total free space on the page (contiguous + fragmented free_bytes).
  */
-export function page_get_total_free_space(view: DataView, pageOffset: number): number {
-  return page_get_contiguous_free_space(view, pageOffset) + page_get_free_bytes(view, pageOffset);
+export function page_get_total_free_space(
+  view: DataView,
+  page_offset: number,
+): number {
+  return (
+    page_get_contiguous_free_space(view, page_offset) +
+    page_get_free_bytes(view, page_offset)
+  );
 }
 
 // ============================================================================
@@ -220,8 +274,8 @@ export function page_get_total_free_space(view: DataView, pageOffset: number): n
 // ============================================================================
 
 export interface ReplacementCell {
-  cellIdx: number;
-  rowBytes: Uint8Array;
+  cell_idx: number;
+  row_bytes: Uint8Array;
 }
 
 /**
@@ -232,114 +286,133 @@ export interface ReplacementCell {
  */
 export function page_compact(
   view: DataView,
-  pageOffset: number,
-  scratchpadOffset?: number,
-  replacement?: ReplacementCell
+  page_offset: number,
+  scratchpad_offset?: number,
+  replacement?: ReplacementCell,
 ): void {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  if (cellCount === 0) {
-    page_set_cell_content_offset(view, pageOffset, PAGE_SIZE);
-    page_set_free_bytes(view, pageOffset, 0);
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (cell_count === 0) {
+    page_set_cell_content_offset(view, page_offset, PAGE_SIZE);
+    page_set_free_bytes(view, page_offset, 0);
     return;
   }
 
-  const absPageStart = view.byteOffset + pageOffset;
+  const abs_page_start = view.byteOffset + page_offset;
   const uint8 = new Uint8Array(view.buffer);
 
   // Read all active cell offsets and their lengths
   interface CellInfo {
-    slotIdx: number;
+    slot_idx: number;
     offset: number;
     length: number;
-    replacementBytes?: Uint8Array;
+    replacement_bytes?: Uint8Array;
   }
 
   const cells: CellInfo[] = [];
-  for (let i = 0; i < cellCount; i++) {
-    if (replacement && i === replacement.cellIdx) {
+  for (let i = 0; i < cell_count; i++) {
+    if (replacement && i === replacement.cell_idx) {
       cells.push({
-        slotIdx: i,
+        slot_idx: i,
         offset: -1,
-        length: replacement.rowBytes.byteLength,
-        replacementBytes: replacement.rowBytes,
+        length: replacement.row_bytes.byteLength,
+        replacement_bytes: replacement.row_bytes,
       });
     } else {
-      const offset = page_get_cell_offset(view, pageOffset, i);
-      const len = page_get_row_length(view, pageOffset + offset);
-      cells.push({ slotIdx: i, offset, length: len });
+      const offset = page_get_cell_offset(view, page_offset, i);
+      const len = page_get_row_length(view, page_offset + offset);
+      cells.push({ slot_idx: i, offset, length: len });
     }
   }
 
   // Create staging scratchpad (either at designated scratchpad offset in ArrayBuffer or locally)
-  let scratchOffset: number;
-  let useLocalScratch = false;
-  let localScratch: Uint8Array | null = null;
+  let scratch_offset: number;
+  let use_local_search = false;
+  let local_scratch: Uint8Array | null = null;
 
-  if (scratchpadOffset !== undefined) {
-    scratchOffset = scratchpadOffset;
+  if (scratchpad_offset !== undefined) {
+    scratch_offset = scratchpad_offset;
   } else {
     // If not provided in standalone tests, use a local 4KB buffer
-    useLocalScratch = true;
-    localScratch = new Uint8Array(PAGE_SIZE);
-    scratchOffset = 0;
+    use_local_search = true;
+    local_scratch = new Uint8Array(PAGE_SIZE);
+    scratch_offset = 0;
   }
 
-  const scratchView = useLocalScratch
-    ? new DataView(localScratch!.buffer)
-    : new DataView(view.buffer, scratchOffset, PAGE_SIZE);
+  const scratch_view = use_local_search
+    ? new DataView(local_scratch!.buffer)
+    : new DataView(view.buffer, scratch_offset, PAGE_SIZE);
 
   // Copy header (first 16 bytes)
-  const headerBytes = new Uint8Array(view.buffer, absPageStart, PAGE_HEADER_SIZE);
-  if (useLocalScratch) {
-    localScratch!.set(headerBytes, 0);
+  const header_bytes = new Uint8Array(
+    view.buffer,
+    abs_page_start,
+    PAGE_HEADER_SIZE,
+  );
+  if (use_local_search) {
+    local_scratch!.set(header_bytes, 0);
   } else {
-    uint8.set(headerBytes, scratchOffset);
+    uint8.set(header_bytes, scratch_offset);
   }
 
   // Pack active cells contiguously from byte 4096 upwards
-  let currentOffset = PAGE_SIZE;
-  for (let i = 0; i < cellCount; i++) {
+  let current_offset = PAGE_SIZE;
+  for (let i = 0; i < cell_count; i++) {
     const cell = cells[i];
-    currentOffset -= cell.length;
+    current_offset -= cell.length;
 
     // Copy cell payload into scratchpad
-    if (cell.replacementBytes) {
-      if (useLocalScratch) {
-        localScratch!.set(cell.replacementBytes, currentOffset);
+    if (cell.replacement_bytes) {
+      if (use_local_search) {
+        local_scratch!.set(cell.replacement_bytes, current_offset);
       } else {
-        uint8.set(cell.replacementBytes, scratchOffset + currentOffset);
+        uint8.set(cell.replacement_bytes, scratch_offset + current_offset);
       }
     } else {
-      const cellBytes = new Uint8Array(view.buffer, absPageStart + cell.offset, cell.length);
-      if (useLocalScratch) {
-        localScratch!.set(cellBytes, currentOffset);
+      const cell_bytes = new Uint8Array(
+        view.buffer,
+        abs_page_start + cell.offset,
+        cell.length,
+      );
+      if (use_local_search) {
+        local_scratch!.set(cell_bytes, current_offset);
       } else {
-        uint8.set(cellBytes, scratchOffset + currentOffset);
+        uint8.set(cell_bytes, scratch_offset + current_offset);
       }
     }
 
     // Write new slot directory offset in scratchpad
-    scratchView.setUint16(PAGE_HEADER_SIZE + (cell.slotIdx * 2), currentOffset, true);
+    scratch_view.setUint16(
+      PAGE_HEADER_SIZE + cell.slot_idx * 2,
+      current_offset,
+      true,
+    );
   }
 
   // Update scratchpad header fields
-  scratchView.setUint16(4, currentOffset, true); // cell_content_offset
-  scratchView.setUint16(10, 0, true);            // free_bytes = 0
+  scratch_view.setUint16(4, current_offset, true); // cell_content_offset
+  scratch_view.setUint16(10, 0, true); // free_bytes = 0
 
   // Copy compacted scratchpad back into target page slot
-  if (useLocalScratch) {
-    uint8.set(localScratch!, absPageStart);
+  if (use_local_search) {
+    uint8.set(local_scratch!, abs_page_start);
   } else {
-    uint8.copyWithin(absPageStart, scratchOffset, scratchOffset + PAGE_SIZE);
+    uint8.copyWithin(
+      abs_page_start,
+      scratch_offset,
+      scratch_offset + PAGE_SIZE,
+    );
   }
 }
 
 /**
  * @export_c
- * Calculates row length in bytes from the serialized row at rowOffset.
+ * Calculates row length in bytes from the serialized row at row_offset.
  */
-export function page_get_row_length(view: DataView, rowOffset: number): number {
-  return view.getUint16(rowOffset + 1, true);
+export function page_get_row_length(
+  view: DataView,
+  row_offset: number,
+): number {
+  return view.getUint16(row_offset + 1, true);
 }
 
 // ============================================================================
@@ -353,46 +426,54 @@ export function page_get_row_length(view: DataView, rowOffset: number): number {
  */
 export function page_insert_row(
   view: DataView,
-  pageOffset: number,
-  rowBytes: Uint8Array,
-  scratchpadOffset?: number
+  page_offset: number,
+  row_bytes: Uint8Array,
+  scratchpad_offset?: number,
 ): number {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  const cellContentOffset = page_get_cell_content_offset(view, pageOffset);
-  const neededBytes = rowBytes.byteLength + 2; // payload + 2B slot directory entry
+  const cell_count = page_get_cell_count(view, page_offset);
+  const cell_content_offset = page_get_cell_content_offset(view, page_offset);
+  const needed_bytes = row_bytes.byteLength + 2; // payload + 2B slot directory entry
 
-  const slotDirEnd = PAGE_HEADER_SIZE + (cellCount * 2);
-  const contiguousFree = cellContentOffset - slotDirEnd;
-  const totalFree = contiguousFree + page_get_free_bytes(view, pageOffset);
+  const slot_dir_end = PAGE_HEADER_SIZE + cell_count * 2;
+  const contiguous_free = cell_content_offset - slot_dir_end;
+  const total_free = contiguous_free + page_get_free_bytes(view, page_offset);
 
-  if (neededBytes > totalFree) {
+  if (needed_bytes > total_free) {
     return -1; // Cannot fit even after defragmentation
   }
 
-  if (neededBytes > contiguousFree) {
+  if (needed_bytes > contiguous_free) {
     // In-place compaction collapses all fragmented holes
-    page_compact(view, pageOffset, scratchpadOffset);
+    page_compact(view, page_offset, scratchpad_offset);
   }
 
-  const currentContentOffset = page_get_cell_content_offset(view, pageOffset);
-  const currentCellCount = page_get_cell_count(view, pageOffset);
+  const current_content_offset = page_get_cell_content_offset(
+    view,
+    page_offset,
+  );
+  const current_cell_count = page_get_cell_count(view, page_offset);
 
   // Allocate payload from bottom up
-  const newContentOffset = currentContentOffset - rowBytes.byteLength;
-  const absTarget = view.byteOffset + pageOffset + newContentOffset;
+  const new_content_offset = current_content_offset - row_bytes.byteLength;
+  const abs_target = view.byteOffset + page_offset + new_content_offset;
 
   // Copy row bytes into page
   const uint8 = new Uint8Array(view.buffer);
-  uint8.set(rowBytes, absTarget);
+  uint8.set(row_bytes, abs_target);
 
   // Write new slot directory entry
-  page_set_cell_offset(view, pageOffset, currentCellCount, newContentOffset);
+  page_set_cell_offset(
+    view,
+    page_offset,
+    current_cell_count,
+    new_content_offset,
+  );
 
   // Update page header
-  page_set_cell_count(view, pageOffset, currentCellCount + 1);
-  page_set_cell_content_offset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, page_offset, current_cell_count + 1);
+  page_set_cell_content_offset(view, page_offset, new_content_offset);
 
-  return currentCellCount;
+  return current_cell_count;
 }
 
 /**
@@ -402,32 +483,38 @@ export function page_insert_row(
  */
 export function page_delete_row(
   view: DataView,
-  pageOffset: number,
-  cellIdx: number
+  page_offset: number,
+  cell_idx: number,
 ): void {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  if (cellIdx < 0 || cellIdx >= cellCount) {
-    throw new Error(`Invalid cell index ${cellIdx} for deletion (cellCount=${cellCount})`);
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (cell_idx < 0 || cell_idx >= cell_count) {
+    throw new Error(
+      `Invalid cell index ${cell_idx} for deletion (cell_count=${cell_count})`,
+    );
   }
 
-  const offset = page_get_cell_offset(view, pageOffset, cellIdx);
-  const rowLen = page_get_row_length(view, pageOffset + offset);
+  const offset = page_get_cell_offset(view, page_offset, cell_idx);
+  const row_len = page_get_row_length(view, page_offset + offset);
 
   // Shift slot directory entries left by 2 bytes
   const uint8 = new Uint8Array(view.buffer);
-  const absPageStart = view.byteOffset + pageOffset;
-  const slotDirStart = absPageStart + PAGE_HEADER_SIZE;
-  const src = slotDirStart + (cellIdx + 1) * 2;
-  const dst = slotDirStart + cellIdx * 2;
-  const shiftLength = (cellCount - 1 - cellIdx) * 2;
+  const abs_page_start = view.byteOffset + page_offset;
+  const slot_dir_start = abs_page_start + PAGE_HEADER_SIZE;
+  const src = slot_dir_start + (cell_idx + 1) * 2;
+  const dst = slot_dir_start + cell_idx * 2;
+  const shift_length = (cell_count - 1 - cell_idx) * 2;
 
-  if (shiftLength > 0) {
-    uint8.copyWithin(dst, src, src + shiftLength);
+  if (shift_length > 0) {
+    uint8.copyWithin(dst, src, src + shift_length);
   }
 
   // Update header
-  page_set_cell_count(view, pageOffset, cellCount - 1);
-  page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + rowLen);
+  page_set_cell_count(view, page_offset, cell_count - 1);
+  page_set_free_bytes(
+    view,
+    page_offset,
+    page_get_free_bytes(view, page_offset) + row_len,
+  );
 }
 
 /**
@@ -437,53 +524,67 @@ export function page_delete_row(
  */
 export function page_update_row(
   view: DataView,
-  pageOffset: number,
-  cellIdx: number,
-  newRowBytes: Uint8Array,
-  scratchpadOffset?: number
+  page_offset: number,
+  cell_idx: number,
+  new_row_bytes: Uint8Array,
+  scratchpad_offset?: number,
 ): boolean {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  if (cellIdx < 0 || cellIdx >= cellCount) {
-    throw new Error(`Invalid cell index ${cellIdx} for update`);
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (cell_idx < 0 || cell_idx >= cell_count) {
+    throw new Error(`Invalid cell index ${cell_idx} for update`);
   }
 
-  const oldOffset = page_get_cell_offset(view, pageOffset, cellIdx);
-  const oldLen = page_get_row_length(view, pageOffset + oldOffset);
-  const newLen = newRowBytes.byteLength;
+  const old_offset = page_get_cell_offset(view, page_offset, cell_idx);
+  const old_len = page_get_row_length(view, page_offset + old_offset);
+  const new_len = new_row_bytes.byteLength;
   const uint8 = new Uint8Array(view.buffer);
 
   // Scenario A: Same-size or shrinking update
-  if (newLen <= oldLen) {
-    uint8.set(newRowBytes, view.byteOffset + pageOffset + oldOffset);
-    if (newLen < oldLen) {
-      page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + (oldLen - newLen));
+  if (new_len <= old_len) {
+    uint8.set(new_row_bytes, view.byteOffset + page_offset + old_offset);
+    if (new_len < old_len) {
+      page_set_free_bytes(
+        view,
+        page_offset,
+        page_get_free_bytes(view, page_offset) + (old_len - new_len),
+      );
     }
     return true;
   }
 
   // Scenario B: Expanding update fitting on current page
-  const totalFree = page_get_total_free_space(view, pageOffset);
-  const neededExtra = newLen - oldLen;
+  const total_free = page_get_total_free_space(view, page_offset);
+  const needed_extra = new_len - old_len;
 
-  if (totalFree >= neededExtra) {
-    const contiguousFree = page_get_contiguous_free_space(view, pageOffset);
-    if (contiguousFree < newLen) {
+  if (total_free >= needed_extra) {
+    const contiguous_free = page_get_contiguous_free_space(view, page_offset);
+    if (contiguous_free < new_len) {
       // Compacting directly replaces the old record with the new record,
       // avoiding dead ghost copies and slot directory boundary overflows
-      page_compact(view, pageOffset, scratchpadOffset, { cellIdx, rowBytes: newRowBytes });
+      page_compact(view, page_offset, scratchpad_offset, {
+        cell_idx,
+        row_bytes: new_row_bytes,
+      });
       return true;
     }
 
     // Mark old record space as hole
-    page_set_free_bytes(view, pageOffset, page_get_free_bytes(view, pageOffset) + oldLen);
+    page_set_free_bytes(
+      view,
+      page_offset,
+      page_get_free_bytes(view, page_offset) + old_len,
+    );
 
-    const contentOffset = page_get_cell_content_offset(view, pageOffset);
-    const newContentOffset = contentOffset - newLen;
-    uint8.set(newRowBytes, view.byteOffset + pageOffset + newContentOffset);
+    const content_offset = page_get_cell_content_offset(view, page_offset);
+    const new_content_offset = content_offset - new_len;
+    uint8.set(
+      new_row_bytes,
+      view.byteOffset + page_offset + new_content_offset,
+    );
 
     // Update slot directory entry
-    page_set_cell_offset(view, pageOffset, cellIdx, newContentOffset);
-    page_set_cell_content_offset(view, pageOffset, newContentOffset);
+    page_set_cell_offset(view, page_offset, cell_idx, new_content_offset);
+    page_set_cell_content_offset(view, page_offset, new_content_offset);
     return true;
   }
 
@@ -499,19 +600,26 @@ export function page_update_row(
  * @export_c
  * Calculates null-bitmap bytes, fixed slice size, and variable column count for row layout.
  */
-export function page_get_table_layout(tableOrColumns: TableMeta | ColumnMeta[]) {
-  const columns = Array.isArray(tableOrColumns) ? tableOrColumns : (tableOrColumns as TableMeta).columns;
-  const nullBitmapBytes = Math.ceil(columns.length / 8);
-  let fixedSliceSize = 0;
-  let varColCount = 0;
+export function page_get_table_layout(
+  table_or_columns: TableMeta | ColumnMeta[],
+) {
+  const columns = Array.isArray(table_or_columns)
+    ? table_or_columns
+    : (table_or_columns as TableMeta).columns;
+  const null_bitmap_bytes = Math.ceil(columns.length / 8);
+  let fixed_slice_size = 0;
+  let var_col_count = 0;
   for (let i = 0; i < columns.length; i++) {
     const c = columns[i];
-    if (c.type === DataType.INT32) fixedSliceSize += 4;
-    else if (c.type === DataType.INT64 || c.type === DataType.FLOAT64) fixedSliceSize += 8;
-    else if (c.type === DataType.UUID || c.type === DataType.ULID) fixedSliceSize += 16;
-    else if (c.type === DataType.TEXT || c.type === DataType.BLOB) varColCount++;
+    if (c.type === DataType.INT32) fixed_slice_size += 4;
+    else if (c.type === DataType.INT64 || c.type === DataType.FLOAT64)
+      fixed_slice_size += 8;
+    else if (c.type === DataType.UUID || c.type === DataType.ULID)
+      fixed_slice_size += 16;
+    else if (c.type === DataType.TEXT || c.type === DataType.BLOB)
+      var_col_count++;
   }
-  return { nullBitmapBytes, fixedSliceSize, varColCount };
+  return { null_bitmap_bytes, fixed_slice_size, var_col_count };
 }
 
 /**
@@ -519,163 +627,178 @@ export function page_get_table_layout(tableOrColumns: TableMeta | ColumnMeta[]) 
  * Serializes a user row into WebDB Phase 1 binary format:
  *
  * [0]: Flags (1B: 0x01 = Active)
- * [1..2]: Row Length (2B uint16 LE)
- * [3..(3 + nullBitmapBytes - 1)]: Null-Bitmap (ceil(N/8) bytes)
+ * [1..2]: Row _length (2B uint16 LE)
+ * [3..(3 + null_bitmap_bytes - 1)]: _null-_bitmap (ceil(N/8) bytes)
  * Followed by: Fixed Slice (INT32 4B, INT64 8B, FLOAT64 8B, UUID 16B, ULID 16B)
- * Followed by: Var-Offset Table (4B per TEXT/BLOB column: 2B rel_offset, 2B length)
+ * Followed by: Var-_offset Table (4B per TEXT/BLOB column: 2B rel_offset, 2B length)
  * Followed by: Var Payloads (raw UTF-8 string or binary bytes)
  *
  * Strict 2048-Byte boundary enforced.
  */
 export function page_serialize_row(
-  tableOrColumns: TableMeta | ColumnMeta[],
-  values: Record<string, DbValue>
+  table_or_columns: TableMeta | ColumnMeta[],
+  values: Record<string, DbValue>,
 ): Uint8Array {
-  const columns = Array.isArray(tableOrColumns) ? tableOrColumns : (tableOrColumns as TableMeta).columns;
-  const colCount = columns.length;
-  if (colCount > MAX_COLUMNS_PER_TABLE) {
-    throw new TooManyColumnsError(colCount, MAX_COLUMNS_PER_TABLE);
+  const columns = Array.isArray(table_or_columns)
+    ? table_or_columns
+    : (table_or_columns as TableMeta).columns;
+  const col_count = columns.length;
+  if (col_count > MAX_COLUMNS_PER_TABLE) {
+    throw new TooManyColumnsError(col_count, MAX_COLUMNS_PER_TABLE);
   }
 
-  const nullBitmapBytes = Math.ceil(colCount / 8);
-  const nullBitmap = new Uint8Array(nullBitmapBytes);
+  const null_bitmap_bytes = Math.ceil(col_count / 8);
+  const null_bitmap = new Uint8Array(null_bitmap_bytes);
 
   // Validate NOT NULL constraints & compute null bits
-  for (let i = 0; i < colCount; i++) {
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
     const val = values[col.name];
-    const isNull = val === null || val === undefined;
+    const is_null = val === null || val === undefined;
 
-    if (isNull) {
+    if (is_null) {
       if ((col.flags & ColumnFlag.NOT_NULL) !== 0) {
         throw new NotNullConstraintError(col.name);
       }
-      const byteIdx = i >> 3;
-      const bitMask = 1 << (i & 7);
-      nullBitmap[byteIdx] |= bitMask;
+      const byte_idx = i >> 3;
+      const bit_mask = 1 << (i & 7);
+      null_bitmap[byte_idx] |= bit_mask;
     }
   }
 
   // Calculate fixed-width slice and var-length payloads
-  let fixedSliceSize = 0;
-  for (let i = 0; i < colCount; i++) {
+  let fixed_slice_size = 0;
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
-    const isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!isNull) {
+    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
+    if (!is_null) {
       switch (col.type) {
         case DataType.INT32:
-          fixedSliceSize += 4;
+          fixed_slice_size += 4;
           break;
         case DataType.INT64:
         case DataType.FLOAT64:
-          fixedSliceSize += 8;
+          fixed_slice_size += 8;
           break;
         case DataType.UUID:
         case DataType.ULID:
-          fixedSliceSize += 16;
+          fixed_slice_size += 16;
           break;
       }
     }
   }
 
   // Variable columns offset table (4 bytes each)
-  const varColumns: Array<{ colIdx: number; col: ColumnMeta; payload: Uint8Array | null }> = [];
-  for (let i = 0; i < colCount; i++) {
+  const var_columns: Array<{
+    col_idx: number;
+    col: ColumnMeta;
+    payload: Uint8Array | null;
+  }> = [];
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
     if (col.type === DataType.TEXT || col.type === DataType.BLOB) {
-      const isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) !== 0;
-      if (isNull) {
-        varColumns.push({ colIdx: i, col, payload: null });
+      const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
+      if (is_null) {
+        var_columns.push({ col_idx: i, col, payload: null });
       } else {
         const val = values[col.name];
         let bytes: Uint8Array;
         if (col.type === DataType.TEXT) {
-          bytes = textEncoder.encode(String(val ?? ''));
+          bytes = text_encoder.encode(String(val ?? ""));
         } else {
           bytes = val instanceof Uint8Array ? val : new Uint8Array(val as any);
         }
-        varColumns.push({ colIdx: i, col, payload: bytes });
+        var_columns.push({ col_idx: i, col, payload: bytes });
       }
     }
   }
 
-  const varOffsetTableSize = varColumns.length * 4;
-  const headerAndTablesSize = 3 + nullBitmapBytes + fixedSliceSize + varOffsetTableSize;
+  const var_offset_table_size = var_columns.length * 4;
+  const header_and_tables_size =
+    3 + null_bitmap_bytes + fixed_slice_size + var_offset_table_size;
 
-  let totalVarPayloadSize = 0;
-  for (let i = 0; i < varColumns.length; i++) {
-    const item = varColumns[i];
+  let total_var_payload_size = 0;
+  for (let i = 0; i < var_columns.length; i++) {
+    const item = var_columns[i];
     if (item.payload) {
-      totalVarPayloadSize += item.payload.byteLength;
+      total_var_payload_size += item.payload.byteLength;
     }
   }
 
-  const totalRowSize = headerAndTablesSize + totalVarPayloadSize;
-  if (totalRowSize > MAX_ROW_SIZE) {
-    throw new RowSizeLimitExceededError(totalRowSize, MAX_ROW_SIZE);
+  const total_row_size = header_and_tables_size + total_var_payload_size;
+  if (total_row_size > MAX_ROW_SIZE) {
+    throw new RowSizeLimitExceededError(total_row_size, MAX_ROW_SIZE);
   }
 
-  const rowBuffer = new Uint8Array(totalRowSize);
-  const rowView = new DataView(rowBuffer.buffer);
+  const row_buffer = new Uint8Array(total_row_size);
+  const row_view = new DataView(row_buffer.buffer);
 
   // [0]: Flags (0x01 = Active)
-  rowView.setUint8(0, 0x01);
-  // [1..2]: Stored Row Length
-  rowView.setUint16(1, totalRowSize, true);
-  // [3..]: Null-Bitmap
-  rowBuffer.set(nullBitmap, 3);
+  row_view.setUint8(0, 0x01);
+  // [1..2]: Stored Row _length
+  row_view.setUint16(1, total_row_size, true);
+  // [3..]: _null-_bitmap
+  row_buffer.set(null_bitmap, 3);
 
-  let currentFixedOffset = 3 + nullBitmapBytes;
-  for (let i = 0; i < colCount; i++) {
+  let current_fixed_offset = 3 + null_bitmap_bytes;
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
-    const isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!isNull) {
+    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
+    if (!is_null) {
       const val = values[col.name];
       switch (col.type) {
         case DataType.INT32:
-          rowView.setInt32(currentFixedOffset, Number(val), true);
-          currentFixedOffset += 4;
+          row_view.setInt32(current_fixed_offset, Number(val), true);
+          current_fixed_offset += 4;
           break;
         case DataType.INT64:
-          rowView.setBigInt64(currentFixedOffset, BigInt(val as any), true);
-          currentFixedOffset += 8;
+          row_view.setBigInt64(current_fixed_offset, BigInt(val as any), true);
+          current_fixed_offset += 8;
           break;
         case DataType.FLOAT64:
-          rowView.setFloat64(currentFixedOffset, Number(val), true);
-          currentFixedOffset += 8;
+          row_view.setFloat64(current_fixed_offset, Number(val), true);
+          current_fixed_offset += 8;
           break;
         case DataType.UUID:
-          UuidCodec.encode(String(val), rowBuffer, currentFixedOffset);
-          currentFixedOffset += 16;
+          UuidCodec.encode(String(val), row_buffer, current_fixed_offset);
+          current_fixed_offset += 16;
           break;
         case DataType.ULID:
-          UlidCodec.encode(String(val), rowBuffer, currentFixedOffset);
-          currentFixedOffset += 16;
+          UlidCodec.encode(String(val), row_buffer, current_fixed_offset);
+          current_fixed_offset += 16;
           break;
       }
     }
   }
 
   // Write var-offset table and payloads
-  let currentVarTableOffset = currentFixedOffset;
-  let currentPayloadOffset = headerAndTablesSize;
+  let current_var_table_offset = current_fixed_offset;
+  let current_payload_offset = header_and_tables_size;
 
-  for (let i = 0; i < varColumns.length; i++) {
-    const item = varColumns[i];
+  for (let i = 0; i < var_columns.length; i++) {
+    const item = var_columns[i];
     if (item.payload === null) {
-      // Null column: rel_offset 0, length 0
-      rowView.setUint16(currentVarTableOffset, 0, true);
-      rowView.setUint16(currentVarTableOffset + 2, 0, true);
+      // _null column: rel_offset 0, length 0
+      row_view.setUint16(current_var_table_offset, 0, true);
+      row_view.setUint16(current_var_table_offset + 2, 0, true);
     } else {
-      rowView.setUint16(currentVarTableOffset, currentPayloadOffset, true);
-      rowView.setUint16(currentVarTableOffset + 2, item.payload.byteLength, true);
-      rowBuffer.set(item.payload, currentPayloadOffset);
-      currentPayloadOffset += item.payload.byteLength;
+      row_view.setUint16(
+        current_var_table_offset,
+        current_payload_offset,
+        true,
+      );
+      row_view.setUint16(
+        current_var_table_offset + 2,
+        item.payload.byteLength,
+        true,
+      );
+      row_buffer.set(item.payload, current_payload_offset);
+      current_payload_offset += item.payload.byteLength;
     }
-    currentVarTableOffset += 4;
+    current_var_table_offset += 4;
   }
 
-  return rowBuffer;
+  return row_buffer;
 }
 
 /**
@@ -685,115 +808,129 @@ export function page_serialize_row(
 export function page_deserialize_row(
   arg1: TableMeta | ColumnMeta[] | DataView,
   arg2: DataView | number,
-  arg3?: number | TableMeta | ColumnMeta[]
+  arg3?: number | TableMeta | ColumnMeta[],
 ): DbRow {
   let columns: ColumnMeta[];
   let view: DataView;
-  let recordOffset: number;
+  let record_offset: number;
 
   if (arg1 instanceof DataView) {
     view = arg1;
-    recordOffset = arg2 as number;
-    const tableOrCols = arg3 as (TableMeta | ColumnMeta[]);
-    columns = Array.isArray(tableOrCols) ? tableOrCols : (tableOrCols as TableMeta).columns;
+    record_offset = arg2 as number;
+    const table_or_cols = arg3 as TableMeta | ColumnMeta[];
+    columns = Array.isArray(table_or_cols)
+      ? table_or_cols
+      : (table_or_cols as TableMeta).columns;
   } else {
     columns = Array.isArray(arg1) ? arg1 : (arg1 as TableMeta).columns;
     view = arg2 as DataView;
-    recordOffset = arg3 as number;
+    record_offset = arg3 as number;
   }
 
   const row: DbRow = {};
-  const colCount = columns.length;
-  const nullBitmapBytes = Math.ceil(colCount / 8);
+  const col_count = columns.length;
+  const null_bitmap_bytes = Math.ceil(col_count / 8);
 
-  const nullBitmap = new Uint8Array(view.buffer, view.byteOffset + recordOffset + 3, nullBitmapBytes);
+  const null_bitmap = new Uint8Array(
+    view.buffer,
+    view.byteOffset + record_offset + 3,
+    null_bitmap_bytes,
+  );
 
-  let currentFixedOffset = recordOffset + 3 + nullBitmapBytes;
+  let current_fixed_offset = record_offset + 3 + null_bitmap_bytes;
 
   // Track var-column index
-  let varColIdx = 0;
+  let var_col_idx = 0;
   // Calculate where the var-offset table starts
   // We need to advance fixed offset for non-null fixed columns
-  const fixedStart = currentFixedOffset;
-  for (let i = 0; i < colCount; i++) {
+  const fixed_start = current_fixed_offset;
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
-    const isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!isNull) {
+    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
+    if (!is_null) {
       switch (col.type) {
         case DataType.INT32:
-          currentFixedOffset += 4;
+          current_fixed_offset += 4;
           break;
         case DataType.INT64:
         case DataType.FLOAT64:
-          currentFixedOffset += 8;
+          current_fixed_offset += 8;
           break;
         case DataType.UUID:
         case DataType.ULID:
-          currentFixedOffset += 16;
+          current_fixed_offset += 16;
           break;
       }
     }
   }
 
-  const varOffsetTableStart = currentFixedOffset;
-  currentFixedOffset = fixedStart;
+  const var_offset_table_start = current_fixed_offset;
+  current_fixed_offset = fixed_start;
 
-  for (let i = 0; i < colCount; i++) {
+  for (let i = 0; i < col_count; i++) {
     const col = columns[i];
-    const isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) !== 0;
+    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
 
-    if (isNull) {
+    if (is_null) {
       row[col.name] = null;
       if (col.type === DataType.TEXT || col.type === DataType.BLOB) {
-        varColIdx++;
+        var_col_idx++;
       }
       continue;
     }
 
     switch (col.type) {
       case DataType.INT32:
-        row[col.name] = view.getInt32(currentFixedOffset, true);
-        currentFixedOffset += 4;
+        row[col.name] = view.getInt32(current_fixed_offset, true);
+        current_fixed_offset += 4;
         break;
       case DataType.INT64:
-        row[col.name] = view.getBigInt64(currentFixedOffset, true);
-        currentFixedOffset += 8;
+        row[col.name] = view.getBigInt64(current_fixed_offset, true);
+        current_fixed_offset += 8;
         break;
       case DataType.FLOAT64:
-        row[col.name] = view.getFloat64(currentFixedOffset, true);
-        currentFixedOffset += 8;
+        row[col.name] = view.getFloat64(current_fixed_offset, true);
+        current_fixed_offset += 8;
         break;
       case DataType.UUID: {
-        const slice = new Uint8Array(view.buffer, view.byteOffset + currentFixedOffset, 16);
+        const slice = new Uint8Array(
+          view.buffer,
+          view.byteOffset + current_fixed_offset,
+          16,
+        );
         row[col.name] = UuidCodec.decode(slice, 0);
-        currentFixedOffset += 16;
+        current_fixed_offset += 16;
         break;
       }
       case DataType.ULID: {
-        const slice = new Uint8Array(view.buffer, view.byteOffset + currentFixedOffset, 16);
+        const slice = new Uint8Array(
+          view.buffer,
+          view.byteOffset + current_fixed_offset,
+          16,
+        );
         row[col.name] = UlidCodec.decode(slice, 0);
-        currentFixedOffset += 16;
+        current_fixed_offset += 16;
         break;
       }
       case DataType.TEXT: {
-        const tableEntryOffset = varOffsetTableStart + (varColIdx * 4);
-        const relOffset = view.getUint16(tableEntryOffset, true);
-        const len = view.getUint16(tableEntryOffset + 2, true);
-        const payloadOffset = view.byteOffset + recordOffset + relOffset;
-        const textBytes = new Uint8Array(view.buffer, payloadOffset, len);
-        row[col.name] = textDecoder.decode(textBytes);
-        varColIdx++;
+        const table_entry_offset = var_offset_table_start + var_col_idx * 4;
+        const rel_offset = view.getUint16(table_entry_offset, true);
+        const len = view.getUint16(table_entry_offset + 2, true);
+        const payload_offset = view.byteOffset + record_offset + rel_offset;
+        const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
+        row[col.name] = text_decoder.decode(text_bytes);
+        var_col_idx++;
         break;
       }
       case DataType.BLOB: {
-        const tableEntryOffset = varOffsetTableStart + (varColIdx * 4);
-        const relOffset = view.getUint16(tableEntryOffset, true);
-        const len = view.getUint16(tableEntryOffset + 2, true);
-        const payloadOffset = view.byteOffset + recordOffset + relOffset;
-        const blobBytes = new Uint8Array(len);
-        blobBytes.set(new Uint8Array(view.buffer, payloadOffset, len));
-        row[col.name] = blobBytes;
-        varColIdx++;
+        const table_entry_offset = var_offset_table_start + var_col_idx * 4;
+        const rel_offset = view.getUint16(table_entry_offset, true);
+        const len = view.getUint16(table_entry_offset + 2, true);
+        const payload_offset = view.byteOffset + record_offset + rel_offset;
+        const blob_bytes = new Uint8Array(len);
+        blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
+        row[col.name] = blob_bytes;
+        var_col_idx++;
         break;
       }
     }
@@ -808,30 +945,37 @@ export function page_deserialize_row(
 
 /**
  * @export_c
- * Initializes a Table Interior Page with rightChildPageId.
+ * Initializes a Table Interior Page with right_child_page_id.
  */
 export function page_init_interior(
   view: DataView,
-  pageOffset: number,
-  rightChildPageId: number = 0
+  page_offset: number,
+  right_child_page_id: number = 0,
 ): void {
-  page_init(view, pageOffset, PAGE_TYPE_TABLE_INTERIOR, rightChildPageId);
+  page_init(view, page_offset, PAGE_TYPE_TABLE_INTERIOR, right_child_page_id);
 }
 
 /**
  * @export_c
  * Returns right child page ID of a Table Interior Page.
  */
-export function page_get_right_child_page_id(view: DataView, pageOffset: number): number {
-  return view.getUint32(pageOffset + 6, true);
+export function page_get_right_child_page_id(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint32(page_offset + 6, true);
 }
 
 /**
  * @export_c
  * Sets right child page ID of a Table Interior Page.
  */
-export function page_set_right_child_page_id(view: DataView, pageOffset: number, rightChildPageId: number): void {
-  view.setUint32(pageOffset + 6, rightChildPageId, true);
+export function page_set_right_child_page_id(
+  view: DataView,
+  page_offset: number,
+  right_child_page_id: number,
+): void {
+  view.setUint32(page_offset + 6, right_child_page_id, true);
 }
 
 /**
@@ -841,70 +985,70 @@ export function page_set_right_child_page_id(view: DataView, pageOffset: number,
  */
 export function page_insert_interior_cell(
   view: DataView,
-  pageOffset: number,
-  childPageId: number,
-  rowid: bigint
+  page_offset: number,
+  child_page_id: number,
+  rowid: bigint,
 ): number {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  if (cellCount >= MAX_TABLE_INTERIOR_CELLS) {
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (cell_count >= MAX_TABLE_INTERIOR_CELLS) {
     return -1; // Interior page full
   }
 
-  const contentOffset = page_get_cell_content_offset(view, pageOffset);
-  const newContentOffset = contentOffset - TABLE_INTERIOR_CELL_SIZE;
+  const content_offset = page_get_cell_content_offset(view, page_offset);
+  const new_content_offset = content_offset - TABLE_INTERIOR_CELL_SIZE;
 
   // Write 12-byte cell payload
-  const targetOffset = pageOffset + newContentOffset;
-  view.setUint32(targetOffset, childPageId, true);
-  view.setBigInt64(targetOffset + 4, rowid, true);
+  const target_offset = page_offset + new_content_offset;
+  view.setUint32(target_offset, child_page_id, true);
+  view.setBigInt64(target_offset + 4, rowid, true);
 
   // Write slot directory entry
-  page_set_cell_offset(view, pageOffset, cellCount, newContentOffset);
+  page_set_cell_offset(view, page_offset, cell_count, new_content_offset);
 
-  page_set_cell_count(view, pageOffset, cellCount + 1);
-  page_set_cell_content_offset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, page_offset, cell_count + 1);
+  page_set_cell_content_offset(view, page_offset, new_content_offset);
 
-  return cellCount + 1;
+  return cell_count + 1;
 }
 
 /**
  * @export_c
- * Performs binary search on a Table Interior Page to route traversal for targetRowid.
+ * Performs binary search on a Table Interior Page to route traversal for target_row_id.
  * Returns the child_page_id to traverse.
  */
 export function page_binary_search_interior(
   view: DataView,
-  pageOffset: number,
-  targetRowid: bigint
+  page_offset: number,
+  target_row_id: bigint,
 ): number {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  if (cellCount === 0) {
-    return page_get_right_child_page_id(view, pageOffset);
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (cell_count === 0) {
+    return page_get_right_child_page_id(view, page_offset);
   }
 
   let lo = 0;
-  let hi = cellCount - 1;
-  let candidateChild = -1;
+  let hi = cell_count - 1;
+  let candidate_child = -1;
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const cellOffset = page_get_cell_offset(view, pageOffset, mid);
-    const cellRowid = view.getBigInt64(pageOffset + cellOffset + 4, true);
+    const cell_offset = page_get_cell_offset(view, page_offset, mid);
+    const cell_rowid = view.getBigInt64(page_offset + cell_offset + 4, true);
 
-    if (targetRowid <= cellRowid) {
-      candidateChild = view.getUint32(pageOffset + cellOffset, true);
+    if (target_row_id <= cell_rowid) {
+      candidate_child = view.getUint32(page_offset + cell_offset, true);
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
 
-  if (candidateChild !== -1) {
-    return candidateChild;
+  if (candidate_child !== -1) {
+    return candidate_child;
   }
 
-  // If targetRowid > all keys on this page, follow right_child_page_id
-  return page_get_right_child_page_id(view, pageOffset);
+  // If target_row_id > all keys on this page, follow right_child_page_id
+  return page_get_right_child_page_id(view, page_offset);
 }
 
 /**
@@ -913,41 +1057,55 @@ export function page_binary_search_interior(
  */
 export function page_split_interior(
   view: DataView,
-  pageOffset: number,
-  newPageOffset: number
-): { medianRowid: bigint; promotedChildPageId: number; rightChildPageId: number } {
-  const cellCount = page_get_cell_count(view, pageOffset);
-  const medianIdx = TABLE_INTERIOR_SPLIT_INDEX; // 145
+  page_offset: number,
+  new_page_offset: number,
+): {
+  median_rowid: bigint;
+  promoted_child_page_id: number;
+  right_child_page_id: number;
+} {
+  const cell_count = page_get_cell_count(view, page_offset);
+  const median_idx = TABLE_INTERIOR_SPLIT_INDEX; // 145
 
-  if (cellCount <= medianIdx) {
-    throw new Error(`Cannot split interior page with only ${cellCount} cells`);
+  if (cell_count <= median_idx) {
+    throw new Error(`Cannot split interior page with only ${cell_count} cells`);
   }
 
   // Read median cell
-  const medianCellOffset = page_get_cell_offset(view, pageOffset, medianIdx);
-  const promotedChildPageId = view.getUint32(pageOffset + medianCellOffset, true);
-  const medianRowid = view.getBigInt64(pageOffset + medianCellOffset + 4, true);
+  const median_cell_offset = page_get_cell_offset(
+    view,
+    page_offset,
+    median_idx,
+  );
+  const promoted_child_page_id = view.getUint32(
+    page_offset + median_cell_offset,
+    true,
+  );
+  const median_rowid = view.getBigInt64(
+    page_offset + median_cell_offset + 4,
+    true,
+  );
 
   // Initialize right sibling interior page
-  const oldRightChild = page_get_right_child_page_id(view, pageOffset);
-  page_init_interior(view, newPageOffset, oldRightChild);
+  const old_right_child = page_get_right_child_page_id(view, page_offset);
+  page_init_interior(view, new_page_offset, old_right_child);
 
-  // Copy entries 146..cellCount-1 to new sibling page
-  for (let i = medianIdx + 1; i < cellCount; i++) {
-    const offset = page_get_cell_offset(view, pageOffset, i);
-    const childId = view.getUint32(pageOffset + offset, true);
-    const rId = view.getBigInt64(pageOffset + offset + 4, true);
-    page_insert_interior_cell(view, newPageOffset, childId, rId);
+  // Copy entries 146..cell_count-1 to new sibling page
+  for (let i = median_idx + 1; i < cell_count; i++) {
+    const offset = page_get_cell_offset(view, page_offset, i);
+    const child_id = view.getUint32(page_offset + offset, true);
+    const r_id = view.getBigInt64(page_offset + offset + 4, true);
+    page_insert_interior_cell(view, new_page_offset, child_id, r_id);
   }
 
-  // Left page keeps entries 0..144, and its right_child_page_id becomes median's childPageId
-  page_set_right_child_page_id(view, pageOffset, promotedChildPageId);
-  page_set_cell_count(view, pageOffset, medianIdx);
+  // Left page keeps entries 0..144, and its right_child_page_id becomes median's child_page_id
+  page_set_right_child_page_id(view, page_offset, promoted_child_page_id);
+  page_set_cell_count(view, page_offset, median_idx);
 
   return {
-    medianRowid,
-    promotedChildPageId,
-    rightChildPageId: oldRightChild,
+    median_rowid,
+    promoted_child_page_id,
+    right_child_page_id: old_right_child,
   };
 }
 
@@ -961,10 +1119,10 @@ export function page_split_interior(
  */
 export function page_init_index_leaf(
   view: DataView,
-  pageOffset: number,
-  nextPageId: number = 0
+  page_offset: number,
+  next_page_id: number = 0,
 ): void {
-  page_init(view, pageOffset, PAGE_TYPE_INDEX_LEAF, nextPageId);
+  page_init(view, page_offset, PAGE_TYPE_INDEX_LEAF, next_page_id);
 }
 
 /**
@@ -973,79 +1131,106 @@ export function page_init_index_leaf(
  * NULL < -Infinity < Numbers < TEXT (UTF-8) < BLOB
  */
 export function page_compare_index_keys(
-  typeA: DataType,
-  valA: any,
-  rowidA: bigint,
-  typeB: DataType,
-  valB: any,
-  rowidB: bigint
+  type_a: DataType,
+  val_a: any,
+  rowid_a: bigint,
+  type_b: DataType,
+  val_b: any,
+  rowid_b: bigint,
 ): number {
-  if (typeA !== typeB) {
+  if (type_a !== type_b) {
     // 3VL collation precedence order
-    return typeA - typeB;
+    return type_a - type_b;
   }
 
-  if (typeA === DataType.NULL) {
-    return rowidA < rowidB ? -1 : (rowidA > rowidB ? 1 : 0);
+  if (type_a === DataType.NULL) {
+    return rowid_a < rowid_b ? -1 : rowid_a > rowid_b ? 1 : 0;
   }
 
   let diff = 0;
-  if (typeA === DataType.INT32 || typeA === DataType.INT64 || typeA === DataType.FLOAT64) {
-    const numA = typeof valA === 'bigint' ? Number(valA) : valA;
-    const numB = typeof valB === 'bigint' ? Number(valB) : valB;
-    diff = numA < numB ? -1 : (numA > numB ? 1 : 0);
-  } else if (typeA === DataType.TEXT || typeA === DataType.UUID || typeA === DataType.ULID) {
-    const strA = String(valA);
-    const strB = String(valB);
-    diff = strA < strB ? -1 : (strA > strB ? 1 : 0);
-  } else if (typeA === DataType.BLOB) {
-    const bA = valA as Uint8Array;
-    const bB = valB as Uint8Array;
-    const minLen = Math.min(bA.length, bB.length);
-    for (let i = 0; i < minLen; i++) {
-      if (bA[i] !== bB[i]) {
-        diff = bA[i] < bB[i] ? -1 : 1;
+  if (
+    type_a === DataType.INT32 ||
+    type_a === DataType.INT64 ||
+    type_a === DataType.FLOAT64
+  ) {
+    const num_a = typeof val_a === "bigint" ? Number(val_a) : val_a;
+    const num_b = typeof val_b === "bigint" ? Number(val_b) : val_b;
+    diff = num_a < num_b ? -1 : num_a > num_b ? 1 : 0;
+  } else if (
+    type_a === DataType.TEXT ||
+    type_a === DataType.UUID ||
+    type_a === DataType.ULID
+  ) {
+    const str_a = String(val_a);
+    const str_b = String(val_b);
+    diff = str_a < str_b ? -1 : str_a > str_b ? 1 : 0;
+  } else if (type_a === DataType.BLOB) {
+    const b_a = val_a as Uint8Array;
+    const b_b = val_b as Uint8Array;
+    const min_len = Math.min(b_a.length, b_b.length);
+    for (let i = 0; i < min_len; i++) {
+      if (b_a[i] !== b_b[i]) {
+        diff = b_a[i] < b_b[i] ? -1 : 1;
         break;
       }
     }
     if (diff === 0) {
-      diff = bA.length - bB.length;
+      diff = b_a.length - b_b.length;
     }
   }
 
   if (diff !== 0) return diff;
-  return rowidA < rowidB ? -1 : (rowidA > rowidB ? 1 : 0);
+  return rowid_a < rowid_b ? -1 : rowid_a > rowid_b ? 1 : 0;
 }
 
 function page_decode_index_cell(
   view: DataView,
-  cellDataOffset: number,
-  kLen: number,
-  contextType: DataType
+  cell_data_offset: number,
+  k_len: number,
+  context_type: DataType,
 ): { cellType: DataType; cellVal: any } {
-  const kData = new Uint8Array(view.buffer, view.byteOffset + cellDataOffset, kLen);
-  if (kLen === 0) {
+  const k_data = new Uint8Array(
+    view.buffer,
+    view.byteOffset + cell_data_offset,
+    k_len,
+  );
+  if (k_len === 0) {
     return { cellType: DataType.NULL, cellVal: null };
   }
-  if (kLen === 2) {
-    return { cellType: DataType.BLOB, cellVal: kData };
+  if (k_len === 2) {
+    return { cellType: DataType.BLOB, cellVal: k_data };
   }
-  if (kLen === 4) {
-    return { cellType: DataType.INT32, cellVal: new DataView(kData.buffer, kData.byteOffset).getInt32(0, true) };
+  if (k_len === 4) {
+    return {
+      cellType: DataType.INT32,
+      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getInt32(0, true),
+    };
   }
-  if (contextType === DataType.UUID && kLen === 16) {
-    return { cellType: DataType.UUID, cellVal: UuidCodec.decode(kData, 0) };
+  if (context_type === DataType.UUID && k_len === 16) {
+    return { cellType: DataType.UUID, cellVal: UuidCodec.decode(k_data, 0) };
   }
-  if (contextType === DataType.ULID && kLen === 16) {
-    return { cellType: DataType.ULID, cellVal: UlidCodec.decode(kData, 0) };
+  if (context_type === DataType.ULID && k_len === 16) {
+    return { cellType: DataType.ULID, cellVal: UlidCodec.decode(k_data, 0) };
   }
-  if (contextType === DataType.FLOAT64 && kLen === 8) {
-    return { cellType: DataType.FLOAT64, cellVal: new DataView(kData.buffer, kData.byteOffset).getFloat64(0, true) };
+  if (context_type === DataType.FLOAT64 && k_len === 8) {
+    return {
+      cellType: DataType.FLOAT64,
+      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getFloat64(
+        0,
+        true,
+      ),
+    };
   }
-  if (contextType === DataType.INT64 && kLen === 8) {
-    return { cellType: DataType.INT64, cellVal: new DataView(kData.buffer, kData.byteOffset).getBigInt64(0, true) };
+  if (context_type === DataType.INT64 && k_len === 8) {
+    return {
+      cellType: DataType.INT64,
+      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getBigInt64(
+        0,
+        true,
+      ),
+    };
   }
-  return { cellType: DataType.TEXT, cellVal: textDecoder.decode(kData) };
+  return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
 }
 
 /**
@@ -1054,102 +1239,122 @@ function page_decode_index_cell(
  */
 export function page_insert_index_leaf_cell(
   view: DataView,
-  pageOffset: number,
-  keyType: DataType,
-  keyValue: any,
+  page_offset: number,
+  key_type: DataType,
+  key_value: any,
   rowid: bigint,
-  scratchpadOffset?: number
+  scratchpad_offset?: number,
 ): number {
-  let keyBytes: Uint8Array;
-  if (keyType === DataType.NULL || keyValue === null || keyValue === undefined) {
-    keyBytes = new Uint8Array(0);
-  } else if (keyType === DataType.INT32) {
-    keyBytes = new Uint8Array(4);
-    new DataView(keyBytes.buffer).setInt32(0, Number(keyValue), true);
-  } else if (keyType === DataType.INT64) {
-    keyBytes = new Uint8Array(8);
-    new DataView(keyBytes.buffer).setBigInt64(0, BigInt(keyValue), true);
-  } else if (keyType === DataType.FLOAT64) {
-    keyBytes = new Uint8Array(8);
-    new DataView(keyBytes.buffer).setFloat64(0, Number(keyValue), true);
-  } else if (keyType === DataType.UUID) {
-    keyBytes = new Uint8Array(16);
-    UuidCodec.encode(String(keyValue), keyBytes, 0);
-  } else if (keyType === DataType.ULID) {
-    keyBytes = new Uint8Array(16);
-    UlidCodec.encode(String(keyValue), keyBytes, 0);
-  } else if (keyType === DataType.TEXT) {
-    keyBytes = textEncoder.encode(String(keyValue));
+  let key_bytes: Uint8Array;
+  if (
+    key_type === DataType.NULL ||
+    key_value === null ||
+    key_value === undefined
+  ) {
+    key_bytes = new Uint8Array(0);
+  } else if (key_type === DataType.INT32) {
+    key_bytes = new Uint8Array(4);
+    new DataView(key_bytes.buffer).setInt32(0, Number(key_value), true);
+  } else if (key_type === DataType.INT64) {
+    key_bytes = new Uint8Array(8);
+    new DataView(key_bytes.buffer).setBigInt64(0, BigInt(key_value), true);
+  } else if (key_type === DataType.FLOAT64) {
+    key_bytes = new Uint8Array(8);
+    new DataView(key_bytes.buffer).setFloat64(0, Number(key_value), true);
+  } else if (key_type === DataType.UUID) {
+    key_bytes = new Uint8Array(16);
+    UuidCodec.encode(String(key_value), key_bytes, 0);
+  } else if (key_type === DataType.ULID) {
+    key_bytes = new Uint8Array(16);
+    UlidCodec.encode(String(key_value), key_bytes, 0);
+  } else if (key_type === DataType.TEXT) {
+    key_bytes = text_encoder.encode(String(key_value));
   } else {
-    keyBytes = keyValue instanceof Uint8Array ? keyValue : new Uint8Array(keyValue);
+    key_bytes =
+      key_value instanceof Uint8Array ? key_value : new Uint8Array(key_value);
   }
 
   // Cell format: [key_len uint16][key_data][rowid int64]
-  const cellLength = 2 + keyBytes.byteLength + 8;
-  const neededBytes = cellLength + 2; // + 2B slot directory entry
+  const cell_length = 2 + key_bytes.byteLength + 8;
+  const needed_bytes = cell_length + 2; // + 2B slot directory entry
 
-  const cellCount = page_get_cell_count(view, pageOffset);
-  const contiguousFree = page_get_contiguous_free_space(view, pageOffset);
-  const totalFree = contiguousFree + page_get_free_bytes(view, pageOffset);
+  const cell_count = page_get_cell_count(view, page_offset);
+  const contiguous_free = page_get_contiguous_free_space(view, page_offset);
+  const total_free = contiguous_free + page_get_free_bytes(view, page_offset);
 
-  if (neededBytes > totalFree) {
+  if (needed_bytes > total_free) {
     return -1; // Index leaf full
   }
 
-  if (neededBytes > contiguousFree) {
-    page_compact(view, pageOffset, scratchpadOffset);
+  if (needed_bytes > contiguous_free) {
+    page_compact(view, page_offset, scratchpad_offset);
   }
 
-  const contentOffset = page_get_cell_content_offset(view, pageOffset);
-  const newContentOffset = contentOffset - cellLength;
-  const targetOffset = pageOffset + newContentOffset;
+  const content_offset = page_get_cell_content_offset(view, page_offset);
+  const new_content_offset = content_offset - cell_length;
+  const target_offset = page_offset + new_content_offset;
 
   // Write cell
-  const absTarget = view.byteOffset + targetOffset;
-  view.setUint16(targetOffset, keyBytes.byteLength, true);
-  new Uint8Array(view.buffer).set(keyBytes, absTarget + 2);
-  view.setBigInt64(targetOffset + 2 + keyBytes.byteLength, rowid, true);
+  const abs_target = view.byteOffset + target_offset;
+  view.setUint16(target_offset, key_bytes.byteLength, true);
+  new Uint8Array(view.buffer).set(key_bytes, abs_target + 2);
+  view.setBigInt64(target_offset + 2 + key_bytes.byteLength, rowid, true);
 
   // Binary search to find sorted insertion slot index
   let lo = 0;
-  let hi = cellCount - 1;
-  let insertSlot = cellCount;
+  let hi = cell_count - 1;
+  let insert_slot = cell_count;
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const offset = page_get_cell_offset(view, pageOffset, mid);
-    const existingKLen = view.getUint16(pageOffset + offset, true);
-    const rId = view.getBigInt64(pageOffset + offset + 2 + existingKLen, true);
-    const { cellType: midType, cellVal: midVal } = page_decode_index_cell(view, pageOffset + offset + 2, existingKLen, keyType);
+    const offset = page_get_cell_offset(view, page_offset, mid);
+    const existing_k_len = view.getUint16(page_offset + offset, true);
+    const r_id = view.getBigInt64(
+      page_offset + offset + 2 + existing_k_len,
+      true,
+    );
+    const { cellType: mid_type, cellVal: mid_val } = page_decode_index_cell(
+      view,
+      page_offset + offset + 2,
+      existing_k_len,
+      key_type,
+    );
 
-    const cmp = page_compare_index_keys(keyType, keyValue, rowid, midType, midVal, rId);
+    const cmp = page_compare_index_keys(
+      key_type,
+      key_value,
+      rowid,
+      mid_type,
+      mid_val,
+      r_id,
+    );
     if (cmp < 0) {
-      insertSlot = mid;
+      insert_slot = mid;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
 
-  // Shift slot directory entries from insertSlot right by 2 bytes
+  // Shift slot directory entries from insert_slot right by 2 bytes
   const uint8 = new Uint8Array(view.buffer);
-  const absPageStart = view.byteOffset + pageOffset;
-  const slotDirStart = absPageStart + PAGE_HEADER_SIZE;
-  const src = slotDirStart + insertSlot * 2;
-  const dst = slotDirStart + (insertSlot + 1) * 2;
-  const shiftLen = (cellCount - insertSlot) * 2;
+  const abs_page_start = view.byteOffset + page_offset;
+  const slot_dir_start = abs_page_start + PAGE_HEADER_SIZE;
+  const src = slot_dir_start + insert_slot * 2;
+  const dst = slot_dir_start + (insert_slot + 1) * 2;
+  const shift_len = (cell_count - insert_slot) * 2;
 
-  if (shiftLen > 0) {
-    uint8.copyWithin(dst, src, src + shiftLen);
+  if (shift_len > 0) {
+    uint8.copyWithin(dst, src, src + shift_len);
   }
 
   // Write new slot entry
-  page_set_cell_offset(view, pageOffset, insertSlot, newContentOffset);
+  page_set_cell_offset(view, page_offset, insert_slot, new_content_offset);
 
-  page_set_cell_count(view, pageOffset, cellCount + 1);
-  page_set_cell_content_offset(view, pageOffset, newContentOffset);
+  page_set_cell_count(view, page_offset, cell_count + 1);
+  page_set_cell_content_offset(view, page_offset, new_content_offset);
 
-  return insertSlot;
+  return insert_slot;
 }
 
 /**
@@ -1158,27 +1363,39 @@ export function page_insert_index_leaf_cell(
  */
 export function page_binary_search_index_leaf(
   view: DataView,
-  pageOffset: number,
-  targetType: DataType,
-  targetValue: any,
-  targetRowid?: bigint
-): { found: boolean; slotIdx: number } {
-  const cellCount = page_get_cell_count(view, pageOffset);
+  page_offset: number,
+  target_type: DataType,
+  target_value: any,
+  target_row_id?: bigint,
+): { found: boolean; slot_idx: number } {
+  const cell_count = page_get_cell_count(view, page_offset);
   let lo = 0;
-  let hi = cellCount - 1;
+  let hi = cell_count - 1;
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const offset = page_get_cell_offset(view, pageOffset, mid);
-    const kLen = view.getUint16(pageOffset + offset, true);
-    const rId = view.getBigInt64(pageOffset + offset + 2 + kLen, true);
-    const { cellType: midType, cellVal: midVal } = page_decode_index_cell(view, pageOffset + offset + 2, kLen, targetType);
+    const offset = page_get_cell_offset(view, page_offset, mid);
+    const k_len = view.getUint16(page_offset + offset, true);
+    const r_id = view.getBigInt64(page_offset + offset + 2 + k_len, true);
+    const { cellType: mid_type, cellVal: mid_val } = page_decode_index_cell(
+      view,
+      page_offset + offset + 2,
+      k_len,
+      target_type,
+    );
 
-    const rowidToCompare = targetRowid !== undefined ? targetRowid : rId;
-    const cmp = page_compare_index_keys(targetType, targetValue, rowidToCompare, midType, midVal, rId);
+    const rowid_to_compare = target_row_id !== undefined ? target_row_id : r_id;
+    const cmp = page_compare_index_keys(
+      target_type,
+      target_value,
+      rowid_to_compare,
+      mid_type,
+      mid_val,
+      r_id,
+    );
 
     if (cmp === 0) {
-      return { found: true, slotIdx: mid };
+      return { found: true, slot_idx: mid };
     } else if (cmp < 0) {
       hi = mid - 1;
     } else {
@@ -1186,5 +1403,5 @@ export function page_binary_search_index_leaf(
     }
   }
 
-  return { found: false, slotIdx: lo };
+  return { found: false, slot_idx: lo };
 }

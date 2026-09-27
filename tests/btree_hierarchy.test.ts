@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from "vitest";
 import {
   page_init_interior,
   page_insert_interior_cell,
@@ -9,16 +9,16 @@ import {
   page_binary_search_index_leaf,
   page_get_cell_count,
   page_get_cell_offset,
-} from '../src/core/index.js';
+} from "../src/core/index.js";
 import {
   PAGE_SIZE,
   PAGE_TYPE_TABLE_INTERIOR,
   MAX_TABLE_INTERIOR_CELLS,
-} from '../src/constants.js';
-import { DataType } from '../src/types/index.js';
+} from "../src/constants.js";
+import { DataType } from "../src/types/index.js";
 
-describe('Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (tests/btree_hierarchy.test.ts)', () => {
-  it('1. Table Interior Node Saturation & Split (splits at entry 145, promotes median key)', () => {
+describe("Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (tests/btree_hierarchy.test.ts)", () => {
+  it("1. Table Interior Node Saturation & Split (splits at entry 145, promotes median key)", () => {
     const p1Buf = new ArrayBuffer(PAGE_SIZE);
     const p1View = new DataView(p1Buf);
     page_init_interior(p1View, 0, 999); // right_child_page_id = 999
@@ -45,12 +45,12 @@ describe('Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (test
     expect(page_get_cell_count(p1View, 0)).toBe(145);
     // Right page gets 291 - 146 = 145 entries (146..290)
     // Median entry (index 145) was promoted
-    expect(splitResult.medianRowid).toBe(BigInt(145 * 10)); // entry 145's rowid
-    expect(splitResult.promotedChildPageId).toBe(145 + 10);
-    expect(splitResult.rightChildPageId).toBe(999);
+    expect(splitResult.median_rowid).toBe(BigInt(145 * 10)); // entry 145's rowid
+    expect(splitResult.promoted_child_page_id).toBe(145 + 10);
+    expect(splitResult.right_child_page_id).toBe(999);
   });
 
-  it('2. Binary Search Traversal Verification across keys and boundaries', () => {
+  it("2. Binary Search Traversal Verification across keys and boundaries", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init_interior(view, 0, 9999); // right_child_page_id = 9999
@@ -73,34 +73,61 @@ describe('Test Suite 6: B+Tree Interior Routing & Secondary Index Geometry (test
     expect(page_binary_search_interior(view, 0, 1500n)).toBe(9999);
   });
 
-  it('3. Secondary Index Slotted Collation (NULL < -inf < Numbers < TEXT < BLOB with rowid tie-breaker)', () => {
+  it("3. Secondary Index Slotted Collation (NULL < -inf < Numbers < TEXT < BLOB with rowid tie-breaker)", () => {
     const buf = new ArrayBuffer(PAGE_SIZE);
     const view = new DataView(buf);
     page_init_index_leaf(view, 0);
 
     // Insert entries in scrambled order
-    page_insert_index_leaf_cell(view, 0, DataType.TEXT, 'banana', 10n);
+    page_insert_index_leaf_cell(view, 0, DataType.TEXT, "banana", 10n);
     page_insert_index_leaf_cell(view, 0, DataType.NULL, null, 1n);
     page_insert_index_leaf_cell(view, 0, DataType.INT32, -500, 20n);
     page_insert_index_leaf_cell(view, 0, DataType.INT32, 100, 5n);
-    page_insert_index_leaf_cell(view, 0, DataType.TEXT, 'apple', 30n);
+    page_insert_index_leaf_cell(view, 0, DataType.TEXT, "apple", 30n);
     page_insert_index_leaf_cell(view, 0, DataType.NULL, null, 2n);
     page_insert_index_leaf_cell(view, 0, DataType.INT32, 100, 2n); // Duplicate key, lower rowid
-    page_insert_index_leaf_cell(view, 0, DataType.BLOB, new Uint8Array([0x01, 0x02]), 9n);
+    page_insert_index_leaf_cell(
+      view,
+      0,
+      DataType.BLOB,
+      new Uint8Array([0x01, 0x02]),
+      9n,
+    );
 
     expect(page_get_cell_count(view, 0)).toBe(8);
 
     // Binary search point seeks
-    const searchApple = page_binary_search_index_leaf(view, 0, DataType.TEXT, 'apple');
+    const searchApple = page_binary_search_index_leaf(
+      view,
+      0,
+      DataType.TEXT,
+      "apple",
+    );
     expect(searchApple.found).toBe(true);
 
-    const searchBanana = page_binary_search_index_leaf(view, 0, DataType.TEXT, 'banana');
+    const searchBanana = page_binary_search_index_leaf(
+      view,
+      0,
+      DataType.TEXT,
+      "banana",
+    );
     expect(searchBanana.found).toBe(true);
 
-    const search100 = page_binary_search_index_leaf(view, 0, DataType.INT32, 100, 2n);
+    const search100 = page_binary_search_index_leaf(
+      view,
+      0,
+      DataType.INT32,
+      100,
+      2n,
+    );
     expect(search100.found).toBe(true);
 
-    const searchMissing = page_binary_search_index_leaf(view, 0, DataType.TEXT, 'orange');
+    const searchMissing = page_binary_search_index_leaf(
+      view,
+      0,
+      DataType.TEXT,
+      "orange",
+    );
     expect(searchMissing.found).toBe(false);
 
     // Verify ordering in slot directory:

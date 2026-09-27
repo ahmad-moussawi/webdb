@@ -17,12 +17,7 @@ export type BufferPoolOffsets = ReturnType<typeof computeBufferPoolOffsets>;
 
 import { IVfsAdapter } from "../storage/vfs.js";
 import { Io } from "../storage/io.js";
-import {
-  read_u32,
-  write_u32,
-  read_u8,
-  memset,
-} from "../../shared/index.js";
+import { read_u32, write_u32, read_u8, memset } from "../../shared/index.js";
 import {
   CorruptPageError,
   QueryArenaExhaustedError,
@@ -122,16 +117,6 @@ export class BufferPoolDriver {
   private in_flight_acquires = new Map<number, Promise<number>>();
   private allocation_lock: Promise<void> = Promise.resolve();
 
-  get pinCounts(): Uint32Array {
-    return this.pin_counts;
-  }
-  get refBits(): Uint8Array {
-    return this.ref_bits;
-  }
-  get clockHand(): number {
-    return this.clock_hand;
-  }
-
   constructor(options: BufferPoolDriverOptions) {
     this.slotCount =
       options.slotCount ?? options.pool?.slotCount ?? DEFAULT_SLOT_COUNT;
@@ -179,7 +164,9 @@ export class BufferPoolDriver {
     } else if (options.vfs) {
       this.io = new Io({ vfs: options.vfs, memory: this.wasmMemory });
     } else {
-      throw new Error("BufferPoolDriver requires either an Io instance or IVfsAdapter");
+      throw new Error(
+        "BufferPoolDriver requires either an Io instance or IVfsAdapter",
+      );
     }
 
     // Initialize slot-to-page map, page-to-slot hash table, and dirty mask to zeros
@@ -383,7 +370,6 @@ export class BufferPoolDriver {
     this.validate_slot_idx(slotIdx);
     this.ref_bits[slotIdx] = val ? 1 : 0;
   }
-
 
   allocArena(size: number): number {
     const aligned = (size + 7) & ~7;
