@@ -209,6 +209,11 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 | | **`OP_LT`** | `0x16` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] < r[B]`. |
 | | **`OP_LE`** | `0x17` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] <= r[B]`. |
 | | **`OP_JUMP`** | `0x18` | `jump_target: uint16` | Unconditional jump to bytecode target address. |
+| | **`OP_STR_LIKE`** | `0x19` | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16` | 3VL SQL `LIKE`: jumps if `r[Str] LIKE r[Pat]` (`%` and `_` wildcards). |
+| | **`OP_STR_NOT_LIKE`** | `0x1A` | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16` | 3VL SQL `NOT LIKE`: jumps if `r[Str] NOT LIKE r[Pat]`. |
+| | **`OP_STR_CONTAINS`** | `0x1B` | `regStr: uint8`, `regSub: uint8`, `jump_target: uint16` | 3VL substring test: jumps if `r[Str]` contains `r[Sub]`. |
+| | **`OP_STR_STARTS_WITH`** | `0x1C` | `regStr: uint8`, `regPfx: uint8`, `jump_target: uint16` | 3VL prefix test: jumps if `r[Str]` starts with `r[Pfx]`. |
+| | **`OP_STR_ENDS_WITH`** | `0x1D` | `regStr: uint8`, `regSfx: uint8`, `jump_target: uint16` | 3VL suffix test: jumps if `r[Str]` ends with `r[Sfx]`. |
 | **Data / Output** | **`OP_LOAD_INT`** | `0x20` | `reg: uint8`, `val: int32` | Loads literal signed 32-bit int into `r[reg]`. |
 | | **`OP_LOAD_FLOAT`** | `0x21` | `reg: uint8`, `val: float64` | Loads literal 64-bit float into `r[reg]`. |
 | | **`OP_LOAD_TEXT`** | `0x22` | `reg: uint8`, `len: uint16`, `bytes: [len]` | Loads literal UTF-8 string into `r[reg]`. |
@@ -216,6 +221,10 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 | | **`OP_EMIT_ROW`** | `0x24` | `cursor: uint8` | Streams raw serialized row from cursor into 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
 | | **`OP_RESULT_ROW`** | `0x25` | `start_reg: uint8`, `num_cols: uint8` | Serializes projected registers into binary row in 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
 | | **`OP_CALL_UDF`** | `0x28` | `udf_id: uint16`, `arg_reg: uint8`, `out_reg: uint8` | Dispatches registered JS UDF function synchronously. |
+| | **`OP_STR_LOWER`** | `0x29` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to lowercase into `r[dest]`. |
+| | **`OP_STR_UPPER`** | `0x2A` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to uppercase into `r[dest]`. |
+| | **`OP_STR_LENGTH`** | `0x2B` | `src_reg: uint8`, `dest_reg: uint8` | Computes UTF-8 string character/byte length into `r[dest]` (int32). |
+| | **`OP_STR_SUBSTR`** | `0x2C` | `src_reg: uint8`, `start_reg: uint8`, `len_reg: uint8`, `dest_reg: uint8` | Extracts 1-indexed substring into `r[dest]`. |
 | **Sorter (ORDER BY)** | **`OP_SORTER_OPEN`** | `0x30` | `sorter_id: uint8`, `key_info_idx: uint8` | Initializes Sorter in Transient Query Arena with `KeyInfo`. |
 | | **`OP_SORTER_INSERT`** | `0x31` | `sorter_id: uint8`, `start_reg: uint8`, `num_keys: uint8`, `cursor: uint8` | Appends `SorterEntry` (16B) and sort keys in arena. |
 | | **`OP_SORTER_SORT`** | `0x32` | `sorter_id: uint8` | Executes in-place Introsort on `SorterEntry[]`. |
@@ -290,6 +299,27 @@ The status field in each `VmFrame` communicates execution state between Core and
 | `5` | **`STATUS_TIMEOUT`** | Instruction cycle limit (10,000,000 cycles) exceeded. | Abort query with `QueryTimeoutError`. |
 | `6` | **`STATUS_ERR_ARENA_EXHAUSTED`** | Transient Query Arena exceeded `maxQueryMemory` (16MB). | Reject query with `QueryArenaExhaustedError`. |
 | `7` | **`STATUS_ERR_INVALID_BYTECODE`** | Corrupt opcode or jump target out-of-bounds. | Abort query with `InvalidBytecodeError`. |
+
+### 2.4 Native String Operations & Pattern Matching
+
+To eliminate Wasm ⟷ JS context switches and prevent Garbage Collection churn during table scans, string filters and transformations execute directly in native C/Wasm with zero JS object allocations.
+
+#### A. SQL `LIKE` Pattern Matching (`OP_STR_LIKE`, `OP_STR_NOT_LIKE`)
+- **Wildcard Semantics:**
+  - `%` matches any sequence of zero or more characters.
+  - `_` matches exactly one character.
+  - Standard ASCII case-insensitive matching matching SQLite defaults.
+- **Algorithm:** An iterative $O(M + N)$ backtracking algorithm executes over raw byte slices without recursion or heap allocation.
+- **3VL Invariant:** If either `r[regStr]` or `r[regPat]` is `NULL`, the result evaluates to `UNKNOWN` $\to$ falls through without jumping.
+
+#### B. Substring & Prefix/Suffix Branching (`OP_STR_CONTAINS`, `OP_STR_STARTS_WITH`, `OP_STR_ENDS_WITH`)
+- Operates directly over evaluation registers `r[regStr]` and `r[regArg]`.
+- Jumps to `jump_target` on match; falls through on mismatch or when either operand is `NULL`.
+
+#### C. Scalar String Transformations (`OP_STR_LOWER`, `OP_STR_UPPER`, `OP_STR_LENGTH`, `OP_STR_SUBSTR`)
+- **`OP_STR_LOWER` / `OP_STR_UPPER`:** In-place or destination register case transformation.
+- **`OP_STR_LENGTH`:** Computes UTF-8 character length into destination register as an `int32`.
+- **`OP_STR_SUBSTR`:** Extracts a 1-indexed SQL substring `SUBSTR(str, start, length)` into `dest_reg`. If `r[str]` or `r[start]` is `NULL`, `dest_reg` is set to `NULL`.
 
 ---
 
