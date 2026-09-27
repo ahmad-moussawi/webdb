@@ -2,6 +2,10 @@ import {
   PAGE_SIZE,
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
+  PAGE_TO_SLOT_OFFSET,
+  PAGE_TO_SLOT_SIZE,
+  DEFAULT_PAGE_TO_SLOT_BUCKETS,
+  SLOT_TO_PAGE_OFFSET,
 } from "../../constants.js";
 import { OpCode, VmStatus, DataType, ColumnMeta } from "../../types/index.js";
 import {
@@ -9,6 +13,7 @@ import {
   page_get_cell_offset,
   page_get_next_page_id,
 } from "./page.c.js";
+import { buf_pool_get_resident_slot } from "./buffer_pool.c.js";
 import { UuidCodec, UlidCodec } from "./codecs.c.js";
 
 import {
@@ -21,6 +26,130 @@ import {
 export { VmCursor, VmContext, createVmContext, resetVmContext };
 
 const text_decoder = new TextDecoder();
+
+/**
+ * Returns the active cursor for cursor_idx (0..15), falling back to ctx.cursor.
+ */
+export function get_cursor(ctx: VmContext, cursor_idx: number): VmCursor {
+  if (ctx.cursors && ctx.cursors[cursor_idx]) {
+    return ctx.cursors[cursor_idx];
+  }
+  return ctx.cursor;
+}
+
+/**
+ * Resolves the byte offset in linear memory for a given page_id.
+ * If the buffer pool page-to-slot table is populated, maps via the resident slot.
+ * Otherwise falls back to standalone direct calculation: (page_id - 1) * PAGE_SIZE.
+ */
+export function resolve_page_offset(view: DataView, page_id: number): number {
+  if (page_id <= 0) return 0;
+  if (view.byteLength >= PAGE_TO_SLOT_OFFSET + PAGE_TO_SLOT_SIZE) {
+    const slot = buf_pool_get_resident_slot(
+      view,
+      PAGE_TO_SLOT_OFFSET,
+      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      page_id,
+    );
+    if (slot >= 0) {
+      return slot * PAGE_SIZE;
+    }
+  }
+  return (page_id - 1) * PAGE_SIZE;
+}
+
+/**
+ * Three-Valued Logic (3VL) comparator for evaluation registers.
+ * If either value is null or undefined, returns is_unknown = true.
+ */
+export function compare_3vl(
+  val_a: any,
+  val_b: any,
+): { result: number; is_unknown: boolean } {
+  if (
+    val_a === null ||
+    val_a === undefined ||
+    val_b === null ||
+    val_b === undefined
+  ) {
+    return { result: 0, is_unknown: true };
+  }
+
+  if (typeof val_a === "number" && typeof val_b === "number") {
+    if (val_a === val_b) return { result: 0, is_unknown: false };
+    return { result: val_a > val_b ? 1 : -1, is_unknown: false };
+  }
+
+  if (typeof val_a === "bigint" || typeof val_b === "bigint") {
+    const a = BigInt(val_a);
+    const b = BigInt(val_b);
+    if (a === b) return { result: 0, is_unknown: false };
+    return { result: a > b ? 1 : -1, is_unknown: false };
+  }
+
+  if (typeof val_a === "string" && typeof val_b === "string") {
+    if (val_a === val_b) return { result: 0, is_unknown: false };
+    return { result: val_a > val_b ? 1 : -1, is_unknown: false };
+  }
+
+  if (val_a instanceof Uint8Array && val_b instanceof Uint8Array) {
+    const min_len = Math.min(val_a.byteLength, val_b.byteLength);
+    for (let i = 0; i < min_len; i++) {
+      if (val_a[i] !== val_b[i]) {
+        return { result: val_a[i] > val_b[i] ? 1 : -1, is_unknown: false };
+      }
+    }
+    if (val_a.byteLength === val_b.byteLength) {
+      return { result: 0, is_unknown: false };
+    }
+    return {
+      result: val_a.byteLength > val_b.byteLength ? 1 : -1,
+      is_unknown: false,
+    };
+  }
+
+  if (val_a === val_b) return { result: 0, is_unknown: false };
+  return { result: val_a > val_b ? 1 : -1, is_unknown: false };
+}
+
+/**
+ * Standard SQL LIKE pattern matcher supporting '%' (any sequence) and '_' (any single character).
+ * Case-insensitive for ASCII matching according to SQLite semantics.
+ */
+export function sql_like_match(str: string, pattern: string): boolean {
+  let s = 0;
+  let p = 0;
+  let star_p = -1;
+  let star_s = -1;
+
+  const s_len = str.length;
+  const p_len = pattern.length;
+
+  while (s < s_len) {
+    if (
+      p < p_len &&
+      (pattern[p] === '_' ||
+        pattern[p].toLowerCase() === str[s].toLowerCase())
+    ) {
+      s++;
+      p++;
+    } else if (p < p_len && pattern[p] === '%') {
+      star_p = p++;
+      star_s = s;
+    } else if (star_p !== -1) {
+      p = star_p + 1;
+      s = ++star_s;
+    } else {
+      return false;
+    }
+  }
+
+  while (p < p_len && pattern[p] === '%') {
+    p++;
+  }
+
+  return p === p_len;
+}
 
 /**
  * Tests whether a column in the row is marked NULL in the null-bitmap.
@@ -85,10 +214,22 @@ export function vm_step(
     bytecode.byteOffset,
     bytecode.byteLength,
   );
-
   const code_len = bytecode.byteLength;
 
+  const MAX_CYCLES = 10_000_000;
+  let cycles = 0;
+
+  const has_buffer_pool =
+    view.byteLength >= SLOT_TO_PAGE_OFFSET + 4 &&
+    view.getUint32(SLOT_TO_PAGE_OFFSET, true) > 0;
+
   while (ctx.pc < code_len) {
+    if (++cycles > MAX_CYCLES) {
+      ctx.status = VmStatus.TIMEOUT;
+      return VmStatus.TIMEOUT;
+    }
+
+    const instr_pc = ctx.pc;
     const op = bytecode[ctx.pc];
     ctx.pc += 1;
 
@@ -97,8 +238,7 @@ export function vm_step(
        * OP_HALT (0x00)
        * Operands: none (0 bytes)
        * Halts VM execution successfully; sets status to STATUS_DONE.
-       Example: Emitted at the end of every compiled bytecode routine.
-      */
+       */
       case OpCode.OP_HALT: {
         ctx.status = VmStatus.DONE;
         return VmStatus.DONE;
@@ -109,17 +249,32 @@ export function vm_step(
        * Operands: [cursor_idx: uint8] [root_page_id: uint32] (5 bytes)
        * Binds cursor[cursor_idx] to a table or index root page ID.
        * Resets the cursor's cellIdx and rowOffset to 0.
-       * Example: OP_OPEN_CURSOR 0, 2 (Binds cursor 0 to table starting at root Page 2)
-       *          Bytecode bytes: [0x01, 0x00, 0x02, 0x00, 0x00, 0x00]
        */
       case OpCode.OP_OPEN_CURSOR: {
-        const _cursor_idx = bytecode[ctx.pc];
+        const cursor_idx = bytecode[ctx.pc];
         const root_page_id = code_view.getUint32(ctx.pc + 1, true);
         ctx.pc += 5;
 
-        ctx.cursor.pageId = root_page_id;
-        ctx.cursor.cellIdx = 0;
-        ctx.cursor.rowOffset = 0;
+        const cursor = get_cursor(ctx, cursor_idx);
+        cursor.pageId = root_page_id;
+        cursor.cellIdx = 0;
+        cursor.rowOffset = 0;
+
+        if (has_buffer_pool && root_page_id > 0) {
+          const slot = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            root_page_id,
+          );
+          if (slot < 0) {
+            ctx.fault_page_id = root_page_id;
+            ctx.status = VmStatus.PAGE_FAULT;
+            ctx.pc = instr_pc;
+            return VmStatus.PAGE_FAULT;
+          }
+          cursor.slotIdx = slot;
+        }
         break;
       }
 
@@ -128,23 +283,44 @@ export function vm_step(
        * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
        * Positions cursor[cursor_idx] at the first cell (index 0) of root page.
        * If the table has 0 rows (cell_count == 0), branches to jump_target (EOF).
-       * Example: OP_REWIND 0, 0x0040 (Rewind cursor 0; jump to offset 0x0040 if table empty)
-       *          Bytecode bytes: [0x02, 0x00, 0x40, 0x00]
        */
       case OpCode.OP_REWIND: {
-        const _cursor_idx = bytecode[ctx.pc];
+        const cursor_idx = bytecode[ctx.pc];
         const jump_target = code_view.getUint16(ctx.pc + 1, true);
         ctx.pc += 3;
 
-        const page_offset = (ctx.cursor.pageId - 1) * PAGE_SIZE;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+
+        if (has_buffer_pool && cursor.pageId > 0) {
+          const slot = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            cursor.pageId,
+          );
+          if (slot < 0) {
+            ctx.fault_page_id = cursor.pageId;
+            ctx.status = VmStatus.PAGE_FAULT;
+            ctx.pc = instr_pc;
+            return VmStatus.PAGE_FAULT;
+          }
+          cursor.slotIdx = slot;
+        }
+
+        const page_offset = resolve_page_offset(view, cursor.pageId);
         const cell_count = page_get_cell_count(view, page_offset);
 
         if (cell_count === 0) {
           ctx.pc = jump_target;
         } else {
-          ctx.cursor.cellIdx = 0;
+          cursor.cellIdx = 0;
           const rel_cell_offset = page_get_cell_offset(view, page_offset, 0);
-          ctx.cursor.rowOffset = page_offset + rel_cell_offset;
+          cursor.rowOffset = page_offset + rel_cell_offset;
         }
         break;
       }
@@ -155,33 +331,54 @@ export function vm_step(
        * Advances cursor[cursor_idx] to the next cell. If all cells on the
        * current page are exhausted, traverses next_page_id to the linked sibling
        * leaf page. Jumps to jump_target when EOF (no more pages) is reached.
-       * Example: OP_NEXT_ROW 0, 0x0055 (Advance cursor 0; jump to 0x0055 on EOF)
-       *          Bytecode bytes: [0x03, 0x00, 0x55, 0x00]
        */
       case OpCode.OP_NEXT_ROW: {
-        const _cursor_idx = bytecode[ctx.pc];
+        const cursor_idx = bytecode[ctx.pc];
         const jump_target = code_view.getUint16(ctx.pc + 1, true);
         ctx.pc += 3;
 
-        const page_offset = (ctx.cursor.pageId - 1) * PAGE_SIZE;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        const page_offset = resolve_page_offset(view, cursor.pageId);
         const cell_count = page_get_cell_count(view, page_offset);
 
-        ctx.cursor.cellIdx++;
-
-        if (ctx.cursor.cellIdx < cell_count) {
+        const next_cell_idx = cursor.cellIdx + 1;
+        if (next_cell_idx < cell_count) {
+          cursor.cellIdx = next_cell_idx;
           const rel_cell_offset = page_get_cell_offset(
             view,
             page_offset,
-            ctx.cursor.cellIdx,
+            cursor.cellIdx,
           );
-          ctx.cursor.rowOffset = page_offset + rel_cell_offset;
+          cursor.rowOffset = page_offset + rel_cell_offset;
         } else {
           // Check if there is a next page linked for this table
           const next_page_id = page_get_next_page_id(view, page_offset);
           if (next_page_id !== 0) {
-            ctx.cursor.pageId = next_page_id;
-            ctx.cursor.cellIdx = 0;
-            const next_offset = (next_page_id - 1) * PAGE_SIZE;
+            if (has_buffer_pool) {
+              const slot = buf_pool_get_resident_slot(
+                view,
+                PAGE_TO_SLOT_OFFSET,
+                DEFAULT_PAGE_TO_SLOT_BUCKETS,
+                next_page_id,
+              );
+              if (slot < 0) {
+                // Page miss: leave cursor on current page and cell, rewind PC to re-evaluate after load
+                ctx.fault_page_id = next_page_id;
+                ctx.status = VmStatus.PAGE_FAULT;
+                ctx.pc = instr_pc;
+                return VmStatus.PAGE_FAULT;
+              }
+              cursor.slotIdx = slot;
+            }
+
+            cursor.pageId = next_page_id;
+            cursor.cellIdx = 0;
+            const next_offset = resolve_page_offset(view, next_page_id);
             const next_count = page_get_cell_count(view, next_offset);
             if (next_count > 0) {
               const rel_cell_offset = page_get_cell_offset(
@@ -189,9 +386,9 @@ export function vm_step(
                 next_offset,
                 0,
               );
-              ctx.cursor.rowOffset = next_offset + rel_cell_offset;
+              cursor.rowOffset = next_offset + rel_cell_offset;
             } else {
-              ctx.pc = jump_target; // Empty next page
+              ctx.pc = jump_target;
             }
           } else {
             // EOF reached
@@ -202,23 +399,86 @@ export function vm_step(
       }
 
       /**
+       * OP_LAST (0x08)
+       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
+       * Positions cursor at rightmost leaf cell for reverse scan.
+       */
+      case OpCode.OP_LAST: {
+        const cursor_idx = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        const page_offset = resolve_page_offset(view, cursor.pageId);
+        const cell_count = page_get_cell_count(view, page_offset);
+
+        if (cell_count === 0) {
+          ctx.pc = jump_target;
+        } else {
+          cursor.cellIdx = cell_count - 1;
+          const rel_cell_offset = page_get_cell_offset(
+            view,
+            page_offset,
+            cursor.cellIdx,
+          );
+          cursor.rowOffset = page_offset + rel_cell_offset;
+        }
+        break;
+      }
+
+      /**
+       * OP_PREV_ROW (0x09)
+       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
+       * Decrements cell index; jumps on beginning of table (BOF).
+       */
+      case OpCode.OP_PREV_ROW: {
+        const cursor_idx = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        const page_offset = resolve_page_offset(view, cursor.pageId);
+
+        if (cursor.cellIdx > 0) {
+          cursor.cellIdx--;
+          const rel_cell_offset = page_get_cell_offset(
+            view,
+            page_offset,
+            cursor.cellIdx,
+          );
+          cursor.rowOffset = page_offset + rel_cell_offset;
+        } else {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
        * OP_COLUMN_INT (0x04)
-       * Operands: [col_idx: uint8] [reg_idx: uint8] (2 bytes)
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
        * Extracts an INT32 or INT64 column value from the current row under cursor.
-       * Tests the row's Null-Bitmap: writes null to r[reg_idx] if NULL; otherwise
-       * reads 4-byte int32 or 8-byte int64 from the row's fixed data slice.
-       * Example: OP_COLUMN_INT 1, 0 (Extract column 1 into register r[0])
-       *          Bytecode bytes: [0x04, 0x01, 0x00]
        */
       case OpCode.OP_COLUMN_INT: {
-        const col_idx = bytecode[ctx.pc];
-        const reg_idx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const reg_idx = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
 
+        const cursor = get_cursor(ctx, cursor_idx);
         const table = ctx.table!;
         const col = table.columns[col_idx];
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        const null_bitmap_offset = cursor.rowOffset + 3;
 
         if (row_is_null(view, null_bitmap_offset, col_idx)) {
           ctx.registers[reg_idx] = null;
@@ -243,21 +503,19 @@ export function vm_step(
 
       /**
        * OP_COLUMN_FLOAT (0x05)
-       * Operands: [col_idx: uint8] [reg_idx: uint8] (2 bytes)
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
        * Extracts a 64-bit IEEE 754 float column from the row under cursor.
-       * Tests Null-Bitmap: writes null to r[reg_idx] if NULL; otherwise
-       * reads 8-byte float64 from the row's fixed data slice.
-       * Example: OP_COLUMN_FLOAT 2, 1 (Extract column 2 into register r[1])
-       *          Bytecode bytes: [0x05, 0x02, 0x01]
        */
       case OpCode.OP_COLUMN_FLOAT: {
-        const col_idx = bytecode[ctx.pc];
-        const reg_idx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const reg_idx = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
 
+        const cursor = get_cursor(ctx, cursor_idx);
         const table = ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        const null_bitmap_offset = cursor.rowOffset + 3;
 
         if (row_is_null(view, null_bitmap_offset, col_idx)) {
           ctx.registers[reg_idx] = null;
@@ -273,27 +531,27 @@ export function vm_step(
         );
 
         ctx.registers[reg_idx] = view.getFloat64(col_offset, true);
-
         break;
       }
 
       /**
        * OP_COLUMN_TEXT (0x06)
-       * Operands: [col_idx: uint8] [reg_idx: uint8] (2 bytes)
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
        * Extracts a variable-length UTF-8 string (or formatted UUID/ULID string)
-       * from the row under cursor into register r[reg_idx]. Reads string offset and
-       * length from the row's variable-offset table, or sets r[reg_idx] = null if NULL.
-       * Example: OP_COLUMN_TEXT 3, 2 (Extract column 3 into register r[2])
-       *          Bytecode bytes: [0x06, 0x03, 0x02]
+       * from the row under cursor into register r[reg_idx].
        */
+      case OpCode.OP_COLUMN_UUID:
+      case OpCode.OP_COLUMN_ULID:
       case OpCode.OP_COLUMN_TEXT: {
-        const col_idx = bytecode[ctx.pc];
-        const reg_idx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const reg_idx = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
 
+        const cursor = get_cursor(ctx, cursor_idx);
         const table = ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        const null_bitmap_offset = cursor.rowOffset + 3;
 
         if (row_is_null(view, null_bitmap_offset, col_idx)) {
           ctx.registers[reg_idx] = null;
@@ -335,7 +593,6 @@ export function vm_step(
         );
 
         let var_idx = 0;
-
         for (let i = 0; i < col_idx; i++) {
           const c = table.columns[i];
           if (c.type === DataType.TEXT || c.type === DataType.BLOB) {
@@ -352,7 +609,7 @@ export function vm_step(
         } else {
           const text_bytes = new Uint8Array(
             view.buffer,
-            ctx.cursor.rowOffset + rel_offset,
+            cursor.rowOffset + rel_offset,
             len,
           );
           ctx.registers[reg_idx] = text_decoder.decode(text_bytes);
@@ -362,20 +619,19 @@ export function vm_step(
 
       /**
        * OP_COLUMN_BLOB (0x07)
-       * Operands: [col_idx: uint8] [reg_idx: uint8] (2 bytes)
-       * Extracts a variable-length binary BLOB column from the row under cursor
-       * into register r[reg_idx] as a Uint8Array slice. Sets null if marked in Null-Bitmap.
-       * Example: OP_COLUMN_BLOB 4, 3 (Extract column 4 into register r[3])
-       *          Bytecode bytes: [0x07, 0x04, 0x03]
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
+       * Extracts a variable-length binary BLOB column from the row under cursor.
        */
       case OpCode.OP_COLUMN_BLOB: {
-        const col_idx = bytecode[ctx.pc];
-        const reg_idx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const reg_idx = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
 
+        const cursor = get_cursor(ctx, cursor_idx);
         const table = ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        const null_bitmap_offset = cursor.rowOffset + 3;
 
         if (row_is_null(view, null_bitmap_offset, col_idx)) {
           ctx.registers[reg_idx] = null;
@@ -404,7 +660,7 @@ export function vm_step(
 
         const blob_copy = new Uint8Array(len);
         blob_copy.set(
-          new Uint8Array(view.buffer, ctx.cursor.rowOffset + rel_offset, len),
+          new Uint8Array(view.buffer, cursor.rowOffset + rel_offset, len),
         );
         ctx.registers[reg_idx] = blob_copy;
         break;
@@ -412,18 +668,22 @@ export function vm_step(
 
       /**
        * OP_IS_NULL (0x10)
-       * Operands: [col_idx: uint8] [jump_target: uint16] (3 bytes)
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [jump_target: uint16] (4 bytes)
        * Evaluates SQL "col IS NULL". Tests the row's Null-Bitmap at col_idx.
-       * If the bit is set (indicating NULL), branches to jump_target.
-       * Example: OP_IS_NULL 2, 0x0060 (If column 2 is NULL, jump to offset 0x0060)
-       *          Bytecode bytes: [0x10, 0x02, 0x60, 0x00]
        */
       case OpCode.OP_IS_NULL: {
-        const col_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
 
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        const null_bitmap_offset = cursor.rowOffset + 3;
         const is_null = row_is_null(view, null_bitmap_offset, col_idx);
 
         if (is_null) {
@@ -434,18 +694,22 @@ export function vm_step(
 
       /**
        * OP_IS_NOT_NULL (0x11)
-       * Operands: [col_idx: uint8] [jump_target: uint16] (3 bytes)
+       * Operands: [cursor_idx: uint8] [col_idx: uint8] [jump_target: uint16] (4 bytes)
        * Evaluates SQL "col IS NOT NULL". Tests the row's Null-Bitmap at col_idx.
-       * If the bit is clear (indicating non-null), branches to jump_target.
-       * Example: OP_IS_NOT_NULL 2, 0x0040 (If column 2 is NOT NULL, jump to offset 0x0040)
-       *          Bytecode bytes: [0x11, 0x02, 0x40, 0x00]
        */
       case OpCode.OP_IS_NOT_NULL: {
-        const col_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
+        const cursor_idx = bytecode[ctx.pc];
+        const col_idx = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
 
-        const null_bitmap_offset = ctx.cursor.rowOffset + 3;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        const null_bitmap_offset = cursor.rowOffset + 3;
         const is_null = row_is_null(view, null_bitmap_offset, col_idx);
 
         if (!is_null) {
@@ -458,10 +722,6 @@ export function vm_step(
        * OP_EQ (0x12)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) equality check: r[reg_a] == r[reg_b].
-       * Jumps to jump_target only if both registers are non-null and equal.
-       * If either register is NULL, 3VL yields UNKNOWN and falls through (no jump).
-       * Example: OP_EQ 0, 1, 0x0050 (If r[0] == r[1], jump to 0x0050)
-       *          Bytecode bytes: [0x12, 0x00, 0x01, 0x50, 0x00]
        */
       case OpCode.OP_EQ: {
         const reg_a = bytecode[ctx.pc];
@@ -469,10 +729,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (val_a !== null && val_b !== null && val_a === val_b) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result === 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -482,10 +745,6 @@ export function vm_step(
        * OP_NE (0x13)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) inequality check: r[reg_a] != r[reg_b].
-       * Jumps to jump_target only if both registers are non-null and unequal.
-       * If either register is NULL, 3VL yields UNKNOWN and falls through.
-       * Example: OP_NE 0, 1, 0x0050 (If r[0] != r[1], jump to 0x0050)
-       *          Bytecode bytes: [0x13, 0x00, 0x01, 0x50, 0x00]
        */
       case OpCode.OP_NE: {
         const reg_a = bytecode[ctx.pc];
@@ -493,10 +752,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (val_a !== null && val_b !== null && val_a !== val_b) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result !== 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -506,10 +768,6 @@ export function vm_step(
        * OP_GT (0x14)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) greater-than comparison: r[reg_a] > r[reg_b].
-       * Jumps to jump_target only if both are non-null and r[reg_a] > r[reg_b].
-       * Falls through on false or NULL (UNKNOWN).
-       * Example: OP_GT 2, 3, 0x0070 (If r[2] > r[3], jump to 0x0070)
-       *          Bytecode bytes: [0x14, 0x02, 0x03, 0x70, 0x00]
        */
       case OpCode.OP_GT: {
         const reg_a = bytecode[ctx.pc];
@@ -517,14 +775,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (
-          val_a !== null &&
-          val_b !== null &&
-          (val_a as any) > (val_b as any)
-        ) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result > 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -534,9 +791,6 @@ export function vm_step(
        * OP_GE (0x15)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) greater-than-or-equal comparison: r[reg_a] >= r[reg_b].
-       * Jumps to jump_target only if both are non-null and r[reg_a] >= r[reg_b].
-       * Example: OP_GE 2, 3, 0x0070 (If r[2] >= r[3], jump to 0x0070)
-       *          Bytecode bytes: [0x15, 0x02, 0x03, 0x70, 0x00]
        */
       case OpCode.OP_GE: {
         const reg_a = bytecode[ctx.pc];
@@ -544,14 +798,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (
-          val_a !== null &&
-          val_b !== null &&
-          (val_a as any) >= (val_b as any)
-        ) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result >= 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -561,9 +814,6 @@ export function vm_step(
        * OP_LT (0x16)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) less-than comparison: r[reg_a] < r[reg_b].
-       * Jumps to jump_target only if both are non-null and r[reg_a] < r[reg_b].
-       * Example: OP_LT 2, 3, 0x0070 (If r[2] < r[3], jump to 0x0070)
-       *          Bytecode bytes: [0x16, 0x02, 0x03, 0x70, 0x00]
        */
       case OpCode.OP_LT: {
         const reg_a = bytecode[ctx.pc];
@@ -571,14 +821,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (
-          val_a !== null &&
-          val_b !== null &&
-          (val_a as any) < (val_b as any)
-        ) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result < 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -588,9 +837,6 @@ export function vm_step(
        * OP_LE (0x17)
        * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
        * Three-Valued Logic (3VL) less-than-or-equal comparison: r[reg_a] <= r[reg_b].
-       * Jumps to jump_target only if both are non-null and r[reg_a] <= r[reg_b].
-       * Example: OP_LE 2, 3, 0x0070 (If r[2] <= r[3], jump to 0x0070)
-       *          Bytecode bytes: [0x17, 0x02, 0x03, 0x70, 0x00]
        */
       case OpCode.OP_LE: {
         const reg_a = bytecode[ctx.pc];
@@ -598,14 +844,13 @@ export function vm_step(
         const jump_target = code_view.getUint16(ctx.pc + 2, true);
         ctx.pc += 4;
 
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
 
-        if (
-          val_a !== null &&
-          val_b !== null &&
-          (val_a as any) <= (val_b as any)
-        ) {
+        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
+        if (!cmp.is_unknown && cmp.result <= 0) {
           ctx.pc = jump_target;
         }
         break;
@@ -615,12 +860,139 @@ export function vm_step(
        * OP_JUMP (0x18)
        * Operands: [jump_target: uint16] (2 bytes)
        * Unconditional jump. Sets the program counter ctx.pc directly to jump_target.
-       Example: OP_JUMP 0x0010 (Jump execution to bytecode offset 0x0010)
-      *          Bytecode bytes: [0x18, 0x10, 0x00]
        */
       case OpCode.OP_JUMP: {
         const jump_target = code_view.getUint16(ctx.pc, true);
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
         ctx.pc = jump_target;
+        break;
+      }
+
+      /**
+       * OP_STR_LIKE (0x19)
+       * Operands: [reg_str: uint8] [reg_pat: uint8] [jump_target: uint16] (4 bytes)
+       * 3VL SQL LIKE: jumps to jump_target if r[reg_str] matches r[reg_pat].
+       */
+      case OpCode.OP_STR_LIKE: {
+        const regStr = bytecode[ctx.pc];
+        const regPat = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const val_str = ctx.registers[regStr];
+        const val_pat = ctx.registers[regPat];
+        if (val_str == null || val_pat == null) {
+          break; // 3VL UNKNOWN: do not jump
+        }
+        if (sql_like_match(String(val_str), String(val_pat))) {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_STR_NOT_LIKE (0x1A)
+       * Operands: [reg_str: uint8] [reg_pat: uint8] [jump_target: uint16] (4 bytes)
+       * 3VL SQL NOT LIKE: jumps to jump_target if r[reg_str] does NOT match r[reg_pat].
+       */
+      case OpCode.OP_STR_NOT_LIKE: {
+        const regStr = bytecode[ctx.pc];
+        const regPat = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const val_str = ctx.registers[regStr];
+        const val_pat = ctx.registers[regPat];
+        if (val_str == null || val_pat == null) {
+          break; // 3VL UNKNOWN: do not jump
+        }
+        if (!sql_like_match(String(val_str), String(val_pat))) {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_STR_CONTAINS (0x1B)
+       * Operands: [reg_str: uint8] [reg_sub: uint8] [jump_target: uint16] (4 bytes)
+       * 3VL Substring search: jumps to jump_target if r[reg_str] contains r[reg_sub].
+       */
+      case OpCode.OP_STR_CONTAINS: {
+        const regStr = bytecode[ctx.pc];
+        const regSub = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const val_str = ctx.registers[regStr];
+        const val_sub = ctx.registers[regSub];
+        if (val_str == null || val_sub == null) {
+          break; // 3VL UNKNOWN: do not jump
+        }
+        if (String(val_str).includes(String(val_sub))) {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_STR_STARTS_WITH (0x1C)
+       * Operands: [reg_str: uint8] [reg_pfx: uint8] [jump_target: uint16] (4 bytes)
+       * 3VL Prefix check: jumps to jump_target if r[reg_str] starts with r[reg_pfx].
+       */
+      case OpCode.OP_STR_STARTS_WITH: {
+        const regStr = bytecode[ctx.pc];
+        const regPfx = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const val_str = ctx.registers[regStr];
+        const val_pfx = ctx.registers[regPfx];
+        if (val_str == null || val_pfx == null) {
+          break; // 3VL UNKNOWN: do not jump
+        }
+        if (String(val_str).startsWith(String(val_pfx))) {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_STR_ENDS_WITH (0x1D)
+       * Operands: [reg_str: uint8] [reg_sfx: uint8] [jump_target: uint16] (4 bytes)
+       * 3VL Suffix check: jumps to jump_target if r[reg_str] ends with r[reg_sfx].
+       */
+      case OpCode.OP_STR_ENDS_WITH: {
+        const regStr = bytecode[ctx.pc];
+        const regSfx = bytecode[ctx.pc + 1];
+        const jump_target = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const val_str = ctx.registers[regStr];
+        const val_sfx = ctx.registers[regSfx];
+        if (val_str == null || val_sfx == null) {
+          break; // 3VL UNKNOWN: do not jump
+        }
+        if (String(val_str).endsWith(String(val_sfx))) {
+          ctx.pc = jump_target;
+        }
         break;
       }
 
@@ -628,8 +1000,6 @@ export function vm_step(
        * OP_LOAD_INT (0x20)
        * Operands: [reg_idx: uint8] [val: int32] (5 bytes)
        * Loads a literal signed 32-bit integer constant into register r[reg_idx].
-       Example: OP_LOAD_INT 1, 42 (Load integer 42 into register r[1])
-      *          Bytecode bytes: [0x20, 0x01, 0x2A, 0x00, 0x00, 0x00]
        */
       case OpCode.OP_LOAD_INT: {
         const reg_idx = bytecode[ctx.pc];
@@ -643,8 +1013,6 @@ export function vm_step(
        * OP_LOAD_FLOAT (0x21)
        * Operands: [reg_idx: uint8] [val: float64] (9 bytes)
        * Loads a literal 64-bit IEEE 754 float constant into register r[reg_idx].
-       Example: OP_LOAD_FLOAT 2, 3.14 (Load float 3.14 into register r[2])
-      *          Bytecode bytes: [0x21, 0x02, 0x1F, 0x85, 0xEB, 0x51, 0xB8, 0x1E, 0x09, 0x40]
        */
       case OpCode.OP_LOAD_FLOAT: {
         const reg_idx = bytecode[ctx.pc];
@@ -658,8 +1026,6 @@ export function vm_step(
        * OP_LOAD_TEXT (0x22)
        * Operands: [reg_idx: uint8] [len: uint16] [utf8_bytes: len bytes]
        * Loads a literal UTF-8 string of length len into register r[reg_idx].
-       Example: OP_LOAD_TEXT 0, 5, "alice" (Load string "alice" into register r[0])
-      *          Bytecode bytes: [0x22, 0x00, 0x05, 0x00, 0x61, 0x6C, 0x69, 0x63, 0x65]
        */
       case OpCode.OP_LOAD_TEXT: {
         const reg_idx = bytecode[ctx.pc];
@@ -678,8 +1044,6 @@ export function vm_step(
        * OP_LOAD_NULL (0x23)
        * Operands: [reg_idx: uint8] (1 byte)
        * Sets register r[reg_idx] to null (type = 0).
-       Example: OP_LOAD_NULL 3 (Set register r[3] = NULL)
-      *          Bytecode bytes: [0x23, 0x03]
        */
       case OpCode.OP_LOAD_NULL: {
         const reg_idx = bytecode[ctx.pc];
@@ -694,21 +1058,19 @@ export function vm_step(
        * Streams the current serialized row focused under cursor[cursor_idx]
        * into the 64KB Output Result Buffer at RESULT_BUFFER_OFFSET + resultOffset.
        * Prepends a 2-byte record length: [uint16 len] [row_bytes].
-       *              If remaining buffer space is insufficient, yields STATUS_BUFFER_FULL.
-       * Example: OP_EMIT_ROW 0 (Emit current row under cursor 0 to result buffer)
-       *          Bytecode bytes: [0x24, 0x00]
+       * If remaining buffer space is insufficient, yields STATUS_BUFFER_FULL.
        */
       case OpCode.OP_EMIT_ROW: {
-        const _cursor_idx = bytecode[ctx.pc];
+        const cursor_idx = bytecode[ctx.pc];
         ctx.pc += 1;
 
-        // Read row record length directly from row bytes 1..2
-        const total_row_length = view.getUint16(ctx.cursor.rowOffset + 1, true);
-
-        // Check if output buffer has space for 2B length + row record
+        const cursor = get_cursor(ctx, cursor_idx);
+        const total_row_length = view.getUint16(cursor.rowOffset + 1, true);
         const needed = 2 + total_row_length;
+
         if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
           ctx.status = VmStatus.BUFFER_FULL;
+          ctx.pc = instr_pc; // Rewind PC so this row emits upon resumption
           return VmStatus.BUFFER_FULL;
         }
 
@@ -718,12 +1080,12 @@ export function vm_step(
         // Copy row bytes into output result buffer
         const src_uint8 = new Uint8Array(
           view.buffer,
-          ctx.cursor.rowOffset,
+          view.byteOffset + cursor.rowOffset,
           total_row_length,
         );
         const dest_uint8 = new Uint8Array(
           view.buffer,
-          out_target + 2,
+          view.byteOffset + out_target + 2,
           total_row_length,
         );
         dest_uint8.set(src_uint8);
@@ -733,8 +1095,80 @@ export function vm_step(
         break;
       }
 
+      /**
+       * OP_STR_LOWER (0x29)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Converts string in r[src_reg] to lowercase and stores into r[dest_reg].
+       */
+      case OpCode.OP_STR_LOWER: {
+        const srcReg = bytecode[ctx.pc];
+        const destReg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[srcReg];
+        ctx.registers[destReg] = val != null ? String(val).toLowerCase() : null;
+        break;
+      }
+
+      /**
+       * OP_STR_UPPER (0x2A)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Converts string in r[src_reg] to uppercase and stores into r[dest_reg].
+       */
+      case OpCode.OP_STR_UPPER: {
+        const srcReg = bytecode[ctx.pc];
+        const destReg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[srcReg];
+        ctx.registers[destReg] = val != null ? String(val).toUpperCase() : null;
+        break;
+      }
+
+      /**
+       * OP_STR_LENGTH (0x2B)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Computes UTF-8 / character length of string in r[src_reg] and stores into r[dest_reg] (int32).
+       */
+      case OpCode.OP_STR_LENGTH: {
+        const srcReg = bytecode[ctx.pc];
+        const destReg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[srcReg];
+        ctx.registers[destReg] = val != null ? String(val).length : null;
+        break;
+      }
+
+      /**
+       * OP_STR_SUBSTR (0x2C)
+       * Operands: [src_reg: uint8] [start_reg: uint8] [len_reg: uint8] [dest_reg: uint8] (4 bytes)
+       * 1-indexed SQL SUBSTR. Extracts substring from r[src_reg] starting at r[start_reg] for r[len_reg] characters.
+       */
+      case OpCode.OP_STR_SUBSTR: {
+        const srcReg = bytecode[ctx.pc];
+        const startReg = bytecode[ctx.pc + 1];
+        const lenReg = bytecode[ctx.pc + 2];
+        const destReg = bytecode[ctx.pc + 3];
+        ctx.pc += 4;
+        const val = ctx.registers[srcReg];
+        const start = ctx.registers[startReg];
+        const len = ctx.registers[lenReg];
+        if (val == null || start == null) {
+          ctx.registers[destReg] = null;
+          break;
+        }
+        const str = String(val);
+        const sIdx = Math.max(0, Number(start) - 1);
+        if (len == null) {
+          ctx.registers[destReg] = str.slice(sIdx);
+        } else {
+          const l = Math.max(0, Number(len));
+          ctx.registers[destReg] = str.slice(sIdx, sIdx + l);
+        }
+        break;
+      }
+
       default:
-        throw new Error(`Unknown bytecode opcode: ${op} at PC=${ctx.pc - 1}`);
+        ctx.status = VmStatus.INVALID_BYTECODE;
+        return VmStatus.INVALID_BYTECODE;
     }
   }
 

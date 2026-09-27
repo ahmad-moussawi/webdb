@@ -10,6 +10,9 @@ import {
   DbRow,
   TableNotFoundError,
   ColumnFlag,
+  VmStatus,
+  QueryTimeoutError,
+  InvalidBytecodeError,
 } from "../../types/index.js";
 import { IVfsAdapter } from "../storage/vfs.js";
 import { MemoryVfsAdapter } from "../storage/memory.js";
@@ -361,27 +364,47 @@ export class WebDB implements IDatabaseQueryExecutor {
     const bytecode = compileQuery({ table, filters });
 
     resetVmContext(this.vmCtx, table);
-    vm_step(this.vmCtx, this.pool.view, bytecode);
 
-    // Hydrate rows from Output Result Buffer
+    // Execute query with support for chunked Result Buffer streaming and Page Faults
     let rows: DbRow[] = [];
-    let currentOffset = 0;
+    while (true) {
+      const status = vm_step(this.vmCtx, this.pool.view, bytecode);
 
-    for (let i = 0; i < this.vmCtx.resultCount; i++) {
-      const rowLen = this.pool.view.getUint16(
-        RESULT_BUFFER_OFFSET + currentOffset,
-        true,
-      );
-      const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
+      // Hydrate rows from Output Result Buffer for current chunk
+      let currentOffset = 0;
+      for (let i = 0; i < this.vmCtx.resultCount; i++) {
+        const rowLen = this.pool.view.getUint16(
+          RESULT_BUFFER_OFFSET + currentOffset,
+          true,
+        );
+        const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
-      const record = page_deserialize_row(
-        table.columns,
-        this.pool.view,
-        rowRecordOffset,
-      );
-      rows.push(record);
+        const record = page_deserialize_row(
+          table.columns,
+          this.pool.view,
+          rowRecordOffset,
+        );
+        rows.push(record);
 
-      currentOffset += 2 + rowLen;
+        currentOffset += 2 + rowLen;
+      }
+
+      if (status === VmStatus.DONE) {
+        break;
+      } else if (status === VmStatus.BUFFER_FULL) {
+        this.vmCtx.resultOffset = 0;
+        this.vmCtx.resultCount = 0;
+        this.vmCtx.status = VmStatus.RUNNING;
+      } else if (status === VmStatus.PAGE_FAULT) {
+        await this.driver.acquirePage(this.vmCtx.fault_page_id);
+        this.vmCtx.status = VmStatus.RUNNING;
+      } else if (status === VmStatus.TIMEOUT) {
+        throw new QueryTimeoutError();
+      } else if (status === VmStatus.INVALID_BYTECODE) {
+        throw new InvalidBytecodeError();
+      } else {
+        throw new Error(`VM execution error: status=${status}`);
+      }
     }
 
     // Apply Sorting with SQLite-compatible 3VL NULL handling:

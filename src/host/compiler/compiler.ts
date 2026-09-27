@@ -2,9 +2,21 @@ import {
   OpCode,
   DataType,
   TableMeta,
+  TooManyRegistersError,
 } from '../../types/index.js';
 
-export type ComparisonOp = '=' | '!=' | '>' | '>=' | '<' | '<=';
+export type ComparisonOp =
+  | '='
+  | '!='
+  | '>'
+  | '>='
+  | '<'
+  | '<='
+  | 'LIKE'
+  | 'NOT LIKE'
+  | 'CONTAINS'
+  | 'STARTS_WITH'
+  | 'ENDS_WITH';
 
 export interface QueryFilter {
   type: 'null' | 'cmp';
@@ -89,6 +101,10 @@ class BytecodeEmitter {
  * Compiles a QueryPlan into an executable bytecode array.
  */
 export function compileQuery(plan: QueryPlan): Uint8Array {
+  if (plan.filters.length * 2 >= 64) {
+    throw new TooManyRegistersError(plan.filters.length * 2);
+  }
+
   const emitter = new BytecodeEmitter();
   const table = plan.table;
 
@@ -152,12 +168,14 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       if (filter.isNull) {
         // If col IS NOT NULL -> skip to next row
         emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
+        emitter.emitUint8(0); // cursor 0
         emitter.emitUint8(colIdx);
         const patch = emitter.emitUint16(0);
         nextRowPatches.push(patch);
       } else {
         // If col IS NULL -> skip to next row
         emitter.emitUint8(OpCode.OP_IS_NULL);
+        emitter.emitUint8(0); // cursor 0
         emitter.emitUint8(colIdx);
         const patch = emitter.emitUint16(0);
         nextRowPatches.push(patch);
@@ -169,14 +187,22 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       // Read column into regCol
       if (col.type === DataType.INT32 || col.type === DataType.INT64) {
         emitter.emitUint8(OpCode.OP_COLUMN_INT);
+        emitter.emitUint8(0); // cursor 0
         emitter.emitUint8(colIdx);
         emitter.emitUint8(regCol);
       } else if (col.type === DataType.FLOAT64) {
         emitter.emitUint8(OpCode.OP_COLUMN_FLOAT);
+        emitter.emitUint8(0); // cursor 0
         emitter.emitUint8(colIdx);
         emitter.emitUint8(regCol);
       } else if (col.type === DataType.TEXT || col.type === DataType.UUID || col.type === DataType.ULID) {
         emitter.emitUint8(OpCode.OP_COLUMN_TEXT);
+        emitter.emitUint8(0); // cursor 0
+        emitter.emitUint8(colIdx);
+        emitter.emitUint8(regCol);
+      } else if (col.type === DataType.BLOB) {
+        emitter.emitUint8(OpCode.OP_COLUMN_BLOB);
+        emitter.emitUint8(0); // cursor 0
         emitter.emitUint8(colIdx);
         emitter.emitUint8(regCol);
       }
@@ -189,6 +215,11 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       else if (filter.op === '>=') cmpOpcode = OpCode.OP_GE;
       else if (filter.op === '<') cmpOpcode = OpCode.OP_LT;
       else if (filter.op === '<=') cmpOpcode = OpCode.OP_LE;
+      else if (filter.op === 'LIKE') cmpOpcode = OpCode.OP_STR_LIKE;
+      else if (filter.op === 'NOT LIKE') cmpOpcode = OpCode.OP_STR_NOT_LIKE;
+      else if (filter.op === 'CONTAINS') cmpOpcode = OpCode.OP_STR_CONTAINS;
+      else if (filter.op === 'STARTS_WITH') cmpOpcode = OpCode.OP_STR_STARTS_WITH;
+      else if (filter.op === 'ENDS_WITH') cmpOpcode = OpCode.OP_STR_ENDS_WITH;
 
       emitter.emitUint8(cmpOpcode);
       emitter.emitUint8(regCol);
@@ -320,13 +351,44 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
         break;
       }
 
+      case OpCode.OP_LAST: {
+        const cursor = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_LAST',
+          p1: `c[${cursor}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: '',
+          comment: `Position cursor to last row; jump to ${fmtAddr(jumpTarget)} if empty`,
+        });
+        break;
+      }
+
+      case OpCode.OP_PREV_ROW: {
+        const cursor = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: 'OP_PREV_ROW',
+          p1: `c[${cursor}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: '',
+          comment: `Advance cursor to previous row; jump to ${fmtAddr(jumpTarget)} if BOF`,
+        });
+        break;
+      }
+
       case OpCode.OP_COLUMN_INT: {
+        const cursor = bytecode[pc++];
         const colIdx = bytecode[pc++];
         const regIdx = bytecode[pc++];
         instructions.push({
           addr,
           opcode: 'OP_COLUMN_INT',
-          p1: `c[0]`,
+          p1: `c[${cursor}]`,
           p2: `${colIdx} (${getColName(colIdx)})`,
           p3: `r[${regIdx}]`,
           comment: `Read ${getColName(colIdx)} as INT into r[${regIdx}]`,
@@ -335,12 +397,13 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
       }
 
       case OpCode.OP_COLUMN_FLOAT: {
+        const cursor = bytecode[pc++];
         const colIdx = bytecode[pc++];
         const regIdx = bytecode[pc++];
         instructions.push({
           addr,
           opcode: 'OP_COLUMN_FLOAT',
-          p1: `c[0]`,
+          p1: `c[${cursor}]`,
           p2: `${colIdx} (${getColName(colIdx)})`,
           p3: `r[${regIdx}]`,
           comment: `Read ${getColName(colIdx)} as FLOAT into r[${regIdx}]`,
@@ -349,12 +412,13 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
       }
 
       case OpCode.OP_COLUMN_TEXT: {
+        const cursor = bytecode[pc++];
         const colIdx = bytecode[pc++];
         const regIdx = bytecode[pc++];
         instructions.push({
           addr,
           opcode: 'OP_COLUMN_TEXT',
-          p1: `c[0]`,
+          p1: `c[${cursor}]`,
           p2: `${colIdx} (${getColName(colIdx)})`,
           p3: `r[${regIdx}]`,
           comment: `Read ${getColName(colIdx)} as TEXT into r[${regIdx}]`,
@@ -362,14 +426,60 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
         break;
       }
 
+      case OpCode.OP_COLUMN_BLOB: {
+        const cursor = bytecode[pc++];
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_BLOB',
+          p1: `c[${cursor}]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as BLOB into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_COLUMN_UUID: {
+        const cursor = bytecode[pc++];
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_UUID',
+          p1: `c[${cursor}]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as UUID into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_COLUMN_ULID: {
+        const cursor = bytecode[pc++];
+        const colIdx = bytecode[pc++];
+        const regIdx = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_COLUMN_ULID',
+          p1: `c[${cursor}]`,
+          p2: `${colIdx} (${getColName(colIdx)})`,
+          p3: `r[${regIdx}]`,
+          comment: `Read ${getColName(colIdx)} as ULID into r[${regIdx}]`,
+        });
+        break;
+      }
+
       case OpCode.OP_IS_NULL: {
+        const cursor = bytecode[pc++];
         const colIdx = bytecode[pc++];
         const jumpTarget = view.getUint16(pc, true);
         pc += 2;
         instructions.push({
           addr,
           opcode: 'OP_IS_NULL',
-          p1: `c[0]`,
+          p1: `c[${cursor}]`,
           p2: `${colIdx} (${getColName(colIdx)})`,
           p3: fmtAddr(jumpTarget),
           comment: `If ${getColName(colIdx)} IS NULL -> jump to ${fmtAddr(jumpTarget)}`,
@@ -378,13 +488,14 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
       }
 
       case OpCode.OP_IS_NOT_NULL: {
+        const cursor = bytecode[pc++];
         const colIdx = bytecode[pc++];
         const jumpTarget = view.getUint16(pc, true);
         pc += 2;
         instructions.push({
           addr,
           opcode: 'OP_IS_NOT_NULL',
-          p1: `c[0]`,
+          p1: `c[${cursor}]`,
           p2: `${colIdx} (${getColName(colIdx)})`,
           p3: fmtAddr(jumpTarget),
           comment: `If ${getColName(colIdx)} IS NOT NULL -> jump to ${fmtAddr(jumpTarget)}`,
@@ -439,6 +550,40 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
           p2: '',
           p3: '',
           comment: `Unconditional jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_STR_LIKE:
+      case OpCode.OP_STR_NOT_LIKE:
+      case OpCode.OP_STR_CONTAINS:
+      case OpCode.OP_STR_STARTS_WITH:
+      case OpCode.OP_STR_ENDS_WITH: {
+        const opNames: Record<number, string> = {
+          [OpCode.OP_STR_LIKE]: 'OP_STR_LIKE',
+          [OpCode.OP_STR_NOT_LIKE]: 'OP_STR_NOT_LIKE',
+          [OpCode.OP_STR_CONTAINS]: 'OP_STR_CONTAINS',
+          [OpCode.OP_STR_STARTS_WITH]: 'OP_STR_STARTS_WITH',
+          [OpCode.OP_STR_ENDS_WITH]: 'OP_STR_ENDS_WITH',
+        };
+        const descriptions: Record<number, string> = {
+          [OpCode.OP_STR_LIKE]: 'LIKE',
+          [OpCode.OP_STR_NOT_LIKE]: 'NOT LIKE',
+          [OpCode.OP_STR_CONTAINS]: 'CONTAINS',
+          [OpCode.OP_STR_STARTS_WITH]: 'STARTS_WITH',
+          [OpCode.OP_STR_ENDS_WITH]: 'ENDS_WITH',
+        };
+        const regA = bytecode[pc++];
+        const regB = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: opNames[op],
+          p1: `r[${regA}]`,
+          p2: `r[${regB}]`,
+          p3: fmtAddr(jumpTarget),
+          comment: `If r[${regA}] ${descriptions[op]} r[${regB}] -> jump to ${fmtAddr(jumpTarget)}`,
         });
         break;
       }
@@ -513,6 +658,57 @@ export function disassembleBytecode(bytecode: Uint8Array, table?: TableMeta): Di
           p2: '',
           p3: '',
           comment: `Row passed all filters -> emit to Output Result Buffer`,
+        });
+        break;
+      }
+
+      case OpCode.OP_RESULT_ROW: {
+        const startReg = bytecode[pc++];
+        const numCols = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_RESULT_ROW',
+          p1: `r[${startReg}]`,
+          p2: `cols=${numCols}`,
+          p3: '',
+          comment: `Serialize registers r[${startReg}..${startReg + numCols - 1}] to Result Buffer`,
+        });
+        break;
+      }
+
+      case OpCode.OP_STR_LOWER:
+      case OpCode.OP_STR_UPPER:
+      case OpCode.OP_STR_LENGTH: {
+        const opNames: Record<number, string> = {
+          [OpCode.OP_STR_LOWER]: 'OP_STR_LOWER',
+          [OpCode.OP_STR_UPPER]: 'OP_STR_UPPER',
+          [OpCode.OP_STR_LENGTH]: 'OP_STR_LENGTH',
+        };
+        const srcReg = bytecode[pc++];
+        const destReg = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: opNames[op],
+          p1: `r[${srcReg}]`,
+          p2: `r[${destReg}]`,
+          p3: '',
+          comment: `${opNames[op]}: r[${destReg}] = ${opNames[op].toLowerCase()}(r[${srcReg}])`,
+        });
+        break;
+      }
+
+      case OpCode.OP_STR_SUBSTR: {
+        const srcReg = bytecode[pc++];
+        const startReg = bytecode[pc++];
+        const lenReg = bytecode[pc++];
+        const destReg = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: 'OP_STR_SUBSTR',
+          p1: `r[${srcReg}]`,
+          p2: `start=r[${startReg}], len=r[${lenReg}]`,
+          p3: `r[${destReg}]`,
+          comment: `Extract substring from r[${srcReg}] into r[${destReg}]`,
         });
         break;
       }
