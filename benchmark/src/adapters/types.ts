@@ -7,6 +7,12 @@ export interface BenchmarkRecord {
   active: number; // 1 or 0 for universal cross-DB compatibility
 }
 
+export interface OrderRecord {
+  id: number;
+  user_id: number;
+  amount: number;
+}
+
 export type StorageCategory = 'memory' | 'persistent';
 
 export type EngineId =
@@ -33,7 +39,8 @@ export type ScenarioId =
   | 'point_lookup'
   | 'range_scan'
   | 'sort_limit'
-  | 'aggregation';
+  | 'aggregation'
+  | 'join_query';
 
 export interface ScenarioInfo {
   id: ScenarioId;
@@ -52,7 +59,7 @@ export interface BenchmarkAdapter {
   init(): Promise<void>;
   
   /** Insert batch of records into DB */
-  bulkInsert(records: BenchmarkRecord[]): Promise<void>;
+  bulkInsert(records: BenchmarkRecord[], orders?: OrderRecord[]): Promise<void>;
   
   /** Point lookup by primary key ID (100 random lookups) */
   pointLookup(ids: number[]): Promise<BenchmarkRecord[]>;
@@ -65,6 +72,9 @@ export interface BenchmarkAdapter {
   
   /** Aggregation (e.g. COUNT(*) and SUM(score) where active = 1) */
   aggregation(): Promise<{ count: number; sumScore: number; avgAge: number }>;
+
+  /** 2-table indexed JOIN between orders and users */
+  joinQuery(): Promise<any[]>;
   
   /** Clean up resources and drop table/database */
   teardown(): Promise<void>;

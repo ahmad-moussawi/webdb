@@ -23,6 +23,7 @@ export const App: React.FC = () => {
     'range_scan',
     'sort_limit',
     'aggregation',
+    'join_query',
   ]);
 
   const [isRunning, setIsRunning] = useState<boolean>(false);

@@ -103,6 +103,13 @@ export const AVAILABLE_SCENARIOS: ScenarioInfo[] = [
     description: 'Compute COUNT(*), SUM(score), and AVG(age) for active records. Tests column projection and accumulator speed.',
     queryHint: 'SELECT COUNT(*), SUM(score), AVG(age) FROM table WHERE active = 1',
   },
+  {
+    id: 'join_query',
+    name: '6. Indexed 2-Table JOIN',
+    category: 'complex',
+    description: 'INNER JOIN between orders and users matching on orders.user_id = users.id. Tests foreign-key to primary-key indexed join.',
+    queryHint: 'SELECT orders.id, users.name, orders.amount FROM orders JOIN users ON orders.user_id = users.id',
+  },
 ];
 
 export function createAdapter(engineId: EngineId): BenchmarkAdapter {

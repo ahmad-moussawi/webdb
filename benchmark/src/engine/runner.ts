@@ -1,13 +1,14 @@
 import {
   BenchmarkAdapter,
   BenchmarkRecord,
+  OrderRecord,
   BenchmarkRunConfig,
   EngineId,
   ScenarioId,
   ScenarioResult,
 } from '../adapters/types.js';
 import { createAdapter } from '../adapters/index.js';
-import { generateBenchmarkDataset, generateLookupIds } from './dataset.js';
+import { generateBenchmarkDataset, generateLookupIds, generateOrdersDataset } from './dataset.js';
 
 export interface ProgressUpdate {
   engineId: EngineId;
@@ -36,6 +37,7 @@ export async function runBenchmarkSuite(
 
   // Generate deterministic dataset and lookup IDs once
   const dataset: BenchmarkRecord[] = generateBenchmarkDataset(config.datasetSize);
+  const orders: OrderRecord[] = generateOrdersDataset(config.datasetSize);
   const lookupIds: number[] = generateLookupIds(config.datasetSize, 100);
 
   const totalSteps = config.engines.length * config.scenarios.length;
@@ -119,27 +121,27 @@ export async function runBenchmarkSuite(
       try {
         // Pre-run setup: ensure dataset is loaded if bulk_insert hasn't already loaded it
         if (scenarioId !== 'bulk_insert' && !isDataLoaded) {
-          await adapter.bulkInsert(dataset);
+          await adapter.bulkInsert(dataset, orders);
           isDataLoaded = true;
         }
 
         // Warmup (1 iteration)
         if (scenarioId !== 'bulk_insert') {
-          await executeScenario(adapter, scenarioId, dataset, lookupIds);
+          await executeScenario(adapter, scenarioId, dataset, lookupIds, orders);
         }
 
         // Iteration runs
         for (let iter = 0; iter < iterations; iter++) {
           if (shouldAbort && shouldAbort()) break;
 
-          // If testing bulk_insert, re-init before each iteration except first
-          if (scenarioId === 'bulk_insert' && iter > 0) {
+          // For bulk_insert, ensure each iteration starts with a clean, empty database
+          if (scenarioId === 'bulk_insert') {
             await adapter.teardown();
             await adapter.init();
           }
 
           const start = performance.now();
-          await executeScenario(adapter, scenarioId, dataset, lookupIds);
+          await executeScenario(adapter, scenarioId, dataset, lookupIds, orders);
           const end = performance.now();
           samples.push(end - start);
         }
@@ -232,11 +234,12 @@ async function executeScenario(
   adapter: BenchmarkAdapter,
   scenarioId: ScenarioId,
   dataset: BenchmarkRecord[],
-  lookupIds: number[]
+  lookupIds: number[],
+  orders: OrderRecord[]
 ): Promise<any> {
   switch (scenarioId) {
     case 'bulk_insert':
-      return await adapter.bulkInsert(dataset);
+      return await adapter.bulkInsert(dataset, orders);
     case 'point_lookup':
       return await adapter.pointLookup(lookupIds);
     case 'range_scan':
@@ -245,6 +248,8 @@ async function executeScenario(
       return await adapter.sortLimit(10);
     case 'aggregation':
       return await adapter.aggregation();
+    case 'join_query':
+      return await adapter.joinQuery();
     default:
       throw new Error(`Unsupported scenario: ${scenarioId}`);
   }

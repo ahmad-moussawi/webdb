@@ -72,3 +72,20 @@ export function generateLookupIds(datasetSize: number, count: number = 100, seed
   }
   return ids;
 }
+
+/**
+ * Generate deterministic orders dataset referencing user_ids 1..datasetSize
+ */
+export function generateOrdersDataset(datasetSize: number, seed: number = 777): import('../adapters/types.js').OrderRecord[] {
+  const rand = createPrng(seed);
+  const count = Math.min(1000, Math.max(100, Math.floor(datasetSize / 2)));
+  const orders: import('../adapters/types.js').OrderRecord[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    orders[i] = {
+      id: 100000 + i + 1,
+      user_id: Math.floor(rand() * datasetSize) + 1,
+      amount: Math.round((10 + rand() * 490) * 100) / 100,
+    };
+  }
+  return orders;
+}

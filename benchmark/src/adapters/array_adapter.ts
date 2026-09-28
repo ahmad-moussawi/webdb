@@ -1,4 +1,4 @@
-import { BenchmarkAdapter, BenchmarkRecord, EngineId, StorageCategory } from './types.js';
+import { BenchmarkAdapter, BenchmarkRecord, OrderRecord, EngineId, StorageCategory } from './types.js';
 
 export class RawArrayAdapter implements BenchmarkAdapter {
   readonly id: EngineId = 'raw_array';
@@ -7,13 +7,15 @@ export class RawArrayAdapter implements BenchmarkAdapter {
 
   private data: BenchmarkRecord[] = [];
   private idIndex: Map<number, BenchmarkRecord> = new Map();
+  private orders: OrderRecord[] = [];
 
   async init(): Promise<void> {
     this.data = [];
     this.idIndex.clear();
+    this.orders = [];
   }
 
-  async bulkInsert(records: BenchmarkRecord[]): Promise<void> {
+  async bulkInsert(records: BenchmarkRecord[], orders: OrderRecord[] = []): Promise<void> {
     this.data = new Array(records.length);
     this.idIndex = new Map();
     for (let i = 0; i < records.length; i++) {
@@ -21,6 +23,7 @@ export class RawArrayAdapter implements BenchmarkAdapter {
       this.data[i] = rec;
       this.idIndex.set(rec.id, rec);
     }
+    this.orders = orders.map((o) => ({ ...o }));
   }
 
   async pointLookup(ids: number[]): Promise<BenchmarkRecord[]> {
@@ -72,8 +75,26 @@ export class RawArrayAdapter implements BenchmarkAdapter {
     };
   }
 
+  async joinQuery(): Promise<any[]> {
+    const results: Array<{ order_id: number; user_name: string; amount: number }> = [];
+    const len = this.orders.length;
+    for (let i = 0; i < len; i++) {
+      const order = this.orders[i];
+      const user = this.idIndex.get(order.user_id);
+      if (user) {
+        results.push({
+          order_id: order.id,
+          user_name: user.name,
+          amount: order.amount,
+        });
+      }
+    }
+    return results;
+  }
+
   async teardown(): Promise<void> {
     this.data = [];
     this.idIndex.clear();
+    this.orders = [];
   }
 }

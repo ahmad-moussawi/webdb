@@ -5,7 +5,7 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
   readonly name = 'Native IndexedDB';
   readonly storage: StorageCategory = 'persistent';
 
-  private dbName: string;
+  private dbName: string = '';
   private db: IDBDatabase | null = null;
 
   constructor() {
@@ -17,6 +17,8 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
       await this.teardown();
     }
 
+    this.dbName = `idb_bench_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(this.dbName, 1);
 
@@ -27,6 +29,10 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
           store.createIndex('age', 'age', { unique: false });
           store.createIndex('score', 'score', { unique: false });
           store.createIndex('active', 'active', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('orders')) {
+          const ordersStore = db.createObjectStore('orders', { keyPath: 'id' });
+          ordersStore.createIndex('user_id', 'user_id', { unique: false });
         }
       };
 
@@ -41,7 +47,7 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
     });
   }
 
-  async bulkInsert(records: BenchmarkRecord[]): Promise<void> {
+  async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
     if (!this.db) throw new Error('IndexedDB not initialized');
     const db = this.db;
 
@@ -61,6 +67,24 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(new Error('IndexedDB transaction aborted'));
       });
+    }
+
+    if (orders.length > 0) {
+      for (let i = 0; i < orders.length; i += CHUNK_SIZE) {
+        const chunk = orders.slice(i, i + CHUNK_SIZE);
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction('orders', 'readwrite');
+          const store = tx.objectStore('orders');
+
+          for (const item of chunk) {
+            store.put(item);
+          }
+
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(new Error('IndexedDB transaction aborted'));
+        });
+      }
     }
   }
 
@@ -170,6 +194,50 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
       };
 
       req.onerror = () => reject(req.error);
+    });
+  }
+
+  async joinQuery(): Promise<any[]> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+    const db = this.db;
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(['orders', 'benchmark'], 'readonly');
+      const ordersStore = tx.objectStore('orders');
+      const benchStore = tx.objectStore('benchmark');
+
+      const getAllOrdersReq = ordersStore.getAll();
+      getAllOrdersReq.onsuccess = () => {
+        const orders = getAllOrdersReq.result as import('./types.js').OrderRecord[];
+        if (orders.length === 0) {
+          resolve([]);
+          return;
+        }
+
+        const results: Array<{ order_id: number; user_name: string; amount: number }> = [];
+        let remaining = orders.length;
+
+        for (const order of orders) {
+          const userReq = benchStore.get(order.user_id);
+          userReq.onsuccess = () => {
+            const user = userReq.result as BenchmarkRecord | undefined;
+            if (user) {
+              results.push({
+                order_id: order.id,
+                user_name: user.name,
+                amount: order.amount,
+              });
+            }
+            remaining--;
+            if (remaining === 0) {
+              resolve(results);
+            }
+          };
+          userReq.onerror = () => reject(userReq.error);
+        }
+      };
+
+      getAllOrdersReq.onerror = () => reject(getAllOrdersReq.error);
     });
   }
 

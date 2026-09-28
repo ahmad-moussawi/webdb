@@ -6,7 +6,7 @@ export class WebDbAdapter implements BenchmarkAdapter {
   readonly name: string;
   readonly storage: StorageCategory;
 
-  private dbName: string;
+  private dbName: string = '';
   private db: WebDB | null = null;
   private storageMode: 'memory' | 'idb' | 'opfs';
 
@@ -15,7 +15,6 @@ export class WebDbAdapter implements BenchmarkAdapter {
     this.storageMode = storageMode;
     this.storage = storageMode === 'memory' ? 'memory' : 'persistent';
     this.name = storageMode === 'memory' ? 'WebDB (In-Memory)' : 'WebDB (IndexedDB VFS)';
-    this.dbName = `webdb_bench_${storageMode}_${Date.now()}`;
   }
 
   async init(): Promise<void> {
@@ -23,10 +22,26 @@ export class WebDbAdapter implements BenchmarkAdapter {
       await this.teardown();
     }
 
+    // Always generate a unique database name per lifecycle to guarantee clean state
+    this.dbName = `bench_wdb_${this.storageMode}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
     this.db = await WebDB.open({
       name: this.dbName,
       storage: this.storageMode,
     });
+
+    // Safeguard: drop tables if they exist
+    try {
+      const tables = await this.db.listTables();
+      if (tables.some((t) => t.name === 'orders')) {
+        await this.db.dropTable('orders');
+      }
+      if (tables.some((t) => t.name === 'benchmark')) {
+        await this.db.dropTable('benchmark');
+      }
+    } catch {
+      // ignore
+    }
 
     await this.db.createTable('benchmark', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
@@ -36,14 +51,24 @@ export class WebDbAdapter implements BenchmarkAdapter {
       { name: 'city', type: 'TEXT' },
       { name: 'active', type: 'INT32' },
     ]);
+
+    await this.db.createTable('orders', [
+      { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+      { name: 'user_id', type: 'INT32', flags: { notNull: true } },
+      { name: 'amount', type: 'FLOAT64' },
+    ]);
   }
 
-  async bulkInsert(records: BenchmarkRecord[]): Promise<void> {
+  async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
     if (!this.db) throw new Error('WebDB not initialized');
     const db = this.db;
     const len = records.length;
     for (let i = 0; i < len; i++) {
       await db.insert('benchmark', records[i]);
+    }
+    const orderLen = orders.length;
+    for (let i = 0; i < orderLen; i++) {
+      await db.insert('orders', orders[i]);
     }
   }
 
@@ -101,14 +126,44 @@ export class WebDbAdapter implements BenchmarkAdapter {
     return { count: 0, sumScore: 0, avgAge: 0 };
   }
 
+  async joinQuery(): Promise<any[]> {
+    if (!this.db) throw new Error('WebDB not initialized');
+    return await this.db
+      .from('orders')
+      .join('benchmark', 'orders.user_id', '=', 'benchmark.id')
+      .select(['orders.id as order_id', 'benchmark.name as user_name', 'orders.amount'])
+      .toArray();
+  }
+
   async teardown(): Promise<void> {
-    if (this.storageMode === 'idb' && typeof indexedDB !== 'undefined') {
+    if (this.db) {
       try {
-        indexedDB.deleteDatabase(this.dbName);
+        const tables = await this.db.listTables();
+        if (tables.some((t) => t.name === 'orders')) {
+          await this.db.dropTable('orders');
+        }
+        if (tables.some((t) => t.name === 'benchmark')) {
+          await this.db.dropTable('benchmark');
+        }
       } catch {
         // ignore
       }
+      try {
+        await this.db.close();
+      } catch {
+        // ignore
+      }
+      this.db = null;
     }
-    this.db = null;
+
+    if (this.storageMode === 'idb' && this.dbName && typeof indexedDB !== 'undefined') {
+      const actualIdbName = `webdb_${this.dbName}`;
+      await new Promise<void>((resolve) => {
+        const req = indexedDB.deleteDatabase(actualIdbName);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
+      });
+    }
   }
 }

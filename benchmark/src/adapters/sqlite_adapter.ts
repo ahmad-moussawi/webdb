@@ -72,16 +72,27 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
       CREATE INDEX idx_benchmark_age ON benchmark(age);
       CREATE INDEX idx_benchmark_score ON benchmark(score);
       CREATE INDEX idx_benchmark_active ON benchmark(active);
+
+      CREATE TABLE orders (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        amount REAL
+      );
+
+      CREATE INDEX idx_orders_user_id ON orders(user_id);
     `);
   }
 
-  async bulkInsert(records: BenchmarkRecord[]): Promise<void> {
+  async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
     if (!this.db) throw new Error('SQLite not initialized');
     const db = this.db;
 
     db.exec('BEGIN TRANSACTION;');
     const stmt = db.prepare(
       'INSERT INTO benchmark (id, name, age, score, city, active) VALUES (?, ?, ?, ?, ?, ?);'
+    );
+    const orderStmt = db.prepare(
+      'INSERT INTO orders (id, user_id, amount) VALUES (?, ?, ?);'
     );
 
     try {
@@ -91,12 +102,19 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
         stmt.step();
         stmt.reset();
       }
+      for (let i = 0; i < orders.length; i++) {
+        const o = orders[i];
+        orderStmt.bind([o.id, o.user_id, o.amount]);
+        orderStmt.step();
+        orderStmt.reset();
+      }
       db.exec('COMMIT;');
     } catch (err) {
       db.exec('ROLLBACK;');
       throw err;
     } finally {
       stmt.finalize();
+      orderStmt.finalize();
     }
   }
 
@@ -179,6 +197,15 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
     }
 
     return { count: 0, sumScore: 0, avgAge: 0 };
+  }
+
+  async joinQuery(): Promise<any[]> {
+    if (!this.db) throw new Error('SQLite not initialized');
+    return this.db.selectObjects(`
+      SELECT orders.id as order_id, benchmark.name as user_name, orders.amount
+      FROM orders
+      JOIN benchmark ON orders.user_id = benchmark.id;
+    `);
   }
 
   async teardown(): Promise<void> {
