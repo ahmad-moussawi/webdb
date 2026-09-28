@@ -68,6 +68,8 @@ export enum OpCode {
   OP_LOAD_NULL = 0x23,
   OP_EMIT_ROW = 0x24,
   OP_RESULT_ROW = 0x25,
+  OP_OFFSET = 0x26,
+  OP_LIMIT = 0x27,
   OP_CALL_UDF = 0x28,
   OP_STR_LOWER = 0x29,
   OP_STR_UPPER = 0x2a,

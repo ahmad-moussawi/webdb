@@ -23,12 +23,16 @@ export type ComparisonOp =
   | "STARTS_WITH"
   | "ENDS_WITH";
 
+export type QueryFilterType = "null" | "cmp" | "and" | "or" | "not";
+
 export interface QueryFilter {
-  type: "null" | "cmp";
-  colName: string;
+  type: QueryFilterType;
+  colName?: string;
   isNull?: boolean; // true for isNull, false for isNotNull
   op?: ComparisonOp;
   value?: any;
+  children?: QueryFilter[]; // for 'and', 'or'
+  child?: QueryFilter;      // for 'not'
 }
 
 export interface SortKey {
@@ -57,7 +61,7 @@ export interface QueryPlan {
   offset?: number;
 }
 
-class BytecodeEmitter {
+export class BytecodeEmitter {
   private buffer: number[] = [];
   private textEncoder = new TextEncoder();
 
@@ -161,13 +165,192 @@ function emitReadColumn(
   }
 }
 
-function emitFilterCheck(
+export function normalizeFilter(filter: QueryFilter): QueryFilter {
+  if (filter.type === "and") {
+    return {
+      type: "and",
+      children: filter.children ? filter.children.map(normalizeFilter) : [],
+    };
+  }
+
+  if (filter.type === "or") {
+    return {
+      type: "or",
+      children: filter.children ? filter.children.map(normalizeFilter) : [],
+    };
+  }
+
+  if (filter.type === "not") {
+    const child = filter.child;
+    if (!child) return filter;
+
+    // Double negation: NOT (NOT x) => x
+    if (child.type === "not" && child.child) {
+      return normalizeFilter(child.child);
+    }
+
+    // De Morgan: NOT (A AND B) => (NOT A) OR (NOT B)
+    if (child.type === "and") {
+      return {
+        type: "or",
+        children: child.children
+          ? child.children.map((c) => normalizeFilter({ type: "not", child: c }))
+          : [],
+      };
+    }
+
+    // De Morgan: NOT (A OR B) => (NOT A) AND (NOT B)
+    if (child.type === "or") {
+      return {
+        type: "and",
+        children: child.children
+          ? child.children.map((c) => normalizeFilter({ type: "not", child: c }))
+          : [],
+      };
+    }
+
+    // NOT (col IS NULL) => col IS NOT NULL
+    // NOT (col IS NOT NULL) => col IS NULL
+    if (child.type === "null") {
+      return {
+        type: "null",
+        colName: child.colName,
+        isNull: !child.isNull,
+      };
+    }
+
+    // NOT (cmp)
+    if (child.type === "cmp") {
+      const inverseOps: Record<string, ComparisonOp> = {
+        "=": "!=",
+        "!=": "=",
+        ">": "<=",
+        ">=": "<",
+        "<": ">=",
+        "<=": ">",
+        LIKE: "NOT LIKE",
+        "NOT LIKE": "LIKE",
+      };
+
+      if (child.op && inverseOps[child.op]) {
+        return {
+          type: "cmp",
+          colName: child.colName,
+          op: inverseOps[child.op],
+          value: child.value,
+        };
+      }
+
+      // For CONTAINS, STARTS_WITH, ENDS_WITH:
+      // In 3VL: NOT(col CONTAINS val) requires col IS NOT NULL AND NOT(col CONTAINS val)
+      return {
+        type: "and",
+        children: [
+          { type: "null", colName: child.colName, isNull: false },
+          { type: "not", child },
+        ],
+      };
+    }
+  }
+
+  return filter;
+}
+
+export function buildRootFilter(filters: QueryFilter[]): QueryFilter | null {
+  if (!filters || filters.length === 0) return null;
+  const rawRoot: QueryFilter =
+    filters.length === 1 ? filters[0] : { type: "and", children: filters };
+  return normalizeFilter(rawRoot);
+}
+
+export function collectLeafFilters(filter: QueryFilter): QueryFilter[] {
+  const leaves: QueryFilter[] = [];
+  const seen = new Set<QueryFilter>();
+  function traverse(f: QueryFilter) {
+    if (f.type === "null" || f.type === "cmp") {
+      if (!seen.has(f)) {
+        seen.add(f);
+        leaves.push(f);
+      }
+    } else if (f.type === "and" || f.type === "or") {
+      if (f.children) {
+        for (const child of f.children) {
+          traverse(child);
+        }
+      }
+    } else if (f.type === "not") {
+      if (f.child) {
+        traverse(f.child);
+      }
+    }
+  }
+  traverse(filter);
+  return leaves;
+}
+
+function emitLeafJumpOnTrue(
   filter: QueryFilter,
-  i: number,
+  leafIdx: number,
   table: TableMeta,
   emitter: BytecodeEmitter,
-  nextRowPatches: number[],
+  truePatches: number[],
 ): void {
+  if (!filter.colName) {
+    throw new Error(`Filter leaf node missing colName`);
+  }
+  const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
+  if (colIdx === -1) {
+    throw new Error(
+      `Column "${filter.colName}" not found in table "${table.name}"`,
+    );
+  }
+  const col = table.columns[colIdx];
+
+  if (filter.type === "null") {
+    if (filter.isNull) {
+      emitter.emitUint8(OpCode.OP_IS_NULL);
+    } else {
+      emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
+    }
+    emitter.emitUint8(0);
+    emitter.emitUint8(colIdx);
+    truePatches.push(emitter.emitUint16(0));
+    return;
+  }
+
+  const regCol = leafIdx * 2;
+  const regConst = leafIdx * 2 + 1;
+  emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+
+  let cmpOpcode = OpCode.OP_EQ;
+  if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
+  else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
+  else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
+  else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
+  else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
+  else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
+  else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
+  else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
+  else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
+  else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
+  else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+
+  emitter.emitUint8(cmpOpcode);
+  emitter.emitUint8(regCol);
+  emitter.emitUint8(regConst);
+  truePatches.push(emitter.emitUint16(0));
+}
+
+function emitLeafJumpOnFalse(
+  filter: QueryFilter,
+  leafIdx: number,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  falsePatches: number[],
+): void {
+  if (!filter.colName) {
+    throw new Error(`Filter leaf node missing colName`);
+  }
   const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
   if (colIdx === -1) {
     throw new Error(
@@ -179,46 +362,212 @@ function emitFilterCheck(
   if (filter.type === "null") {
     if (filter.isNull) {
       emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
-      emitter.emitUint8(0);
-      emitter.emitUint8(colIdx);
-      const patch = emitter.emitUint16(0);
-      nextRowPatches.push(patch);
     } else {
       emitter.emitUint8(OpCode.OP_IS_NULL);
-      emitter.emitUint8(0);
-      emitter.emitUint8(colIdx);
-      const patch = emitter.emitUint16(0);
-      nextRowPatches.push(patch);
     }
-  } else if (filter.type === "cmp") {
-    const regCol = i * 2;
-    const regConst = i * 2 + 1;
+    emitter.emitUint8(0);
+    emitter.emitUint8(colIdx);
+    falsePatches.push(emitter.emitUint16(0));
+    return;
+  }
 
-    emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+  const regCol = leafIdx * 2;
+  const regConst = leafIdx * 2 + 1;
+  emitReadColumn(emitter, 0, colIdx, regCol, col.type);
 
-    let cmpOpcode = OpCode.OP_EQ;
-    if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
-    else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
-    else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
-    else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
-    else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
-    else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
-    else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
-    else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
-    else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
-    else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
-    else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+  let cmpOpcode = OpCode.OP_EQ;
+  if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
+  else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
+  else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
+  else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
+  else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
+  else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
+  else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
+  else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
+  else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
+  else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
+  else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
 
-    emitter.emitUint8(cmpOpcode);
-    emitter.emitUint8(regCol);
-    emitter.emitUint8(regConst);
-    const passPatch = emitter.emitUint16(0);
+  emitter.emitUint8(cmpOpcode);
+  emitter.emitUint8(regCol);
+  emitter.emitUint8(regConst);
+  const passPatch = emitter.emitUint16(0);
 
+  emitter.emitUint8(OpCode.OP_JUMP);
+  falsePatches.push(emitter.emitUint16(0));
+
+  emitter.patchUint16(passPatch, emitter.currentOffset());
+}
+
+function emitLeafCondition(
+  filter: QueryFilter,
+  leafIdx: number,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  truePatches: number[],
+  falsePatches: number[],
+  fallthrough: "true" | "false" | "none",
+): void {
+  if (fallthrough === "true") {
+    emitLeafJumpOnFalse(filter, leafIdx, table, emitter, falsePatches);
+  } else if (fallthrough === "false") {
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches);
+  } else {
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches);
     emitter.emitUint8(OpCode.OP_JUMP);
-    const skipPatch = emitter.emitUint16(0);
-    nextRowPatches.push(skipPatch);
+    falsePatches.push(emitter.emitUint16(0));
+  }
+}
 
-    emitter.patchUint16(passPatch, emitter.currentOffset());
+function compileFilterNode(
+  node: QueryFilter,
+  emitter: BytecodeEmitter,
+  table: TableMeta,
+  leafRegMap: Map<QueryFilter, number>,
+  truePatches: number[],
+  falsePatches: number[],
+  fallthrough: "true" | "false" | "none",
+): void {
+  if (node.type === "cmp" || node.type === "null") {
+    const leafIdx = leafRegMap.get(node) ?? 0;
+    emitLeafCondition(
+      node,
+      leafIdx,
+      table,
+      emitter,
+      truePatches,
+      falsePatches,
+      fallthrough,
+    );
+    return;
+  }
+
+  if (node.type === "not") {
+    if (!node.child) {
+      return;
+    }
+    const leaf = node.child;
+    const leafIdx = leafRegMap.get(leaf) ?? 0;
+    if (fallthrough === "true") {
+      emitLeafJumpOnTrue(leaf, leafIdx, table, emitter, falsePatches);
+    } else if (fallthrough === "false") {
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches);
+    } else {
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches);
+      emitter.emitUint8(OpCode.OP_JUMP);
+      falsePatches.push(emitter.emitUint16(0));
+    }
+    return;
+  }
+
+  if (node.type === "and") {
+    const children = node.children ?? [];
+    if (children.length === 0) {
+      if (fallthrough === "false") {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        truePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const isLast = i === children.length - 1;
+      if (!isLast) {
+        const subTruePatches: number[] = [];
+        compileFilterNode(
+          child,
+          emitter,
+          table,
+          leafRegMap,
+          subTruePatches,
+          falsePatches,
+          "true",
+        );
+        const nextChildPos = emitter.currentOffset();
+        for (const patch of subTruePatches) {
+          emitter.patchUint16(patch, nextChildPos);
+        }
+      } else {
+        compileFilterNode(
+          child,
+          emitter,
+          table,
+          leafRegMap,
+          truePatches,
+          falsePatches,
+          fallthrough,
+        );
+      }
+    }
+    return;
+  }
+
+  if (node.type === "or") {
+    const children = node.children ?? [];
+    if (children.length === 0) {
+      if (fallthrough === "true") {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        falsePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const isLast = i === children.length - 1;
+      if (!isLast) {
+        const subFalsePatches: number[] = [];
+        compileFilterNode(
+          child,
+          emitter,
+          table,
+          leafRegMap,
+          truePatches,
+          subFalsePatches,
+          "false",
+        );
+        const nextChildPos = emitter.currentOffset();
+        for (const patch of subFalsePatches) {
+          emitter.patchUint16(patch, nextChildPos);
+        }
+      } else {
+        compileFilterNode(
+          child,
+          emitter,
+          table,
+          leafRegMap,
+          truePatches,
+          falsePatches,
+          fallthrough,
+        );
+      }
+    }
+    return;
+  }
+}
+
+function emitFilterTree(
+  root: QueryFilter | null,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  leafRegMap: Map<QueryFilter, number>,
+  nextRowPatches: number[],
+): void {
+  if (!root) return;
+  const truePatches: number[] = [];
+  compileFilterNode(
+    root,
+    emitter,
+    table,
+    leafRegMap,
+    truePatches,
+    nextRowPatches,
+    "true",
+  );
+  const rowStartPos = emitter.currentOffset();
+  for (const patch of truePatches) {
+    emitter.patchUint16(patch, rowStartPos);
   }
 }
 
@@ -226,8 +575,15 @@ function emitFilterCheck(
  * Compiles a QueryPlan into an executable bytecode array.
  */
 export function compileQuery(plan: QueryPlan): Uint8Array {
-  if (plan.filters.length * 2 >= 64) {
-    throw new TooManyRegistersError(plan.filters.length * 2);
+  const rootFilter = buildRootFilter(plan.filters);
+  const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
+  const leafRegMap = new Map<QueryFilter, number>();
+  for (let i = 0; i < leafFilters.length; i++) {
+    leafRegMap.set(leafFilters[i], i);
+  }
+
+  if (leafFilters.length * 2 >= 64) {
+    throw new TooManyRegistersError(leafFilters.length * 2);
   }
 
   if (plan.orderBy && plan.orderBy.length > 8) {
@@ -239,11 +595,27 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   }
 
   const emitter = new BytecodeEmitter();
+
+  if (plan.limit !== undefined && plan.limit <= 0) {
+    emitter.emitUint8(OpCode.OP_HALT);
+    return emitter.toByteArray();
+  }
+
+  let nextReg = leafFilters.length * 2;
+  const hasOffset = plan.offset !== undefined && plan.offset > 0;
+  const hasLimit = plan.limit !== undefined && plan.limit > 0;
+  const regOffset = hasOffset ? nextReg++ : -1;
+  const regLimit = hasLimit ? nextReg++ : -1;
+
+  if (nextReg >= 64) {
+    throw new TooManyRegistersError(nextReg);
+  }
+
   const table = plan.table;
 
   // 1. Preamble: Load constant filter values into registers
-  for (let i = 0; i < plan.filters.length; i++) {
-    const filter = plan.filters[i];
+  for (let i = 0; i < leafFilters.length; i++) {
+    const filter = leafFilters[i];
     if (filter.type === "cmp") {
       const regConst = i * 2 + 1;
       const val = filter.value;
@@ -272,6 +644,18 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.emitString(val);
       }
     }
+  }
+
+  // Load offset / limit into registers
+  if (hasOffset) {
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(regOffset);
+    emitter.emitInt32(plan.offset!);
+  }
+  if (hasLimit) {
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(regLimit);
+    emitter.emitInt32(plan.limit!);
   }
 
   // Case 1: In-Arena Hash Aggregation (GROUP BY / Aggregates)
@@ -308,10 +692,10 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     }
 
     // Register layout:
-    const numFilterRegs = plan.filters.length * 2;
+    const numFilterRegs = nextReg;
     const groupKeyStartReg = numFilterRegs;
     const aggValStartReg = groupKeyStartReg + G;
-    const outAccReg = aggValStartReg + A;
+    const outAccReg = aggValStartReg + 4;
     const outGroupKeyReg = outAccReg + 4;
     const finalAggStartReg = outGroupKeyReg + G;
     const totalRegs = finalAggStartReg + A;
@@ -341,9 +725,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     const loopStartPos = emitter.currentOffset();
     const nextRowPatches: number[] = [];
 
-    for (let i = 0; i < plan.filters.length; i++) {
-      emitFilterCheck(plan.filters[i], i, table, emitter, nextRowPatches);
-    }
+    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches);
 
     // Extract group keys into registers
     if (plan.groupBy) {
@@ -486,6 +868,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     const processGroupPatch = emitter.emitUint16(0);
 
     // EOF on aggregates
+    const aggHaltPos = emitter.currentOffset();
     emitter.emitUint8(OpCode.OP_HALT);
 
     // Process group label
@@ -522,10 +905,22 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       emitter.emitUint8(funcId);
     }
 
+    if (hasOffset) {
+      emitter.emitUint8(OpCode.OP_OFFSET);
+      emitter.emitUint8(regOffset);
+      emitter.emitUint16(aggEmitLoopPos);
+    }
+
     // Emit result row: group keys followed by aggregated results
     emitter.emitUint8(OpCode.OP_RESULT_ROW);
     emitter.emitUint8(outGroupKeyReg);
     emitter.emitUint8(G + A);
+
+    if (hasLimit) {
+      emitter.emitUint8(OpCode.OP_LIMIT);
+      emitter.emitUint8(regLimit);
+      emitter.emitUint16(aggHaltPos);
+    }
 
     // Jump back to next aggregate
     emitter.emitUint8(OpCode.OP_JUMP);
@@ -540,8 +935,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   // Case 2: In-Arena Sorter (ORDER BY)
   if (plan.orderBy && plan.orderBy.length > 0) {
     const K = plan.orderBy.length;
-    const numFilterRegs = plan.filters.length * 2;
-    const sortKeyStartReg = numFilterRegs;
+    const sortKeyStartReg = nextReg;
     const totalRegs = sortKeyStartReg + K;
 
     if (totalRegs >= 64) {
@@ -560,6 +954,8 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
               ? 1
               : 0,
       ),
+      limit: plan.limit,
+      offset: plan.offset,
     };
     plan.keyInfos = [keyInfo];
 
@@ -582,9 +978,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     const loopStartPos = emitter.currentOffset();
     const nextRowPatches: number[] = [];
 
-    for (let i = 0; i < plan.filters.length; i++) {
-      emitFilterCheck(plan.filters[i], i, table, emitter, nextRowPatches);
-    }
+    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches);
 
     // Extract sort keys into registers
     for (let k = 0; k < K; k++) {
@@ -659,16 +1053,31 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   const loopStartPos = emitter.currentOffset();
   const nextRowPatches: number[] = [];
 
-  for (let i = 0; i < plan.filters.length; i++) {
-    emitFilterCheck(plan.filters[i], i, table, emitter, nextRowPatches);
+  emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches);
+
+  let offsetSkipPatch = -1;
+  if (hasOffset) {
+    emitter.emitUint8(OpCode.OP_OFFSET);
+    emitter.emitUint8(regOffset);
+    offsetSkipPatch = emitter.emitUint16(0);
   }
 
   // Emit matching row
   emitter.emitUint8(OpCode.OP_EMIT_ROW);
   emitter.emitUint8(0);
 
+  let limitHaltPatch = -1;
+  if (hasLimit) {
+    emitter.emitUint8(OpCode.OP_LIMIT);
+    emitter.emitUint8(regLimit);
+    limitHaltPatch = emitter.emitUint16(0);
+  }
+
   // next_row_label
   const nextRowPos = emitter.currentOffset();
+  if (offsetSkipPatch !== -1) {
+    emitter.patchUint16(offsetSkipPatch, nextRowPos);
+  }
   for (const patch of nextRowPatches) {
     emitter.patchUint16(patch, nextRowPos);
   }
@@ -686,6 +1095,9 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   const eofPos = emitter.currentOffset();
   emitter.patchUint16(rewindJumpPatch, eofPos);
   emitter.patchUint16(nextRowEofPatch, eofPos);
+  if (limitHaltPatch !== -1) {
+    emitter.patchUint16(limitHaltPatch, eofPos);
+  }
 
   emitter.emitUint8(OpCode.OP_HALT);
 
@@ -1112,6 +1524,36 @@ export function disassembleBytecode(
           p2: `cols=${numCols}`,
           p3: "",
           comment: `Serialize registers r[${startReg}..${startReg + numCols - 1}] to Result Buffer`,
+        });
+        break;
+      }
+
+      case OpCode.OP_OFFSET: {
+        const offsetReg = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_OFFSET",
+          p1: `r[${offsetReg}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: "",
+          comment: `If r[${offsetReg}] > 0 -> decrement and skip row to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LIMIT: {
+        const limitReg = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_LIMIT",
+          p1: `r[${limitReg}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: "",
+          comment: `If r[${limitReg}] <= 1 -> halt to ${fmtAddr(jumpTarget)}, else decrement`,
         });
         break;
       }

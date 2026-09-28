@@ -25,6 +25,8 @@ export interface VmKeyInfo {
   numKeys: number;
   directions: number[]; // 0 = ASC, 1 = DESC
   nullOrders: number[]; // 0 = NULLS_FIRST, 1 = NULLS_LAST
+  limit?: number;
+  offset?: number;
 }
 
 export interface VmSorterEntry {

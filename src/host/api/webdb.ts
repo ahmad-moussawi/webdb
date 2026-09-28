@@ -339,6 +339,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy?: SortKey[];
       groupBy?: string[];
       aggregates?: AggExpr[];
+      select?: any;
+      limit?: number;
+      offset?: number;
     },
   ): Promise<ExplainOutput> {
     const table = await this.getTable(tableName);
@@ -348,6 +351,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy: options?.orderBy,
       groupBy: options?.groupBy,
       aggregates: options?.aggregates,
+      limit: options?.limit,
+      offset: options?.offset,
     });
     const instructions = disassembleBytecode(bytecode, table);
     const assembly = formatDisassembly(instructions);
@@ -361,6 +366,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         orderBy: options?.orderBy,
         groupBy: options?.groupBy,
         aggregates: options?.aggregates,
+        select: options?.select,
+        limit: options?.limit,
+        offset: options?.offset,
       },
       bytecodeSize: bytecode.byteLength,
       instructions,
@@ -394,6 +402,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy,
       groupBy: options.groupBy,
       aggregates: options.aggregates,
+      limit: options.limit !== null ? options.limit : undefined,
+      offset: options.offset !== null ? options.offset : undefined,
     };
 
     const bytecode = compileQuery(plan);
@@ -435,7 +445,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    let rows: DbRow[] = [];
+    this.vmCtx.outputColumns = outputColumns;
+
+    const rows: DbRow[] = [];
     while (true) {
       const status = vm_step(this.vmCtx, this.pool.view, bytecode);
 
@@ -477,16 +489,6 @@ export class WebDB implements IDatabaseQueryExecutor {
       } else {
         throw new Error(`VM execution error: status=${status}`);
       }
-    }
-
-    // Apply Offset
-    if (options.offset && options.offset > 0) {
-      rows = rows.slice(options.offset);
-    }
-
-    // Apply Limit
-    if (options.limit !== null && options.limit !== undefined && options.limit >= 0) {
-      rows = rows.slice(0, options.limit);
     }
 
     return rows;

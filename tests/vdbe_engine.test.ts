@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, it, expect, assert } from "vitest";
+import { describe, it, expect } from "vitest";
 import { createVmContext, resetVmContext } from "../src/shared/index.js";
 import {
   vm_step,
@@ -1246,6 +1246,240 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       expect(elec!.avg_price).toBeCloseTo(166.6566, 2);
       expect(elec!.min_price).toBe(99.99);
       expect(elec!.max_price).toBe(299.99);
+    });
+  });
+
+  describe("Milestone 6: Native OP_LIMIT, OP_OFFSET, and Top-K Sorter Optimization", () => {
+    it("emits OP_OFFSET and OP_LIMIT opcodes in table scan queries", async () => {
+      const db = await WebDB.open({
+        name: "test_limit_offset_explain",
+        storage: "memory",
+      });
+
+      await db.createTable("items", [
+        { name: "id", type: "INT32", flags: { primaryKey: true } },
+        { name: "name", type: "TEXT" },
+      ]);
+
+      const explanation = await db.from("items").offset(5).limit(10).explain();
+      const opcodes = explanation.instructions.map((inst) => inst.opcode);
+      expect(opcodes).toContain("OP_OFFSET");
+      expect(opcodes).toContain("OP_LIMIT");
+    });
+
+    it("evaluates unsorted table scan with OFFSET and LIMIT correctly", async () => {
+      const db = await WebDB.open({
+        name: "test_limit_offset_scan",
+        storage: "memory",
+      });
+
+      await db.createTable("numbers", [
+        { name: "val", type: "INT32", flags: { primaryKey: true } },
+        { name: "label", type: "TEXT" },
+      ]);
+
+      for (let i = 1; i <= 10; i++) {
+        await db.insert("numbers", { val: i, label: `num_${i}` });
+      }
+
+      // 1. LIMIT only
+      const limit3 = await db.from("numbers").limit(3).toArray();
+      expect(limit3.map((r) => r.val)).toEqual([1, 2, 3]);
+
+      // 2. OFFSET + LIMIT
+      const offset2Limit3 = await db.from("numbers").offset(2).limit(3).toArray();
+      expect(offset2Limit3.map((r) => r.val)).toEqual([3, 4, 5]);
+
+      // 3. OFFSET near end with large LIMIT
+      const offset8Limit5 = await db.from("numbers").offset(8).limit(5).toArray();
+      expect(offset8Limit5.map((r) => r.val)).toEqual([9, 10]);
+
+      // 4. OFFSET past total rows
+      const offsetPast = await db.from("numbers").offset(10).limit(5).toArray();
+      expect(offsetPast).toEqual([]);
+    });
+
+    it("optimizes ORDER BY with Top-K bounded max-heap and respects LIMIT/OFFSET", async () => {
+      const db = await WebDB.open({
+        name: "test_topk_sorter",
+        storage: "memory",
+      });
+
+      await db.createTable("scores", [
+        { name: "id", type: "INT32", flags: { primaryKey: true } },
+        { name: "score", type: "INT32" },
+      ]);
+
+      // Insert 30 scores in scrambled order
+      const values = [
+        45, 12, 88, 3, 99, 27, 64, 51, 82, 19,
+        91, 33, 76, 5, 60, 42, 15, 70, 38, 85,
+        22, 95, 8, 55, 30, 67, 10, 79, 48, 25,
+      ];
+      for (let i = 0; i < values.length; i++) {
+        await db.insert("scores", { id: i + 1, score: values[i] });
+      }
+
+      // Top 5 lowest scores
+      const top5Asc = await db.from("scores").orderBy("score", "asc").limit(5).toArray();
+      expect(top5Asc.map((r) => r.score)).toEqual([3, 5, 8, 10, 12]);
+
+      // Top 5 lowest scores with OFFSET 3 -> skip [3, 5, 8], get [10, 12, 15, 19, 22]
+      const offset3Limit5Asc = await db
+        .from("scores")
+        .orderBy("score", "asc")
+        .offset(3)
+        .limit(5)
+        .toArray();
+      expect(offset3Limit5Asc.map((r) => r.score)).toEqual([10, 12, 15, 19, 22]);
+
+      // Top 4 highest scores (DESC)
+      const top4Desc = await db.from("scores").orderBy("score", "desc").limit(4).toArray();
+      expect(top4Desc.map((r) => r.score)).toEqual([99, 95, 91, 88]);
+
+      // Top 3 highest scores with OFFSET 2 (DESC) -> skip [99, 95], get [91, 88, 85]
+      const offset2Limit3Desc = await db
+        .from("scores")
+        .orderBy("score", "desc")
+        .offset(2)
+        .limit(3)
+        .toArray();
+      expect(offset2Limit3Desc.map((r) => r.score)).toEqual([91, 88, 85]);
+    });
+
+    it("falls back to full in-arena sorting when limit exceeds MAX_TOPK_HEAP_LIMIT (4096)", async () => {
+      const db = await WebDB.open({
+        name: "test_topk_fallback",
+        storage: "memory",
+      });
+
+      await db.createTable("items", [
+        { name: "id", type: "INT32", flags: { primaryKey: true } },
+        { name: "val", type: "INT32" },
+      ]);
+
+      for (let i = 1; i <= 20; i++) {
+        await db.insert("items", { id: i, val: (21 - i) * 10 });
+      }
+
+      // Query with limit 5000 > MAX_TOPK_HEAP_LIMIT (4096)
+      const res = await db.from("items").orderBy("val", "asc").limit(5000).toArray();
+      expect(res).toHaveLength(20);
+      expect(res[0].val).toBe(10);
+      expect(res[19].val).toBe(200);
+
+      // Query with offset and limit > MAX_TOPK_HEAP_LIMIT (e.g. 10,000,000)
+      const sliced = await db
+        .from("items")
+        .orderBy("val", "asc")
+        .offset(15)
+        .limit(10000000)
+        .toArray();
+      expect(sliced).toHaveLength(5);
+      expect(sliced.map((r) => r.val)).toEqual([160, 170, 180, 190, 200]);
+    });
+
+    it("evaluates GROUP BY aggregations with OFFSET and LIMIT", async () => {
+      const db = await WebDB.open({
+        name: "test_agg_limit_offset",
+        storage: "memory",
+      });
+
+      await db.createTable("sales", [
+        { name: "id", type: "INT32", flags: { primaryKey: true } },
+        { name: "region", type: "TEXT" },
+        { name: "amount", type: "FLOAT64" },
+      ]);
+
+      await db.insert("sales", { id: 1, region: "North", amount: 100 });
+      await db.insert("sales", { id: 2, region: "North", amount: 150 });
+      await db.insert("sales", { id: 3, region: "South", amount: 200 });
+      await db.insert("sales", { id: 4, region: "East", amount: 300 });
+      await db.insert("sales", { id: 5, region: "West", amount: 400 });
+
+      // Group by region with LIMIT 2
+      const limit2 = await db
+        .from("sales")
+        .groupBy("region")
+        .sum("amount", "total")
+        .limit(2)
+        .toArray();
+      expect(limit2).toHaveLength(2);
+
+      // Group by region with OFFSET 1 and LIMIT 2
+      const offset1Limit2 = await db
+        .from("sales")
+        .groupBy("region")
+        .sum("amount", "total")
+        .offset(1)
+        .limit(2)
+        .toArray();
+      expect(offset1Limit2).toHaveLength(2);
+    });
+
+    it("executes OP_OFFSET and OP_LIMIT directly via VDBE bytecode", () => {
+      const ctx = createVmContext();
+      const view = new DataView(new ArrayBuffer(1024));
+
+      // Bytecode layout (11 bytes):
+      // 0: OP_OFFSET reg 0, jump to 10 [0x26, 0, 10, 0]
+      // 4: OP_LOAD_INT reg 2, val 99 [0x20, 2, 99, 0, 0, 0]
+      // 10: OP_HALT [0x00]
+      const offsetCode = new Uint8Array([
+        OpCode.OP_OFFSET, 0, 10, 0,
+        OpCode.OP_LOAD_INT, 2, 99, 0, 0, 0,
+        OpCode.OP_HALT,
+      ]);
+
+      // 1. Initial offset = 2: decrements to 1, jumps to 10 (skipping LOAD_INT)
+      ctx.registers[0] = 2;
+      ctx.registers[2] = 0;
+      ctx.pc = 0;
+      let status = vm_step(ctx, view, offsetCode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[0]).toBe(1);
+      expect(ctx.registers[2]).toBe(0);
+
+      // 2. Second run with offset = 1: decrements to 0, jumps to 10
+      ctx.pc = 0;
+      status = vm_step(ctx, view, offsetCode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[0]).toBe(0);
+      expect(ctx.registers[2]).toBe(0);
+
+      // 3. Third run with offset = 0: does not jump, executes LOAD_INT -> r2 = 99
+      ctx.pc = 0;
+      status = vm_step(ctx, view, offsetCode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[0]).toBe(0);
+      expect(ctx.registers[2]).toBe(99);
+
+      // Bytecode layout for limit (11 bytes):
+      // 0: OP_LIMIT reg 1, jump to 10 [0x27, 1, 10, 0]
+      // 4: OP_LOAD_INT reg 2, val 42 [0x20, 2, 42, 0, 0, 0]
+      // 10: OP_HALT [0x00]
+      const limitCode = new Uint8Array([
+        OpCode.OP_LIMIT, 1, 10, 0,
+        OpCode.OP_LOAD_INT, 2, 42, 0, 0, 0,
+        OpCode.OP_HALT,
+      ]);
+
+      // 1. Initial limit = 2: decrements to 1, falls through to load 42
+      ctx.registers[1] = 2;
+      ctx.registers[2] = 0;
+      ctx.pc = 0;
+      status = vm_step(ctx, view, limitCode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[1]).toBe(1);
+      expect(ctx.registers[2]).toBe(42);
+
+      // 2. Limit is now 1: <= 1 branches immediately to 10, skipping LOAD_INT
+      ctx.registers[2] = 0;
+      ctx.pc = 0;
+      status = vm_step(ctx, view, limitCode);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[1]).toBe(0);
+      expect(ctx.registers[2]).toBe(0); // skipped
     });
   });
 });

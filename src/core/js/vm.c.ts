@@ -1,24 +1,18 @@
 import {
-  PAGE_SIZE,
-  RESULT_BUFFER_OFFSET,
-  RESULT_BUFFER_SIZE,
   PAGE_TO_SLOT_OFFSET,
-  PAGE_TO_SLOT_SIZE,
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
+  MAX_TOPK_HEAP_LIMIT,
 } from "../../constants.ts";
 import {
   OpCode,
   VmStatus,
   DataType,
-  ColumnMeta,
-  ColumnFlag,
 } from "../../types/index.ts";
 import {
   page_get_cell_count,
   page_get_cell_offset,
   page_get_next_page_id,
-  page_serialize_row,
 } from "./page.c.ts";
 import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
 import { UuidCodec, UlidCodec } from "./codecs.c.ts";
@@ -34,6 +28,24 @@ import {
   resetVmContext,
 } from "../../shared/index.ts";
 
+import {
+  get_cursor,
+  resolve_page_offset,
+  compare_3vl,
+  sql_like_match,
+  fnv1a_32,
+  group_keys_match,
+  create_agg_buckets,
+  sort_sorter_entries,
+  sorter_insert_row,
+  serialize_result_registers,
+  emit_to_result_buffer,
+  row_is_null,
+  compute_fixed_column_offset,
+} from "./vm.helpers.c.ts";
+
+// Re-export helpers, context functions, and types for public/core consumers
+export * from "./vm.helpers.c.ts";
 export { createVmContext, resetVmContext };
 export type {
   VmCursor,
@@ -45,342 +57,6 @@ export type {
 };
 
 const text_decoder = new TextDecoder();
-
-/**
- * Returns the active cursor for cursor_idx (0..15), falling back to ctx.cursor.
- */
-export function get_cursor(ctx: VmContext, cursor_idx: number): VmCursor {
-  if (ctx.cursors && ctx.cursors[cursor_idx]) {
-    return ctx.cursors[cursor_idx];
-  }
-  return ctx.cursor;
-}
-
-/**
- * Resolves the byte offset in linear memory for a given page_id.
- * If the buffer pool page-to-slot table is populated, maps via the resident slot.
- * Otherwise falls back to standalone direct calculation: (page_id - 1) * PAGE_SIZE.
- */
-export function resolve_page_offset(view: DataView, page_id: number): number {
-  if (page_id <= 0) return 0;
-  if (view.byteLength >= PAGE_TO_SLOT_OFFSET + PAGE_TO_SLOT_SIZE) {
-    const slot = buf_pool_get_resident_slot(
-      view,
-      PAGE_TO_SLOT_OFFSET,
-      DEFAULT_PAGE_TO_SLOT_BUCKETS,
-      page_id,
-    );
-    if (slot >= 0) {
-      return slot * PAGE_SIZE;
-    }
-  }
-  return (page_id - 1) * PAGE_SIZE;
-}
-
-/**
- * Three-Valued Logic (3VL) comparator for evaluation registers.
- * If either value is null or undefined, returns is_unknown = true.
- */
-export function compare_3vl(
-  val_a: any,
-  val_b: any,
-): { result: number; is_unknown: boolean } {
-  if (
-    val_a === null ||
-    val_a === undefined ||
-    val_b === null ||
-    val_b === undefined
-  ) {
-    return { result: 0, is_unknown: true };
-  }
-
-  if (typeof val_a === "number" && typeof val_b === "number") {
-    if (val_a === val_b) return { result: 0, is_unknown: false };
-    return { result: val_a > val_b ? 1 : -1, is_unknown: false };
-  }
-
-  if (typeof val_a === "bigint" || typeof val_b === "bigint") {
-    const a = BigInt(val_a);
-    const b = BigInt(val_b);
-    if (a === b) return { result: 0, is_unknown: false };
-    return { result: a > b ? 1 : -1, is_unknown: false };
-  }
-
-  if (typeof val_a === "string" && typeof val_b === "string") {
-    if (val_a === val_b) return { result: 0, is_unknown: false };
-    return { result: val_a > val_b ? 1 : -1, is_unknown: false };
-  }
-
-  if (val_a instanceof Uint8Array && val_b instanceof Uint8Array) {
-    const min_len = Math.min(val_a.byteLength, val_b.byteLength);
-    for (let i = 0; i < min_len; i++) {
-      if (val_a[i] !== val_b[i]) {
-        return { result: val_a[i] > val_b[i] ? 1 : -1, is_unknown: false };
-      }
-    }
-    if (val_a.byteLength === val_b.byteLength) {
-      return { result: 0, is_unknown: false };
-    }
-    return {
-      result: val_a.byteLength > val_b.byteLength ? 1 : -1,
-      is_unknown: false,
-    };
-  }
-
-  if (val_a === val_b) return { result: 0, is_unknown: false };
-  return { result: val_a > val_b ? 1 : -1, is_unknown: false };
-}
-
-/**
- * Standard SQL LIKE pattern matcher supporting '%' (any sequence) and '_' (any single character).
- * Case-insensitive for ASCII matching according to SQLite semantics.
- */
-export function sql_like_match(str: string, pattern: string): boolean {
-  let s = 0;
-  let p = 0;
-  let star_p = -1;
-  let star_s = -1;
-
-  const s_len = str.length;
-  const p_len = pattern.length;
-
-  while (s < s_len) {
-    if (
-      p < p_len &&
-      (pattern[p] === "_" || pattern[p].toLowerCase() === str[s].toLowerCase())
-    ) {
-      s++;
-      p++;
-    } else if (p < p_len && pattern[p] === "%") {
-      star_p = p++;
-      star_s = s;
-    } else if (star_p !== -1) {
-      p = star_p + 1;
-      s = ++star_s;
-    } else {
-      return false;
-    }
-  }
-
-  while (p < p_len && pattern[p] === "%") {
-    p++;
-  }
-
-  return p === p_len;
-}
-
-/**
- * Compares two sets of sort keys according to KeyInfo descriptor.
- * Strictly adheres to SQLite NULL collation (NULL is smaller than any non-NULL value)
- * and honors independent per-column ASC/DESC and NULLS_FIRST/NULLS_LAST.
- */
-export function compare_sorter_keys(
-  keys_a: any[],
-  keys_b: any[],
-  key_info: VmKeyInfo,
-): number {
-  const num_keys = key_info.numKeys;
-  for (let k = 0; k < num_keys; k++) {
-    const a = keys_a[k];
-    const b = keys_b[k];
-    const direction = key_info.directions[k] ?? 0; // 0 = ASC, 1 = DESC
-    const null_order = key_info.nullOrders[k] ?? (direction === 1 ? 1 : 0); // 0 = NULLS_FIRST, 1 = NULLS_LAST
-
-    const a_is_null = a === null || a === undefined;
-    const b_is_null = b === null || b === undefined;
-
-    if (a_is_null && b_is_null) {
-      continue;
-    }
-
-    if (a_is_null || b_is_null) {
-      const cmp = null_order === 0 ? (a_is_null ? -1 : 1) : a_is_null ? 1 : -1;
-      return cmp;
-    }
-
-    // Both non-null
-    let cmp = 0;
-    if (typeof a === "number" && typeof b === "number") {
-      cmp = a < b ? -1 : a > b ? 1 : 0;
-    } else if (typeof a === "bigint" || typeof b === "bigint") {
-      const ba = BigInt(a);
-      const bb = BigInt(b);
-      cmp = ba < bb ? -1 : ba > bb ? 1 : 0;
-    } else if (typeof a === "string" && typeof b === "string") {
-      cmp = a < b ? -1 : a > b ? 1 : 0;
-    } else if (a instanceof Uint8Array && b instanceof Uint8Array) {
-      const min_len = Math.min(a.byteLength, b.byteLength);
-      for (let i = 0; i < min_len; i++) {
-        if (a[i] !== b[i]) {
-          cmp = a[i] < b[i] ? -1 : 1;
-          break;
-        }
-      }
-      if (cmp === 0) {
-        cmp =
-          a.byteLength < b.byteLength
-            ? -1
-            : a.byteLength > b.byteLength
-              ? 1
-              : 0;
-      }
-    } else {
-      cmp = (a as any) < (b as any) ? -1 : (a as any) > (b as any) ? 1 : 0;
-    }
-
-    if (cmp !== 0) {
-      return direction === 1 ? -cmp : cmp;
-    }
-  }
-  return 0;
-}
-
-/**
- * 32-bit FNV-1a hash over grouping key values.
- * Returns non-zero uint32 (reserving 0 as empty bucket marker).
- */
-export function fnv1a_32(values: any[]): number {
-  let hash = 0x811c9dc5; // 2166136261
-  for (let k = 0; k < values.length; k++) {
-    const v = values[k];
-    if (v === null || v === undefined) {
-      hash ^= 0xff;
-      hash = Math.imul(hash, 0x01000193);
-    } else if (typeof v === "number") {
-      const buf = new ArrayBuffer(8);
-      new DataView(buf).setFloat64(0, v, true);
-      const u8 = new Uint8Array(buf);
-      for (let i = 0; i < 8; i++) {
-        hash ^= u8[i];
-        hash = Math.imul(hash, 0x01000193);
-      }
-    } else if (typeof v === "string") {
-      for (let i = 0; i < v.length; i++) {
-        hash ^= v.charCodeAt(i) & 0xff;
-        hash = Math.imul(hash, 0x01000193);
-      }
-    } else if (typeof v === "bigint") {
-      const n = Number(v);
-      hash ^= n & 0xff;
-      hash = Math.imul(hash, 0x01000193);
-    } else if (v instanceof Uint8Array) {
-      for (let i = 0; i < v.byteLength; i++) {
-        hash ^= v[i];
-        hash = Math.imul(hash, 0x01000193);
-      }
-    }
-  }
-  hash = hash >>> 0;
-  return hash === 0 ? 1 : hash;
-}
-
-/**
- * Checks equality between two sets of grouping keys.
- * In SQL GROUP BY: two NULLs in grouping columns are considered identical!
- */
-export function group_keys_match(keys_a: any[], keys_b: any[]): boolean {
-  if (keys_a.length !== keys_b.length) {
-    return false;
-  }
-
-  for (let i = 0; i < keys_a.length; i++) {
-    const a = keys_a[i];
-    const b = keys_b[i];
-
-    if (a === null || a === undefined) {
-      if (b !== null && b !== undefined) return false;
-    } else if (b === null || b === undefined) {
-      return false;
-    } else if (a !== b) {
-      if (a instanceof Uint8Array && b instanceof Uint8Array) {
-        if (a.byteLength !== b.byteLength) return false;
-        for (let j = 0; j < a.byteLength; j++) {
-          if (a[j] !== b[j]) return false;
-        }
-      } else {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-/**
- * Allocates and initializes an array of empty aggregate buckets.
- */
-function create_agg_buckets(capacity: number): VmAggBucket[] {
-  const buckets: VmAggBucket[] = new Array(capacity);
-  for (let i = 0; i < capacity; i++) {
-    buckets[i] = {
-      hash: 0,
-      keys: [],
-      count: 0,
-      sum: 0,
-      min_val: Infinity,
-      max_val: -Infinity,
-      has_val: false,
-    };
-  }
-  return buckets;
-}
-
-/**
- * Sorts sorter entries using collation keys.
- */
-function sort_sorter_entries(sorter: VmSorter): void {
-  const key_info = sorter.keyInfo;
-  sorter.entries.sort((a: VmSorterEntry, b: VmSorterEntry) =>
-    compare_sorter_keys(a.keys, b.keys, key_info),
-  );
-}
-
-/**
- * Tests whether a column in the row is marked NULL in the null-bitmap.
- */
-export function row_is_null(
-  view: DataView,
-  null_bitmap_offset: number,
-  col_idx: number,
-): boolean {
-  return (
-    (view.getUint8(null_bitmap_offset + (col_idx >> 3)) &
-      (1 << (col_idx & 7))) !==
-    0
-  );
-}
-
-/**
- * Computes the byte offset of a fixed-width column within a row record,
- * or the start of the variable-length offset table if target_col_idx == column_count.
- */
-export function compute_fixed_column_offset(
-  view: DataView,
-  null_bitmap_offset: number,
-  null_bitmap_bytes: number,
-  columns: ColumnMeta[],
-  target_col_idx: number,
-): number {
-  let col_offset = null_bitmap_offset + null_bitmap_bytes;
-  for (let i = 0; i < target_col_idx; i++) {
-    if (!row_is_null(view, null_bitmap_offset, i)) {
-      const prev_col = columns[i];
-      switch (prev_col.type) {
-        case DataType.INT32:
-          col_offset += 4;
-          break;
-        case DataType.INT64:
-        case DataType.FLOAT64:
-          col_offset += 8;
-          break;
-        case DataType.UUID:
-        case DataType.ULID:
-          col_offset += 16;
-          break;
-      }
-    }
-  }
-  return col_offset;
-}
 
 /**
  * @export_c
@@ -1250,32 +926,70 @@ export function vm_step(
 
         const cursor = get_cursor(ctx, cursor_idx);
         const total_row_length = view.getUint16(cursor.rowOffset + 1, true);
-        const needed = 2 + total_row_length;
-
-        if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
-          ctx.status = VmStatus.BUFFER_FULL;
-          ctx.pc = instr_pc; // Rewind PC so this row emits upon resumption
-          return VmStatus.BUFFER_FULL;
-        }
-
-        const out_target = RESULT_BUFFER_OFFSET + ctx.resultOffset;
-        view.setUint16(out_target, total_row_length, true);
-
-        // Copy row bytes into output result buffer
-        const src_uint8 = new Uint8Array(
+        const row_bytes = new Uint8Array(
           view.buffer,
           view.byteOffset + cursor.rowOffset,
           total_row_length,
         );
-        const dest_uint8 = new Uint8Array(
-          view.buffer,
-          view.byteOffset + out_target + 2,
-          total_row_length,
-        );
-        dest_uint8.set(src_uint8);
 
-        ctx.resultOffset += needed;
-        ctx.resultCount++;
+        const emit_status = emit_to_result_buffer(
+          ctx,
+          view,
+          row_bytes,
+          instr_pc,
+        );
+        if (emit_status !== VmStatus.RUNNING) {
+          return emit_status;
+        }
+        break;
+      }
+
+      /**
+       * OP_OFFSET (0x26)
+       * Operands: [offset_reg: uint8] [jump_target: uint16] (3 bytes)
+       * If r[offset_reg] > 0, decrements r[offset_reg] and branches to jump_target (skipping row emission).
+       */
+      case OpCode.OP_OFFSET: {
+        const offset_reg = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const offset_val = Number(ctx.registers[offset_reg] ?? 0);
+        if (offset_val > 0) {
+          ctx.registers[offset_reg] = offset_val - 1;
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_LIMIT (0x27)
+       * Operands: [limit_reg: uint8] [jump_target: uint16] (3 bytes)
+       * If r[limit_reg] <= 1, sets r[limit_reg] to 0 and branches to jump_target (early HALT).
+       * Otherwise decrements r[limit_reg] and falls through.
+       */
+      case OpCode.OP_LIMIT: {
+        const limit_reg = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const limit_val = Number(ctx.registers[limit_reg] ?? 0);
+        if (limit_val <= 1) {
+          ctx.registers[limit_reg] = 0;
+          ctx.pc = jump_target;
+        } else {
+          ctx.registers[limit_reg] = limit_val - 1;
+        }
         break;
       }
 
@@ -1364,62 +1078,16 @@ export function vm_step(
         const num_cols = bytecode[ctx.pc + 1];
         ctx.pc += 2;
 
-        let cols: ColumnMeta[] = [];
-        const record: Record<string, any> = {};
-
-        if (ctx.outputColumns && num_cols === ctx.outputColumns.length) {
-          cols = ctx.outputColumns;
-          for (let c = 0; c < num_cols; c++) {
-            record[cols[c].name] = ctx.registers[start_reg + c];
-          }
-        } else if (ctx.table && num_cols === ctx.table.columns.length) {
-          cols = ctx.table.columns;
-          for (let c = 0; c < num_cols; c++) {
-            record[cols[c].name] = ctx.registers[start_reg + c];
-          }
-        } else {
-          for (let c = 0; c < num_cols; c++) {
-            const val = ctx.registers[start_reg + c];
-            const col_name = ctx.table?.columns[c]?.name ?? `col_${c}`;
-            let col_type = DataType.TEXT;
-            if (typeof val === "number") {
-              col_type = Number.isInteger(val)
-                ? DataType.INT32
-                : DataType.FLOAT64;
-            } else if (typeof val === "bigint") {
-              col_type = DataType.INT64;
-            } else if (val instanceof Uint8Array) {
-              col_type = DataType.BLOB;
-            }
-            cols.push({
-              name: col_name,
-              type: col_type,
-              flags: ColumnFlag.NONE,
-              colOffset: 0,
-            });
-            record[col_name] = val;
-          }
-        }
-
-        const serialized = page_serialize_row(cols, record);
-        const needed = 2 + serialized.byteLength;
-        if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
-          ctx.status = VmStatus.BUFFER_FULL;
-          ctx.pc = instr_pc;
-          return VmStatus.BUFFER_FULL;
-        }
-
-        const out_target = RESULT_BUFFER_OFFSET + ctx.resultOffset;
-        view.setUint16(out_target, serialized.byteLength, true);
-        const dest = new Uint8Array(
-          view.buffer,
-          view.byteOffset + out_target + 2,
-          serialized.byteLength,
+        const serialized = serialize_result_registers(ctx, start_reg, num_cols);
+        const emit_status = emit_to_result_buffer(
+          ctx,
+          view,
+          serialized,
+          instr_pc,
         );
-        dest.set(serialized);
-
-        ctx.resultOffset += needed;
-        ctx.resultCount++;
+        if (emit_status !== VmStatus.RUNNING) {
+          return emit_status;
+        }
         break;
       }
 
@@ -1470,33 +1138,32 @@ export function vm_step(
         const cursor = get_cursor(ctx, cursor_idx);
         const row_len = view.getUint16(cursor.rowOffset + 1, true);
 
-        // Account for arena memory: SorterEntry (16B) + Register keys (16B * num_keys) + row_len
-        const entry_size = 16 + 16 * num_keys + row_len;
-        if (ctx.arenaOffset + entry_size > ctx.maxQueryMemory) {
-          ctx.status = VmStatus.ARENA_EXHAUSTED;
-          return VmStatus.ARENA_EXHAUSTED;
-        }
-        ctx.arenaOffset += entry_size;
-
         const keys: any[] = [];
         for (let k = 0; k < num_keys; k++) {
           keys.push(ctx.registers[start_reg + k]);
         }
 
-        const row_uint8 = new Uint8Array(
-          view.buffer,
-          view.byteOffset + cursor.rowOffset,
-          row_len,
-        );
-        const row_data = new Uint8Array(row_len);
-        row_data.set(row_uint8);
+        const requested_k =
+          sorter.keyInfo.limit !== undefined && sorter.keyInfo.limit > 0
+            ? (sorter.keyInfo.offset ?? 0) + sorter.keyInfo.limit
+            : 0;
+        const max_k =
+          requested_k > 0 && requested_k <= MAX_TOPK_HEAP_LIMIT
+            ? requested_k
+            : 0;
 
-        sorter.entries.push({
+        const insert_status = sorter_insert_row(
+          ctx,
+          sorter,
           keys,
-          rowOffset: cursor.rowOffset,
-          rowLen: row_len,
-          rowData: row_data,
-        });
+          cursor.rowOffset,
+          row_len,
+          view,
+          max_k,
+        );
+        if (insert_status !== VmStatus.RUNNING) {
+          return insert_status;
+        }
         break;
       }
 
@@ -1517,7 +1184,6 @@ export function vm_step(
 
         sort_sorter_entries(sorter);
         sorter.isSorted = true;
-        sorter.readIdx = 0;
         break;
       }
 
@@ -1543,41 +1209,36 @@ export function vm_step(
           return VmStatus.INVALID_BYTECODE;
         }
 
-        if (sorter.readIdx >= sorter.entries.length) {
-          // EOF: all sorted entries emitted, fall through
+        const max_read =
+          sorter.keyInfo.limit !== undefined
+            ? (sorter.keyInfo.offset ?? 0) + sorter.keyInfo.limit
+            : sorter.entries.length;
+
+        if (sorter.readIdx >= Math.min(sorter.entries.length, max_read)) {
+          // EOF: all requested sorted entries emitted, fall through
           break;
         }
 
         const entry = sorter.entries[sorter.readIdx];
-        const needed = 2 + entry.rowLen;
-        if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
-          ctx.status = VmStatus.BUFFER_FULL;
-          ctx.pc = instr_pc;
-          return VmStatus.BUFFER_FULL;
-        }
-
-        const out_target = RESULT_BUFFER_OFFSET + ctx.resultOffset;
-        view.setUint16(out_target, entry.rowLen, true);
-        const dest = new Uint8Array(
-          view.buffer,
-          view.byteOffset + out_target + 2,
-          entry.rowLen,
-        );
-        if (entry.rowData) {
-          dest.set(entry.rowData);
-        } else {
-          const src = new Uint8Array(
+        const row_bytes =
+          entry.rowData ??
+          new Uint8Array(
             view.buffer,
             view.byteOffset + entry.rowOffset,
             entry.rowLen,
           );
-          dest.set(src);
+
+        const emit_status = emit_to_result_buffer(
+          ctx,
+          view,
+          row_bytes,
+          instr_pc,
+        );
+        if (emit_status !== VmStatus.RUNNING) {
+          return emit_status;
         }
 
-        ctx.resultOffset += needed;
-        ctx.resultCount++;
         sorter.readIdx++;
-
         ctx.pc = jump_target;
         break;
       }

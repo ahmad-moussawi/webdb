@@ -24,3 +24,6 @@ export const MAX_SUBQUERY_DEPTH = 7;
 export const WAL_HEADER_SIZE = 32;
 export const WAL_FRAME_HEADER_SIZE = 32;
 export const WAL_FRAME_SIZE = 4128; // 32B frame header + 4096B page
+
+// Sorter & Query Optimization Limits
+export const MAX_TOPK_HEAP_LIMIT = 4096;
