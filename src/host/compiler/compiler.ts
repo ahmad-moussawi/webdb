@@ -29,7 +29,31 @@ export type ComparisonOp =
   | "NOT LIKE"
   | "CONTAINS"
   | "STARTS_WITH"
-  | "ENDS_WITH";
+  | "ENDS_WITH"
+  | "like"
+  | "not like"
+  | "contains"
+  | "starts_with"
+  | "ends_with"
+  | "startswith"
+  | "endswith";
+
+export function getCmpOpcode(op: string | undefined): OpCode {
+  if (!op) return OpCode.OP_EQ;
+  const norm = String(op).trim().toUpperCase().replace(/\s+/g, " ");
+  if (norm === "=" || norm === "==") return OpCode.OP_EQ;
+  if (norm === "!=" || norm === "<>") return OpCode.OP_NE;
+  if (norm === ">") return OpCode.OP_GT;
+  if (norm === ">=") return OpCode.OP_GE;
+  if (norm === "<") return OpCode.OP_LT;
+  if (norm === "<=") return OpCode.OP_LE;
+  if (norm === "LIKE") return OpCode.OP_STR_LIKE;
+  if (norm === "NOT LIKE") return OpCode.OP_STR_NOT_LIKE;
+  if (norm === "CONTAINS") return OpCode.OP_STR_CONTAINS;
+  if (norm === "STARTS_WITH" || norm === "STARTSWITH") return OpCode.OP_STR_STARTS_WITH;
+  if (norm === "ENDS_WITH" || norm === "ENDSWITH") return OpCode.OP_STR_ENDS_WITH;
+  return OpCode.OP_EQ;
+}
 
 export type QueryFilterType = "null" | "cmp" | "expr" | "and" | "or" | "not";
 
@@ -456,18 +480,7 @@ function emitLeafJumpOnTrue(
     }
   }
 
-  let cmpOpcode = OpCode.OP_EQ;
-  if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
-  else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
-  else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
-  else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
-  else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
-  else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
-  else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
-  else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
-  else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
-  else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
-  else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+  const cmpOpcode = getCmpOpcode(filter.op);
 
   emitter.emitUint8(cmpOpcode);
   emitter.emitUint8(regCol);
@@ -565,18 +578,7 @@ function emitLeafJumpOnFalse(
     }
   }
 
-  let cmpOpcode = OpCode.OP_EQ;
-  if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
-  else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
-  else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
-  else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
-  else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
-  else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
-  else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
-  else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
-  else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
-  else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
-  else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+  const cmpOpcode = getCmpOpcode(filter.op);
 
   emitter.emitUint8(cmpOpcode);
   emitter.emitUint8(regCol);
@@ -807,18 +809,7 @@ function emitHavingLeafJumpOnFalse(
       emitter.emitInt32(Number(val));
     }
 
-    let cmpOpcode = OpCode.OP_EQ;
-    if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
-    else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
-    else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
-    else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
-    else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
-    else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
-    else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
-    else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
-    else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
-    else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
-    else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+    const cmpOpcode = getCmpOpcode(filter.op);
 
     emitter.emitUint8(cmpOpcode);
     emitter.emitUint8(regLhs);
@@ -940,18 +931,7 @@ function emitHavingLeafJumpOnTrue(
       emitter.emitInt32(Number(val));
     }
 
-    let cmpOpcode = OpCode.OP_EQ;
-    if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
-    else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
-    else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
-    else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
-    else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
-    else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
-    else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
-    else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
-    else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
-    else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
-    else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+    const cmpOpcode = getCmpOpcode(filter.op);
 
     emitter.emitUint8(cmpOpcode);
     emitter.emitUint8(regLhs);
@@ -1249,7 +1229,7 @@ export function inferExprType(
       }
     }
     if (['upper', 'lower', 'substr', 'trim', 'concat'].includes(fn)) return DataType.TEXT;
-    if (['length', 'count'].includes(fn)) return DataType.INT32;
+    if (['length', 'count', 'starts_with', 'startswith', 'ends_with', 'endswith', 'like', 'contains'].includes(fn)) return DataType.INT32;
     if (['abs', 'round', 'floor', 'ceil', 'sum', 'avg', 'min', 'max'].includes(fn)) {
       if (expr.args.length > 0 && expr.args[0].type === 'col') {
         const resolved = resolveColumnAcrossTables((expr.args[0] as any).name, tables ?? [table]);
@@ -1429,6 +1409,42 @@ export function emitExpression(
       emitter.emitUint8(startReg);
       emitter.emitUint8(lenReg);
       emitter.emitUint8(targetReg);
+      return;
+    }
+
+    const patternOps: Record<string, OpCode> = {
+      starts_with: OpCode.OP_STR_STARTS_WITH,
+      startswith: OpCode.OP_STR_STARTS_WITH,
+      ends_with: OpCode.OP_STR_ENDS_WITH,
+      endswith: OpCode.OP_STR_ENDS_WITH,
+      like: OpCode.OP_STR_LIKE,
+      contains: OpCode.OP_STR_CONTAINS,
+    };
+    if (patternOps[fnName]) {
+      const regStr = allocReg();
+      const regPat = allocReg();
+      emitExpression(expr.args[0] ?? { type: 'literal', value: null }, table, emitter, cursor, regStr, allocReg, udfNameMap, resolveReg, tables);
+      emitExpression(expr.args[1] ?? { type: 'literal', value: '' }, table, emitter, cursor, regPat, allocReg, udfNameMap, resolveReg, tables);
+
+      emitter.emitUint8(patternOps[fnName]);
+      emitter.emitUint8(regStr);
+      emitter.emitUint8(regPat);
+      const truePatch = emitter.emitUint16(0);
+
+      // False branch: targetReg = 0
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(targetReg);
+      emitter.emitInt32(0);
+      emitter.emitUint8(OpCode.OP_JUMP);
+      const donePatch = emitter.emitUint16(0);
+
+      // True branch: targetReg = 1
+      emitter.patchUint16(truePatch, emitter.currentOffset());
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(targetReg);
+      emitter.emitInt32(1);
+
+      emitter.patchUint16(donePatch, emitter.currentOffset());
       return;
     }
 

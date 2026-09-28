@@ -3,6 +3,7 @@ import {
   UnknownFunctionError,
   DbRow,
 } from '../../types/index.js';
+import { sql_like_match } from '../../core/js/vm.helpers.c.js';
 
 export type BinaryOp =
   | '+'
@@ -816,6 +817,24 @@ export function evalExprNode(
           }
           return null;
         }
+        case 'starts_with':
+        case 'startswith':
+          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+            ? String(args[0]).startsWith(String(args[1])) ? 1 : 0
+            : null;
+        case 'ends_with':
+        case 'endswith':
+          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+            ? String(args[0]).endsWith(String(args[1])) ? 1 : 0
+            : null;
+        case 'contains':
+          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+            ? String(args[0]).includes(String(args[1])) ? 1 : 0
+            : null;
+        case 'like':
+          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+            ? sql_like_match(String(args[0]), String(args[1])) ? 1 : 0
+            : null;
         default: {
           let fnCb: ((...a: any[]) => any) | undefined;
           if (typeof udfs === 'function') {

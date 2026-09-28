@@ -44,6 +44,17 @@ export const ResultsHeader: React.FC = () => {
         )}
 
         <button
+          id="tabPagesBtn"
+          className={`result-tab-btn ${resultTab === 'pages' ? 'active' : ''}`}
+          onClick={() => {
+            if (!isResultsOpen) toggleResults();
+            setResultTab('pages');
+          }}
+        >
+          PAGES
+        </button>
+
+        <button
           id="tabBytecodeBtn"
           className={`result-tab-btn ${resultTab === 'bytecode' ? 'active' : ''}`}
           onClick={() => {

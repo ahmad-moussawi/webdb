@@ -1,9 +1,9 @@
 import React from 'react';
 import { useStudio } from '../../context/StudioContext';
-import { RotateCw, Table, PanelLeftClose } from 'lucide-react';
+import { RotateCw, Table, PanelLeftClose, Layers } from 'lucide-react';
 
 export const TableTree: React.FC = () => {
-  const { tables, refreshSchema, queryTable, viewTableStructure, toggleExplorer } = useStudio();
+  const { tables, refreshSchema, queryTable, viewTableStructure, toggleExplorer, inspectPage } = useStudio();
 
   return (
     <>
@@ -64,6 +64,16 @@ export const TableTree: React.FC = () => {
                       }}
                     >
                       <Table size={14} />
+                    </span>
+                    <span
+                      className="table-icon-btn"
+                      title={`Inspect Root Page (Page ${tbl.rootPageId})`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        inspectPage(tbl.rootPageId);
+                      }}
+                    >
+                      <Layers size={13} />
                     </span>
                     <span
                       className="table-name-link"

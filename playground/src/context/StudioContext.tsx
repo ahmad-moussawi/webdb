@@ -46,6 +46,9 @@ interface StudioContextValue {
   logs: string[];
   explainOutput: ExplainOutput | null;
   selectedTableForStructure: TableMeta | null;
+  selectedPageId: number;
+  setSelectedPageId: (id: number) => void;
+  inspectPage: (pageId: number) => void;
   isNewDbModalOpen: boolean;
   seedingProgress: SeedingProgress;
   toastMessage: string | null;
@@ -125,6 +128,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [logs, setLogs] = useState<string[]>([]);
   const [explainOutput, setExplainOutput] = useState<ExplainOutput | null>(null);
   const [selectedTableForStructure, setSelectedTableForStructure] = useState<TableMeta | null>(null);
+  const [selectedPageId, setSelectedPageId] = useState<number>(1);
 
   const [isNewDbModalOpen, setIsNewDbModalOpen] = useState<boolean>(false);
   const [seedingProgress, setSeedingProgress] = useState<SeedingProgress>({
@@ -590,6 +594,15 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, [tables]);
 
+  const inspectPage = useCallback((pageId: number) => {
+    setSelectedPageId(pageId);
+    setResultTab('pages');
+    setIsResultsOpen(true);
+    try {
+      localStorage.setItem('webdb_layout_results_open', 'true');
+    } catch {}
+  }, []);
+
   const queryTable = useCallback((tableName: string) => {
     const queryCode = `// Query all rows from "${tableName}"\nreturn db.from("${tableName}")\n  .limit(25);`;
 
@@ -656,6 +669,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         logs,
         explainOutput,
         selectedTableForStructure,
+        selectedPageId,
+        setSelectedPageId,
+        inspectPage,
         isNewDbModalOpen,
         seedingProgress,
         toastMessage,

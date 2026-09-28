@@ -5,6 +5,7 @@ import { DataGrid } from './DataGrid';
 import { StructureView } from './StructureView';
 import { BytecodeView } from './BytecodeView';
 import { ConsoleView } from './ConsoleView';
+import { PageInspector } from './PageInspector';
 
 export const ResultsPanel: React.FC = () => {
   const { resultTab, isResultsOpen } = useStudio();
@@ -19,6 +20,7 @@ export const ResultsPanel: React.FC = () => {
         <div className="tab-view-content">
           {resultTab === 'results' && <DataGrid />}
           {resultTab === 'structure' && <StructureView />}
+          {resultTab === 'pages' && <PageInspector />}
           {resultTab === 'bytecode' && <BytecodeView />}
           {resultTab === 'console' && <ConsoleView />}
         </div>

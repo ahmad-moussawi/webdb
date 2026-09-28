@@ -2,7 +2,7 @@ import React from 'react';
 import { useStudio } from '../../context/StudioContext';
 
 export const StructureView: React.FC = () => {
-  const { selectedTableForStructure, queryTable } = useStudio();
+  const { selectedTableForStructure, queryTable, inspectPage } = useStudio();
 
   if (!selectedTableForStructure) {
     return (
@@ -41,8 +41,16 @@ export const StructureView: React.FC = () => {
                 fontFamily: 'var(--font-mono)',
               }}
             >
-              Root Page: {selectedTableForStructure.rootPageId} • Col Catalog Page:{' '}
-              {selectedTableForStructure.colCatalogPageId} • ~
+              Root Page:{' '}
+              <button
+                className="link-btn-highlight"
+                style={{ fontSize: 'inherit', padding: '1px 4px' }}
+                onClick={() => inspectPage(selectedTableForStructure.rootPageId)}
+                title="Inspect this table's root 4KB page in Page Inspector"
+              >
+                Page {selectedTableForStructure.rootPageId} &rarr;
+              </button>
+              {' '}• Col Catalog Page: {selectedTableForStructure.colCatalogPageId} • ~
               {selectedTableForStructure.rowCountEstimate.toLocaleString()} rows
             </span>
           </div>

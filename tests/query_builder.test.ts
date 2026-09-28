@@ -1190,5 +1190,97 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       await expect(qb.toArray()).rejects.toThrow(/17 exceeds maximum limit of 16 cursors/);
     });
   });
+
+  describe('String Pattern Operations (LIKE, STARTS_WITH, ENDS_WITH, CONTAINS)', () => {
+    let db: WebDB;
+
+    beforeEach(async () => {
+      db = await WebDB.open({ name: 'patterns_test', storage: 'memory' });
+      await db.createTable('items', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'name', type: 'TEXT' },
+        { name: 'category', type: 'TEXT' },
+      ]);
+
+      await db.insert('items', { id: 1, name: 'Apple iPhone 15', category: 'Phone' });
+      await db.insert('items', { id: 2, name: 'Google Pixel 8', category: 'Phone' });
+      await db.insert('items', { id: 3, name: 'Apple iPad Pro', category: 'Tablet' });
+      await db.insert('items', { id: 4, name: 'Samsung Galaxy Tab', category: 'Tablet' });
+    });
+
+    it('supports lowercase string operators in where (like, starts_with, ends_with, contains)', async () => {
+      // starts_with
+      const starts = await db.from('items').where('name', 'starts_with', 'Apple').toArray();
+      expect(starts).toHaveLength(2);
+      expect(starts.map((i) => i.id)).toEqual([1, 3]);
+
+      // ends_with
+      const ends = await db.from('items').where('name', 'ends_with', '15').toArray();
+      expect(ends).toHaveLength(1);
+      expect(ends[0].name).toBe('Apple iPhone 15');
+
+      // like
+      const like = await db.from('items').where('name', 'like', '%Pixel%').toArray();
+      expect(like).toHaveLength(1);
+      expect(like[0].name).toBe('Google Pixel 8');
+
+      // contains
+      const contains = await db.from('items').where('name', 'contains', 'Galaxy').toArray();
+      expect(contains).toHaveLength(1);
+      expect(contains[0].name).toBe('Samsung Galaxy Tab');
+    });
+
+    it('emits dedicated string opcodes in bytecode instead of OP_EQ', async () => {
+      const explainStarts = await db.from('items').where('name', 'starts_with', 'Apple').explain();
+      const opStarts = explainStarts.instructions.map((i) => i.opcode);
+      expect(opStarts).toContain('OP_STR_STARTS_WITH');
+      expect(opStarts).not.toContain('OP_EQ');
+
+      const explainEnds = await db.from('items').where('name', 'ends_with', '15').explain();
+      const opEnds = explainEnds.instructions.map((i) => i.opcode);
+      expect(opEnds).toContain('OP_STR_ENDS_WITH');
+      expect(opEnds).not.toContain('OP_EQ');
+
+      const explainLike = await db.from('items').where('name', 'like', '%Pixel%').explain();
+      const opLike = explainLike.instructions.map((i) => i.opcode);
+      expect(opLike).toContain('OP_STR_LIKE');
+      expect(opLike).not.toContain('OP_EQ');
+
+      const explainContains = await db.from('items').where('name', 'contains', 'Galaxy').explain();
+      const opContains = explainContains.instructions.map((i) => i.opcode);
+      expect(opContains).toContain('OP_STR_CONTAINS');
+      expect(opContains).not.toContain('OP_EQ');
+    });
+
+    it('supports dedicated QueryBuilder helper methods (whereLike, whereStartsWith, etc.)', async () => {
+      const p1 = await db.from('items').whereStartsWith('name', 'Apple').toArray();
+      expect(p1).toHaveLength(2);
+
+      const p2 = await db.from('items').whereEndsWith('name', 'Pro').toArray();
+      expect(p2).toHaveLength(1);
+      expect(p2[0].name).toBe('Apple iPad Pro');
+
+      const p3 = await db.from('items').whereLike('name', '%Galaxy%').toArray();
+      expect(p3).toHaveLength(1);
+
+      const p4 = await db.from('items').whereContains('name', 'iPhone').toArray();
+      expect(p4).toHaveLength(1);
+    });
+
+    it('supports string pattern functions in expressions (starts_with, ends_with, like, contains)', async () => {
+      // In where expression
+      const rows = await db.from('items').where("starts_with(name, 'Apple')").toArray();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.id)).toEqual([1, 3]);
+
+      // In select expression
+      const projected = await db.from('items')
+        .select(['name', "starts_with(name, 'Apple') as is_apple"])
+        .toArray();
+      expect(projected[0]).toEqual({ name: 'Apple iPhone 15', is_apple: 1 });
+      expect(projected[1]).toEqual({ name: 'Google Pixel 8', is_apple: 0 });
+    });
+  });
 });
+
 

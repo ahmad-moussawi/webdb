@@ -710,6 +710,46 @@ export class QueryBuilder {
     return this;
   }
 
+  whereLike(colName: string, pattern: string): this {
+    return this.where(colName, 'LIKE', pattern);
+  }
+
+  whereNotLike(colName: string, pattern: string): this {
+    return this.where(colName, 'NOT LIKE', pattern);
+  }
+
+  whereStartsWith(colName: string, prefix: string): this {
+    return this.where(colName, 'STARTS_WITH', prefix);
+  }
+
+  whereEndsWith(colName: string, suffix: string): this {
+    return this.where(colName, 'ENDS_WITH', suffix);
+  }
+
+  whereContains(colName: string, substring: string): this {
+    return this.where(colName, 'CONTAINS', substring);
+  }
+
+  orWhereLike(colName: string, pattern: string): this {
+    return this.orWhere(colName, 'LIKE', pattern);
+  }
+
+  orWhereNotLike(colName: string, pattern: string): this {
+    return this.orWhere(colName, 'NOT LIKE', pattern);
+  }
+
+  orWhereStartsWith(colName: string, prefix: string): this {
+    return this.orWhere(colName, 'STARTS_WITH', prefix);
+  }
+
+  orWhereEndsWith(colName: string, suffix: string): this {
+    return this.orWhere(colName, 'ENDS_WITH', suffix);
+  }
+
+  orWhereContains(colName: string, substring: string): this {
+    return this.orWhere(colName, 'CONTAINS', substring);
+  }
+
   getFilters(): QueryFilter[] {
     return this.filters;
   }
