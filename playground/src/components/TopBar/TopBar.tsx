@@ -148,7 +148,7 @@ export const TopBar: React.FC = () => {
           id="runBtn"
           className="btn btn-primary"
           title="Execute Query (Cmd+Enter)"
-          onClick={executeCode}
+          onClick={() => executeCode()}
         >
           <Play size={13} fill="currentColor" />
           <span>Run</span>

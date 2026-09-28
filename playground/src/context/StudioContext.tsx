@@ -486,8 +486,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     const currentTab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
-    const rawCode = codeOverride !== undefined ? codeOverride : (currentTab?.code || '');
-    if (!rawCode || !rawCode.trim()) return;
+    const rawCode = typeof codeOverride === 'string' ? codeOverride : (currentTab?.code || '');
+    if (!rawCode || typeof rawCode !== 'string' || !rawCode.trim()) return;
 
     const t0 = performance.now();
     setStatusText('RUNNING...');
