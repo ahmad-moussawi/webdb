@@ -1666,17 +1666,95 @@ export function chooseIndexScan(
   return null;
 }
 
+export interface JoinIndexCandidate {
+  index: IndexDescriptor;
+  isUnique: boolean;
+  innerCol: ResolvedColumn;
+  outerCol: ResolvedColumn;
+  indexCursor: number;
+}
+
+export function chooseJoinIndex(
+  joinPlan: JoinPlan,
+  innerTable: TableMeta,
+  innerTableIdx: number,
+  allTables: TableMeta[],
+  indexCursor: number,
+): JoinIndexCandidate | null {
+  if (joinPlan.op !== '=' || !innerTable.indexes || innerTable.indexes.length === 0) {
+    return null;
+  }
+
+  const resolvedLeft = resolveColumnAcrossTables(joinPlan.leftCol, allTables);
+  const resolvedRight = resolveColumnAcrossTables(joinPlan.rightCol, allTables);
+  if (!resolvedLeft || !resolvedRight) return null;
+
+  let innerCol: ResolvedColumn | null = null;
+  let outerCol: ResolvedColumn | null = null;
+
+  if (resolvedLeft.tableIdx === innerTableIdx && resolvedRight.tableIdx < innerTableIdx) {
+    innerCol = resolvedLeft;
+    outerCol = resolvedRight;
+  } else if (resolvedRight.tableIdx === innerTableIdx && resolvedLeft.tableIdx < innerTableIdx) {
+    innerCol = resolvedRight;
+    outerCol = resolvedLeft;
+  }
+
+  if (!innerCol || !outerCol) return null;
+
+  let bestIdx: IndexDescriptor | null = null;
+  let bestRank = 999;
+
+  for (const idx of innerTable.indexes) {
+    if (idx.columnCount === 1 && idx.columnIndices[0] === innerCol.colIdx) {
+      const isPk = (idx.flags & IndexFlag.PRIMARY) !== 0;
+      const isUnique = (idx.flags & IndexFlag.UNIQUE) !== 0;
+      const rank = isPk ? 1 : isUnique ? 2 : 3;
+      if (rank < bestRank) {
+        bestRank = rank;
+        bestIdx = idx;
+      }
+    }
+  }
+
+  if (!bestIdx) return null;
+
+  const isUnique = (bestIdx.flags & (IndexFlag.PRIMARY | IndexFlag.UNIQUE)) !== 0;
+  return {
+    index: bestIdx,
+    isUnique,
+    innerCol,
+    outerCol,
+    indexCursor,
+  };
+}
+
 /**
  * Compiles a QueryPlan into an executable bytecode array.
  */
 export function compileQuery(plan: QueryPlan): Uint8Array {
-  const totalCursors = 1 + (plan.joinedTables?.length ?? 0);
+  const isJoinQuery = plan.joinedTables !== undefined && plan.joinedTables.length > 0;
+  const allTables: TableMeta[] = [plan.table, ...(plan.joinedTables?.map((j) => j.table) ?? [])];
+
+  const joinIndices: (JoinIndexCandidate | null)[] = new Array(allTables.length).fill(null);
+  let nextCursor = allTables.length;
+  if (isJoinQuery && plan.joinedTables) {
+    for (let i = 1; i < allTables.length; i++) {
+      const jPlan = plan.joinedTables[i - 1];
+      if (nextCursor < 16) {
+        const cand = chooseJoinIndex(jPlan, allTables[i], i, allTables, nextCursor);
+        if (cand) {
+          joinIndices[i] = cand;
+          nextCursor++;
+        }
+      }
+    }
+  }
+
+  const totalCursors = nextCursor;
   if (totalCursors > 16) {
     throw new TooManyCursorsError(totalCursors, 16);
   }
-
-  const isJoinQuery = plan.joinedTables !== undefined && plan.joinedTables.length > 0;
-  const allTables: TableMeta[] = [plan.table, ...(plan.joinedTables?.map((j) => j.table) ?? [])];
 
   const rootFilter = buildRootFilter(plan.filters);
   const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
@@ -2427,6 +2505,16 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       emitter.emitUint32(allTables[i].rootPageId);
     }
 
+    // Open index cursors for accelerated joins
+    for (let i = 1; i < N; i++) {
+      const jIdx = joinIndices[i];
+      if (jIdx) {
+        emitter.emitUint8(OpCode.OP_OPEN_INDEX);
+        emitter.emitUint8(jIdx.indexCursor);
+        emitter.emitUint32(jIdx.index.rootPageId);
+      }
+    }
+
     const rewindJumpPatches: number[] = new Array(N);
     const loopStartPositions: number[] = new Array(N);
     const nextRowPatchesPerTable: number[][] = Array.from({ length: N }, () => []);
@@ -2443,82 +2531,155 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     // Nested Joined Tables (1..N-1)
     for (let i = 1; i < N; i++) {
       const joinPlan = plan.joinedTables![i - 1];
+      const jIdx = joinIndices[i];
+
       if (joinPlan.type === 'left') {
         emitter.emitUint8(OpCode.OP_LOAD_INT);
         emitter.emitUint8(regMatched[i]);
         emitter.emitInt32(0);
       }
 
-      emitter.emitUint8(OpCode.OP_REWIND);
-      emitter.emitUint8(i);
-      rewindJumpPatches[i] = emitter.emitUint16(0);
+      if (jIdx && jIdx.isUnique) {
+        // Point seek into unique index
+        emitReadColumn(
+          emitter,
+          jIdx.outerCol.cursor,
+          jIdx.outerCol.colIdx,
+          regJoinLeft,
+          jIdx.outerCol.col.type,
+        );
 
-      loopStartPositions[i] = emitter.currentOffset();
+        emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
+        emitter.emitUint8(jIdx.indexCursor);
+        emitter.emitUint8(i); // data cursor
+        emitter.emitUint8(regJoinLeft);
+        emitter.emitUint8(jIdx.outerCol.col.type);
+        rewindJumpPatches[i] = emitter.emitUint16(0); // If not found, jumps to eofPos of table i
 
-      const resolvedLeft = resolveColumnAcrossTables(joinPlan.leftCol, allTables);
-      if (!resolvedLeft) {
-        throw new Error(`Join column "${joinPlan.leftCol}" not found in tables`);
-      }
-      const resolvedRight = resolveColumnAcrossTables(joinPlan.rightCol, allTables);
-      if (!resolvedRight) {
-        throw new Error(`Join column "${joinPlan.rightCol}" not found in tables`);
-      }
+        loopStartPositions[i] = emitter.currentOffset();
 
-      emitReadColumn(
-        emitter,
-        resolvedLeft.cursor,
-        resolvedLeft.colIdx,
-        regJoinLeft,
-        resolvedLeft.col.type,
-      );
-      emitReadColumn(
-        emitter,
-        resolvedRight.cursor,
-        resolvedRight.colIdx,
-        regJoinRight,
-        resolvedRight.col.type,
-      );
+        if (joinPlan.type === 'left') {
+          emitter.emitUint8(OpCode.OP_LOAD_INT);
+          emitter.emitUint8(regMatched[i]);
+          emitter.emitInt32(1);
+        }
+      } else if (jIdx && !jIdx.isUnique) {
+        // Range seek into non-unique index
+        emitReadColumn(
+          emitter,
+          jIdx.outerCol.cursor,
+          jIdx.outerCol.colIdx,
+          regJoinLeft,
+          jIdx.outerCol.col.type,
+        );
 
-      let cmpOp: OpCode;
-      switch (joinPlan.op) {
-        case '=':
-          cmpOp = OpCode.OP_EQ;
-          break;
-        case '!=':
-          cmpOp = OpCode.OP_NE;
-          break;
-        case '>':
-          cmpOp = OpCode.OP_GT;
-          break;
-        case '>=':
-          cmpOp = OpCode.OP_GE;
-          break;
-        case '<':
-          cmpOp = OpCode.OP_LT;
-          break;
-        case '<=':
-          cmpOp = OpCode.OP_LE;
-          break;
-        default:
-          cmpOp = OpCode.OP_EQ;
-      }
+        emitter.emitUint8(OpCode.OP_INDEX_SEEK_GE);
+        emitter.emitUint8(jIdx.indexCursor);
+        emitter.emitUint8(i); // data cursor
+        emitter.emitUint8(regJoinLeft);
+        emitter.emitUint8(jIdx.outerCol.col.type);
+        rewindJumpPatches[i] = emitter.emitUint16(0); // If no entries >= key, jumps to eofPos
 
-      emitter.emitUint8(cmpOp);
-      emitter.emitUint8(regJoinLeft);
-      emitter.emitUint8(regJoinRight);
-      const condMatchPatch = emitter.emitUint16(0);
+        loopStartPositions[i] = emitter.currentOffset();
 
-      // Mismatch: jump to nextRow for table i
-      emitter.emitUint8(OpCode.OP_JUMP);
-      nextRowPatchesPerTable[i].push(emitter.emitUint16(0));
+        emitReadColumn(
+          emitter,
+          i,
+          jIdx.innerCol.colIdx,
+          regJoinRight,
+          jIdx.innerCol.col.type,
+        );
 
-      // Match
-      emitter.patchUint16(condMatchPatch, emitter.currentOffset());
+        emitter.emitUint8(OpCode.OP_EQ);
+        emitter.emitUint8(regJoinLeft);
+        emitter.emitUint8(regJoinRight);
+        const condMatchPatch = emitter.emitUint16(0);
 
-      if (joinPlan.type === 'left') {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
-        emitter.emitUint8(regMatched[i]);
-        emitter.emitInt32(1);
+        // Mismatch: we scanned past all duplicates for this key! Jump to eofPos
+        emitter.emitUint8(OpCode.OP_JUMP);
+        nextRowPatchesPerTable[i].push(emitter.emitUint16(0));
+
+        // Match
+        emitter.patchUint16(condMatchPatch, emitter.currentOffset());
+
+        if (joinPlan.type === 'left') {
+          emitter.emitUint8(OpCode.OP_LOAD_INT);
+          emitter.emitUint8(regMatched[i]);
+          emitter.emitInt32(1);
+        }
+      } else {
+        // Cartesian Fallback
+        emitter.emitUint8(OpCode.OP_REWIND);
+        emitter.emitUint8(i);
+        rewindJumpPatches[i] = emitter.emitUint16(0);
+
+        loopStartPositions[i] = emitter.currentOffset();
+
+        const resolvedLeft = resolveColumnAcrossTables(joinPlan.leftCol, allTables);
+        if (!resolvedLeft) {
+          throw new Error(`Join column "${joinPlan.leftCol}" not found in tables`);
+        }
+        const resolvedRight = resolveColumnAcrossTables(joinPlan.rightCol, allTables);
+        if (!resolvedRight) {
+          throw new Error(`Join column "${joinPlan.rightCol}" not found in tables`);
+        }
+
+        emitReadColumn(
+          emitter,
+          resolvedLeft.cursor,
+          resolvedLeft.colIdx,
+          regJoinLeft,
+          resolvedLeft.col.type,
+        );
+        emitReadColumn(
+          emitter,
+          resolvedRight.cursor,
+          resolvedRight.colIdx,
+          regJoinRight,
+          resolvedRight.col.type,
+        );
+
+        let cmpOp: OpCode;
+        switch (joinPlan.op) {
+          case '=':
+            cmpOp = OpCode.OP_EQ;
+            break;
+          case '!=':
+            cmpOp = OpCode.OP_NE;
+            break;
+          case '>':
+            cmpOp = OpCode.OP_GT;
+            break;
+          case '>=':
+            cmpOp = OpCode.OP_GE;
+            break;
+          case '<':
+            cmpOp = OpCode.OP_LT;
+            break;
+          case '<=':
+            cmpOp = OpCode.OP_LE;
+            break;
+          default:
+            cmpOp = OpCode.OP_EQ;
+        }
+
+        emitter.emitUint8(cmpOp);
+        emitter.emitUint8(regJoinLeft);
+        emitter.emitUint8(regJoinRight);
+        const condMatchPatch = emitter.emitUint16(0);
+
+        // Mismatch: jump to nextRow for table i
+        emitter.emitUint8(OpCode.OP_JUMP);
+        nextRowPatchesPerTable[i].push(emitter.emitUint16(0));
+
+        // Match
+        emitter.patchUint16(condMatchPatch, emitter.currentOffset());
+
+        if (joinPlan.type === 'left') {
+          emitter.emitUint8(OpCode.OP_LOAD_INT);
+          emitter.emitUint8(regMatched[i]);
+          emitter.emitInt32(1);
+        }
       }
     }
 
@@ -2580,16 +2741,37 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.patchUint16(patch, nextRowPos);
       }
 
-      emitter.emitUint8(OpCode.OP_NEXT_ROW);
-      emitter.emitUint8(i);
-      nextRowEofPatches[i] = emitter.emitUint16(0);
+      const jIdx = joinIndices[i];
+      if (jIdx && jIdx.isUnique) {
+        // Point seek: at most 1 match
+        const eofPos = emitter.currentOffset();
+        emitter.patchUint16(rewindJumpPatches[i], eofPos);
+      } else if (jIdx && !jIdx.isUnique) {
+        // Non-unique index: advance index cursor to next entry
+        emitter.emitUint8(OpCode.OP_INDEX_NEXT);
+        emitter.emitUint8(jIdx.indexCursor);
+        emitter.emitUint8(i); // data cursor
+        nextRowEofPatches[i] = emitter.emitUint16(0);
 
-      emitter.emitUint8(OpCode.OP_JUMP);
-      emitter.emitUint16(loopStartPositions[i]);
+        emitter.emitUint8(OpCode.OP_JUMP);
+        emitter.emitUint16(loopStartPositions[i]);
 
-      const eofPos = emitter.currentOffset();
-      emitter.patchUint16(rewindJumpPatches[i], eofPos);
-      emitter.patchUint16(nextRowEofPatches[i], eofPos);
+        const eofPos = emitter.currentOffset();
+        emitter.patchUint16(rewindJumpPatches[i], eofPos);
+        emitter.patchUint16(nextRowEofPatches[i], eofPos);
+      } else {
+        // Cartesian fallback: OP_NEXT_ROW
+        emitter.emitUint8(OpCode.OP_NEXT_ROW);
+        emitter.emitUint8(i);
+        nextRowEofPatches[i] = emitter.emitUint16(0);
+
+        emitter.emitUint8(OpCode.OP_JUMP);
+        emitter.emitUint16(loopStartPositions[i]);
+
+        const eofPos = emitter.currentOffset();
+        emitter.patchUint16(rewindJumpPatches[i], eofPos);
+        emitter.patchUint16(nextRowEofPatches[i], eofPos);
+      }
 
       const joinPlan = plan.joinedTables![i - 1];
       if (joinPlan.type === 'left') {
@@ -2684,6 +2866,17 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     if (plan.outputColumns) {
       (result as any).outputColumns = plan.outputColumns;
     }
+    const joinedTableScans = plan.joinedTables?.map((j, idx) => {
+      const tableIdx = idx + 1;
+      const cand = joinIndices[tableIdx];
+      return {
+        tableIndex: tableIdx,
+        tableName: j.table.name,
+        scanType: cand ? ('IndexScan' as const) : ('TableScan' as const),
+        indexName: cand ? cand.index.name : undefined,
+      };
+    });
+    (result as any).joinedTableScans = joinedTableScans;
     return result;
   }
 

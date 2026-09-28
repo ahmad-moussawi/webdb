@@ -171,10 +171,10 @@ Add dedicated opcodes to `OpCode` enum:
 
 ## 4. Work Breakdown & Phasing
 
-| Step | Tasks | Estimated Scope |
-| :--- | :--- | :--- |
-| **Step 1** | Add `UniqueConstraintViolationError`, auto-init PK index descriptor on `createTable`, and enforce uniqueness check on `insert()`. | Core Engine & Types |
-| **Step 2** | Implement B+Tree node insertion & splitting for index pages, plus `db.createIndex()` / `db.dropIndex()`. | Storage & B+Tree |
-| **Step 3** | Implement multi-column composite key serializer and comparator in `page.c.ts`. | Binary Geometry |
-| **Step 4** | Update `compiler.ts` & VDBE engine to route point/range queries through index seeks instead of full scan. | Compiler & VM |
-| **Step 5** | Add full unit & integration test coverage (PK violations, composite keys, explain plan verification). | Test Suite |
+| Step | Tasks | Estimated Scope | Status |
+| :--- | :--- | :--- | :--- |
+| **Phase 1** | Add `UniqueConstraintViolationError`, auto-init PK index descriptor on `createTable`, and enforce uniqueness check on `insert()`. | Core Engine & Types | Completed |
+| **Phase 2** | Implement B+Tree node insertion & chaining for index pages, plus `db.createIndex()` / `db.dropIndex()`. | Storage & B+Tree | Completed |
+| **Phase 3** | Implement multi-column composite key serializer and update `compiler.ts` & VDBE engine to route point/range queries through index seeks. | Compiler & VM | Completed |
+| **Phase 4** | Implement indexed nested-loop joins ($O(M \log N)$), transaction rollback, page splits, and comprehensive test suite. | Engine & Test Suite | Completed |
+

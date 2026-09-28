@@ -243,6 +243,8 @@ export interface JoinClause {
   leftCol: string;
   op: ComparisonOp;
   rightCol: string;
+  scanType?: 'TableScan' | 'IndexScan';
+  indexName?: string;
 }
 
 export interface QueryExecutionOptions {

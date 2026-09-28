@@ -3,6 +3,7 @@ import { DEFAULT_MAX_QUERY_MEMORY } from '../constants.js';
 
 export interface VmCursor {
   pageId: number;
+  rootPageId?: number;
   slotIdx: number;
   cellIdx: number;
   rowOffset: number; // Absolute byte offset in view
@@ -13,6 +14,7 @@ export interface VmCursor {
 export function createVmCursor(): VmCursor {
   return {
     pageId: 0,
+    rootPageId: 0,
     slotIdx: 0,
     cellIdx: 0,
     rowOffset: 0,
@@ -124,6 +126,7 @@ export function resetVmContext(
   for (let i = 0; i < ctx.cursors.length; i++) {
     const c = ctx.cursors[i];
     c.pageId = 0;
+    c.rootPageId = 0;
     c.slotIdx = 0;
     c.cellIdx = 0;
     c.rowOffset = 0;

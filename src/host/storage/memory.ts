@@ -38,6 +38,21 @@ export class MemoryVfsAdapter implements IVfsAdapter {
     }
   }
 
+  snapshot(): Map<number, Uint8Array> {
+    const snap = new Map<number, Uint8Array>();
+    for (const [k, v] of this.pages.entries()) {
+      snap.set(k, new Uint8Array(v));
+    }
+    return snap;
+  }
+
+  restoreSnapshot(snap: Map<number, Uint8Array>): void {
+    this.pages.clear();
+    for (const [k, v] of snap.entries()) {
+      this.pages.set(k, new Uint8Array(v));
+    }
+  }
+
   // --- Write-Ahead Log Methods ---
 
   async readWalHeader(): Promise<Uint8Array | null> {

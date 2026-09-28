@@ -1401,6 +1401,35 @@ export function page_binary_search_index_leaf(
     );
 
     if (cmp === 0) {
+      if (target_row_id === undefined) {
+        let first_slot = mid;
+        while (first_slot > 0) {
+          const prev_slot = first_slot - 1;
+          const prev_offset = page_get_cell_offset(view, page_offset, prev_slot);
+          const prev_k_len = view.getUint16(page_offset + prev_offset, true);
+          const { cellType: prev_type, cellVal: prev_val } = page_decode_index_cell(
+            view,
+            page_offset + prev_offset + 2,
+            prev_k_len,
+            target_type,
+          );
+          if (
+            page_compare_index_keys(
+              target_type,
+              target_value,
+              0n,
+              prev_type,
+              prev_val,
+              0n,
+            ) === 0
+          ) {
+            first_slot = prev_slot;
+          } else {
+            break;
+          }
+        }
+        return { found: true, slot_idx: first_slot };
+      }
       return { found: true, slot_idx: mid };
     } else if (cmp < 0) {
       hi = mid - 1;

@@ -750,6 +750,54 @@ export class WebDB implements IDatabaseQueryExecutor {
     await this.driver.flushAllDirty();
   }
 
+  async transaction<T>(callback: (tx: WebDB) => Promise<T>): Promise<T> {
+    const pool = this.pool;
+    const vfsSnap =
+      this.vfs instanceof MemoryVfsAdapter ? this.vfs.snapshot() : null;
+
+    const slotSnapshots = new Map<
+      number,
+      { pageId: number; dirty: boolean; data: Uint8Array }
+    >();
+
+    for (let slot = 0; slot < pool.slotCount; slot++) {
+      const pageId = pool.getAssignedPage(slot);
+      if (pageId > 0) {
+        const dirty = pool.isDirty(slot);
+        const data = new Uint8Array(pool.getPageBytesInSlot(slot));
+        slotSnapshots.set(slot, { pageId, dirty, data });
+      }
+    }
+
+    try {
+      const res = await callback(this);
+      await this.driver.flushAllDirty();
+      return res;
+    } catch (err) {
+      // Rollback: restore all buffer pool slots and page data
+      for (let slot = 0; slot < pool.slotCount; slot++) {
+        const snap = slotSnapshots.get(slot);
+        if (snap) {
+          pool.assignSlot(slot, snap.pageId);
+          pool.getPageBytesInSlot(slot).set(snap.data);
+          if (snap.dirty) {
+            pool.markDirty(slot);
+          } else {
+            pool.clearDirty(slot);
+          }
+        } else {
+          pool.unassignSlot(slot);
+        }
+      }
+
+      if (vfsSnap && this.vfs instanceof MemoryVfsAdapter) {
+        this.vfs.restoreSnapshot(vfsSnap);
+      }
+
+      throw err;
+    }
+  }
+
   registerFunction(
     name: string,
     def: UdfDefinition | ((...args: any[]) => any),
@@ -873,6 +921,26 @@ export class WebDB implements IDatabaseQueryExecutor {
     const indexScan = (bytecode as any).indexScan;
     const scanType = indexScan ? "IndexScan" : "TableScan";
     const indexName = indexScan ? indexScan.index.name : undefined;
+    const joinedTableScans = (bytecode as any).joinedTableScans as
+      | {
+          tableIndex: number;
+          tableName: string;
+          scanType: "IndexScan" | "TableScan";
+          indexName?: string;
+        }[]
+      | undefined;
+
+    const decoratedJoins = options?.joins?.map((j, idx) => {
+      const scanInfo = joinedTableScans?.[idx];
+      if (scanInfo && scanInfo.scanType === "IndexScan") {
+        return {
+          ...j,
+          scanType: scanInfo.scanType,
+          indexName: scanInfo.indexName,
+        };
+      }
+      return j;
+    });
 
     return {
       plan: {
@@ -886,7 +954,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         aggregates: options?.aggregates,
         having: options?.having,
         select: options?.select,
-        joins: options?.joins,
+        joins: decoratedJoins,
         limit: options?.limit,
         offset: options?.offset,
       },
@@ -924,13 +992,21 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    // Pre-load all data pages for all tables into buffer pool before running VM
+    // Pre-load all data pages and index pages for all tables into buffer pool before running VM
     for (const t of [table, ...joinedTablesMeta]) {
       let currPageId = t.rootPageId;
       while (currPageId !== 0) {
         const slot = await this.driver.acquirePage(currPageId);
         const view = this.pool.getSlotDataView(slot);
         currPageId = page_get_next_page_id(view, 0);
+      }
+      for (const idx of t.indexes ?? []) {
+        let idxPageId = idx.rootPageId;
+        while (idxPageId !== 0) {
+          const slot = await this.driver.acquirePage(idxPageId);
+          const view = this.pool.getSlotDataView(slot);
+          idxPageId = page_get_next_page_id(view, 0);
+        }
       }
     }
 

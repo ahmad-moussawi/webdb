@@ -539,6 +539,7 @@ export function vm_step(
 
         const cursor = get_cursor(ctx, cursor_idx);
         cursor.pageId = root_page_id;
+        cursor.rootPageId = root_page_id;
         cursor.cellIdx = 0;
         cursor.rowOffset = 0;
 
@@ -581,9 +582,14 @@ export function vm_step(
         }
 
         const key_val = ctx.registers[reg_key];
+        if (key_val === null || key_val === undefined) {
+          ctx.pc = jump_not_found;
+          break;
+        }
+
         const idx_cursor = get_cursor(ctx, index_cursor_idx);
 
-        let curr_page_id = idx_cursor.pageId;
+        let curr_page_id = idx_cursor.rootPageId || idx_cursor.pageId;
         let found = false;
         let matched_rowid = 0n;
 
@@ -677,9 +683,14 @@ export function vm_step(
         }
 
         const key_val = ctx.registers[reg_key];
+        if (key_val === null || key_val === undefined) {
+          ctx.pc = jump_eof;
+          break;
+        }
+
         const idx_cursor = get_cursor(ctx, index_cursor_idx);
 
-        let curr_page_id = idx_cursor.pageId;
+        let curr_page_id = idx_cursor.rootPageId || idx_cursor.pageId;
         let found = false;
         let matched_rowid = 0n;
 
