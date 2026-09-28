@@ -1,9 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WebDB Studio - Relational Database IDE</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='100' y2='100' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%233B82F6'/%3E%3Cstop offset='1' stop-color='%238B5CF6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='100' height='100' rx='20' fill='url(%23g)'/%3E%3Cpath d='M25 35L50 20L75 35L50 50L25 35Z' fill='%23ffffff' fill-opacity='0.9'/%3E%3Cpath d='M25 50L50 65L75 50' stroke='%23ffffff' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M25 65L50 80L75 65' stroke='%23ffffff' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <link rel="alternate icon" href="./logo.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -11,7 +17,32 @@
       rel="stylesheet"
     />
     <style>
-      :root {
+      :root,
+      [data-theme="light"] {
+        --bg-main: #f8fafc;
+        --bg-surface: #ffffff;
+        --bg-panel: #f1f5f9;
+        --bg-hover: rgba(0, 0, 0, 0.04);
+        --bg-active: rgba(37, 99, 235, 0.1);
+        --card-border: #e2e8f0;
+        --border-subtle: #edf2f7;
+        --accent: #2563eb;
+        --accent-hover: #1d4ed8;
+        --cyan: #0891b2;
+        --emerald: #059669;
+        --amber: #d97706;
+        --rose: #dc2626;
+        --text: #0f172a;
+        --text-secondary: #475569;
+        --text-muted: #94a3b8;
+        --font-mono: "Fira Code", monospace;
+        --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+        --radius: 2px;
+        --modal-backdrop: rgba(15, 23, 42, 0.45);
+        --progress-overlay: rgba(248, 250, 252, 0.9);
+      }
+
+      [data-theme="dark"] {
         --bg-main: #0c0f17;
         --bg-surface: #121722;
         --bg-panel: #161c2b;
@@ -28,9 +59,8 @@
         --text: #e2e8f0;
         --text-secondary: #94a3b8;
         --text-muted: #64748b;
-        --font-mono: "Fira Code", monospace;
-        --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-        --radius: 2px;
+        --modal-backdrop: rgba(0, 0, 0, 0.75);
+        --progress-overlay: rgba(12, 15, 23, 0.88);
       }
 
       * {
@@ -85,7 +115,7 @@
         font-size: 0.95rem;
         font-weight: 700;
         letter-spacing: -0.01em;
-        color: #fff;
+        color: var(--text);
       }
 
       .brand-title span {
@@ -97,37 +127,48 @@
       .header-actions {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
       }
 
-      .select-pill {
+      .active-db-badge {
         background: var(--bg-panel);
         border: 1px solid var(--card-border);
-        color: var(--text);
-        padding: 5px 10px;
+        padding: 4px 8px;
         border-radius: var(--radius);
-        font-size: 0.75rem;
         font-family: var(--font-mono);
-        outline: none;
-        cursor: pointer;
+        font-size: 0.72rem;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        gap: 6px;
       }
-      .select-pill:focus {
-        border-color: var(--accent);
+
+      .active-db-badge strong {
+        color: var(--text);
       }
 
       .btn {
         background: var(--accent);
         color: white;
         border: 1px solid transparent;
-        padding: 5px 12px;
+        padding: 0 12px;
+        height: 28px;
+        min-height: 28px;
+        max-height: 28px;
+        box-sizing: border-box;
         border-radius: var(--radius);
-        font-size: 0.76rem;
+        font-size: 0.74rem;
         font-weight: 600;
         cursor: pointer;
         display: inline-flex;
         align-items: center;
+        justify-content: center;
         gap: 6px;
-        transition: background 0.15s ease;
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease;
+        line-height: 26px;
+        vertical-align: middle;
       }
       .btn:hover {
         background: var(--accent-hover);
@@ -139,11 +180,56 @@
       }
       .btn-secondary:hover {
         background: var(--bg-hover);
-        color: #fff;
+        color: var(--text);
       }
       .btn-sm {
-        padding: 4px 8px;
+        height: 24px;
+        min-height: 24px;
+        max-height: 24px;
+        line-height: 22px;
+        padding: 0 8px;
+        font-size: 0.7rem;
+      }
+
+      #clearEditorBtn,
+      #runBtn {
+        height: 28px !important;
+        min-height: 28px !important;
+        max-height: 28px !important;
+        line-height: 26px !important;
+        padding: 0 12px !important;
+        box-sizing: border-box !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        vertical-align: middle !important;
+      }
+      #runBtn span {
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .header-snippet-select {
+        height: 28px;
+        min-height: 28px;
+        max-height: 28px;
+        line-height: 26px;
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        color: var(--text);
         font-size: 0.72rem;
+        font-family: var(--font-mono);
+        padding: 0 8px;
+        border-radius: var(--radius);
+        outline: none;
+        cursor: pointer;
+        box-sizing: border-box;
+        max-width: 260px;
+        vertical-align: middle;
+      }
+      .header-snippet-select:focus {
+        border-color: var(--accent);
       }
 
       /* ================= 3-COLUMN WORKSPACE ================= */
@@ -152,6 +238,7 @@
         display: flex;
         min-height: 0;
         overflow: hidden;
+        position: relative;
       }
 
       .ide-panel {
@@ -188,31 +275,129 @@
       /* ================= LEFT COLUMN: DB EXPLORER ================= */
       .panel-explorer {
         width: 250px;
-        min-width: 200px;
+        min-width: 210px;
         max-width: 320px;
         flex-shrink: 0;
-      }
-
-      .explorer-selector-box {
-        padding: 8px 10px;
-        border-bottom: 1px solid var(--card-border);
-        background: var(--bg-surface);
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-
-      .explorer-selector-box label {
-        font-size: 0.68rem;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        font-weight: 600;
       }
 
       .explorer-tree {
         flex: 1;
         overflow-y: auto;
         padding: 4px 0;
+        min-height: 0;
+      }
+
+      .explorer-footer {
+        background: var(--bg-panel);
+        border-top: 1px solid var(--card-border);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+
+      .explorer-footer-db-row {
+        padding: 6px 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .explorer-footer-theme-row {
+        padding: 5px 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        border-top: 1px solid var(--border-subtle);
+      }
+
+      .theme-row-label {
+        font-size: 0.68rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+        font-weight: 500;
+      }
+
+      .theme-segmented-box {
+        display: inline-flex;
+        background: var(--bg-surface);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .theme-segment-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 0.66rem;
+        font-family: var(--font-mono);
+        font-weight: 600;
+        padding: 2px 7px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+      }
+      .theme-segment-btn:hover {
+        color: var(--text);
+        background: var(--bg-hover);
+      }
+      .theme-segment-btn.active {
+        background: var(--accent);
+        color: #ffffff;
+      }
+
+      .select-pill {
+        background: var(--bg-surface);
+        border: 1px solid var(--card-border);
+        color: var(--text);
+        padding: 3px 6px;
+        border-radius: var(--radius);
+        font-size: 0.72rem;
+        font-family: var(--font-mono);
+        outline: none;
+        cursor: pointer;
+        height: 24px;
+        box-sizing: border-box;
+      }
+      .select-pill:focus {
+        border-color: var(--accent);
+      }
+      .select-pill optgroup {
+        font-weight: 700;
+        color: var(--text-muted);
+        background: var(--bg-panel);
+      }
+      .select-pill option {
+        color: var(--text);
+        background: var(--bg-surface);
+      }
+
+      .panel-icon-btn {
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        color: var(--text-secondary);
+        border-radius: var(--radius);
+        width: 22px;
+        height: 22px;
+        min-width: 22px;
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.12s;
+        padding: 0;
+        margin: 0;
+        box-sizing: border-box;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      }
+      .panel-icon-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--bg-hover);
+      }
+      .panel-icon-btn svg {
+        display: block;
       }
 
       .tree-section-title {
@@ -268,7 +453,7 @@
       }
       .table-icon-btn:hover {
         color: var(--accent);
-        background: rgba(37, 99, 235, 0.15);
+        background: var(--bg-active);
         border-color: rgba(37, 99, 235, 0.3);
       }
 
@@ -277,7 +462,7 @@
         cursor: pointer;
       }
       .table-name-link:hover {
-        color: #fff;
+        color: var(--accent);
       }
 
       .badge-count {
@@ -290,6 +475,13 @@
         font-family: var(--font-mono);
       }
 
+      .tree-row-count {
+        font-size: 0.68rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        opacity: 0.75;
+      }
+
       /* ================= MIDDLE COLUMN: EDITOR & RESULTS ================= */
       .panel-middle {
         flex: 1;
@@ -297,6 +489,7 @@
         flex-direction: column;
         min-width: 400px;
         border-right: 1px solid var(--card-border);
+        position: relative;
       }
 
       .editor-container-wrapper {
@@ -309,21 +502,124 @@
 
       .editor-toolbar {
         height: 34px;
-        padding: 0 10px;
+        padding: 0 8px 0 0;
         background: var(--bg-panel);
         border-bottom: 1px solid var(--card-border);
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 8px;
+        overflow: hidden;
       }
 
-      .editor-tab-pill {
-        font-size: 0.74rem;
-        font-family: var(--font-mono);
-        color: var(--text);
+      .editor-tabs-bar {
         display: flex;
         align-items: center;
+        height: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+        flex: 1;
+        min-width: 0;
+      }
+      .editor-tabs-bar::-webkit-scrollbar {
+        display: none;
+      }
+
+      .editor-tabs-list {
+        display: flex;
+        align-items: stretch;
+        height: 100%;
+      }
+
+      .editor-tab-item {
+        display: inline-flex;
+        align-items: center;
         gap: 6px;
+        padding: 0 10px;
+        height: 100%;
+        font-size: 0.72rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+        background: transparent;
+        border-right: 1px solid var(--border-subtle);
+        cursor: pointer;
+        user-select: none;
+        border-bottom: 2px solid transparent;
+        transition: all 0.12s ease;
+        white-space: nowrap;
+        box-sizing: border-box;
+      }
+
+      .editor-tab-item:hover {
+        color: var(--text);
+        background: var(--bg-hover);
+      }
+
+      .editor-tab-item.active {
+        color: var(--text);
+        background: var(--bg-surface);
+        border-bottom-color: var(--accent);
+        font-weight: 600;
+      }
+
+      .editor-tab-lang {
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.65rem;
+      }
+
+      .editor-tab-title {
+        max-width: 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: inline-block;
+        vertical-align: middle;
+      }
+
+      .editor-tab-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border-radius: var(--radius);
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0.6;
+        transition: all 0.12s;
+        padding: 0;
+        margin-left: 2px;
+      }
+      .editor-tab-close:hover {
+        opacity: 1;
+        color: var(--rose);
+        background: rgba(239, 68, 68, 0.15);
+      }
+
+      .editor-tab-add-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 22px;
+        width: 22px;
+        margin: 0 6px;
+        background: transparent;
+        border: 1px dashed var(--card-border);
+        color: var(--text-muted);
+        border-radius: var(--radius);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: all 0.12s;
+      }
+      .editor-tab-add-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--bg-hover);
       }
 
       .snippet-select {
@@ -335,6 +631,7 @@
         padding: 3px 6px;
         border-radius: var(--radius);
         outline: none;
+        max-width: 250px;
       }
 
       #monacoEditor {
@@ -388,7 +685,7 @@
         background: var(--bg-hover);
       }
       .result-tab-btn.active {
-        color: #fff;
+        color: var(--text);
         background: var(--bg-surface);
         border-bottom: 2px solid var(--accent);
       }
@@ -432,7 +729,7 @@
       table.results-table th {
         position: sticky;
         top: 0;
-        background: #151a26;
+        background: var(--bg-panel);
         color: var(--text-secondary);
         padding: 5px 8px;
         border-bottom: 1px solid var(--card-border);
@@ -457,16 +754,16 @@
         transition: background 0.08s;
       }
       table.results-table tbody tr:hover td {
-        background: rgba(37, 99, 235, 0.08);
+        background: var(--bg-hover);
       }
       table.results-table tbody tr.selected td {
-        background: rgba(37, 99, 235, 0.22);
-        color: #fff;
+        background: var(--bg-active);
+        color: var(--text);
       }
 
       .null-badge {
         background: rgba(239, 68, 68, 0.12);
-        color: #f87171;
+        color: var(--rose);
         font-family: var(--font-mono);
         font-size: 0.68rem;
         padding: 1px 4px;
@@ -492,7 +789,7 @@
 
       .structure-header {
         padding: 8px 12px;
-        background: rgba(255, 255, 255, 0.02);
+        background: rgba(0, 0, 0, 0.02);
         border-bottom: 1px solid var(--card-border);
         display: flex;
         justify-content: space-between;
@@ -507,9 +804,9 @@
         font-family: var(--font-mono);
         font-size: 0.78rem;
         line-height: 1.45;
-        color: #cbd5e1;
+        color: var(--text);
         white-space: pre;
-        background: #080b11;
+        background: var(--bg-surface);
         min-height: 100%;
       }
 
@@ -520,9 +817,9 @@
         font-family: var(--font-mono);
         font-size: 0.78rem;
         line-height: 1.45;
-        color: #94a3b8;
+        color: var(--text-secondary);
         white-space: pre-wrap;
-        background: #080b11;
+        background: var(--bg-surface);
         min-height: 100%;
       }
 
@@ -536,121 +833,421 @@
         border-right: none;
       }
 
+      .floating-copy-btn {
+        position: absolute;
+        top: 36px;
+        right: 10px;
+        z-index: 10;
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        color: var(--text-secondary);
+        border-radius: var(--radius);
+        width: 24px;
+        height: 24px;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.12s;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        padding: 0;
+        margin: 0;
+        box-sizing: border-box;
+      }
+      .floating-copy-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--bg-hover);
+      }
+      .floating-copy-btn svg {
+        display: block;
+      }
+
+      .panel-details-footer {
+        height: 34px;
+        padding: 0 8px;
+        background: var(--bg-panel);
+        border-top: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-shrink: 0;
+      }
+
+      .json-toggle-btn {
+        background: transparent;
+        border: 1px solid var(--card-border);
+        color: var(--text-muted);
+        padding: 3px 8px;
+        font-size: 0.68rem;
+        font-family: var(--font-mono);
+        font-weight: 600;
+        border-radius: var(--radius);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: all 0.12s ease;
+      }
+      .json-toggle-btn:hover {
+        color: var(--text);
+        background: var(--bg-hover);
+      }
+      .json-toggle-btn.active {
+        background: var(--accent);
+        color: #ffffff;
+        border-color: var(--accent);
+      }
+
+      .details-footer-meta {
+        font-size: 0.66rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+      }
+
       .details-content {
         flex: 1;
         overflow-y: auto;
-        padding: 10px;
+        padding: 0;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        background: var(--bg-surface);
       }
 
       .details-empty-state {
         text-align: center;
         color: var(--text-muted);
-        font-size: 0.78rem;
+        font-size: 0.76rem;
         margin-top: 40px;
-        padding: 0 16px;
+        padding: 0 20px;
         line-height: 1.5;
       }
 
-      .row-card {
+      .details-sub-header {
+        padding: 5px 10px;
         background: var(--bg-panel);
-        border: 1px solid var(--card-border);
-        border-radius: var(--radius);
-        overflow: hidden;
-      }
-
-      .row-card-header {
-        padding: 6px 10px;
-        background: rgba(255, 255, 255, 0.02);
-        border-bottom: 1px solid var(--card-border);
-        font-size: 0.72rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        border-bottom: 1px solid var(--border-subtle);
+        font-size: 0.68rem;
+        font-family: var(--font-mono);
         color: var(--text-secondary);
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-shrink: 0;
       }
 
       .fields-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 0.78rem;
+        font-size: 0.76rem;
+        table-layout: fixed;
       }
 
       .fields-table tr {
         border-bottom: 1px solid var(--border-subtle);
       }
-      .fields-table tr:last-child {
-        border-bottom: none;
+      .fields-table tr:hover {
+        background: var(--bg-hover);
       }
 
       .fields-table td {
-        padding: 6px 8px;
-        vertical-align: top;
+        padding: 5px 10px;
+        vertical-align: middle;
       }
 
       .field-key {
         color: var(--text-secondary);
         font-family: var(--font-mono);
         font-size: 0.72rem;
-        width: 35%;
-        word-break: break-all;
+        width: 44%;
+        font-weight: 500;
+        vertical-align: middle;
+        overflow: hidden;
+      }
+
+      .col-type-tag {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--font-mono);
+        font-size: 0.58rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        background: var(--bg-panel);
+        border: 1px solid var(--border-subtle);
+        border-radius: 3px;
+        padding: 1px 3px;
+        min-width: 22px;
+        height: 15px;
+        line-height: 1;
+        margin-right: 6px;
+        flex-shrink: 0;
+        cursor: help;
+        user-select: none;
+      }
+
+      .field-key-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: inline-block;
+        vertical-align: middle;
       }
 
       .field-val {
         color: var(--text);
         font-family: var(--font-mono);
-        font-size: 0.75rem;
+        font-size: 0.74rem;
+        vertical-align: middle;
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .field-val span {
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        vertical-align: middle;
+      }
+
+      .row-json-view {
+        margin: 0;
+        padding: 10px 38px 10px 10px;
+        font-family: var(--font-mono);
+        font-size: 0.74rem;
+        color: var(--text);
+        background: transparent;
+        overflow: auto;
+        line-height: 1.45;
+        white-space: pre-wrap;
         word-break: break-all;
+        flex: 1;
       }
 
-      .col-type-pill {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        color: var(--text-muted);
-        background: rgba(255, 255, 255, 0.04);
-        padding: 1px 4px;
-        border-radius: var(--radius);
-      }
-      .col-pk-pill {
-        background: rgba(245, 158, 11, 0.15);
-        color: #fbbf24;
-        border: 1px solid rgba(245, 158, 11, 0.3);
-        font-size: 0.65rem;
-        padding: 1px 4px;
-        border-radius: var(--radius);
-        font-family: var(--font-mono);
-        font-weight: 600;
+      /* ================= MODAL: CREATE DATABASE ================= */
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: var(--modal-backdrop);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
       }
 
-      .json-viewer-box {
-        background: #080b11;
+      .modal-card {
+        background: var(--bg-surface);
         border: 1px solid var(--card-border);
         border-radius: var(--radius);
-        padding: 8px;
+        width: 480px;
+        max-width: 90vw;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.2);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .modal-header {
+        padding: 12px 16px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--text);
+      }
+
+      .modal-close-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 1.1rem;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .modal-close-btn:hover {
+        color: var(--text);
+      }
+
+      .modal-body {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .form-group label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--text-secondary);
+      }
+
+      .modal-input {
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        color: var(--text);
+        padding: 6px 10px;
+        border-radius: var(--radius);
+        font-size: 0.8rem;
         font-family: var(--font-mono);
-        font-size: 0.72rem;
-        color: #38bdf8;
-        overflow-x: auto;
-        white-space: pre-wrap;
-        max-height: 250px;
+        outline: none;
+      }
+      .modal-input:focus {
+        border-color: var(--accent);
+      }
+
+      .modal-segmented-vfs {
+        display: flex;
+        gap: 8px;
+      }
+
+      .vfs-radio-label {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        cursor: pointer;
+        font-size: 0.75rem;
+      }
+      .vfs-radio-label input {
+        accent-color: var(--accent);
+      }
+
+      .template-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .template-option-label {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 8px 10px;
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        cursor: pointer;
+        transition: border-color 0.15s;
+      }
+      .template-option-label:hover {
+        border-color: var(--accent);
+      }
+      .template-option-label input {
+        margin-top: 3px;
+        accent-color: var(--accent);
+      }
+
+      .template-info {
+        display: flex;
+        flex-direction: column;
+      }
+      .template-info strong {
+        font-size: 0.78rem;
+        color: var(--text);
+      }
+      .template-info span {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+      }
+
+      .modal-footer {
+        padding: 12px 16px;
+        background: var(--bg-panel);
+        border-top: 1px solid var(--card-border);
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      /* ================= CENTER PROGRESS OVERLAY ================= */
+      .progress-overlay {
+        position: absolute;
+        inset: 0;
+        background: var(--progress-overlay);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+
+      .progress-card {
+        background: var(--bg-surface);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        padding: 20px;
+        width: 360px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.15);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .progress-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--text);
+      }
+
+      .progress-bar-track {
+        background: var(--bg-panel);
+        height: 6px;
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .progress-bar-fill {
+        background: linear-gradient(90deg, #2563eb, #38bdf8);
+        height: 100%;
+        width: 0%;
+        transition: width 0.08s ease;
+      }
+
+      .progress-status-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
       }
 
       .toast-msg {
         position: fixed;
         bottom: 16px;
         right: 16px;
-        background: #1e293b;
-        color: #38bdf8;
+        background: var(--bg-panel);
+        color: var(--text);
         border: 1px solid var(--card-border);
         padding: 6px 12px;
         border-radius: var(--radius);
         font-size: 0.76rem;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         opacity: 0;
         transform: translateY(10px);
         transition: all 0.15s ease;
@@ -670,11 +1267,34 @@
         <!-- Official WebDB Logo -->
         <svg class="logo-img" viewBox="0 0 100 100" fill="none">
           <rect width="100" height="100" rx="14" fill="url(#logoGrad)" />
-          <path d="M25 35L50 20L75 35L50 50L25 35Z" fill="#ffffff" fill-opacity="0.9" />
-          <path d="M25 50L50 65L75 50" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="M25 65L50 80L75 65" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+          <path
+            d="M25 35L50 20L75 35L50 50L25 35Z"
+            fill="#ffffff"
+            fill-opacity="0.9"
+          />
+          <path
+            d="M25 50L50 65L75 50"
+            stroke="#ffffff"
+            stroke-width="6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M25 65L50 80L75 65"
+            stroke="#ffffff"
+            stroke-width="6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
           <defs>
-            <linearGradient id="logoGrad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+            <linearGradient
+              id="logoGrad"
+              x1="0"
+              y1="0"
+              x2="100"
+              y2="100"
+              gradientUnits="userSpaceOnUse"
+            >
               <stop stop-color="#3B82F6" />
               <stop offset="1" stop-color="#8B5CF6" />
             </linearGradient>
@@ -682,25 +1302,57 @@
         </svg>
         <div class="brand-title">
           <h1>WebDB Studio</h1>
-          <span>SQL-less Relational Engine</span>
+          <span>Relational Database IDE</span>
         </div>
       </div>
       <div class="header-actions">
-        <select id="storageSelect" class="select-pill">
-          <option value="memory">STORAGE: IN-MEMORY VFS</option>
-          <option value="idb">STORAGE: INDEXEDDB (PERSISTENT)</option>
+        <select
+          id="querySnippetSelect"
+          class="header-snippet-select"
+          title="Insert Code Snippet"
+        >
+          <option value="">-- CODE SNIPPETS --</option>
+          <option value="topRated">
+            Top Rated Products (Rating &gt;= 4.5)
+          </option>
+          <option value="udfRegex">UDF: Regex Pattern Match</option>
+          <option value="udfDate">
+            UDF: Date Operations (Days Ago &amp; Format)
+          </option>
+          <option value="udfMargin">UDF: Profit Margin Calculation</option>
+          <option value="lowStock">Low Stock Alert (&lt; 15 units)</option>
+          <option value="deliveredOrders">
+            High-Value Delivered Orders (&gt; $200)
+          </option>
+          <option value="vipCustomers">
+            VIP Customers (Spent &gt; $1,000)
+          </option>
+          <option value="explainBytecode">
+            Inspect VDBE Bytecode (EXPLAIN)
+          </option>
         </select>
-        <select id="seedPresetSelect" class="select-pill" title="Choose Seed Dataset">
-          <option value="store_standard">SEED: E-COMMERCE (1,500 ROWS)</option>
-          <option value="store_large">SEED: LARGE STORE (10,000 ROWS)</option>
-          <option value="store_real_api">SEED: FETCH REAL PRODUCTS (DUMMYJSON)</option>
-          <option value="store_small">SEED: QUICK TEST (150 ROWS)</option>
-        </select>
-        <button id="seedBtn" class="btn btn-secondary btn-sm" title="Re-create and seed database">
-          RESET &amp; SEED
+        <button
+          id="clearEditorBtn"
+          class="btn btn-secondary"
+          title="Clear Active Editor"
+        >
+          CLEAR
         </button>
-        <button id="runBtn" class="btn btn-sm" title="Execute Query (Cmd+Enter / Ctrl+Enter)">
-          RUN <span style="font-size: 0.68rem; opacity: 0.8; margin-left: 4px; font-family: var(--font-mono);">⌘↵</span>
+        <button
+          id="runBtn"
+          class="btn"
+          title="Execute Query (Cmd+Enter / Ctrl+Enter)"
+        >
+          RUN
+          <span
+            style="
+              font-size: 0.68rem;
+              opacity: 0.8;
+              margin-left: 4px;
+              font-family: var(--font-mono);
+            "
+            >⌘↵</span
+          >
         </button>
       </div>
     </header>
@@ -709,28 +1361,94 @@
     <div class="ide-workspace">
       <!-- 1. LEFT COLUMN: DB EXPLORER -->
       <div class="ide-panel panel-explorer">
-        <div class="panel-header">
-          <span class="panel-title">EXPLORER</span>
-          <button id="refreshSchemaBtn" class="btn btn-secondary btn-sm" style="padding: 1px 6px;" title="Refresh Schema">
-            REFRESH
-          </button>
-        </div>
-
-        <div class="explorer-selector-box">
-          <label>DATABASE</label>
-          <select id="dbSelect" class="select-pill" style="width: 100%;">
-            <option value="ecommerce_db">ecommerce_db</option>
-          </select>
+        <div class="tree-section-title">
+          <span>TABLES</span>
+          <div style="display: flex; align-items: center; gap: 6px">
+            <span id="tableCountBadge" class="badge-count">0</span>
+            <button
+              id="refreshSchemaBtn"
+              class="panel-icon-btn"
+              title="Refresh Tables"
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path
+                  d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div class="explorer-tree">
-          <div class="tree-section-title">
-            <span>TABLES</span>
-            <span id="tableCountBadge" class="badge-count">0</span>
-          </div>
           <div id="tablesTreeContainer">
-            <div style="padding: 10px; font-size: 0.74rem; color: var(--text-muted); text-align: center;">
+            <div
+              style="
+                padding: 10px;
+                font-size: 0.74rem;
+                color: var(--text-muted);
+                text-align: center;
+              "
+            >
               Loading tables...
+            </div>
+          </div>
+        </div>
+
+        <!-- Explorer Bottom Section: Combined Database Selector, New DB, Theme Row -->
+        <div class="explorer-footer">
+          <div class="explorer-footer-db-row">
+            <select
+              id="dbSelect"
+              class="select-pill"
+              style="flex: 1; min-width: 0"
+              title="Select Database"
+            >
+              <!-- Populated dynamically with optgroups for MEMORY and INDEXEDDB -->
+            </select>
+            <button
+              id="openNewDbModalBtn"
+              class="btn btn-secondary btn-sm"
+              title="Create New Database"
+              style="padding: 0 8px; height: 24px"
+            >
+              + NEW
+            </button>
+          </div>
+          <div class="explorer-footer-theme-row">
+            <span class="theme-row-label">Theme:</span>
+            <div class="theme-segmented-box" id="themeSegmentedBox">
+              <button
+                type="button"
+                class="theme-segment-btn"
+                data-theme-val="auto"
+                title="System Theme"
+              >
+                auto
+              </button>
+              <button
+                type="button"
+                class="theme-segment-btn"
+                data-theme-val="dark"
+                title="Dark Theme"
+              >
+                dark
+              </button>
+              <button
+                type="button"
+                class="theme-segment-btn"
+                data-theme-val="light"
+                title="Light Theme"
+              >
+                light
+              </button>
             </div>
           </div>
         </div>
@@ -741,22 +1459,26 @@
         <!-- Top: JS Query Editor -->
         <div class="editor-container-wrapper">
           <div class="editor-toolbar">
-            <div class="editor-tab-pill">
-              <span style="color: #60a5fa; font-weight: 700;">JS</span> query.js
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <select id="querySnippetSelect" class="snippet-select">
-                <option value="">-- CODE SNIPPETS --</option>
-                <option value="topRated">Top Rated Products (Rating &gt;= 4.5)</option>
-                <option value="lowStock">Low Stock Alert (&lt; 15 units)</option>
-                <option value="deliveredOrders">High-Value Delivered Orders (&gt; $200)</option>
-                <option value="vipCustomers">VIP Customers (Spent &gt; $1,000)</option>
-                <option value="verifiedReviews">5-Star Verified Reviews</option>
-                <option value="electronicsFilter">Electronics under $150</option>
-                <option value="insertProduct">Insert Product &amp; Query</option>
-                <option value="explainBytecode">Inspect VDBE Bytecode (EXPLAIN)</option>
-              </select>
-              <button id="clearEditorBtn" class="btn btn-secondary btn-sm" title="Clear Editor">CLEAR</button>
+            <div class="editor-tabs-bar" id="editorTabsBar">
+              <div class="editor-tabs-list" id="editorTabsList">
+                <!-- Dynamically rendered tabs -->
+              </div>
+              <button
+                id="addEditorTabBtn"
+                class="editor-tab-add-btn"
+                title="Open New Editor Tab"
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                >
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
             </div>
           </div>
           <div id="monacoEditor"></div>
@@ -769,19 +1491,34 @@
               <button id="tabResultsBtn" class="result-tab-btn active">
                 RESULTS <span id="resCountBadge" class="badge-count">0</span>
               </button>
-              <button id="tabStructureBtn" class="result-tab-btn" style="display: none;">
+              <button
+                id="tabStructureBtn"
+                class="result-tab-btn"
+                style="display: none"
+              >
                 STRUCTURE: <span id="structTableName">NONE</span>
               </button>
               <button id="tabBytecodeBtn" class="result-tab-btn">
                 VDBE BYTECODE
               </button>
               <button id="tabConsoleBtn" class="result-tab-btn">
-                CONSOLE <span id="logCountBadge" class="badge-count" style="display: none;">0</span>
+                CONSOLE
+                <span
+                  id="logCountBadge"
+                  class="badge-count"
+                  style="display: none"
+                  >0</span
+                >
               </button>
             </div>
             <div class="results-meta">
               <span id="timingBadge" class="meta-pill">0.00 ms</span>
-              <span id="statusBadge" class="meta-pill" style="color: #10b981;">Ready</span>
+              <span
+                id="statusBadge"
+                class="meta-pill"
+                style="color: var(--emerald)"
+                >Ready</span
+              >
             </div>
           </div>
 
@@ -790,11 +1527,19 @@
             <div id="tableView" class="table-view">
               <table id="resultsTable" class="results-table">
                 <thead id="resultsThead">
-                  <tr><th>Status</th></tr>
+                  <tr>
+                    <th>Status</th>
+                  </tr>
                 </thead>
                 <tbody id="resultsTbody">
                   <tr>
-                    <td style="text-align: center; color: var(--text-muted); padding: 24px;">
+                    <td
+                      style="
+                        text-align: center;
+                        color: var(--text-muted);
+                        padding: 24px;
+                      "
+                    >
                       Hit "RUN" or press ⌘↵ to execute query
                     </td>
                   </tr>
@@ -808,14 +1553,23 @@
                 <div class="structure-header">
                   <div>
                     <strong id="structTitle">products</strong>
-                    <span id="structMeta" style="color: var(--text-muted); margin-left: 8px; font-family: var(--font-mono);"></span>
+                    <span
+                      id="structMeta"
+                      style="
+                        color: var(--text-muted);
+                        margin-left: 8px;
+                        font-family: var(--font-mono);
+                      "
+                    ></span>
                   </div>
-                  <button id="queryStructBtn" class="btn btn-sm">QUERY ROWS</button>
+                  <button id="queryStructBtn" class="btn btn-sm">
+                    QUERY ROWS
+                  </button>
                 </div>
                 <table class="results-table">
                   <thead>
                     <tr>
-                      <th style="width: 40px;">#</th>
+                      <th style="width: 40px">#</th>
                       <th>Column Name</th>
                       <th>Data Type</th>
                       <th>Constraints</th>
@@ -828,7 +1582,8 @@
 
             <!-- Bytecode Disassembly -->
             <div id="bytecodeView" class="bytecode-view">
-              Execute a query to inspect compiled SQLite-style VDBE instructions...
+              Execute a query to inspect compiled SQLite-style VDBE
+              instructions...
             </div>
 
             <!-- Console Logs -->
@@ -837,21 +1592,163 @@
             </div>
           </div>
         </div>
+
+        <!-- Overlayed Progress Bar for Template Seeding -->
+        <div
+          id="seedProgressOverlay"
+          class="progress-overlay"
+          style="display: none"
+        >
+          <div class="progress-card">
+            <div class="progress-title-row">
+              <span id="progressTitle">Seeding Template...</span>
+              <span id="progressPercentBadge" class="badge-count">0%</span>
+            </div>
+            <div class="progress-bar-track">
+              <div id="progressBarFill" class="progress-bar-fill"></div>
+            </div>
+            <div class="progress-status-row">
+              <span id="progressStepText">Initializing tables...</span>
+              <span id="progressCountText">0 / 0</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- 3. RIGHT COLUMN: ROW DETAILS -->
-      <div class="ide-panel panel-details">
-        <div class="panel-header">
-          <span class="panel-title">ROW DETAILS</span>
-          <button id="copyJsonBtn" class="btn btn-secondary btn-sm" title="Copy selected row as JSON">
-            COPY JSON
-          </button>
-        </div>
+      <div class="ide-panel panel-details" style="position: relative">
+        <!-- Floating Copy Icon Button on Top Right (Only in JSON View, icon-only) -->
+        <button id="copyJsonBtn" class="floating-copy-btn" title="Copy JSON">
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            ></path>
+          </svg>
+        </button>
 
         <div id="detailsContent" class="details-content">
           <div class="details-empty-state">
-            Select any row from the query results table to inspect its fields, types, and raw JSON.
+            Select any row from the query results table to inspect its fields,
+            types, and raw JSON.
           </div>
+        </div>
+
+        <!-- Fixed Bottom Bar with JSON Icon Toggle -->
+        <div class="panel-details-footer">
+          <button
+            id="rowJsonToggleBtn"
+            class="json-toggle-btn"
+            title="Toggle JSON / Fields View"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"
+              ></path>
+              <path
+                d="M16 3h1a2 2 0 0 1 2 2v5c0 1.1.9 2 2 2a2 2 0 0 1-2 2v5a2 2 0 0 1-2 2h-1"
+              ></path>
+            </svg>
+            <span>JSON</span>
+          </button>
+          <span id="rowDetailsMeta" class="details-footer-meta"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Create New Database -->
+    <div id="newDbModal" class="modal-backdrop" style="display: none">
+      <div class="modal-card">
+        <div class="modal-header">
+          <span>CREATE NEW DATABASE</span>
+          <button id="closeModalBtn" class="modal-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>DATABASE NAME</label>
+            <input
+              id="modalDbNameInput"
+              type="text"
+              class="modal-input"
+              value="analytics_db"
+              placeholder="e.g. store_db"
+            />
+          </div>
+
+          <div class="form-group">
+            <label>STORAGE ENGINE (VFS)</label>
+            <div class="modal-segmented-vfs">
+              <label class="vfs-radio-label">
+                <input type="radio" name="modalVfs" value="memory" checked />
+                <span>Memory (Fast, Ephemeral)</span>
+              </label>
+              <label class="vfs-radio-label">
+                <input type="radio" name="modalVfs" value="idb" />
+                <span>IndexedDB (Persistent)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>INITIAL DATA TEMPLATE</label>
+            <div class="template-list">
+              <label class="template-option-label">
+                <input type="radio" name="modalTemplate" value="empty" />
+                <div class="template-info">
+                  <strong>Empty Database</strong>
+                  <span>Create a blank database with zero tables</span>
+                </div>
+              </label>
+              <label class="template-option-label">
+                <input
+                  type="radio"
+                  name="modalTemplate"
+                  value="store_standard"
+                  checked
+                />
+                <div class="template-info">
+                  <strong>E-Commerce Store (1,500 rows)</strong>
+                  <span>Categories, Products, Customers, Orders, Reviews</span>
+                </div>
+              </label>
+              <label class="template-option-label">
+                <input type="radio" name="modalTemplate" value="store_large" />
+                <div class="template-info">
+                  <strong>Large Scale Store (10,000 rows)</strong>
+                  <span>Benchmark scale store dataset</span>
+                </div>
+              </label>
+              <label class="template-option-label">
+                <input
+                  type="radio"
+                  name="modalTemplate"
+                  value="store_real_api"
+                />
+                <div class="template-info">
+                  <strong>Real Products (DummyJSON API)</strong>
+                  <span>Fetch real-world products over HTTP</span>
+                </div>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancelModalBtn" class="btn btn-secondary">CANCEL</button>
+          <button id="confirmCreateDbBtn" class="btn">CREATE DATABASE</button>
         </div>
       </div>
     </div>
@@ -869,21 +1766,159 @@
       // Global State
       let db = null;
       let editor = null;
+      let themePreference = "light"; // "auto" | "dark" | "light"
+      let currentTheme = "light"; // resolved "light" | "dark"
+      let activeStorage = "memory"; // "memory" | "idb"
+      let activeDbName = "ecommerce_db";
       let currentResultRows = [];
       let selectedRowIndex = -1;
       let lastExplainOutput = null;
       let capturedLogs = [];
       let cachedTablesMeta = [];
+      let activeQueryTableName = null;
 
-      // E-Commerce Curated Vocabulary for Realistic Deterministic Generation
+      // Multi-tab Editor State
+      let editorTabs = [
+        {
+          id: "tab-1",
+          title: "Query 1",
+          modelUri: null,
+          model: null,
+        },
+      ];
+      let activeTabId = "tab-1";
+      let tabCounter = 1;
+
+      // Row Inspector Mode ("fields" | "json")
+      let rowInspectorMode =
+        localStorage.getItem("webdb_row_inspector_mode") || "fields";
+
+      // Curated Vocabulary for E-Commerce Data Generation
       const VOCAB = {
-        brands: ["Apple", "Sony", "Samsung", "Logitech", "Dell", "Bose", "Anker", "Corsair", "Keychron", "ASUS", "Sennheiser", "LG", "Razer", "Microsoft", "Canon", "Nikon", "SteelSeries", "Belkin", "Sonos", "HyperX"],
-        adjectives: ["Pro", "Ultra", "Wireless", "Mechanical", "Ergonomic", "Studio", "Elite", "Compact", "Titanium", "Carbon", "Smart", "Precision", "Max", "Modular", "RGB", "Gaming", "Acoustic", "Speed", "Prime"],
-        nouns: ["Headphones", "Mechanical Keyboard", "Wireless Mouse", "4K Monitor", "Webcam", "USB-C Microphone", "NVMe SSD", "Docking Station", "Noise-Cancelling Earbuds", "Gaming Controller", "Smart Speaker", "Wi-Fi Router", "Laptop Stand", "Power Bank"],
-        firstNames: ["James", "Emma", "Liam", "Olivia", "Noah", "Ava", "William", "Sophia", "Lucas", "Isabella", "Benjamin", "Mia", "Henry", "Evelyn", "Alexander", "Harper", "Mason", "Ella", "Ethan", "Charlotte"],
-        lastNames: ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Taylor", "Thomas", "Moore"],
-        countries: ["United States", "Germany", "United Kingdom", "Japan", "Canada", "France", "Australia", "Netherlands", "Sweden", "Singapore", "Switzerland", "Norway"],
-        orderStatuses: ["delivered", "delivered", "delivered", "shipped", "processing", "cancelled", "refunded"],
+        brands: [
+          "Apple",
+          "Sony",
+          "Samsung",
+          "Logitech",
+          "Dell",
+          "Bose",
+          "Anker",
+          "Corsair",
+          "Keychron",
+          "ASUS",
+          "Sennheiser",
+          "LG",
+          "Razer",
+          "Microsoft",
+          "Canon",
+          "Nikon",
+          "SteelSeries",
+          "Belkin",
+          "Sonos",
+          "HyperX",
+        ],
+        adjectives: [
+          "Pro",
+          "Ultra",
+          "Wireless",
+          "Mechanical",
+          "Ergonomic",
+          "Studio",
+          "Elite",
+          "Compact",
+          "Titanium",
+          "Carbon",
+          "Smart",
+          "Precision",
+          "Max",
+          "Modular",
+          "RGB",
+          "Gaming",
+          "Acoustic",
+          "Speed",
+          "Prime",
+        ],
+        nouns: [
+          "Headphones",
+          "Mechanical Keyboard",
+          "Wireless Mouse",
+          "4K Monitor",
+          "Webcam",
+          "USB-C Microphone",
+          "NVMe SSD",
+          "Docking Station",
+          "Noise-Cancelling Earbuds",
+          "Gaming Controller",
+          "Smart Speaker",
+          "Wi-Fi Router",
+          "Laptop Stand",
+          "Power Bank",
+        ],
+        firstNames: [
+          "James",
+          "Emma",
+          "Liam",
+          "Olivia",
+          "Noah",
+          "Ava",
+          "William",
+          "Sophia",
+          "Lucas",
+          "Isabella",
+          "Benjamin",
+          "Mia",
+          "Henry",
+          "Evelyn",
+          "Alexander",
+          "Harper",
+          "Mason",
+          "Ella",
+          "Ethan",
+          "Charlotte",
+        ],
+        lastNames: [
+          "Smith",
+          "Johnson",
+          "Williams",
+          "Brown",
+          "Jones",
+          "Garcia",
+          "Miller",
+          "Davis",
+          "Rodriguez",
+          "Martinez",
+          "Hernandez",
+          "Lopez",
+          "Gonzalez",
+          "Wilson",
+          "Anderson",
+          "Taylor",
+          "Thomas",
+          "Moore",
+        ],
+        countries: [
+          "United States",
+          "Germany",
+          "United Kingdom",
+          "Japan",
+          "Canada",
+          "France",
+          "Australia",
+          "Netherlands",
+          "Sweden",
+          "Singapore",
+          "Switzerland",
+          "Norway",
+        ],
+        orderStatuses: [
+          "delivered",
+          "delivered",
+          "delivered",
+          "shipped",
+          "processing",
+          "cancelled",
+          "refunded",
+        ],
         customerTiers: ["platinum", "gold", "silver", "standard"],
         reviewHeadlines: [
           "Incredible build quality and sound",
@@ -894,19 +1929,19 @@
           "Decent, but software needs work",
           "Highly recommended for professionals",
           "Fast shipping and flawless design",
-          "Battery life is outstanding"
+          "Battery life is outstanding",
         ],
       };
 
-      // Snippet Definitions
+      // Snippet Definitions (Including UDF Regex & Date Operations)
       const SNIPPETS = {
         topRated: `// Query top 10 products with rating >= 4.5 sorted by rating\nreturn db.from("products")\n  .where("rating", ">=", 4.5)\n  .orderBy("rating", "desc")\n  .limit(10);`,
+        udfRegex: `// 1. Register custom regex pattern matching User-Defined Function (UDF)\ndb.registerFunction("regex_match", (val, pattern) => {\n  if (!val) return false;\n  return new RegExp(pattern, "i").test(val);\n});\n\n// 2. Query products whose brand starts with Sony, Apple, or Logitech\nreturn db.from("products")\n  .select(["id", "title", "brand", "price", "rating"])\n  .where("regex_match(title, '^(Sony|Apple|Logitech)')")\n  .orderBy("price", "desc")\n  .limit(10);`,
+        udfDate: `// 1. Register date parsing and delta calculations (UDF)\ndb.registerFunction("format_date", (dateStr) => {\n  if (!dateStr) return null;\n  return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });\n});\n\ndb.registerFunction("days_ago", (dateStr) => {\n  if (!dateStr) return null;\n  const diffMs = Date.now() - new Date(dateStr).getTime();\n  return Math.floor(diffMs / (1000 * 60 * 60 * 24));\n});\n\n// 2. Query recent orders placed in the last 30 days\nreturn db.from("orders")\n  .select([\n    "id",\n    "customer_id",\n    "format_date(order_date) as formatted_date",\n    "days_ago(order_date) as days_since_order",\n    "total_amount",\n    "status"\n  ])\n  .where("days_ago(order_date)", "<=", 30)\n  .orderBy("total_amount", "desc")\n  .limit(10);`,
+        udfMargin: `// 1. Register dynamic profit margin calculation UDF\ndb.registerFunction("profit_margin", (price, cost) => {\n  if (!price || !cost) return 0;\n  return Math.round(((price - cost) / price) * 100);\n});\n\n// 2. Query items with >= 55% profit margin\nreturn db.from("products")\n  .select(["id", "title", "price", "cost", "profit_margin(price, cost) as margin_pct"])\n  .where("profit_margin(price, cost)", ">=", 55)\n  .orderBy("price", "desc")\n  .limit(10);`,
         lowStock: `// Inventory Alert: Find items running low on stock (< 15 units)\nreturn db.from("products")\n  .where("stock", "<", 15)\n  .orderBy("stock", "asc")\n  .limit(10);`,
         deliveredOrders: `// High-value delivered orders over $200\nreturn db.from("orders")\n  .where("status", "=", "delivered")\n  .where("total_amount", ">", 200)\n  .orderBy("total_amount", "desc")\n  .limit(10);`,
         vipCustomers: `// VIP Customers who spent over $1,000\nreturn db.from("customers")\n  .where("lifetime_spent", ">", 1000)\n  .orderBy("lifetime_spent", "desc")\n  .limit(10);`,
-        verifiedReviews: `// 5-Star Reviews from verified buyers\nreturn db.from("reviews")\n  .where("rating", "=", 5)\n  .where("verified_purchase", "=", 1)\n  .limit(10);`,
-        electronicsFilter: `// Category 1 (Electronics) under $150 sorted by price\nreturn db.from("products")\n  .where("category_id", "=", 1)\n  .where("price", "<", 150)\n  .orderBy("price", "asc")\n  .limit(10);`,
-        insertProduct: `// Insert a flagship product into the catalog and inspect\nawait db.insert("products", {\n  id: 99999,\n  category_id: 1,\n  title: "WebDB Ultra Studio Monitor",\n  brand: "WebDB Labs",\n  price: 349.99,\n  cost: 160.00,\n  stock: 45,\n  rating: 4.98\n});\n\nreturn db.from("products")\n  .where("brand", "=", "WebDB Labs");`,
         explainBytecode: `// Inspect compiled SQLite-style VDBE instruction stream\nconst q = db.from("products")\n  .where("price", ">=", 99)\n  .where("rating", ">=", 4.0)\n  .orderBy("price", "desc")\n  .limit(10);\n\nconst explain = await q.explain();\nconsole.log("VDBE Instruction Count:", explain.instructions.length);\nconsole.log("Compiled Bytecode Size:", explain.bytecodeSize, "bytes");\n\nreturn q;`,
       };
 
@@ -918,16 +1953,79 @@
         </svg>
       `;
 
+      // Window error filter for harmless Monaco internal worker race conditions
+      window.addEventListener("unhandledrejection", (event) => {
+        if (
+          event.reason &&
+          String(event.reason.message || event.reason).includes(
+            "inmemory://model",
+          )
+        ) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener("error", (event) => {
+        if (
+          event.message &&
+          String(event.message).includes("inmemory://model")
+        ) {
+          event.preventDefault();
+        }
+      });
+
+      // Theme Manager (Auto / Dark / Light)
+      function resolveSystemTheme() {
+        return window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+      }
+
+      function applyThemePreference(pref) {
+        themePreference = pref;
+        try {
+          localStorage.setItem("webdb_theme_preference", pref);
+        } catch (e) {}
+
+        const resolvedTheme = pref === "auto" ? resolveSystemTheme() : pref;
+        currentTheme = resolvedTheme;
+        document.documentElement.setAttribute("data-theme", resolvedTheme);
+
+        if (window.monaco && editor) {
+          monaco.editor.setTheme(resolvedTheme === "light" ? "vs" : "vs-dark");
+        }
+
+        document.querySelectorAll(".theme-segment-btn").forEach((btn) => {
+          btn.classList.toggle(
+            "active",
+            btn.getAttribute("data-theme-val") === pref,
+          );
+        });
+      }
+
+      if (window.matchMedia) {
+        window
+          .matchMedia("(prefers-color-scheme: dark)")
+          .addEventListener("change", () => {
+            if (themePreference === "auto") {
+              applyThemePreference("auto");
+            }
+          });
+      }
+
       // Initialize Monaco Editor with Custom Completion Provider
       function initMonaco() {
         require.config({
-          paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs" },
+          paths: {
+            vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs",
+          },
         });
 
-        require(["vs/editor/editor.main"], function () {
+        require(["vs/editor/editor.main"], async function () {
           monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-            noSemanticValidation: false,
-            noSyntaxValidation: false,
+            noSemanticValidation: true,
+            noSyntaxValidation: true,
+            noSuggestionDiagnostics: true,
           });
 
           monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
@@ -939,46 +2037,110 @@
 
           // Intelligent WebDB Autocomplete Provider
           monaco.languages.registerCompletionItemProvider("javascript", {
-            triggerCharacters: [".", '"', "'", "("],
+            triggerCharacters: [".", '"', "'", "(", " "],
             provideCompletionItems: (model, position) => {
               const lineContent = model.getLineContent(position.lineNumber);
-              const textUntilPosition = lineContent.substring(0, position.column - 1);
+              const textUntilPosition = lineContent.substring(
+                0,
+                position.column - 1,
+              );
               const suggestions = [];
 
-              // 1. After 'db.'
+              // 1. After 'db.' -> All WebDB methods
               if (/\bdb\.\s*$/.test(textUntilPosition)) {
                 suggestions.push(
                   {
                     label: "from",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'from("${1:tableName}")',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-                    documentation: "Start a query on a database table.\nExample: db.from('products')",
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Start a query on a database table.\nExample: db.from('products')",
+                  },
+                  {
+                    label: "registerFunction",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText:
+                      'registerFunction("${1:fnName}", (${2:arg}) => {\n  ${3:return arg;}\n})',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Register a custom JavaScript User-Defined Function (UDF) callable in WebDB queries.",
                   },
                   {
                     label: "insert",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'insert("${1:tableName}", ${2:rowObject})',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-                    documentation: "Insert a new row into the table.",
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation: "Insert a new row into the specified table.",
+                  },
+                  {
+                    label: "createTable",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText:
+                      'createTable("${1:tableName}", [\n  { name: "${2:id}", type: "INT32", flags: { primaryKey: true, notNull: true } },\n  { name: "${3:title}", type: "TEXT", flags: { notNull: true } }\n])',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Create a new table with typed column definitions and constraints.",
                   },
                   {
                     label: "getTable",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'getTable("${1:tableName}")',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-                    documentation: "Retrieve table metadata and column schema.",
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Retrieve table metadata descriptor and column schema.",
                   },
                   {
                     label: "listTables",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: "listTables()",
-                    documentation: "List all active tables in the database.",
-                  }
+                    documentation:
+                      "List all active tables and schemas in the database.",
+                  },
+                  {
+                    label: "explainQuery",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'explainQuery("${1:tableName}", ${2:filters})',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Compile and inspect query execution plan and VDBE bytecode.",
+                  },
+                  {
+                    label: "executeQuery",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText:
+                      'executeQuery("${1:tableName}", ${2:filters}, ${3:options})',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Execute low-level compiled query directly on the VDBE VM.",
+                  },
+                  {
+                    label: "close",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "close()",
+                    documentation:
+                      "Flush all dirty buffer pages and close storage VFS.",
+                  },
                 );
               }
-              // 2. Inside db.from("...")
-              else if (/\bdb\.from\(\s*["']?[a-zA-Z0-9_]*$/.test(textUntilPosition)) {
+              // 2. Inside db.from("...") -> Table names
+              else if (
+                /\bdb\.from\(\s*["']?[a-zA-Z0-9_]*$/.test(textUntilPosition)
+              ) {
                 for (const t of cachedTablesMeta) {
                   suggestions.push({
                     label: `"${t.name}"`,
@@ -988,66 +2150,173 @@
                   });
                 }
               }
-              // 3. Chained methods on QueryBuilder
+              // 3. Inside column argument (e.g. .where("...", .orderBy("...", etc.))
+              else if (
+                /\.(where|whereNull|whereNotNull|orderBy|groupBy|select)\(\s*["']?[a-zA-Z0-9_]*$/.test(
+                  textUntilPosition,
+                )
+              ) {
+                const colNames = new Set([
+                  "id",
+                  "category_id",
+                  "title",
+                  "brand",
+                  "price",
+                  "cost",
+                  "stock",
+                  "rating",
+                  "name",
+                  "department",
+                  "item_count",
+                  "email",
+                  "country",
+                  "tier",
+                  "lifetime_spent",
+                  "customer_id",
+                  "status",
+                  "order_date",
+                  "total_amount",
+                  "tax",
+                  "shipping_cost",
+                  "items_count",
+                  "product_id",
+                  "verified_purchase",
+                  "headline",
+                ]);
+                for (const c of colNames) {
+                  suggestions.push({
+                    label: `"${c}"`,
+                    kind: monaco.languages.CompletionItemKind.Field,
+                    insertText: `"${c}"`,
+                    documentation: `Column field: ${c}`,
+                  });
+                }
+              }
+              // 4. Chained methods on QueryBuilder (after dot)
               else if (/\.\s*$/.test(textUntilPosition)) {
                 suggestions.push(
                   {
                     label: "where",
                     kind: monaco.languages.CompletionItemKind.Method,
-                    insertText: 'where("${1:column}", "${2|=,!=,<,<=,>,>=|}", ${3:value})',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertText:
+                      'where("${1:column}", "${2|=,!=,<,<=,>,>=|}", ${3:value})',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "Filter rows with a comparison operator.",
+                  },
+                  {
+                    label: "having",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText:
+                      'having("${1:column}", "${2|=,!=,<,<=,>,>=|}", ${3:value})',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Filter aggregated rows with a comparison operator.",
                   },
                   {
                     label: "whereNull",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'whereNull("${1:column}")',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "Filter rows where column is NULL.",
                   },
                   {
                     label: "whereNotNull",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'whereNotNull("${1:column}")',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "Filter rows where column is NOT NULL.",
+                  },
+                  {
+                    label: "groupBy",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'groupBy("${1:column}")',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation: "Group by results by column.",
                   },
                   {
                     label: "orderBy",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: 'orderBy("${1:column}", "${2|asc,desc|}")',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-                    documentation: "Order results by column ascending or descending.",
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation:
+                      "Order results by column ascending or descending.",
+                  },
+                  {
+                    label: "groupBy",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'groupBy("${1:column}")',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation: "Group results by one or more columns.",
+                  },
+                  {
+                    label: "select",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'select("${1:column}")',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
+                    documentation: "Project specific columns or expressions.",
                   },
                   {
                     label: "limit",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: "limit(${1:10})",
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "Limit maximum number of rows returned.",
                   },
                   {
                     label: "offset",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: "offset(${1:0})",
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "Skip rows before returning results.",
                   },
                   {
                     label: "explain",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: "explain()",
-                    documentation: "Compile and return VDBE bytecode disassembly.",
+                    documentation:
+                      "Compile and return VDBE bytecode disassembly.",
                   },
                   {
                     label: "toArray",
                     kind: monaco.languages.CompletionItemKind.Method,
                     insertText: "toArray()",
                     documentation: "Execute query and return rows array.",
-                  }
+                  },
+                  {
+                    label: "count",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "count()",
+                    documentation: "Return the count of matching rows.",
+                  },
+                  {
+                    label: "first",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "first()",
+                    documentation: "Return the first matching row or null.",
+                  },
                 );
               }
-              // 4. Global keywords
+              // 5. Global keywords
               else if (!textUntilPosition.includes(".")) {
                 suggestions.push(
                   {
@@ -1059,10 +2328,13 @@
                   {
                     label: "return db.from",
                     kind: monaco.languages.CompletionItemKind.Snippet,
-                    insertText: 'return db.from("${1:products}")\n  .where("${2:price}", ">=", ${3:100})\n  .orderBy("${4:rating}", "desc");',
-                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    insertText:
+                      'return db.from("${1:products}")\n  .where("${2:price}", ">=", ${3:100})\n  .orderBy("${4:rating}", "desc");',
+                    insertTextRules:
+                      monaco.languages.CompletionItemInsertTextRule
+                        .InsertAsSnippet,
                     documentation: "E-Commerce query template.",
-                  }
+                  },
                 );
               }
 
@@ -1070,48 +2342,400 @@
             },
           });
 
-          // Create Monaco Editor
-          editor = monaco.editor.create(document.getElementById("monacoEditor"), {
-            value: SNIPPETS.topRated,
-            language: "javascript",
-            theme: "vs-dark",
-            automaticLayout: true,
-            minimap: { enabled: false },
-            fontSize: 13,
-            fontFamily: '"Fira Code", monospace',
-            lineNumbers: "on",
-            scrollBeyondLastLine: false,
-            tabSize: 2,
-            scrollbar: {
-              verticalScrollbarSize: 6,
-              horizontalScrollbarSize: 6,
-            },
-          });
+          // Load Persisted Tabs from IndexedDB (or localStorage fallback)
+          const savedState = await loadTabsState();
+          editorTabs = [];
 
-          // Shortcut: Cmd+Enter or Ctrl+Enter to execute query
+          if (
+            savedState &&
+            Array.isArray(savedState.tabs) &&
+            savedState.tabs.length > 0
+          ) {
+            tabCounter = savedState.tabCounter || savedState.tabs.length;
+            activeTabId = savedState.activeTabId || savedState.tabs[0].id;
+
+            savedState.tabs.forEach((st) => {
+              const uri = monaco.Uri.parse(`file:///workspace/${st.id}.js`);
+              let model = monaco.editor.getModel(uri);
+              if (!model) {
+                model = monaco.editor.createModel(
+                  st.code !== undefined ? st.code : "",
+                  "javascript",
+                  uri,
+                );
+              } else {
+                model.setValue(st.code !== undefined ? st.code : "");
+              }
+              model.onDidChangeContent(() => debounceSaveTabs());
+
+              editorTabs.push({
+                id: st.id,
+                title: st.title || "Query",
+                modelUri: uri,
+                model: model,
+              });
+            });
+          } else {
+            tabCounter = 1;
+            activeTabId = "tab-1";
+            const initialUri = monaco.Uri.parse("file:///workspace/tab-1.js");
+            let initialModel = monaco.editor.getModel(initialUri);
+            if (!initialModel) {
+              initialModel = monaco.editor.createModel(
+                SNIPPETS.topRated,
+                "javascript",
+                initialUri,
+              );
+            }
+            initialModel.onDidChangeContent(() => debounceSaveTabs());
+
+            editorTabs.push({
+              id: "tab-1",
+              title: "Query 1",
+              modelUri: initialUri,
+              model: initialModel,
+            });
+          }
+
+          let activeTab =
+            editorTabs.find((t) => t.id === activeTabId) || editorTabs[0];
+          activeTabId = activeTab.id;
+
+          editor = monaco.editor.create(
+            document.getElementById("monacoEditor"),
+            {
+              model: activeTab.model,
+              theme: currentTheme === "light" ? "vs" : "vs-dark",
+              automaticLayout: true,
+              minimap: { enabled: false },
+              fontSize: 13,
+              fontFamily: '"Fira Code", monospace',
+              lineNumbers: "on",
+              scrollBeyondLastLine: false,
+              tabSize: 2,
+              scrollbar: {
+                verticalScrollbarSize: 6,
+                horizontalScrollbarSize: 6,
+              },
+            },
+          );
+
           editor.addCommand(
             monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
             () => {
               executeUserCode();
             },
           );
+
+          renderEditorTabs();
+          saveTabsState();
         });
       }
 
-      // Initialize Database Connection
-      async function initDb() {
-        const storage = document.getElementById("storageSelect").value;
+      // ================= INDEXEDDB TABS PERSISTENCE =================
+      function openStudioMetaDB() {
+        return new Promise((resolve) => {
+          if (!window.indexedDB) return resolve(null);
+          try {
+            const req = indexedDB.open("WebDBStudioDB", 1);
+            req.onupgradeneeded = (e) => {
+              const d = e.target.result;
+              if (!d.objectStoreNames.contains("state")) {
+                d.createObjectStore("state");
+              }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(null);
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      }
+
+      let saveTabsTimer = null;
+      function debounceSaveTabs() {
+        if (saveTabsTimer) clearTimeout(saveTabsTimer);
+        saveTabsTimer = setTimeout(() => {
+          saveTabsState();
+        }, 300);
+      }
+
+      async function saveTabsState() {
+        try {
+          const serializedTabs = editorTabs.map((t) => ({
+            id: t.id,
+            title: t.title,
+            code: t.model ? t.model.getValue() : t.code || "",
+          }));
+          const state = {
+            tabs: serializedTabs,
+            activeTabId,
+            tabCounter,
+          };
+
+          try {
+            localStorage.setItem("webdb_tabs_backup", JSON.stringify(state));
+          } catch (e) {}
+
+          const idb = await openStudioMetaDB();
+          if (idb) {
+            const tx = idb.transaction("state", "readwrite");
+            tx.objectStore("state").put(state, "editor_tabs");
+          }
+        } catch (err) {
+          console.warn("Failed to persist tabs to IndexedDB:", err);
+        }
+      }
+
+      async function loadTabsState() {
+        try {
+          const idb = await openStudioMetaDB();
+          if (idb) {
+            const result = await new Promise((resolve) => {
+              try {
+                const tx = idb.transaction("state", "readonly");
+                const req = tx.objectStore("state").get("editor_tabs");
+                req.onsuccess = () => resolve(req.result || null);
+                req.onerror = () => resolve(null);
+              } catch (e) {
+                resolve(null);
+              }
+            });
+            if (
+              result &&
+              Array.isArray(result.tabs) &&
+              result.tabs.length > 0
+            ) {
+              return result;
+            }
+          }
+        } catch (e) {}
+
+        try {
+          const raw = localStorage.getItem("webdb_tabs_backup");
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (
+              parsed &&
+              Array.isArray(parsed.tabs) &&
+              parsed.tabs.length > 0
+            ) {
+              return parsed;
+            }
+          }
+        } catch (e) {}
+
+        return null;
+      }
+
+      // Editor Tabs Manager
+      function renderEditorTabs() {
+        const container = document.getElementById("editorTabsList");
+        if (!container) return;
+        container.innerHTML = "";
+
+        editorTabs.forEach((tab) => {
+          const tabEl = document.createElement("div");
+          tabEl.className = `editor-tab-item ${tab.id === activeTabId ? "active" : ""}`;
+          tabEl.title = tab.title;
+
+          const canClose = editorTabs.length > 1;
+
+          tabEl.innerHTML = `
+            <span class="editor-tab-lang">JS</span>
+            <span class="editor-tab-title">${escapeHtml(tab.title)}</span>
+            ${canClose ? `<button class="editor-tab-close" title="Close Tab" data-close-tab="${tab.id}">&times;</button>` : ""}
+          `;
+
+          tabEl.addEventListener("click", (e) => {
+            const closeBtn = e.target.closest("[data-close-tab]");
+            if (closeBtn) {
+              e.stopPropagation();
+              closeEditorTab(closeBtn.getAttribute("data-close-tab"));
+              return;
+            }
+            switchToTab(tab.id);
+          });
+
+          container.appendChild(tabEl);
+        });
+      }
+
+      function switchToTab(tabId) {
+        const tab = editorTabs.find((t) => t.id === tabId);
+        if (!tab || !editor) return;
+
+        activeTabId = tabId;
+        if (tab.model && editor.getModel() !== tab.model) {
+          editor.setModel(tab.model);
+        }
+        renderEditorTabs();
+        saveTabsState();
+        editor.focus();
+      }
+
+      function openNewEditorTab(initialCode = null, customTitle = null) {
+        tabCounter++;
+        const tabId = `tab-${tabCounter}`;
+        const title = customTitle || `Query ${tabCounter}`;
+        const uri = monaco.Uri.parse(`file:///workspace/${tabId}.js`);
+        const code =
+          initialCode !== null
+            ? initialCode
+            : `// ${title}\nreturn db.from("products")\n  .limit(25);`;
+
+        let model = monaco.editor.getModel(uri);
+        if (!model) {
+          model = monaco.editor.createModel(code, "javascript", uri);
+        } else {
+          model.setValue(code);
+        }
+        model.onDidChangeContent(() => debounceSaveTabs());
+
+        editorTabs.push({
+          id: tabId,
+          title: title,
+          modelUri: uri,
+          model: model,
+        });
+
+        renderEditorTabs();
+        switchToTab(tabId);
+        saveTabsState();
+      }
+
+      function closeEditorTab(tabId) {
+        if (editorTabs.length <= 1) return;
+
+        const idx = editorTabs.findIndex((t) => t.id === tabId);
+        if (idx === -1) return;
+
+        const [removed] = editorTabs.splice(idx, 1);
+        if (removed && removed.model) {
+          removed.model.dispose();
+        }
+
+        if (activeTabId === tabId) {
+          const nextTab = editorTabs[Math.max(0, idx - 1)];
+          switchToTab(nextTab.id);
+        } else {
+          renderEditorTabs();
+        }
+        saveTabsState();
+      }
+
+      // LocalStorage Database List Registry
+      function getRegisteredDbs(vfs) {
+        try {
+          const raw = localStorage.getItem(`webdb_dbs_${vfs}`);
+          if (raw) return JSON.parse(raw);
+        } catch (e) {}
+        return vfs === "memory" ? ["ecommerce_db"] : ["persistent_store"];
+      }
+
+      function saveRegisteredDbs(vfs, list) {
+        try {
+          localStorage.setItem(`webdb_dbs_${vfs}`, JSON.stringify(list));
+        } catch (e) {}
+      }
+
+      function addRegisteredDb(vfs, dbName) {
+        const list = getRegisteredDbs(vfs);
+        if (!list.includes(dbName)) {
+          list.push(dbName);
+          saveRegisteredDbs(vfs, list);
+        }
+      }
+
+      // Update Database Dropdown Selector (Combined Memory & IndexedDB with Optgroups)
+      function updateDbSelectorUI() {
+        const select = document.getElementById("dbSelect");
+        if (!select) return;
+        select.innerHTML = "";
+
+        const memDbs = getRegisteredDbs("memory");
+        const idbDbs = getRegisteredDbs("idb");
+
+        if (activeStorage === "memory" && !memDbs.includes(activeDbName)) {
+          memDbs.push(activeDbName);
+        } else if (activeStorage === "idb" && !idbDbs.includes(activeDbName)) {
+          idbDbs.push(activeDbName);
+        }
+
+        const memGroup = document.createElement("optgroup");
+        memGroup.label = "MEMORY (EPHEMERAL)";
+        for (const name of memDbs) {
+          const opt = document.createElement("option");
+          opt.value = `memory:${name}`;
+          opt.textContent = name;
+          if (activeStorage === "memory" && name === activeDbName) {
+            opt.selected = true;
+          }
+          memGroup.appendChild(opt);
+        }
+        select.appendChild(memGroup);
+
+        const idbGroup = document.createElement("optgroup");
+        idbGroup.label = "INDEXEDDB (PERSISTENT)";
+        for (const name of idbDbs) {
+          const opt = document.createElement("option");
+          opt.value = `idb:${name}`;
+          opt.textContent = name;
+          if (activeStorage === "idb" && name === activeDbName) {
+            opt.selected = true;
+          }
+          idbGroup.appendChild(opt);
+        }
+        select.appendChild(idbGroup);
+      }
+
+      // Open a WebDB instance with forgiving fallback
+      async function openDatabase(name, storage) {
+        setStatus("OPENING DB...", "#f59e0b");
         if (db) {
           try {
             await db.close();
           } catch (e) {}
         }
-        db = await WebDB.open({ name: "ecommerce_db", storage });
-        window.db = db;
-        await refreshSchemaExplorer();
+
+        try {
+          db = await WebDB.open({ name, storage });
+          window.db = db;
+          activeDbName = name;
+          activeStorage = storage;
+
+          try {
+            localStorage.setItem("webdb_active_storage", activeStorage);
+            localStorage.setItem("webdb_active_db", activeDbName);
+          } catch (e) {}
+
+          updateDbSelectorUI();
+          await refreshSchemaExplorer();
+          setStatus("READY", "var(--emerald)");
+
+          // If standard ecommerce db is completely empty, seed standard template
+          if (cachedTablesMeta.length === 0 && name === "ecommerce_db") {
+            await seedFromTemplate("store_standard");
+          }
+        } catch (err) {
+          console.warn(
+            `Could not open DB ${name} on ${storage}, falling back to memory/ecommerce_db:`,
+            err,
+          );
+          showToast(`Fallback: Opened ecommerce_db on Memory`);
+          activeStorage = "memory";
+          activeDbName = "ecommerce_db";
+          updateDbSelectorUI();
+          db = await WebDB.open({ name: "ecommerce_db", storage: "memory" });
+          window.db = db;
+          await refreshSchemaExplorer();
+          if (cachedTablesMeta.length === 0) {
+            await seedFromTemplate("store_standard");
+          }
+        }
       }
 
-      // Helpers for procedural generation
+      // Helpers for Data Generation
       function pickRandom(arr) {
         return arr[Math.floor(Math.random() * arr.length)];
       }
@@ -1125,33 +2749,59 @@
         return Math.floor(min + Math.random() * (max - min + 1));
       }
 
-      // Fetch Real Products from DummyJSON API
-      async function fetchRealProductsFromApi() {
-        try {
-          const res = await fetch("https://dummyjson.com/products?limit=100");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const json = await res.json();
-          return json.products || [];
-        } catch (err) {
-          console.warn("Could not fetch real products, falling back to generator:", err);
-          return null;
-        }
+      function randomPastDate(daysAgoMax = 90) {
+        const d = new Date();
+        d.setDate(d.getDate() - randomInt(0, daysAgoMax));
+        return d.toISOString().split("T")[0];
       }
 
-      // Comprehensive E-Commerce Seed System
-      async function seedSampleData() {
-        const preset = document.getElementById("seedPresetSelect").value;
+      // Progress Overlay Controller
+      function showProgressOverlay(title) {
+        const overlay = document.getElementById("seedProgressOverlay");
+        document.getElementById("progressTitle").innerText = title;
+        document.getElementById("progressPercentBadge").innerText = "0%";
+        document.getElementById("progressBarFill").style.width = "0%";
+        document.getElementById("progressStepText").innerText =
+          "Preparing tables...";
+        document.getElementById("progressCountText").innerText = "0 / 0";
+        overlay.style.display = "flex";
+      }
+
+      function updateProgress(current, total, stepName) {
+        const pct = Math.min(100, Math.round((current / total) * 100));
+        document.getElementById("progressBarFill").style.width = `${pct}%`;
+        document.getElementById("progressPercentBadge").innerText = `${pct}%`;
+        if (stepName)
+          document.getElementById("progressStepText").innerText = stepName;
+        document.getElementById("progressCountText").innerText =
+          `${current.toLocaleString()} / ${total.toLocaleString()}`;
+      }
+
+      function hideProgressOverlay() {
+        document.getElementById("seedProgressOverlay").style.display = "none";
+      }
+
+      // Seed Database From Template
+      async function seedFromTemplate(templateKey) {
+        if (!db) return;
+        if (templateKey === "empty") {
+          await refreshSchemaExplorer();
+          return;
+        }
+
         const t0 = performance.now();
-        setStatus("INITIALIZING...", "#f59e0b");
+        showProgressOverlay(`Seeding ${activeDbName}...`);
 
-        await initDb();
-
-        // 1. Define E-Commerce Tables Schema
+        // 1. Define E-Commerce Schema
         const tablesSchema = [
           {
             name: "categories",
             cols: [
-              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              {
+                name: "id",
+                type: "INT32",
+                flags: { primaryKey: true, notNull: true },
+              },
               { name: "name", type: "TEXT", flags: { notNull: true } },
               { name: "department", type: "TEXT" },
               { name: "item_count", type: "INT32" },
@@ -1160,7 +2810,11 @@
           {
             name: "products",
             cols: [
-              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              {
+                name: "id",
+                type: "INT32",
+                flags: { primaryKey: true, notNull: true },
+              },
               { name: "category_id", type: "INT32", flags: { notNull: true } },
               { name: "title", type: "TEXT", flags: { notNull: true } },
               { name: "brand", type: "TEXT" },
@@ -1173,7 +2827,11 @@
           {
             name: "customers",
             cols: [
-              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              {
+                name: "id",
+                type: "INT32",
+                flags: { primaryKey: true, notNull: true },
+              },
               { name: "name", type: "TEXT", flags: { notNull: true } },
               { name: "email", type: "TEXT" },
               { name: "country", type: "TEXT" },
@@ -1184,9 +2842,14 @@
           {
             name: "orders",
             cols: [
-              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              {
+                name: "id",
+                type: "INT32",
+                flags: { primaryKey: true, notNull: true },
+              },
               { name: "customer_id", type: "INT32", flags: { notNull: true } },
               { name: "status", type: "TEXT" },
+              { name: "order_date", type: "TEXT" },
               { name: "total_amount", type: "FLOAT64" },
               { name: "tax", type: "FLOAT64" },
               { name: "shipping_cost", type: "FLOAT64" },
@@ -1196,7 +2859,11 @@
           {
             name: "reviews",
             cols: [
-              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              {
+                name: "id",
+                type: "INT32",
+                flags: { primaryKey: true, notNull: true },
+              },
               { name: "product_id", type: "INT32", flags: { notNull: true } },
               { name: "customer_id", type: "INT32", flags: { notNull: true } },
               { name: "rating", type: "INT32" },
@@ -1206,80 +2873,108 @@
           },
         ];
 
-        // Create tables if they do not exist
         for (const tbl of tablesSchema) {
           try {
             await db.createTable(tbl.name, tbl.cols);
           } catch (e) {}
         }
 
-        // 2. Determine counts based on preset
+        // 2. Counts
         let countProducts = 500;
         let countCustomers = 250;
         let countOrders = 500;
         let countReviews = 250;
         let useRealApi = false;
 
-        if (preset === "store_small") {
-          countProducts = 50;
-          countCustomers = 30;
-          countOrders = 50;
-          countReviews = 30;
-        } else if (preset === "store_large") {
+        if (templateKey === "store_large") {
           countProducts = 4000;
           countCustomers = 2000;
           countOrders = 3000;
           countReviews = 1000;
-        } else if (preset === "store_real_api") {
+        } else if (templateKey === "store_real_api") {
           useRealApi = true;
           countCustomers = 100;
           countOrders = 200;
           countReviews = 150;
         }
 
-        // 3. Seed Categories (5 core departments)
-        const categoriesData = [
-          { id: 1, name: "Audio & Acoustics", department: "Electronics", item_count: 0 },
-          { id: 2, name: "Computers & Laptops", department: "Computers", item_count: 0 },
-          { id: 3, name: "Mobile & Accessories", department: "Mobile", item_count: 0 },
-          { id: 4, name: "Gaming Gear", department: "Gaming", item_count: 0 },
-          { id: 5, name: "Workspace & Office", department: "Office", item_count: 0 },
-        ];
+        const totalItems =
+          5 + countProducts + countCustomers + countOrders + countReviews;
+        let inserted = 0;
 
+        // 3. Seed Categories
+        const categoriesData = [
+          {
+            id: 1,
+            name: "Audio & Acoustics",
+            department: "Electronics",
+            item_count: 0,
+          },
+          {
+            id: 2,
+            name: "Computers & Laptops",
+            department: "Computers",
+            item_count: 0,
+          },
+          {
+            id: 3,
+            name: "Mobile & Accessories",
+            department: "Mobile",
+            item_count: 0,
+          },
+          { id: 4, name: "Gaming Gear", department: "Gaming", item_count: 0 },
+          {
+            id: 5,
+            name: "Workspace & Office",
+            department: "Office",
+            item_count: 0,
+          },
+        ];
         for (const cat of categoriesData) {
           try {
             await db.insert("categories", cat);
           } catch (e) {}
+          inserted++;
         }
+        updateProgress(inserted, totalItems, "Seeding Categories...");
 
         // 4. Seed Products
-        setStatus("SEEDING PRODUCTS...", "#3b82f6");
-        let realProducts = null;
         if (useRealApi) {
-          setStatus("FETCHING REAL PRODUCTS (API)...", "#06b6d4");
-          realProducts = await fetchRealProductsFromApi();
-        }
+          updateProgress(
+            inserted,
+            totalItems,
+            "Fetching live products (DummyJSON)...",
+          );
+          try {
+            const res = await fetch("https://dummyjson.com/products?limit=100");
+            const data = await res.json();
+            const realProducts = data.products || [];
+            countProducts = realProducts.length;
 
-        if (realProducts && realProducts.length > 0) {
-          countProducts = realProducts.length;
-          for (let i = 0; i < realProducts.length; i++) {
-            const p = realProducts[i];
-            const catId = (i % 5) + 1;
-            try {
-              await db.insert("products", {
-                id: p.id,
-                category_id: catId,
-                title: p.title,
-                brand: p.brand || pickRandom(VOCAB.brands),
-                price: parseFloat(Number(p.price).toFixed(2)),
-                cost: parseFloat((Number(p.price) * 0.45).toFixed(2)),
-                stock: p.stock || randomInt(5, 120),
-                rating: parseFloat(Number(p.rating || 4.5).toFixed(2)),
-              });
-            } catch (e) {}
+            for (let i = 0; i < realProducts.length; i++) {
+              const p = realProducts[i];
+              try {
+                await db.insert("products", {
+                  id: p.id,
+                  category_id: (i % 5) + 1,
+                  title: p.title,
+                  brand: p.brand || pickRandom(VOCAB.brands),
+                  price: parseFloat(Number(p.price).toFixed(2)),
+                  cost: parseFloat((Number(p.price) * 0.45).toFixed(2)),
+                  stock: p.stock || randomInt(5, 120),
+                  rating: parseFloat(Number(p.rating || 4.5).toFixed(2)),
+                });
+              } catch (e) {}
+              inserted++;
+              if (i % 25 === 0) {
+                updateProgress(inserted, totalItems, "Inserting Products...");
+                await new Promise((r) => setTimeout(r, 0));
+              }
+            }
+          } catch (err) {
+            console.warn("API fetch failed, falling back to procedural:", err);
           }
         } else {
-          // Fast procedural generator
           for (let i = 1; i <= countProducts; i++) {
             const brand = pickRandom(VOCAB.brands);
             const adj = pickRandom(VOCAB.adjectives);
@@ -1303,11 +2998,15 @@
                 rating,
               });
             } catch (e) {}
+            inserted++;
+            if (i % 200 === 0) {
+              updateProgress(inserted, totalItems, "Inserting Products...");
+              await new Promise((r) => setTimeout(r, 0));
+            }
           }
         }
 
         // 5. Seed Customers
-        setStatus("SEEDING CUSTOMERS...", "#3b82f6");
         for (let i = 1; i <= countCustomers; i++) {
           const fn = pickRandom(VOCAB.firstNames);
           const ln = pickRandom(VOCAB.lastNames);
@@ -1327,13 +3026,18 @@
               lifetime_spent,
             });
           } catch (e) {}
+          inserted++;
+          if (i % 200 === 0) {
+            updateProgress(inserted, totalItems, "Inserting Customers...");
+            await new Promise((r) => setTimeout(r, 0));
+          }
         }
 
         // 6. Seed Orders
-        setStatus("SEEDING ORDERS...", "#3b82f6");
         for (let i = 1; i <= countOrders; i++) {
           const customer_id = randomInt(1, countCustomers);
           const status = pickRandom(VOCAB.orderStatuses);
+          const order_date = randomPastDate(90);
           const total_amount = randomFloat(25.0, 1850.0);
           const tax = randomFloat(total_amount * 0.07, total_amount * 0.1);
           const shipping_cost = randomFloat(4.99, 29.99);
@@ -1344,16 +3048,21 @@
               id: 1000 + i,
               customer_id,
               status,
+              order_date,
               total_amount,
               tax,
               shipping_cost,
               items_count,
             });
           } catch (e) {}
+          inserted++;
+          if (i % 200 === 0) {
+            updateProgress(inserted, totalItems, "Inserting Orders...");
+            await new Promise((r) => setTimeout(r, 0));
+          }
         }
 
         // 7. Seed Reviews
-        setStatus("SEEDING REVIEWS...", "#3b82f6");
         for (let i = 1; i <= countReviews; i++) {
           const product_id = randomInt(1, countProducts);
           const customer_id = randomInt(1, countCustomers);
@@ -1371,14 +3080,20 @@
               headline,
             });
           } catch (e) {}
+          inserted++;
+          if (i % 200 === 0) {
+            updateProgress(inserted, totalItems, "Inserting Reviews...");
+            await new Promise((r) => setTimeout(r, 0));
+          }
         }
 
-        const tTotal = (performance.now() - t0).toFixed(0);
-        const totalRows = 5 + countProducts + countCustomers + countOrders + countReviews;
+        updateProgress(totalItems, totalItems, "Finalizing Database...");
+        await new Promise((r) => setTimeout(r, 100));
+        hideProgressOverlay();
 
+        const tTotal = (performance.now() - t0).toFixed(0);
         await refreshSchemaExplorer();
-        setStatus("READY", "#10b981");
-        showToast(`Seeded ${totalRows.toLocaleString()} rows in ${tTotal}ms`);
+        showToast(`Seeded ${inserted.toLocaleString()} rows in ${tTotal}ms`);
         await executeUserCode();
       }
 
@@ -1394,7 +3109,10 @@
           container.innerHTML = "";
 
           if (cachedTablesMeta.length === 0) {
-            container.innerHTML = `<div style="padding: 10px; font-size: 0.74rem; color: var(--text-muted); text-align: center;">No tables found.</div>`;
+            container.innerHTML = `
+              <div style="padding: 16px 10px; font-size: 0.74rem; color: var(--text-muted); text-align: center;">
+                No tables in this database.<br/>Use <code>db.createTable(...)</code> or create from template.
+              </div>`;
             return;
           }
 
@@ -1414,7 +3132,7 @@
                   ${tbl.name}
                 </span>
               </div>
-              <span class="badge-count">${tbl.rowCountEstimate.toLocaleString()}</span>
+              <span class="tree-row-count">${tbl.rowCountEstimate.toLocaleString()}</span>
             `;
 
             header.addEventListener("click", (e) => {
@@ -1441,14 +3159,44 @@
       }
 
       function selectTableForQuery(tableName) {
-        document.querySelectorAll(".table-item-header").forEach((el) => el.classList.remove("active"));
+        activeQueryTableName = tableName;
+        document
+          .querySelectorAll(".table-item-header")
+          .forEach((el) => el.classList.remove("active"));
         const activeHeader = document.getElementById(`tbl-header-${tableName}`);
         if (activeHeader) activeHeader.classList.add("active");
 
-        if (editor) {
-          editor.setValue(`// Query all rows from "${tableName}"\nreturn db.from("${tableName}")\n  .limit(25);`);
-          executeUserCode();
+        const queryCode = `// Query all rows from "${tableName}"\nreturn db.from("${tableName}")\n  .limit(25);`;
+
+        // Check if tab-1 exists; if it was closed, automatically reopen it at position 0
+        let firstTab = editorTabs.find((t) => t.id === "tab-1");
+        if (!firstTab) {
+          const uri = monaco.Uri.parse("file:///workspace/tab-1.js");
+          let model = monaco.editor.getModel(uri);
+          if (!model) {
+            model = monaco.editor.createModel(queryCode, "javascript", uri);
+          } else {
+            model.setValue(queryCode);
+          }
+          model.onDidChangeContent(() => debounceSaveTabs());
+
+          firstTab = {
+            id: "tab-1",
+            title: "Query 1",
+            modelUri: uri,
+            model: model,
+          };
+          editorTabs.unshift(firstTab);
+          renderEditorTabs();
+        } else {
+          if (firstTab.model) {
+            firstTab.model.setValue(queryCode);
+          }
         }
+
+        switchToTab(firstTab.id);
+        saveTabsState();
+        executeUserCode();
       }
 
       // Show Table Structure in Center Panel
@@ -1457,27 +3205,46 @@
         if (!tbl) return;
 
         document.getElementById("structTitle").innerText = tbl.name;
-        document.getElementById("structMeta").innerText = `Root Page: ${tbl.rootPageId} • Col Catalog Page: ${tbl.colCatalogPageId} • ~${tbl.rowCountEstimate.toLocaleString()} rows`;
+        document.getElementById("structMeta").innerText =
+          `Root Page: ${tbl.rootPageId} • Col Catalog Page: ${tbl.colCatalogPageId} • ~${tbl.rowCountEstimate.toLocaleString()} rows`;
         document.getElementById("structTableName").innerText = tbl.name;
 
         const tbody = document.getElementById("structTbody");
         tbody.innerHTML = "";
 
-        const typeMap = { 0: "NULL", 1: "INT32", 2: "INT64", 3: "FLOAT64", 4: "TEXT", 5: "BLOB", 6: "UUID", 7: "ULID" };
+        const typeMap = {
+          0: "NULL",
+          1: "INT32",
+          2: "INT64",
+          3: "FLOAT64",
+          4: "TEXT",
+          5: "BLOB",
+          6: "UUID",
+          7: "ULID",
+        };
 
         tbl.columns.forEach((col, idx) => {
           const tr = document.createElement("tr");
-          const typeStr = typeof col.type === "number" ? (typeMap[col.type] || `TYPE_${col.type}`) : col.type;
+          const typeStr =
+            typeof col.type === "number"
+              ? typeMap[col.type] || `TYPE_${col.type}`
+              : col.type;
           const flagsNum = typeof col.flags === "number" ? col.flags : 0;
           const isPk = (flagsNum & 0x01) !== 0 || col.flags?.primaryKey;
           const isNotNull = (flagsNum & 0x02) !== 0 || col.flags?.notNull;
           const isAutoInc = (flagsNum & 0x08) !== 0 || col.flags?.autoInc;
 
           let constraints = [];
-          if (isPk) constraints.push(`<span class="col-pk-pill">PRIMARY KEY</span>`);
-          if (isNotNull) constraints.push(`<span class="col-type-pill">NOT NULL</span>`);
-          if (isAutoInc) constraints.push(`<span class="col-type-pill">AUTO_INC</span>`);
-          if (constraints.length === 0) constraints.push(`<span style="color: var(--text-muted);">-</span>`);
+          if (isPk)
+            constraints.push(`<span class="col-pk-pill">PRIMARY KEY</span>`);
+          if (isNotNull)
+            constraints.push(`<span class="col-type-pill">NOT NULL</span>`);
+          if (isAutoInc)
+            constraints.push(`<span class="col-type-pill">AUTO_INC</span>`);
+          if (constraints.length === 0)
+            constraints.push(
+              `<span style="color: var(--text-muted);">-</span>`,
+            );
 
           tr.innerHTML = `
             <td style="color: var(--text-muted); font-size: 0.72rem;">${idx + 1}</td>
@@ -1501,16 +3268,26 @@
       // Execute User JavaScript Code (Middle Column)
       async function executeUserCode() {
         if (!editor) return;
-        if (!db) await initDb();
+        if (!db) await openDatabase(activeDbName, activeStorage);
 
         const rawCode = editor.getValue();
+        const fromMatch = rawCode.match(
+          /(?:from|\.from)\s*\(\s*["']([^"']+)["']/,
+        );
+        if (fromMatch) {
+          activeQueryTableName = fromMatch[1];
+        }
         const t0 = performance.now();
         setStatus("RUNNING...", "#3b82f6");
 
         capturedLogs = [];
         const customConsole = {
           log: (...args) => {
-            const line = args.map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" ");
+            const line = args
+              .map((a) =>
+                typeof a === "object" ? JSON.stringify(a, null, 2) : String(a),
+              )
+              .join(" ");
             capturedLogs.push(line);
           },
           warn: (...args) => {
@@ -1525,7 +3302,6 @@
           let trimmed = rawCode.trim();
           let codeToRun = rawCode;
 
-          // Wrap single expression in return if missing
           if (
             !trimmed.includes("return") &&
             !trimmed.startsWith("let ") &&
@@ -1536,7 +3312,9 @@
             codeToRun = `return (${rawCode});`;
           }
 
-          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const AsyncFunction = Object.getPrototypeOf(
+            async function () {},
+          ).constructor;
           let fn;
           try {
             fn = new AsyncFunction("db", "WebDB", "console", codeToRun);
@@ -1546,7 +3324,6 @@
 
           let result = await fn(db, WebDB, customConsole);
 
-          // If result is QueryBuilder, generate both Explain and Results
           if (result && typeof result.toArray === "function") {
             try {
               lastExplainOutput = await result.explain();
@@ -1563,7 +3340,7 @@
           const totalMs = (tExec - t0).toFixed(2);
 
           document.getElementById("timingBadge").innerText = `${totalMs} ms`;
-          setStatus("SUCCESS", "#10b981");
+          setStatus("SUCCESS", "var(--emerald)");
 
           if (Array.isArray(result)) {
             currentResultRows = result;
@@ -1576,13 +3353,17 @@
             renderEmptyResults("Code executed successfully (no return value).");
           }
 
-          switchTab(document.getElementById("tabResultsBtn"), document.getElementById("tableView"));
+          switchTab(
+            document.getElementById("tabResultsBtn"),
+            document.getElementById("tableView"),
+          );
           updateConsoleView();
           await refreshSchemaExplorer();
         } catch (err) {
           const tErr = performance.now();
-          document.getElementById("timingBadge").innerText = `${(tErr - t0).toFixed(2)} ms`;
-          setStatus("ERROR", "#ef4444");
+          document.getElementById("timingBadge").innerText =
+            `${(tErr - t0).toFixed(2)} ms`;
+          setStatus("ERROR", "var(--rose)");
           renderError(err);
           capturedLogs.push(`[Execution Error] ${err.stack || err.message}`);
           updateConsoleView();
@@ -1614,9 +3395,21 @@
         const columns = Array.from(colSet);
         if (columns.length === 0) columns.push("value");
 
-        let headerHtml = "<tr><th style='width: 36px; text-align: center;'>#</th>";
+        const numCols = new Set();
         for (const col of columns) {
-          headerHtml += `<th>${col}</th>`;
+          for (const r of rows) {
+            if (r && typeof r[col] === "number") {
+              numCols.add(col);
+              break;
+            }
+          }
+        }
+
+        let headerHtml =
+          "<tr><th style='width: 36px; text-align: center;'>#</th>";
+        for (const col of columns) {
+          const isNum = numCols.has(col);
+          headerHtml += `<th style="${isNum ? "text-align: right;" : ""}">${col}</th>`;
         }
         headerHtml += "</tr>";
         thead.innerHTML = headerHtml;
@@ -1631,12 +3424,9 @@
             if (val === null || val === undefined) {
               rowHtml += `<td><span class="null-badge">NULL</span></td>`;
             } else if (typeof val === "number") {
-              const colLower = col.toLowerCase();
-              const isMoney = colLower.includes("price") || colLower.includes("cost") || colLower.includes("amount") || colLower.includes("spent") || colLower.includes("tax");
-              const formatted = isMoney ? "$" + Number(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : val.toLocaleString();
-              rowHtml += `<td style="font-family: var(--font-mono);">${formatted}</td>`;
+              rowHtml += `<td style="font-family: var(--font-mono); text-align: right; color: var(--accent); font-weight: 500;">${val}</td>`;
             } else if (typeof val === "boolean") {
-              rowHtml += `<td><span style="color: ${val ? '#10b981' : '#ef4444'}; font-weight: 600;">${val}</span></td>`;
+              rowHtml += `<td><span style="color: ${val ? "var(--emerald)" : "var(--rose)"}; font-weight: 600;">${val}</span></td>`;
             } else {
               rowHtml += `<td>${escapeHtml(String(val))}</td>`;
             }
@@ -1657,24 +3447,57 @@
       }
 
       function renderEmptyResults(msg) {
-        document.getElementById("resultsThead").innerHTML = `<tr><th>Status</th></tr>`;
-        document.getElementById("resultsTbody").innerHTML = `<tr><td style="text-align: center; color: var(--text-muted); padding: 20px;">${msg}</td></tr>`;
+        document.getElementById("resultsThead").innerHTML =
+          `<tr><th>Status</th></tr>`;
+        document.getElementById("resultsTbody").innerHTML =
+          `<tr><td style="text-align: center; color: var(--text-muted); padding: 20px;">${msg}</td></tr>`;
         document.getElementById("resCountBadge").innerText = 0;
         clearRowDetails();
       }
 
       function renderError(err) {
-        document.getElementById("resultsThead").innerHTML = `<tr><th>Execution Error</th></tr>`;
+        document.getElementById("resultsThead").innerHTML =
+          `<tr><th>Execution Error</th></tr>`;
         document.getElementById("resultsTbody").innerHTML = `
           <tr>
-            <td style="color: #ef4444; padding: 14px; font-family: var(--font-mono); white-space: pre-wrap; line-height: 1.4;">
+            <td style="color: var(--rose); padding: 14px; font-family: var(--font-mono); white-space: pre-wrap; line-height: 1.4;">
               ${err.name}: ${err.message}\n\n${err.stack || ""}
             </td>
           </tr>`;
         document.getElementById("resCountBadge").innerText = 0;
       }
 
-      // Right Column: Row Details Inspector
+      // Right Column: Row Details Inspector Mode & Rendering
+      function setRowInspectorMode(mode) {
+        rowInspectorMode = mode;
+        try {
+          localStorage.setItem("webdb_row_inspector_mode", mode);
+        } catch (e) {}
+        updateRowInspectorModeButtons();
+        if (selectedRowIndex >= 0 && currentResultRows[selectedRowIndex]) {
+          renderRowDetails(
+            currentResultRows[selectedRowIndex],
+            selectedRowIndex,
+          );
+        }
+      }
+
+      function updateRowInspectorModeButtons() {
+        const toggleBtn = document.getElementById("rowJsonToggleBtn");
+        const copyBtn = document.getElementById("copyJsonBtn");
+        if (toggleBtn) {
+          toggleBtn.classList.toggle("active", rowInspectorMode === "json");
+        }
+        if (copyBtn) {
+          const hasSelectedRow =
+            selectedRowIndex >= 0 && currentResultRows[selectedRowIndex];
+          copyBtn.style.display =
+            rowInspectorMode === "json" && hasSelectedRow
+              ? "inline-flex"
+              : "none";
+        }
+      }
+
       function selectRow(index, trElement) {
         selectedRowIndex = index;
         const allTrs = document.querySelectorAll("#resultsTbody tr");
@@ -1682,70 +3505,181 @@
         if (trElement) trElement.classList.add("selected");
 
         const row = currentResultRows[index];
+        renderRowDetails(row, index);
+      }
+
+      function getColumnMetaType(colName, val) {
+        let schemaType = null;
+        if (cachedTablesMeta && cachedTablesMeta.length > 0) {
+          if (activeQueryTableName) {
+            const tbl = cachedTablesMeta.find(
+              (t) => t.name === activeQueryTableName,
+            );
+            if (tbl && tbl.columns) {
+              const col = tbl.columns.find((c) => c.name === colName);
+              if (col) schemaType = col.type;
+            }
+          }
+          if (schemaType === null) {
+            for (const tbl of cachedTablesMeta) {
+              const col = tbl.columns?.find((c) => c.name === colName);
+              if (col) {
+                schemaType = col.type;
+                break;
+              }
+            }
+          }
+        }
+
+        if (schemaType !== null && schemaType !== undefined) {
+          const typeStr = String(schemaType).toUpperCase();
+          if (
+            typeStr === "1" ||
+            typeStr === "INT32" ||
+            typeStr === "INTEGER" ||
+            typeStr === "INT"
+          ) {
+            return { short: "i32", label: "INT32" };
+          }
+          if (typeStr === "2" || typeStr === "INT64" || typeStr === "BIGINT") {
+            return { short: "i64", label: "INT64" };
+          }
+          if (
+            typeStr === "3" ||
+            typeStr === "FLOAT64" ||
+            typeStr === "FLOAT" ||
+            typeStr === "REAL" ||
+            typeStr === "DOUBLE"
+          ) {
+            return { short: "f64", label: "FLOAT64" };
+          }
+          if (
+            typeStr === "4" ||
+            typeStr === "TEXT" ||
+            typeStr === "VARCHAR" ||
+            typeStr === "STRING"
+          ) {
+            return { short: "txt", label: "TEXT" };
+          }
+          if (typeStr === "5" || typeStr === "BLOB" || typeStr === "BINARY") {
+            return { short: "blo", label: "BLOB" };
+          }
+          if (typeStr === "6" || typeStr === "UUID") {
+            return { short: "uid", label: "UUID" };
+          }
+          if (typeStr === "7" || typeStr === "ULID") {
+            return { short: "uid", label: "ULID" };
+          }
+        }
+
+        if (val === null || val === undefined) {
+          return { short: "null", label: "NULL" };
+        }
+        if (typeof val === "number") {
+          return Number.isInteger(val)
+            ? { short: "i32", label: "INT32" }
+            : { short: "f64", label: "FLOAT64" };
+        }
+        if (typeof val === "bigint") {
+          return { short: "i64", label: "INT64" };
+        }
+        if (typeof val === "boolean") {
+          return { short: "bool", label: "BOOLEAN" };
+        }
+        if (val instanceof Uint8Array) {
+          return { short: "blo", label: "BLOB" };
+        }
+        if (typeof val === "string") {
+          const isUuid =
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+              val,
+            );
+          const isUlid = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i.test(val);
+          if (isUuid) return { short: "uid", label: "UUID" };
+          if (isUlid) return { short: "uid", label: "ULID" };
+          return { short: "txt", label: "TEXT" };
+        }
+        return { short: "txt", label: "TEXT" };
+      }
+
+      function renderRowDetails(row, index) {
         const container = document.getElementById("detailsContent");
+        const metaSpan = document.getElementById("rowDetailsMeta");
+        const copyBtn = document.getElementById("copyJsonBtn");
 
         if (!row || typeof row !== "object") {
           container.innerHTML = `
-            <div class="row-card">
-              <div class="row-card-header">Row #${index + 1}</div>
-              <div style="padding: 10px; font-family: var(--font-mono); font-size: 0.75rem;">${String(row)}</div>
-            </div>`;
+            <div class="details-sub-header">
+              <span>ROW #${index + 1}</span>
+            </div>
+            <div style="padding: 10px; font-family: var(--font-mono); font-size: 0.75rem;">${escapeHtml(String(row))}</div>`;
+          if (metaSpan) metaSpan.innerText = "";
+          if (copyBtn) copyBtn.style.display = "none";
           return;
         }
 
+        const jsonStr = JSON.stringify(row, null, 2);
+        const byteCount = new Blob([jsonStr]).size;
+
+        if (rowInspectorMode === "json") {
+          if (copyBtn) copyBtn.style.display = "inline-flex";
+          if (metaSpan) metaSpan.innerText = `${byteCount} B`;
+
+          container.innerHTML = `
+            <div class="details-sub-header">
+              <span>ROW #${index + 1} &bull; RAW JSON</span>
+              <span class="badge-count">${byteCount} bytes</span>
+            </div>
+            <pre class="row-json-view">${escapeHtml(jsonStr)}</pre>
+          `;
+          return;
+        }
+
+        // Fields View
+        if (copyBtn) copyBtn.style.display = "none";
+        const entries = Object.entries(row);
+        if (metaSpan) metaSpan.innerText = `${entries.length} fields`;
+
         let fieldsRowsHtml = "";
-        for (const [key, val] of Object.entries(row)) {
+        for (const [key, val] of entries) {
+          const typeMeta = getColumnMetaType(key, val);
+          const isNum = typeof val === "number";
           let valDisplay = "";
-          let valType = typeof val;
 
           if (val === null || val === undefined) {
             valDisplay = `<span class="null-badge">NULL</span>`;
-            valType = "null";
-          } else if (typeof val === "number") {
-            const keyLower = key.toLowerCase();
-            const isMoney = keyLower.includes("price") || keyLower.includes("cost") || keyLower.includes("amount") || keyLower.includes("spent") || keyLower.includes("tax");
-            const formatted = isMoney ? "$" + Number(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : val;
-            valDisplay = `<span style="color: #38bdf8;">${formatted}</span>`;
+          } else if (isNum) {
+            valDisplay = `<span style="font-family: var(--font-mono); color: var(--accent); font-weight: 500;" title="${val}">${val}</span>`;
           } else if (typeof val === "boolean") {
-            valDisplay = `<span style="color: ${val ? '#10b981' : '#ef4444'}; font-weight: 600;">${val}</span>`;
+            valDisplay = `<span style="color: ${val ? "var(--emerald)" : "var(--rose)"}; font-weight: 600;" title="${val}">${val}</span>`;
           } else {
-            valDisplay = `<span>"${escapeHtml(String(val))}"</span>`;
+            const strVal = String(val);
+            valDisplay = `<span title="${escapeHtml(strVal)}">${escapeHtml(strVal)}</span>`;
           }
 
           fieldsRowsHtml += `
             <tr>
-              <td class="field-key">${key}</td>
-              <td class="field-val">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                  <span>${valDisplay}</span>
-                  <span class="col-type-pill">${valType}</span>
+              <td class="field-key">
+                <div style="display: flex; align-items: center; min-width: 0;">
+                  <span class="col-type-tag" title="${typeMeta.label}">${typeMeta.short}</span>
+                  <span class="field-key-name" title="${escapeHtml(key)}">${escapeHtml(key)}</span>
                 </div>
+              </td>
+              <td class="field-val">
+                ${valDisplay}
               </td>
             </tr>
           `;
         }
 
-        const jsonStr = JSON.stringify(row, null, 2);
-
         container.innerHTML = `
-          <div class="row-card">
-            <div class="row-card-header">
-              <span>Row #${index + 1} Attributes</span>
-              <span class="badge-count">${Object.keys(row).length} Fields</span>
-            </div>
-            <table class="fields-table">
-              <tbody>${fieldsRowsHtml}</tbody>
-            </table>
+          <div class="details-sub-header">
+            <span>ROW #${index + 1} ATTRIBUTES</span>
+            <span class="badge-count">${entries.length} Fields</span>
           </div>
-
-          <div class="row-card">
-            <div class="row-card-header">
-              <span>Raw JSON Object</span>
-            </div>
-            <div style="padding: 6px;">
-              <div class="json-viewer-box">${escapeHtml(jsonStr)}</div>
-            </div>
-          </div>
+          <table class="fields-table">
+            <tbody>${fieldsRowsHtml}</tbody>
+          </table>
         `;
       }
 
@@ -1756,6 +3690,10 @@
             Select any row from the query results table to inspect its fields, types, and raw JSON.
           </div>
         `;
+        const metaSpan = document.getElementById("rowDetailsMeta");
+        if (metaSpan) metaSpan.innerText = "";
+        const copyBtn = document.getElementById("copyJsonBtn");
+        if (copyBtn) copyBtn.style.display = "none";
       }
 
       // Update Bytecode (EXPLAIN) Tab
@@ -1788,6 +3726,31 @@
         const badge = document.getElementById("statusBadge");
         badge.innerText = text;
         badge.style.color = color;
+      }
+
+      async function copyTextToClipboard(text) {
+        let copied = false;
+        if (navigator.clipboard && window.isSecureContext) {
+          try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+          } catch (e) {}
+        }
+        if (!copied) {
+          try {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.opacity = "0";
+            textArea.style.pointerEvents = "none";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            copied = document.execCommand("copy");
+            document.body.removeChild(textArea);
+          } catch (e) {}
+        }
+        return copied;
       }
 
       function showToast(msg) {
@@ -1828,38 +3791,152 @@
 
       // Setup Event Listeners
       function setupListeners() {
-        document.getElementById("runBtn").addEventListener("click", executeUserCode);
-        document.getElementById("seedBtn").addEventListener("click", seedSampleData);
+        document
+          .getElementById("runBtn")
+          .addEventListener("click", executeUserCode);
 
-        document.getElementById("storageSelect").addEventListener("change", async () => {
-          await initDb();
-          await seedSampleData();
+        // Theme Segmented Switcher
+        document.querySelectorAll(".theme-segment-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const val = btn.getAttribute("data-theme-val");
+            if (val) applyThemePreference(val);
+          });
         });
 
-        document.getElementById("refreshSchemaBtn").addEventListener("click", refreshSchemaExplorer);
+        // Combined Database Dropdown Change
+        document
+          .getElementById("dbSelect")
+          .addEventListener("change", async (e) => {
+            const selected = e.target.value;
+            if (selected && selected.includes(":")) {
+              const [storage, name] = selected.split(":");
+              await openDatabase(name, storage);
+            }
+          });
 
-        document.getElementById("querySnippetSelect").addEventListener("change", (e) => {
-          const key = e.target.value;
-          if (key && SNIPPETS[key] && editor) {
-            editor.setValue(SNIPPETS[key]);
+        // Refresh Schema Button
+        document
+          .getElementById("refreshSchemaBtn")
+          .addEventListener("click", refreshSchemaExplorer);
+
+        // Snippets Dropdown: opens new tab if current editor tab is not empty
+        document
+          .getElementById("querySnippetSelect")
+          .addEventListener("change", (e) => {
+            const key = e.target.value;
+            if (!key || !SNIPPETS[key] || !editor) return;
+
+            const currentVal = editor.getValue().trim();
+            const selectedText =
+              e.target.options[e.target.selectedIndex]?.text || "Query";
+            const snippetName = selectedText.split("(")[0].trim();
+
+            if (currentVal === "") {
+              editor.setValue(SNIPPETS[key]);
+            } else {
+              openNewEditorTab(SNIPPETS[key], snippetName);
+            }
+
+            e.target.value = "";
+            saveTabsState();
             executeUserCode();
-          }
+          });
+
+        // Editor Tabs: Add Tab Button
+        document
+          .getElementById("addEditorTabBtn")
+          .addEventListener("click", () => {
+            openNewEditorTab();
+          });
+
+        // Clear Editor Button (in Top Header)
+        document
+          .getElementById("clearEditorBtn")
+          .addEventListener("click", () => {
+            if (editor) {
+              editor.setValue("");
+              saveTabsState();
+            }
+          });
+
+        // Fixed Bottom Row Details JSON Toggle
+        document
+          .getElementById("rowJsonToggleBtn")
+          .addEventListener("click", () => {
+            setRowInspectorMode(
+              rowInspectorMode === "json" ? "fields" : "json",
+            );
+          });
+
+        // Floating Copy JSON Button
+        document
+          .getElementById("copyJsonBtn")
+          .addEventListener("click", async () => {
+            if (selectedRowIndex >= 0 && currentResultRows[selectedRowIndex]) {
+              const json = JSON.stringify(
+                currentResultRows[selectedRowIndex],
+                null,
+                2,
+              );
+              await copyTextToClipboard(json);
+              showToast("Row JSON copied to clipboard");
+            } else {
+              showToast("Please select a row first");
+            }
+          });
+
+        // Modal: Create New Database
+        const modal = document.getElementById("newDbModal");
+        const openModalBtn = document.getElementById("openNewDbModalBtn");
+        const closeModalBtn = document.getElementById("closeModalBtn");
+        const cancelModalBtn = document.getElementById("cancelModalBtn");
+        const confirmBtn = document.getElementById("confirmCreateDbBtn");
+
+        openModalBtn.addEventListener("click", () => {
+          document.getElementById("modalDbNameInput").value =
+            `db_${Date.now().toString().slice(-4)}`;
+          modal.style.display = "flex";
         });
 
-        document.getElementById("clearEditorBtn").addEventListener("click", () => {
-          if (editor) editor.setValue("");
-        });
+        const hideModal = () => {
+          modal.style.display = "none";
+        };
+        closeModalBtn.addEventListener("click", hideModal);
+        cancelModalBtn.addEventListener("click", hideModal);
 
-        document.getElementById("copyJsonBtn").addEventListener("click", () => {
-          if (selectedRowIndex >= 0 && currentResultRows[selectedRowIndex]) {
-            const json = JSON.stringify(currentResultRows[selectedRowIndex], null, 2);
-            navigator.clipboard.writeText(json);
-            showToast("Copied row JSON to clipboard");
+        confirmBtn.addEventListener("click", async () => {
+          const rawName = document
+            .getElementById("modalDbNameInput")
+            .value.trim()
+            .toLowerCase();
+          const cleanName =
+            rawName.replace(/[^a-z0-9_]/g, "_") || `db_${Date.now()}`;
+          const selectedVfs = document.querySelector(
+            'input[name="modalVfs"]:checked',
+          ).value;
+          const selectedTemplate = document.querySelector(
+            'input[name="modalTemplate"]:checked',
+          ).value;
+
+          hideModal();
+
+          // Register in database list for that VFS
+          addRegisteredDb(selectedVfs, cleanName);
+
+          activeStorage = selectedVfs;
+          activeDbName = cleanName;
+          updateDbSelectorUI();
+
+          await openDatabase(cleanName, selectedVfs);
+
+          if (selectedTemplate !== "empty") {
+            await seedFromTemplate(selectedTemplate);
           } else {
-            showToast("Please select a row first");
+            showToast(`Created empty database: ${cleanName}`);
           }
         });
 
+        // Tab Switching in Results Viewer
         const tabResults = document.getElementById("tabResultsBtn");
         const tabStructure = document.getElementById("tabStructureBtn");
         const tabBytecode = document.getElementById("tabBytecodeBtn");
@@ -1869,18 +3946,55 @@
         const bytecodeView = document.getElementById("bytecodeView");
         const consoleView = document.getElementById("consoleView");
 
-        tabResults.addEventListener("click", () => switchTab(tabResults, tableView));
-        tabStructure.addEventListener("click", () => switchTab(tabStructure, structureView));
-        tabBytecode.addEventListener("click", () => switchTab(tabBytecode, bytecodeView));
-        tabConsole.addEventListener("click", () => switchTab(tabConsole, consoleView));
+        tabResults.addEventListener("click", () =>
+          switchTab(tabResults, tableView),
+        );
+        tabStructure.addEventListener("click", () =>
+          switchTab(tabStructure, structureView),
+        );
+        tabBytecode.addEventListener("click", () =>
+          switchTab(tabBytecode, bytecodeView),
+        );
+        tabConsole.addEventListener("click", () =>
+          switchTab(tabConsole, consoleView),
+        );
       }
 
-      // Bootstrapping
+      // Bootstrapping with LocalStorage Persistence
       window.addEventListener("DOMContentLoaded", async () => {
+        // 1. Restore Theme Preference (Default Light)
+        try {
+          const savedPref =
+            localStorage.getItem("webdb_theme_preference") ||
+            localStorage.getItem("webdb_theme");
+          if (
+            savedPref === "auto" ||
+            savedPref === "dark" ||
+            savedPref === "light"
+          ) {
+            themePreference = savedPref;
+          }
+        } catch (e) {}
+        applyThemePreference(themePreference);
+
         initMonaco();
         setupListeners();
-        await initDb();
-        await seedSampleData();
+        updateRowInspectorModeButtons();
+
+        // 2. Restore last storage and db from localStorage
+        try {
+          const storedVfs = localStorage.getItem("webdb_active_storage");
+          if (storedVfs === "memory" || storedVfs === "idb") {
+            activeStorage = storedVfs;
+          }
+          const storedDb = localStorage.getItem("webdb_active_db");
+          if (storedDb) {
+            activeDbName = storedDb;
+          }
+        } catch (e) {}
+
+        updateDbSelectorUI();
+        await openDatabase(activeDbName, activeStorage);
       });
     </script>
   </body>
