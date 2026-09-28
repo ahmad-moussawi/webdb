@@ -7,6 +7,7 @@ import {
   TooManyRegistersError,
   TooManyOrderByColumnsError,
   TooManyGroupByColumnsError,
+  TooManyCursorsError,
   UnknownFunctionError,
 } from "../../types/index.js";
 import { VmKeyInfo } from "../../shared/vm_context.js";
@@ -63,8 +64,20 @@ export interface AggExpr {
   alias?: string;
 }
 
+export type JoinType = 'inner' | 'left';
+
+export interface JoinPlan {
+  type: JoinType;
+  table: TableMeta;
+  cursor: number;
+  leftCol: string;
+  op: ComparisonOp;
+  rightCol: string;
+}
+
 export interface QueryPlan {
   table: TableMeta;
+  joinedTables?: JoinPlan[];
   filters: QueryFilter[];
   orderBy?: SortKey[];
   groupBy?: (string | GroupKey)[];
@@ -306,6 +319,58 @@ export function collectLeafFilters(filter: QueryFilter): QueryFilter[] {
   return leaves;
 }
 
+export interface ResolvedColumn {
+  tableIdx: number;
+  cursor: number;
+  colIdx: number;
+  col: ColumnMeta;
+  table: TableMeta;
+}
+
+export function resolveColumnAcrossTables(
+  colName: string,
+  tables: TableMeta[],
+): ResolvedColumn | null {
+  if (colName.includes('.')) {
+    const parts = colName.split('.');
+    const tblName = parts[0];
+    const cName = parts[1];
+    const tableIdx = tables.findIndex(
+      (t) => t.name.toLowerCase() === tblName.toLowerCase(),
+    );
+    if (tableIdx === -1) return null;
+    const colIdx = tables[tableIdx].columns.findIndex(
+      (c) => c.name.toLowerCase() === cName.toLowerCase(),
+    );
+    if (colIdx === -1) return null;
+    return {
+      tableIdx,
+      cursor: tableIdx,
+      colIdx,
+      col: tables[tableIdx].columns[colIdx],
+      table: tables[tableIdx],
+    };
+  }
+
+  // Unqualified column name: search tables in order
+  for (let i = 0; i < tables.length; i++) {
+    const colIdx = tables[i].columns.findIndex(
+      (c) => c.name.toLowerCase() === colName.toLowerCase(),
+    );
+    if (colIdx !== -1) {
+      return {
+        tableIdx: i,
+        cursor: i,
+        colIdx,
+        col: tables[i].columns[colIdx],
+        table: tables[i],
+      };
+    }
+  }
+
+  return null;
+}
+
 function emitLeafJumpOnTrue(
   filter: QueryFilter,
   leafIdx: number,
@@ -313,7 +378,9 @@ function emitLeafJumpOnTrue(
   emitter: BytecodeEmitter,
   truePatches: number[],
   udfNameMap?: Map<string, number>,
+  tables?: TableMeta[],
 ): void {
+  const all = tables ?? [table];
   if (filter.type === "expr") {
     const regRes = leafIdx * 2;
     const regOne = leafIdx * 2 + 1;
@@ -322,7 +389,7 @@ function emitLeafJumpOnTrue(
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
     };
-    emitExpression(filter.expr!, table, emitter, 0, regRes, allocReg, udfNameMap);
+    emitExpression(filter.expr!, table, emitter, 0, regRes, allocReg, udfNameMap, undefined, all);
     emitter.emitUint8(OpCode.OP_LOAD_INT);
     emitter.emitUint8(regOne);
     emitter.emitInt32(1);
@@ -338,10 +405,10 @@ function emitLeafJumpOnTrue(
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
-    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-    if (colIdx === -1) {
+    const resolved = resolveColumnAcrossTables(filter.colName, all);
+    if (!resolved) {
       throw new Error(
-        `Column "${filter.colName}" not found in table "${table.name}"`,
+        `Column "${filter.colName}" not found in tables`,
       );
     }
     if (filter.isNull) {
@@ -349,8 +416,8 @@ function emitLeafJumpOnTrue(
     } else {
       emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
     }
-    emitter.emitUint8(0);
-    emitter.emitUint8(colIdx);
+    emitter.emitUint8(resolved.cursor);
+    emitter.emitUint8(resolved.colIdx);
     truePatches.push(emitter.emitUint16(0));
     return;
   }
@@ -364,15 +431,14 @@ function emitLeafJumpOnTrue(
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
     };
-    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap);
+    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
   } else {
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
-    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-    if (colIdx !== -1) {
-      const col = table.columns[colIdx];
-      emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+    const resolved = resolveColumnAcrossTables(filter.colName, all);
+    if (resolved) {
+      emitReadColumn(emitter, resolved.cursor, resolved.colIdx, regCol, resolved.col.type);
     } else {
       try {
         const parsed = parseExpression(filter.colName);
@@ -381,10 +447,10 @@ function emitLeafJumpOnTrue(
           if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
           return tempReg++;
         };
-        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap);
+        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
       } catch {
         throw new Error(
-          `Column "${filter.colName}" not found in table "${table.name}"`,
+          `Column "${filter.colName}" not found in tables`,
         );
       }
     }
@@ -416,7 +482,9 @@ function emitLeafJumpOnFalse(
   emitter: BytecodeEmitter,
   falsePatches: number[],
   udfNameMap?: Map<string, number>,
+  tables?: TableMeta[],
 ): void {
+  const all = tables ?? [table];
   if (filter.type === "expr") {
     const regRes = leafIdx * 2;
     const regOne = leafIdx * 2 + 1;
@@ -425,7 +493,7 @@ function emitLeafJumpOnFalse(
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
     };
-    emitExpression(filter.expr!, table, emitter, 0, regRes, allocReg, udfNameMap);
+    emitExpression(filter.expr!, table, emitter, 0, regRes, allocReg, udfNameMap, undefined, all);
     emitter.emitUint8(OpCode.OP_LOAD_INT);
     emitter.emitUint8(regOne);
     emitter.emitInt32(1);
@@ -446,10 +514,10 @@ function emitLeafJumpOnFalse(
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
-    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-    if (colIdx === -1) {
+    const resolved = resolveColumnAcrossTables(filter.colName, all);
+    if (!resolved) {
       throw new Error(
-        `Column "${filter.colName}" not found in table "${table.name}"`,
+        `Column "${filter.colName}" not found in tables`,
       );
     }
     if (filter.isNull) {
@@ -457,8 +525,8 @@ function emitLeafJumpOnFalse(
     } else {
       emitter.emitUint8(OpCode.OP_IS_NULL);
     }
-    emitter.emitUint8(0);
-    emitter.emitUint8(colIdx);
+    emitter.emitUint8(resolved.cursor);
+    emitter.emitUint8(resolved.colIdx);
     falsePatches.push(emitter.emitUint16(0));
     return;
   }
@@ -472,15 +540,14 @@ function emitLeafJumpOnFalse(
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
     };
-    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap);
+    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
   } else {
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
-    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-    if (colIdx !== -1) {
-      const col = table.columns[colIdx];
-      emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+    const resolved = resolveColumnAcrossTables(filter.colName, all);
+    if (resolved) {
+      emitReadColumn(emitter, resolved.cursor, resolved.colIdx, regCol, resolved.col.type);
     } else {
       try {
         const parsed = parseExpression(filter.colName);
@@ -489,10 +556,10 @@ function emitLeafJumpOnFalse(
           if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
           return tempReg++;
         };
-        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap);
+        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
       } catch {
         throw new Error(
-          `Column "${filter.colName}" not found in table "${table.name}"`,
+          `Column "${filter.colName}" not found in tables`,
         );
       }
     }
@@ -531,13 +598,14 @@ function emitLeafCondition(
   falsePatches: number[],
   fallthrough: "true" | "false" | "none",
   udfNameMap?: Map<string, number>,
+  tables?: TableMeta[],
 ): void {
   if (fallthrough === "true") {
-    emitLeafJumpOnFalse(filter, leafIdx, table, emitter, falsePatches, udfNameMap);
+    emitLeafJumpOnFalse(filter, leafIdx, table, emitter, falsePatches, udfNameMap, tables);
   } else if (fallthrough === "false") {
-    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap);
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables);
   } else {
-    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap);
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables);
     emitter.emitUint8(OpCode.OP_JUMP);
     falsePatches.push(emitter.emitUint16(0));
   }
@@ -552,6 +620,7 @@ function compileFilterNode(
   falsePatches: number[],
   fallthrough: "true" | "false" | "none",
   udfNameMap?: Map<string, number>,
+  tables?: TableMeta[],
 ): void {
   if (node.type === "cmp" || node.type === "null" || node.type === "expr") {
     const leafIdx = leafRegMap.get(node) ?? 0;
@@ -564,6 +633,7 @@ function compileFilterNode(
       falsePatches,
       fallthrough,
       udfNameMap,
+      tables,
     );
     return;
   }
@@ -575,11 +645,11 @@ function compileFilterNode(
     const leaf = node.child;
     const leafIdx = leafRegMap.get(leaf) ?? 0;
     if (fallthrough === "true") {
-      emitLeafJumpOnTrue(leaf, leafIdx, table, emitter, falsePatches, udfNameMap);
+      emitLeafJumpOnTrue(leaf, leafIdx, table, emitter, falsePatches, udfNameMap, tables);
     } else if (fallthrough === "false") {
-      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap);
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables);
     } else {
-      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap);
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables);
       emitter.emitUint8(OpCode.OP_JUMP);
       falsePatches.push(emitter.emitUint16(0));
     }
@@ -610,6 +680,7 @@ function compileFilterNode(
           falsePatches,
           "true",
           udfNameMap,
+          tables,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subTruePatches) {
@@ -625,6 +696,7 @@ function compileFilterNode(
           falsePatches,
           fallthrough,
           udfNameMap,
+          tables,
         );
       }
     }
@@ -655,6 +727,7 @@ function compileFilterNode(
           subFalsePatches,
           "false",
           udfNameMap,
+          tables,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subFalsePatches) {
@@ -670,6 +743,7 @@ function compileFilterNode(
           falsePatches,
           fallthrough,
           udfNameMap,
+          tables,
         );
       }
     }
@@ -1124,6 +1198,7 @@ function emitFilterTree(
   leafRegMap: Map<QueryFilter, number>,
   nextRowPatches: number[],
   udfNameMap?: Map<string, number>,
+  tables?: TableMeta[],
 ): void {
   if (!root) return;
   const truePatches: number[] = [];
@@ -1136,6 +1211,7 @@ function emitFilterTree(
     nextRowPatches,
     "true",
     udfNameMap,
+    tables,
   );
   const rowStartPos = emitter.currentOffset();
   for (const patch of truePatches) {
@@ -1147,6 +1223,7 @@ export function inferExprType(
   expr: ExprNode,
   table: TableMeta,
   udfDefs?: Map<string, { returnType?: DataType }>,
+  tables?: TableMeta[],
 ): DataType {
   if (expr.type === 'literal') {
     if (typeof expr.value === 'number') {
@@ -1156,8 +1233,9 @@ export function inferExprType(
     return DataType.TEXT;
   }
   if (expr.type === 'col') {
-    const c = table.columns.find((col) => col.name === expr.name);
-    return c ? c.type : DataType.TEXT;
+    const all = tables ?? [table];
+    const resolved = resolveColumnAcrossTables(expr.name, all);
+    return resolved ? resolved.col.type : DataType.TEXT;
   }
   if (expr.type === 'binary') {
     return DataType.FLOAT64;
@@ -1174,8 +1252,8 @@ export function inferExprType(
     if (['length', 'count'].includes(fn)) return DataType.INT32;
     if (['abs', 'round', 'floor', 'ceil', 'sum', 'avg', 'min', 'max'].includes(fn)) {
       if (expr.args.length > 0 && expr.args[0].type === 'col') {
-        const c = table.columns.find((col) => col.name === (expr.args[0] as any).name);
-        if (c && c.type === DataType.INT32 && fn !== 'avg') return DataType.INT32;
+        const resolved = resolveColumnAcrossTables((expr.args[0] as any).name, tables ?? [table]);
+        if (resolved && resolved.col.type === DataType.INT32 && fn !== 'avg') return DataType.INT32;
       }
       return DataType.FLOAT64;
     }
@@ -1193,6 +1271,7 @@ export function emitExpression(
   allocReg: () => number,
   udfNameMap?: Map<string, number>,
   resolveReg?: (name?: string, expr?: ExprNode) => number | undefined,
+  tables?: TableMeta[],
 ): void {
   if (resolveReg) {
     const colName = expr.type === 'col' ? expr.name : undefined;
@@ -1238,8 +1317,9 @@ export function emitExpression(
     if (cursor === -1) {
       throw new Error(`Column "${expr.name}" in HAVING clause must be an aggregate or grouping column`);
     }
-    const colIdx = table.columns.findIndex((c) => c.name === expr.name);
-    if (colIdx === -1) {
+    const all = tables ?? [table];
+    const resolved = resolveColumnAcrossTables(expr.name, all);
+    if (!resolved) {
       if (expr.name === '*') {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
         emitter.emitUint8(targetReg);
@@ -1247,16 +1327,15 @@ export function emitExpression(
       }
       throw new Error(`Column "${expr.name}" does not exist in table "${table.name}"`);
     }
-    const col = table.columns[colIdx];
-    emitReadColumn(emitter, cursor, colIdx, targetReg, col.type);
+    emitReadColumn(emitter, resolved.cursor, resolved.colIdx, targetReg, resolved.col.type);
     return;
   }
 
   if (expr.type === 'binary') {
     const regLeft = allocReg();
     const regRight = allocReg();
-    emitExpression(expr.left, table, emitter, cursor, regLeft, allocReg, udfNameMap, resolveReg);
-    emitExpression(expr.right, table, emitter, cursor, regRight, allocReg, udfNameMap, resolveReg);
+    emitExpression(expr.left, table, emitter, cursor, regLeft, allocReg, udfNameMap, resolveReg, tables);
+    emitExpression(expr.right, table, emitter, cursor, regRight, allocReg, udfNameMap, resolveReg, tables);
 
     let opCode = OpCode.OP_ADD;
     if (expr.op === '+') opCode = OpCode.OP_ADD;
@@ -1326,7 +1405,7 @@ export function emitExpression(
     if (unaryOps[fnName]) {
       const srcReg = allocReg();
       const arg = expr.args[0] ?? { type: 'literal', value: null };
-      emitExpression(arg, table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg);
+      emitExpression(arg, table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg, tables);
       emitter.emitUint8(unaryOps[fnName]);
       emitter.emitUint8(srcReg);
       emitter.emitUint8(targetReg);
@@ -1337,10 +1416,10 @@ export function emitExpression(
       const srcReg = allocReg();
       const startReg = allocReg();
       const lenReg = allocReg();
-      emitExpression(expr.args[0], table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg);
-      emitExpression(expr.args[1] ?? { type: 'literal', value: 1 }, table, emitter, cursor, startReg, allocReg, udfNameMap, resolveReg);
+      emitExpression(expr.args[0], table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg, tables);
+      emitExpression(expr.args[1] ?? { type: 'literal', value: 1 }, table, emitter, cursor, startReg, allocReg, udfNameMap, resolveReg, tables);
       if (expr.args[2] !== undefined) {
-        emitExpression(expr.args[2], table, emitter, cursor, lenReg, allocReg, udfNameMap, resolveReg);
+        emitExpression(expr.args[2], table, emitter, cursor, lenReg, allocReg, udfNameMap, resolveReg, tables);
       } else {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
         emitter.emitUint8(lenReg);
@@ -1360,7 +1439,7 @@ export function emitExpression(
         allocReg();
       }
       for (let i = 0; i < numArgs; i++) {
-        emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg);
+        emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg, tables);
       }
       const op = fnName === 'concat' ? OpCode.OP_STR_CONCAT : OpCode.OP_COALESCE;
       emitter.emitUint8(op);
@@ -1380,7 +1459,7 @@ export function emitExpression(
           allocReg();
         }
         for (let i = 0; i < numArgs; i++) {
-          emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg);
+          emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg, tables);
         }
       }
       emitter.emitUint8(OpCode.OP_CALL_UDF);
@@ -1399,6 +1478,14 @@ export function emitExpression(
  * Compiles a QueryPlan into an executable bytecode array.
  */
 export function compileQuery(plan: QueryPlan): Uint8Array {
+  const totalCursors = 1 + (plan.joinedTables?.length ?? 0);
+  if (totalCursors > 16) {
+    throw new TooManyCursorsError(totalCursors, 16);
+  }
+
+  const isJoinQuery = plan.joinedTables !== undefined && plan.joinedTables.length > 0;
+  const allTables: TableMeta[] = [plan.table, ...(plan.joinedTables?.map((j) => j.table) ?? [])];
+
   const rootFilter = buildRootFilter(plan.filters);
   const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
   const leafRegMap = new Map<QueryFilter, number>();
@@ -1448,10 +1535,10 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
         emitter.emitUint8(regConst);
       } else if (typeof val === "number") {
-        const col = filter.colName
-          ? table.columns.find((c) => c.name === filter.colName)
+        const resolved = filter.colName
+          ? resolveColumnAcrossTables(filter.colName, allTables)
           : undefined;
-        if (col && col.type === DataType.FLOAT64) {
+        if (resolved && resolved.col.type === DataType.FLOAT64) {
           emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
           emitter.emitUint8(regConst);
           emitter.emitFloat64(val);
@@ -1941,7 +2028,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   }
 
   // Case 2: In-Arena Sorter (ORDER BY)
-  if (plan.orderBy && plan.orderBy.length > 0) {
+  if (!isJoinQuery && plan.orderBy && plan.orderBy.length > 0) {
     const K = plan.orderBy.length;
     const sortKeyStartReg = nextReg;
     const totalRegs = sortKeyStartReg + K;
@@ -2072,7 +2159,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     return result;
   }
 
-  // Case 3: Standard Scan (Unsorted, non-aggregate)
+  // Case 3: Scan (Unsorted, non-aggregate) / Nested Loop Joins
   const hasSelectExprs =
     plan.selectExprs !== undefined &&
     plan.selectExprs.length > 0 &&
@@ -2082,20 +2169,330 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       plan.selectExprs[0].expr.name === '*'
     );
 
-  let outStartReg = -1;
+  let outSelectExprs: ParsedSelectExpr[] = [];
   if (hasSelectExprs) {
-    const cols: ColumnMeta[] = plan.selectExprs!.map((se) => ({
+    outSelectExprs = plan.selectExprs!;
+  } else if (isJoinQuery) {
+    const seenNames = new Set<string>();
+    const dupNames = new Set<string>();
+    for (const t of allTables) {
+      for (const c of t.columns) {
+        if (seenNames.has(c.name.toLowerCase())) {
+          dupNames.add(c.name.toLowerCase());
+        }
+        seenNames.add(c.name.toLowerCase());
+      }
+    }
+    for (const t of allTables) {
+      for (const c of t.columns) {
+        const alias = dupNames.has(c.name.toLowerCase())
+          ? `${t.name}.${c.name}`
+          : c.name;
+        outSelectExprs.push({
+          expr: { type: 'col', name: `${t.name}.${c.name}` },
+          alias,
+        });
+      }
+    }
+  }
+
+  let outStartReg = -1;
+  if (hasSelectExprs || isJoinQuery) {
+    const cols: ColumnMeta[] = outSelectExprs.map((se) => ({
       name: se.alias,
-      type: inferExprType(se.expr, table, plan.udfDefs),
+      type: inferExprType(se.expr, table, plan.udfDefs, allTables),
       flags: ColumnFlag.NONE,
       colOffset: 0,
     }));
     plan.outputColumns = cols;
     outStartReg = nextReg;
-    nextReg += plan.selectExprs!.length;
+    nextReg += outSelectExprs.length;
     if (nextReg >= 64) {
       throw new TooManyRegistersError(nextReg);
     }
+  }
+
+  if (isJoinQuery) {
+    const N = allTables.length;
+    const regMatched: number[] = new Array(N);
+    for (let i = 1; i < N; i++) {
+      const joinPlan = plan.joinedTables![i - 1];
+      if (joinPlan.type === 'left') {
+        regMatched[i] = nextReg++;
+      }
+    }
+    const regJoinLeft = nextReg++;
+    const regJoinRight = nextReg++;
+    const regZero = nextReg++;
+    if (nextReg >= 64) {
+      throw new TooManyRegistersError(nextReg);
+    }
+
+    // Open Cursors for all tables
+    for (let i = 0; i < N; i++) {
+      emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
+      emitter.emitUint8(i);
+      emitter.emitUint32(allTables[i].rootPageId);
+    }
+
+    const rewindJumpPatches: number[] = new Array(N);
+    const loopStartPositions: number[] = new Array(N);
+    const nextRowPatchesPerTable: number[][] = Array.from({ length: N }, () => []);
+    const nextRowEofPatches: number[] = new Array(N);
+    const limitHaltPatches: number[] = [];
+
+    // Outer table (Table 0) Rewind
+    emitter.emitUint8(OpCode.OP_REWIND);
+    emitter.emitUint8(0);
+    rewindJumpPatches[0] = emitter.emitUint16(0);
+
+    loopStartPositions[0] = emitter.currentOffset();
+
+    // Nested Joined Tables (1..N-1)
+    for (let i = 1; i < N; i++) {
+      const joinPlan = plan.joinedTables![i - 1];
+      if (joinPlan.type === 'left') {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regMatched[i]);
+        emitter.emitInt32(0);
+      }
+
+      emitter.emitUint8(OpCode.OP_REWIND);
+      emitter.emitUint8(i);
+      rewindJumpPatches[i] = emitter.emitUint16(0);
+
+      loopStartPositions[i] = emitter.currentOffset();
+
+      const resolvedLeft = resolveColumnAcrossTables(joinPlan.leftCol, allTables);
+      if (!resolvedLeft) {
+        throw new Error(`Join column "${joinPlan.leftCol}" not found in tables`);
+      }
+      const resolvedRight = resolveColumnAcrossTables(joinPlan.rightCol, allTables);
+      if (!resolvedRight) {
+        throw new Error(`Join column "${joinPlan.rightCol}" not found in tables`);
+      }
+
+      emitReadColumn(
+        emitter,
+        resolvedLeft.cursor,
+        resolvedLeft.colIdx,
+        regJoinLeft,
+        resolvedLeft.col.type,
+      );
+      emitReadColumn(
+        emitter,
+        resolvedRight.cursor,
+        resolvedRight.colIdx,
+        regJoinRight,
+        resolvedRight.col.type,
+      );
+
+      let cmpOp: OpCode;
+      switch (joinPlan.op) {
+        case '=':
+          cmpOp = OpCode.OP_EQ;
+          break;
+        case '!=':
+          cmpOp = OpCode.OP_NE;
+          break;
+        case '>':
+          cmpOp = OpCode.OP_GT;
+          break;
+        case '>=':
+          cmpOp = OpCode.OP_GE;
+          break;
+        case '<':
+          cmpOp = OpCode.OP_LT;
+          break;
+        case '<=':
+          cmpOp = OpCode.OP_LE;
+          break;
+        default:
+          cmpOp = OpCode.OP_EQ;
+      }
+
+      emitter.emitUint8(cmpOp);
+      emitter.emitUint8(regJoinLeft);
+      emitter.emitUint8(regJoinRight);
+      const condMatchPatch = emitter.emitUint16(0);
+
+      // Mismatch: jump to nextRow for table i
+      emitter.emitUint8(OpCode.OP_JUMP);
+      nextRowPatchesPerTable[i].push(emitter.emitUint16(0));
+
+      // Match
+      emitter.patchUint16(condMatchPatch, emitter.currentOffset());
+
+      if (joinPlan.type === 'left') {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regMatched[i]);
+        emitter.emitInt32(1);
+      }
+    }
+
+    // Innermost: WHERE filters
+    emitFilterTree(
+      rootFilter,
+      table,
+      emitter,
+      leafRegMap,
+      nextRowPatchesPerTable[N - 1],
+      plan.udfNameMap,
+      allTables,
+    );
+
+    let offsetSkipPatch = -1;
+    if (hasOffset) {
+      emitter.emitUint8(OpCode.OP_OFFSET);
+      emitter.emitUint8(regOffset);
+      offsetSkipPatch = emitter.emitUint16(0);
+    }
+
+    let exprTempReg = nextReg;
+    const allocExprReg = () => {
+      if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
+      return exprTempReg++;
+    };
+
+    for (let k = 0; k < outSelectExprs.length; k++) {
+      emitExpression(
+        outSelectExprs[k].expr,
+        table,
+        emitter,
+        0,
+        outStartReg + k,
+        allocExprReg,
+        plan.udfNameMap,
+        undefined,
+        allTables,
+      );
+    }
+
+    emitter.emitUint8(OpCode.OP_RESULT_ROW);
+    emitter.emitUint8(outStartReg);
+    emitter.emitUint8(outSelectExprs.length);
+
+    if (hasLimit) {
+      emitter.emitUint8(OpCode.OP_LIMIT);
+      emitter.emitUint8(regLimit);
+      limitHaltPatches.push(emitter.emitUint16(0));
+    }
+
+    // Close loops from innermost to outermost
+    for (let i = N - 1; i >= 1; i--) {
+      const nextRowPos = emitter.currentOffset();
+      if (i === N - 1 && offsetSkipPatch !== -1) {
+        emitter.patchUint16(offsetSkipPatch, nextRowPos);
+      }
+      for (const patch of nextRowPatchesPerTable[i]) {
+        emitter.patchUint16(patch, nextRowPos);
+      }
+
+      emitter.emitUint8(OpCode.OP_NEXT_ROW);
+      emitter.emitUint8(i);
+      nextRowEofPatches[i] = emitter.emitUint16(0);
+
+      emitter.emitUint8(OpCode.OP_JUMP);
+      emitter.emitUint16(loopStartPositions[i]);
+
+      const eofPos = emitter.currentOffset();
+      emitter.patchUint16(rewindJumpPatches[i], eofPos);
+      emitter.patchUint16(nextRowEofPatches[i], eofPos);
+
+      const joinPlan = plan.joinedTables![i - 1];
+      if (joinPlan.type === 'left') {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regZero);
+        emitter.emitInt32(0);
+
+        emitter.emitUint8(OpCode.OP_EQ);
+        emitter.emitUint8(regMatched[i]);
+        emitter.emitUint8(regZero);
+        const nullRowBranchPatch = emitter.emitUint16(0);
+
+        emitter.emitUint8(OpCode.OP_JUMP);
+        const skipNullRowPatch = emitter.emitUint16(0);
+
+        emitter.patchUint16(nullRowBranchPatch, emitter.currentOffset());
+
+        for (let k = 0; k < outSelectExprs.length; k++) {
+          const se = outSelectExprs[k];
+          let refTableIdx = -1;
+          if (se.expr.type === 'col') {
+            const resolved = resolveColumnAcrossTables(se.expr.name, allTables);
+            if (resolved) {
+              refTableIdx = resolved.tableIdx;
+            }
+          }
+          if (refTableIdx >= i) {
+            emitter.emitUint8(OpCode.OP_LOAD_NULL);
+            emitter.emitUint8(outStartReg + k);
+          } else {
+            emitExpression(
+              se.expr,
+              table,
+              emitter,
+              0,
+              outStartReg + k,
+              allocExprReg,
+              plan.udfNameMap,
+              undefined,
+              allTables,
+            );
+          }
+        }
+
+        const afterNullRowPatches: number[] = [];
+        if (hasOffset) {
+          emitter.emitUint8(OpCode.OP_OFFSET);
+          emitter.emitUint8(regOffset);
+          afterNullRowPatches.push(emitter.emitUint16(0));
+        }
+
+        emitter.emitUint8(OpCode.OP_RESULT_ROW);
+        emitter.emitUint8(outStartReg);
+        emitter.emitUint8(outSelectExprs.length);
+
+        if (hasLimit) {
+          emitter.emitUint8(OpCode.OP_LIMIT);
+          emitter.emitUint8(regLimit);
+          limitHaltPatches.push(emitter.emitUint16(0));
+        }
+
+        const afterNullRowPos = emitter.currentOffset();
+        emitter.patchUint16(skipNullRowPatch, afterNullRowPos);
+        for (const p of afterNullRowPatches) {
+          emitter.patchUint16(p, afterNullRowPos);
+        }
+      }
+    }
+
+    const nextRowPos0 = emitter.currentOffset();
+    for (const patch of nextRowPatchesPerTable[0]) {
+      emitter.patchUint16(patch, nextRowPos0);
+    }
+
+    emitter.emitUint8(OpCode.OP_NEXT_ROW);
+    emitter.emitUint8(0);
+    nextRowEofPatches[0] = emitter.emitUint16(0);
+
+    emitter.emitUint8(OpCode.OP_JUMP);
+    emitter.emitUint16(loopStartPositions[0]);
+
+    const eofPos0 = emitter.currentOffset();
+    emitter.patchUint16(rewindJumpPatches[0], eofPos0);
+    emitter.patchUint16(nextRowEofPatches[0], eofPos0);
+    for (const patch of limitHaltPatches) {
+      emitter.patchUint16(patch, eofPos0);
+    }
+
+    emitter.emitUint8(OpCode.OP_HALT);
+
+    const result = emitter.toByteArray();
+    if (plan.outputColumns) {
+      (result as any).outputColumns = plan.outputColumns;
+    }
+    return result;
   }
 
   // Open Cursor

@@ -15,6 +15,7 @@ import {
   QueryTimeoutError,
   InvalidBytecodeError,
   QueryArenaExhaustedError,
+  TooManyCursorsError,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
@@ -55,6 +56,7 @@ import {
   GroupKey,
   AggExpr,
   QueryPlan,
+  JoinPlan,
   disassembleBytecode,
   formatDisassembly,
 } from "../compiler/compiler.ts";
@@ -64,6 +66,7 @@ import {
   type ExplainOutput,
   type IDatabaseQueryExecutor,
   type QueryExecutionOptions,
+  type JoinClause,
 } from "./query_builder.ts";
 
 export interface UdfDefinition {
@@ -426,13 +429,35 @@ export class WebDB implements IDatabaseQueryExecutor {
       having?: QueryFilter[];
       select?: any;
       selectExprs?: ParsedSelectExpr[];
+      joins?: JoinClause[];
       limit?: number;
       offset?: number;
     },
   ): Promise<ExplainOutput> {
     const table = await this.getTable(tableName);
+
+    const joinPlans: JoinPlan[] = [];
+    if (options?.joins && options.joins.length > 0) {
+      if (1 + options.joins.length > 16) {
+        throw new TooManyCursorsError(1 + options.joins.length, 16);
+      }
+      for (let i = 0; i < options.joins.length; i++) {
+        const j = options.joins[i];
+        const joinedTable = await this.getTable(j.table);
+        joinPlans.push({
+          type: j.type,
+          table: joinedTable,
+          cursor: i + 1,
+          leftCol: j.leftCol,
+          op: j.op,
+          rightCol: j.rightCol,
+        });
+      }
+    }
+
     const bytecode = compileQuery({
       table,
+      joinedTables: joinPlans.length > 0 ? joinPlans : undefined,
       filters,
       orderBy: options?.orderBy,
       groupBy: options?.groupBy,
@@ -458,6 +483,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         aggregates: options?.aggregates,
         having: options?.having,
         select: options?.select,
+        joins: options?.joins,
         limit: options?.limit,
         offset: options?.offset,
       },
@@ -474,12 +500,35 @@ export class WebDB implements IDatabaseQueryExecutor {
   ): Promise<DbRow[]> {
     const table = await this.getTable(tableName);
 
-    // Pre-load all data pages for this table into buffer pool before running VM
-    let currPageId = table.rootPageId;
-    while (currPageId !== 0) {
-      const slot = await this.driver.acquirePage(currPageId);
-      const view = this.pool.getSlotDataView(slot);
-      currPageId = page_get_next_page_id(view, 0);
+    const joinedTablesMeta: TableMeta[] = [];
+    const joinPlans: JoinPlan[] = [];
+    if (options.joins && options.joins.length > 0) {
+      if (1 + options.joins.length > 16) {
+        throw new TooManyCursorsError(1 + options.joins.length, 16);
+      }
+      for (let i = 0; i < options.joins.length; i++) {
+        const j = options.joins[i];
+        const joinedTable = await this.getTable(j.table);
+        joinedTablesMeta.push(joinedTable);
+        joinPlans.push({
+          type: j.type,
+          table: joinedTable,
+          cursor: i + 1,
+          leftCol: j.leftCol,
+          op: j.op,
+          rightCol: j.rightCol,
+        });
+      }
+    }
+
+    // Pre-load all data pages for all tables into buffer pool before running VM
+    for (const t of [table, ...joinedTablesMeta]) {
+      let currPageId = t.rootPageId;
+      while (currPageId !== 0) {
+        const slot = await this.driver.acquirePage(currPageId);
+        const view = this.pool.getSlotDataView(slot);
+        currPageId = page_get_next_page_id(view, 0);
+      }
     }
 
     let orderBy = options.orderBy;
@@ -489,6 +538,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const plan: QueryPlan = {
       table,
+      joinedTables: joinPlans.length > 0 ? joinPlans : undefined,
       filters,
       orderBy,
       groupBy: options.groupBy,
@@ -503,7 +553,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const bytecode = compileQuery(plan);
 
-    resetVmContext(this.vmCtx, table);
+    resetVmContext(this.vmCtx, table, [table, ...joinedTablesMeta]);
     if (plan.keyInfos) {
       this.vmCtx.keyInfos = plan.keyInfos;
     }

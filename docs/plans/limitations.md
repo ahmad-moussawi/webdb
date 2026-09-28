@@ -26,6 +26,7 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 | **Query**       | Secondary Indexes                     | Single-column in V1 (`IndexDescriptor` reserved) | Composite indexes deferred to V1.1+ (zero migration)|
 | **Query**       | Table Joins                           |     Up to `16 tables` per query level      | `TooManyCursorsError` if > 16 cursors needed        |
 | **Query**       | Subqueries                            | Correlated depth ≤ 7; sequential unlimited | `SubqueryNestingTooDeepError` (compile time)        |
+| **Query**       | Client-Side Projections (`projectRow`)| Terminal execution only (not in subqueries)| VM executes native bytecode; JS projections bypassed|
 | **Concurrency** | Concurrent Writers                    |         `1 writer` (Web Locks API)         | Serialized in FIFO order via browser locks          |
 | **Concurrency** | Active Transactions per Connection    |              `1 transaction`               | `TransactionAlreadyActiveError`                     |
 
@@ -276,6 +277,12 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 
 - **Invariant:** Tables cannot be modified in-place dynamically after creation.
 - **Migration Pattern:** To alter a schema in V1, applications create the new table, migrate data via `insert()`, and drop the old table. Dynamic column addition/removal is scheduled for future catalog revisions.
+
+### 4.9 Client-Side Projection (`projectRow`) & Subquery Boundary Limitation
+
+- **Current V1 Architecture:** Terminal queries executed through the Query Builder (via `.toArray()` or `.first()`) run an in-memory post-processor [`projectRow`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts). This handles JavaScript-side scalar expression evaluation, client-side UDF execution, column aliasing, and fallback formatting on the raw result rows returned by the VDBE VM.
+- **Subquery Invariant / Limitation:** Subqueries (such as derived tables in `FROM (subquery)`, scalar subqueries, or `IN (subquery)` filters) compile and execute strictly within the core VDBE virtual machine and bytecode frames. Consequently, any projection logic, expression transforms, or custom aliases handled exclusively in JavaScript `projectRow` are **not** evaluated or accessible within subquery contexts. Subqueries only have access to raw columns and native VM registers emitted by bytecode.
+- **Resolution Roadmap:** Full composability will be achieved by lowering all scalar functions and expressions directly into VDBE bytecode opcodes (`OP_STR_*`, `OP_MATH_*`, `OP_ADD`, `OP_CALL_UDF`, etc.) during compilation, eliminating the need for client-side JavaScript row interception.
 
 ---
 

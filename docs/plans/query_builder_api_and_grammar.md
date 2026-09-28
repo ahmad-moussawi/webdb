@@ -565,6 +565,10 @@ const results = await db.from(subquery)
    - Inner query writes results to an ephemeral B-Tree cursor (`OP_OPEN_EPHEMERAL`).
    - Outer query scans the ephemeral cursor.
 
+> [!WARNING]
+> **Subquery Boundary & `projectRow` Limitation:**
+> In the current V1 architecture, client-side expression evaluations, UDFs, and custom alias mappings handled exclusively inside `QueryBuilder.projectRow()` only run at terminal execution (`.toArray()`, `.first()`). When a query is passed as a subquery, the VDBE executes native bytecode and does not run client-side `projectRow`. Subqueries currently only project native table columns and bytecode registers until scalar expressions are fully lowered into bytecode opcodes in the compiler.
+
 ---
 
 ## 8. Terminal Execution Methods

@@ -79,6 +79,7 @@ export interface VmContext {
   sorters: VmSorter[];
   aggregators: VmAggregator[];
   table: TableMeta | null;
+  tables?: TableMeta[];
   outputColumns?: ColumnMeta[];
   udfs?: Record<number, (...args: any[]) => any>;
 }
@@ -101,11 +102,16 @@ export function createVmContext(): VmContext {
     sorters: [],
     aggregators: [],
     table: null,
+    tables: undefined,
     outputColumns: undefined,
   };
 }
 
-export function resetVmContext(ctx: VmContext, table?: TableMeta): void {
+export function resetVmContext(
+  ctx: VmContext,
+  table?: TableMeta,
+  tables?: TableMeta[],
+): void {
   ctx.pc = 0;
   ctx.status = VmStatus.RUNNING;
   ctx.fault_page_id = 0;
@@ -129,5 +135,6 @@ export function resetVmContext(ctx: VmContext, table?: TableMeta): void {
   ctx.sorters = [];
   ctx.aggregators = [];
   ctx.table = table ?? null;
+  ctx.tables = tables;
   ctx.outputColumns = undefined;
 }

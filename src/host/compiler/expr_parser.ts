@@ -207,11 +207,17 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
-    // Identifier / Keyword
+    // Identifier / Keyword (supports qualified identifiers like table.column)
     if (/[a-zA-Z_]/.test(ch)) {
       const start = i;
-      while (i < len && /[a-zA-Z0-9_]/.test(input[i])) {
-        i++;
+      while (i < len) {
+        if (/[a-zA-Z0-9_]/.test(input[i])) {
+          i++;
+        } else if (input[i] === '.' && i + 1 < len && /[a-zA-Z_]/.test(input[i + 1])) {
+          i += 2;
+        } else {
+          break;
+        }
       }
       const val = input.slice(start, i);
       tokens.push({ type: 'IDENT', value: val, pos: start });
@@ -447,11 +453,16 @@ function splitAsAlias(raw: string): { exprStr: string; explicitAlias?: string } 
  */
 export function deriveDefaultAlias(expr: ExprNode): string {
   if (expr.type === 'col') {
-    return expr.name;
+    return expr.name.includes('.')
+      ? expr.name.slice(expr.name.lastIndexOf('.') + 1)
+      : expr.name;
   }
   if (expr.type === 'fn') {
     if (expr.args.length > 0 && expr.args[0].type === 'col' && expr.args[0].name !== '*') {
-      return `${expr.name}_${expr.args[0].name}`;
+      const colName = expr.args[0].name.includes('.')
+        ? expr.args[0].name.slice(expr.args[0].name.lastIndexOf('.') + 1)
+        : expr.args[0].name;
+      return `${expr.name}_${colName}`;
     }
     return expr.name;
   }

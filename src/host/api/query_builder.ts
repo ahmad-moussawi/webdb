@@ -234,6 +234,16 @@ export interface ExplainOutput {
   assembly: string;
 }
 
+export type JoinType = 'inner' | 'left';
+
+export interface JoinClause {
+  type: JoinType;
+  table: string;
+  leftCol: string;
+  op: ComparisonOp;
+  rightCol: string;
+}
+
 export interface QueryExecutionOptions {
   limit: number | null;
   offset: number | null;
@@ -245,6 +255,7 @@ export interface QueryExecutionOptions {
   having?: QueryFilter[];
   select?: NormalizedSelectField[];
   selectExprs?: ParsedSelectExpr[];
+  joins?: JoinClause[];
 }
 
 export interface IDatabaseQueryExecutor {
@@ -258,6 +269,7 @@ export interface IDatabaseQueryExecutor {
       having?: QueryFilter[];
       select?: NormalizedSelectField[];
       selectExprs?: ParsedSelectExpr[];
+      joins?: JoinClause[];
       limit?: number;
       offset?: number;
     },
@@ -313,10 +325,93 @@ export class QueryBuilder {
   private groupKeys: GroupKey[] = [];
   private aggExprs: AggExpr[] = [];
   private havingFilters: QueryFilter[] = [];
+  private joins: JoinClause[] = [];
 
   constructor(db: IDatabaseQueryExecutor, tableName: string) {
     this.db = db;
     this.tableName = tableName;
+  }
+
+  join(
+    table: string,
+    leftCol: string,
+    rightCol: string,
+  ): this;
+  join(
+    table: string,
+    leftCol: string,
+    op: ComparisonOp,
+    rightCol: string,
+  ): this;
+  join(
+    table: string,
+    leftCol: string,
+    opOrRightCol: string,
+    rightCol?: string,
+  ): this {
+    const op = (rightCol !== undefined ? opOrRightCol : '=') as ComparisonOp;
+    const rCol = rightCol !== undefined ? rightCol : opOrRightCol;
+    this.joins.push({
+      type: 'inner',
+      table,
+      leftCol,
+      op,
+      rightCol: rCol,
+    });
+    return this;
+  }
+
+  innerJoin(
+    table: string,
+    leftCol: string,
+    rightCol: string,
+  ): this;
+  innerJoin(
+    table: string,
+    leftCol: string,
+    op: ComparisonOp,
+    rightCol: string,
+  ): this;
+  innerJoin(
+    table: string,
+    leftCol: string,
+    opOrRightCol: string,
+    rightCol?: string,
+  ): this {
+    return this.join(table, leftCol, opOrRightCol as any, rightCol as any);
+  }
+
+  leftJoin(
+    table: string,
+    leftCol: string,
+    rightCol: string,
+  ): this;
+  leftJoin(
+    table: string,
+    leftCol: string,
+    op: ComparisonOp,
+    rightCol: string,
+  ): this;
+  leftJoin(
+    table: string,
+    leftCol: string,
+    opOrRightCol: string,
+    rightCol?: string,
+  ): this {
+    const op = (rightCol !== undefined ? opOrRightCol : '=') as ComparisonOp;
+    const rCol = rightCol !== undefined ? rightCol : opOrRightCol;
+    this.joins.push({
+      type: 'left',
+      table,
+      leftCol,
+      op,
+      rightCol: rCol,
+    });
+    return this;
+  }
+
+  getJoins(): JoinClause[] {
+    return this.joins;
   }
 
   where(exprSql: string): this;
@@ -1274,6 +1369,18 @@ export class QueryBuilder {
     return this.selectFields;
   }
 
+  /**
+   * Post-processes raw VDBE result rows into projected output records according
+   * to select fields, expressions, aliases, and registered UDFs.
+   *
+   * ARCHITECTURAL LIMITATION NOTE:
+   * Everything handled exclusively within `projectRow` operates on client-side
+   * result rows after VM execution. Subqueries (e.g. derived tables `db.from(subquery)`
+   * or correlated scalar subqueries) compile and execute at the VDBE bytecode level,
+   * so client-side transformations performed solely in `projectRow` will not be
+   * available inside subqueries until scalar expressions are fully lowered into
+   * VDBE register opcodes in the compiler.
+   */
   private projectRow(row: DbRow): DbRow {
     // Fast-path: If rawRows was already projected by VDBE OP_RESULT_ROW,
     // the row contains exactly the target aliases.
@@ -1321,6 +1428,7 @@ export class QueryBuilder {
     }));
 
     return this.db.explainQuery(this.tableName, this.filters, {
+      joins: this.joins.length > 0 ? this.joins : undefined,
       orderBy: this.orderKeys.length > 0 ? this.orderKeys : undefined,
       groupBy:
         this.groupKeys.length > 0
@@ -1337,14 +1445,42 @@ export class QueryBuilder {
     });
   }
 
+  private getOrderKeyValue(row: DbRow, k: OrderKey): any {
+    const rawKey =
+      k.colName ?? (k.expr ? deriveDefaultAlias(k.expr) : undefined);
+    if (!rawKey) return undefined;
+
+    if (row[rawKey] !== undefined) return row[rawKey];
+
+    const shortCol = rawKey.includes('.')
+      ? rawKey.slice(rawKey.lastIndexOf('.') + 1)
+      : rawKey;
+    if (row[shortCol] !== undefined) return row[shortCol];
+
+    if (this.selectFields.length > 0) {
+      for (const f of this.selectFields) {
+        if (
+          f.sourceCol === rawKey ||
+          f.sourceCol === shortCol ||
+          f.alias === rawKey ||
+          f.alias === shortCol
+        ) {
+          if (row[f.alias] !== undefined) return row[f.alias];
+        }
+      }
+    }
+
+    if (row[`__sort_${rawKey}`] !== undefined) return row[`__sort_${rawKey}`];
+    if (row[`__sort_${shortCol}`] !== undefined) return row[`__sort_${shortCol}`];
+
+    return undefined;
+  }
+
   private sortAggregatedRows(rows: DbRow[]): DbRow[] {
     return [...rows].sort((a, b) => {
       for (const k of this.orderKeys) {
-        const keyName =
-          k.colName ?? (k.expr ? deriveDefaultAlias(k.expr) : undefined);
-        if (!keyName) continue;
-        const valA = a[keyName];
-        const valB = b[keyName];
+        const valA = this.getOrderKeyValue(a, k);
+        const valB = this.getOrderKeyValue(b, k);
         if (valA === valB) continue;
         if (valA === null || valA === undefined) {
           return k.nullOrder === 'nulls_first' ? -1 : 1;
@@ -1368,12 +1504,44 @@ export class QueryBuilder {
       alias: f.alias,
     }));
 
+    const hasJoins = this.joins.length > 0;
+    const hasOrderBy = this.orderKeys.length > 0;
+    const hasAggsOrGrouping =
+      this.aggExprs.length > 0 ||
+      this.groupKeys.length > 0 ||
+      this.groupCols.length > 0;
+
+    if (hasJoins && hasOrderBy && selectExprs.length > 0) {
+      for (const k of this.orderKeys) {
+        const col = k.colName;
+        if (col) {
+          const short = col.includes('.')
+            ? col.slice(col.lastIndexOf('.') + 1)
+            : col;
+          const found = this.selectFields.some(
+            (f) =>
+              f.alias === col ||
+              f.alias === short ||
+              f.sourceCol === col ||
+              f.sourceCol === short,
+          );
+          if (!found) {
+            selectExprs.push({
+              expr: { type: 'col', name: col },
+              alias: `__sort_${col}`,
+            });
+          }
+        }
+      }
+    }
+
     const rawRows = await this.db.executeQuery(this.tableName, this.filters, {
-      limit: this.limitCount,
-      offset: this.offsetCount,
-      sortCol: this.sortCol,
+      limit: hasJoins && hasOrderBy ? null : this.limitCount,
+      offset: hasJoins && hasOrderBy ? null : this.offsetCount,
+      sortCol: hasJoins ? null : this.sortCol,
       sortDir: this.sortDir,
-      orderBy: this.orderKeys.length > 0 ? this.orderKeys : undefined,
+      orderBy: hasJoins ? undefined : (hasOrderBy ? this.orderKeys : undefined),
+      joins: hasJoins ? this.joins : undefined,
       groupBy:
         this.groupKeys.length > 0
           ? this.groupKeys
@@ -1387,17 +1555,20 @@ export class QueryBuilder {
     });
 
     let rows = rawRows;
-    if (this.selectFields.length > 0) {
-      rows = rawRows.map((r) => this.projectRow(r));
+    if ((hasAggsOrGrouping || hasJoins) && hasOrderBy) {
+      rows = this.sortAggregatedRows(rows);
+      if (hasJoins) {
+        if (this.offsetCount !== null && this.offsetCount > 0) {
+          rows = rows.slice(this.offsetCount);
+        }
+        if (this.limitCount !== null && this.limitCount >= 0) {
+          rows = rows.slice(0, this.limitCount);
+        }
+      }
     }
 
-    if (
-      (this.aggExprs.length > 0 ||
-        this.groupKeys.length > 0 ||
-        this.groupCols.length > 0) &&
-      this.orderKeys.length > 0
-    ) {
-      rows = this.sortAggregatedRows(rows);
+    if (this.selectFields.length > 0) {
+      rows = rows.map((r) => this.projectRow(r));
     }
 
     return rows;

@@ -8,6 +8,7 @@ import {
   sql,
   AggregateNotAllowedInWhereError,
   UnknownFunctionError,
+  TooManyCursorsError,
 } from '../src/index.js';
 
 describe('QueryBuilder Unit & Integration Tests', () => {
@@ -950,6 +951,243 @@ describe('QueryBuilder Unit & Integration Tests', () => {
           .having('name', '=', 'Alice')
           .toArray()
       ).rejects.toThrow(/Column "name" in HAVING clause must be an aggregate or grouping column/);
+    });
+  });
+
+  describe('Table Join Support (INNER & LEFT JOIN, Multi-Table, Filters, Sorters)', () => {
+    let db: WebDB;
+
+    beforeEach(async () => {
+      db = await WebDB.open({ name: 'test_qb_joins', storage: 'memory' });
+
+      // Table 1: customers
+      await db.createTable('customers', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+        { name: 'name', type: 'TEXT', flags: { notNull: true } },
+        { name: 'city', type: 'TEXT' },
+      ]);
+
+      // Table 2: orders
+      await db.createTable('orders', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+        { name: 'customer_id', type: 'INT32' },
+        { name: 'total_amount', type: 'FLOAT64' },
+        { name: 'status', type: 'TEXT' },
+      ]);
+
+      // Table 3: order_items
+      await db.createTable('order_items', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+        { name: 'order_id', type: 'INT32' },
+        { name: 'item_name', type: 'TEXT' },
+        { name: 'qty', type: 'INT32' },
+      ]);
+
+      // Seed customers:
+      // 1: Alice (Beirut), 2: Bob (Paris), 3: Charlie (Tokyo, no orders)
+      await db.insert('customers', { id: 1, name: 'Alice', city: 'Beirut' });
+      await db.insert('customers', { id: 2, name: 'Bob', city: 'Paris' });
+      await db.insert('customers', { id: 3, name: 'Charlie', city: 'Tokyo' });
+
+      // Seed orders:
+      // 101: Alice, 150.0, completed
+      // 102: Alice, 50.0, pending
+      // 103: Bob, 200.0, completed
+      await db.insert('orders', { id: 101, customer_id: 1, total_amount: 150.0, status: 'completed' });
+      await db.insert('orders', { id: 102, customer_id: 1, total_amount: 50.0, status: 'pending' });
+      await db.insert('orders', { id: 103, customer_id: 2, total_amount: 200.0, status: 'completed' });
+
+      // Seed order_items:
+      // 1: order 101 -> Laptop
+      // 2: order 101 -> Mouse
+      // 3: order 103 -> Keyboard
+      await db.insert('order_items', { id: 1, order_id: 101, item_name: 'Laptop', qty: 1 });
+      await db.insert('order_items', { id: 2, order_id: 101, item_name: 'Mouse', qty: 2 });
+      await db.insert('order_items', { id: 3, order_id: 103, item_name: 'Keyboard', qty: 1 });
+    });
+
+    it('executes 2-table INNER JOIN with select aliases', async () => {
+      const rows = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .select([
+          'customers.name as customer_name',
+          'orders.id as order_id',
+          'orders.total_amount as amount',
+        ])
+        .orderBy('order_id', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { customer_name: 'Alice', order_id: 101, amount: 150.0 },
+        { customer_name: 'Alice', order_id: 102, amount: 50.0 },
+        { customer_name: 'Bob', order_id: 103, amount: 200.0 },
+      ]);
+    });
+
+    it('supports innerJoin alias and explicit operator', async () => {
+      const rows = await db.from('customers')
+        .innerJoin('orders', 'customers.id', '=', 'orders.customer_id')
+        .select(['customers.name', 'orders.id as order_id'])
+        .orderBy('order_id', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { name: 'Alice', order_id: 101 },
+        { name: 'Alice', order_id: 102 },
+        { name: 'Bob', order_id: 103 },
+      ]);
+    });
+
+    it('executes INNER JOIN with WHERE filters on both tables', async () => {
+      const rows = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .where('customers.city', '=', 'Beirut')
+        .where('orders.status', '=', 'completed')
+        .select(['customers.name', 'orders.total_amount as amount'])
+        .toArray();
+
+      expect(rows).toEqual([
+        { name: 'Alice', amount: 150.0 },
+      ]);
+    });
+
+    it('executes 2-table LEFT JOIN including rows without matches', async () => {
+      const rows = await db.from('customers')
+        .leftJoin('orders', 'customers.id', 'orders.customer_id')
+        .select([
+          'customers.name as customer_name',
+          'orders.id as order_id',
+          'orders.total_amount as amount',
+        ])
+        .orderBy('customers.id', 'asc')
+        .toArray();
+
+      // Alice has 101, 102. Bob has 103. Charlie has no orders (NULLs).
+      expect(rows).toEqual([
+        { customer_name: 'Alice', order_id: 101, amount: 150.0 },
+        { customer_name: 'Alice', order_id: 102, amount: 50.0 },
+        { customer_name: 'Bob', order_id: 103, amount: 200.0 },
+        { customer_name: 'Charlie', order_id: null, amount: null },
+      ]);
+    });
+
+    it('executes 3-table multi-join (customers -> orders -> order_items)', async () => {
+      const rows = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .join('order_items', 'orders.id', 'order_items.order_id')
+        .select([
+          'customers.name as customer_name',
+          'orders.id as order_id',
+          'order_items.item_name as item',
+          'order_items.qty as quantity',
+        ])
+        .orderBy('order_items.id', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { customer_name: 'Alice', order_id: 101, item: 'Laptop', quantity: 1 },
+        { customer_name: 'Alice', order_id: 101, item: 'Mouse', quantity: 2 },
+        { customer_name: 'Bob', order_id: 103, item: 'Keyboard', quantity: 1 },
+      ]);
+    });
+
+    it('executes multi-table join with mixed INNER and LEFT JOIN', async () => {
+      const rows = await db.from('customers')
+        .leftJoin('orders', 'customers.id', 'orders.customer_id')
+        .leftJoin('order_items', 'orders.id', 'order_items.order_id')
+        .select([
+          'customers.name as customer_name',
+          'orders.id as order_id',
+          'order_items.item_name as item',
+        ])
+        .orderBy('customers.id', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { customer_name: 'Alice', order_id: 101, item: 'Laptop' },
+        { customer_name: 'Alice', order_id: 101, item: 'Mouse' },
+        { customer_name: 'Alice', order_id: 102, item: null },
+        { customer_name: 'Bob', order_id: 103, item: 'Keyboard' },
+        { customer_name: 'Charlie', order_id: null, item: null },
+      ]);
+    });
+
+    it('supports joins with ORDER BY, LIMIT, and OFFSET', async () => {
+      const rows = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .select(['customers.name', 'orders.total_amount as amount'])
+        .orderBy('orders.total_amount', 'desc')
+        .limit(2)
+        .offset(1)
+        .toArray();
+
+      // Sorted desc: 200 (Bob), 150 (Alice), 50 (Alice)
+      // offset 1, limit 2 => 150 (Alice), 50 (Alice)
+      expect(rows).toEqual([
+        { name: 'Alice', amount: 150.0 },
+        { name: 'Alice', amount: 50.0 },
+      ]);
+    });
+
+    it('retrieves single joined row with .first()', async () => {
+      const row = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .select(['customers.name', 'orders.id as order_id'])
+        .where('orders.id', '=', 103)
+        .first();
+
+      expect(row).toEqual({
+        name: 'Bob',
+        order_id: 103,
+      });
+    });
+
+    it('supports join without explicit select() with default column disambiguation', async () => {
+      const rows = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .where('orders.id', '=', 103)
+        .toArray();
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toHaveProperty('customers.id', 2);
+      expect(rows[0]).toHaveProperty('name', 'Bob');
+      expect(rows[0]).toHaveProperty('city', 'Paris');
+      expect(rows[0]).toHaveProperty('orders.id', 103);
+      expect(rows[0]).toHaveProperty('customer_id', 2);
+      expect(rows[0]).toHaveProperty('total_amount', 200.0);
+      expect(rows[0]).toHaveProperty('status', 'completed');
+    });
+
+    it('disassembles join query with explain()', async () => {
+      const explain = await db.from('customers')
+        .join('orders', 'customers.id', 'orders.customer_id')
+        .select(['customers.name', 'orders.total_amount as amount'])
+        .explain();
+
+      expect(explain.plan.joins).toHaveLength(1);
+      expect(explain.plan.joins![0]).toEqual({
+        type: 'inner',
+        table: 'orders',
+        leftCol: 'customers.id',
+        op: '=',
+        rightCol: 'orders.customer_id',
+      });
+      // Should open cursor 0 and cursor 1
+      const openOps = explain.instructions.filter((i) => i.opcode === 'OP_OPEN_CURSOR');
+      expect(openOps).toHaveLength(2);
+      expect(openOps[0].p1).toBe('c[0]');
+      expect(openOps[1].p1).toBe('c[1]');
+    });
+
+    it('throws TooManyCursorsError when exceeding 16 cursors per frame', async () => {
+      let qb = db.from('customers');
+      // Chain 16 joins -> 1 primary + 16 joined = 17 tables > 16 cursors limit
+      for (let i = 0; i < 16; i++) {
+        qb = qb.join('orders', 'customers.id', 'orders.customer_id');
+      }
+
+      await expect(qb.toArray()).rejects.toThrow(TooManyCursorsError);
+      await expect(qb.toArray()).rejects.toThrow(/17 exceeds maximum limit of 16 cursors/);
     });
   });
 });

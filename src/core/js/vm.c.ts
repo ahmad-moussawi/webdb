@@ -335,7 +335,7 @@ export function vm_step(
         ctx.pc += 3;
 
         const cursor = get_cursor(ctx, cursor_idx);
-        const table = ctx.table!;
+        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
         const col = table.columns[col_idx];
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
         const null_bitmap_offset = cursor.rowOffset + 3;
@@ -373,7 +373,7 @@ export function vm_step(
         ctx.pc += 3;
 
         const cursor = get_cursor(ctx, cursor_idx);
-        const table = ctx.table!;
+        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
         const null_bitmap_offset = cursor.rowOffset + 3;
 
@@ -409,7 +409,7 @@ export function vm_step(
         ctx.pc += 3;
 
         const cursor = get_cursor(ctx, cursor_idx);
-        const table = ctx.table!;
+        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
         const null_bitmap_offset = cursor.rowOffset + 3;
 
@@ -489,7 +489,7 @@ export function vm_step(
         ctx.pc += 3;
 
         const cursor = get_cursor(ctx, cursor_idx);
-        const table = ctx.table!;
+        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
         const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
         const null_bitmap_offset = cursor.rowOffset + 3;
 
