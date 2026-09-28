@@ -1,12 +1,9 @@
 import React, { useState, useRef } from 'react';
 import { Header } from './components/Header.js';
 import { BenchmarkControls } from './components/BenchmarkControls.js';
-import { ComparisonCharts } from './components/ComparisonCharts.js';
-import { ResultsTable } from './components/ResultsTable.js';
-import { ArchitectureNotes } from './components/ArchitectureNotes.js';
+import { ResultsView } from './components/ResultsView.js';
 import { EngineId, ScenarioId, ScenarioResult } from './adapters/index.js';
 import { ProgressUpdate, runBenchmarkSuite } from './engine/runner.js';
-import { Loader2 } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [datasetSize, setDatasetSize] = useState<number>(5000);
@@ -51,7 +48,6 @@ export const App: React.FC = () => {
           setProgress(update);
           if (update.latestResult) {
             setResults((prev) => {
-              // Replace existing result if present, otherwise append
               const filtered = prev.filter(
                 (r) =>
                   !(
@@ -79,41 +75,11 @@ export const App: React.FC = () => {
     abortRequestedRef.current = true;
   };
 
-  const percentComplete = progress
-    ? Math.round((progress.currentStep / progress.totalSteps) * 100)
-    : 0;
-
   return (
-    <div className="app-container">
+    <div className="app-shell">
       <Header />
 
-      <main className="main-content">
-        {/* Progress Alert Bar */}
-        {isRunning && progress && (
-          <div className="progress-banner">
-            <div className="progress-banner-inner">
-              <div className="progress-text-row">
-                <div className="progress-indicator">
-                  <Loader2 size={18} className="spinner" />
-                  <span className="progress-title">
-                    Benchmarking <strong>{progress.engineName}</strong> —{' '}
-                    <span>{progress.scenarioId.replace(/_/g, ' ').toUpperCase()}</span>
-                  </span>
-                </div>
-                <span className="progress-percent">
-                  Step {progress.currentStep} of {progress.totalSteps} ({percentComplete}%)
-                </span>
-              </div>
-              <div className="progress-track">
-                <div
-                  className="progress-fill"
-                  style={{ width: `${percentComplete}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
+      <div className="workspace-layout">
         <BenchmarkControls
           datasetSize={datasetSize}
           setDatasetSize={setDatasetSize}
@@ -124,25 +90,15 @@ export const App: React.FC = () => {
           iterations={iterations}
           setIterations={setIterations}
           isRunning={isRunning}
+          progress={progress}
           onRun={handleRun}
           onStop={handleStop}
         />
 
-        {results.length > 0 && (
-          <>
-            <ComparisonCharts results={results} />
-            <ResultsTable results={results} datasetSize={datasetSize} />
-          </>
-        )}
-
-        <ArchitectureNotes />
-      </main>
-
-      <footer className="footer-container">
-        <p>
-          WebDB Benchmarking Suite • Browser Native Database Performance Lab • Built with Vite & React
-        </p>
-      </footer>
+        <main className="workspace-main">
+          <ResultsView results={results} datasetSize={datasetSize} />
+        </main>
+      </div>
     </div>
   );
 };

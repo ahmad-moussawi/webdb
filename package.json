@@ -30,8 +30,8 @@
     "build:playground": "vite build --config vite.playground.config.ts",
     "benchmark": "vite --config vite.benchmark.config.ts",
     "build:benchmark": "vite build --config vite.benchmark.config.ts",
-    "docs:prepare": "npm run build && npm run build:playground && node scripts/prepare_docs_playground.js",
-    "docs:dev": "npm run build:playground && node scripts/prepare_docs_playground.js && vitepress dev docs",
+    "docs:prepare": "npm run build && npm run build:playground && npm run build:benchmark && node scripts/prepare_docs_playground.js",
+    "docs:dev": "npm run build:playground && npm run build:benchmark && node scripts/prepare_docs_playground.js && vitepress dev docs",
     "docs:build": "npm run docs:prepare && vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },

@@ -3,6 +3,7 @@ node_modules/
 docs/.vitepress/dist
 docs/.vitepress/cache
 docs/public/playground/
+docs/public/benchmark/
 docs/public/dist/
 .DS_Store
 

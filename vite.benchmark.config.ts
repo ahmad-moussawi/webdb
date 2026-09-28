@@ -7,7 +7,7 @@ export default defineConfig({
   root: resolve(__dirname, 'benchmark'),
   base: './',
   build: {
-    outDir: resolve(__dirname, 'dist/benchmark'),
+    outDir: resolve(__dirname, 'docs/public/benchmark'),
     emptyOutDir: true,
   },
   server: {

@@ -7,6 +7,7 @@ on:
     paths:
       - 'docs/**'
       - 'playground/**'
+      - 'benchmark/**'
       - 'src/**'
       - 'scripts/**'
       - '.github/workflows/deploy-docs.yml'

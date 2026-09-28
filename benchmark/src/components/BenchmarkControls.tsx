@@ -1,6 +1,7 @@
 import React from 'react';
-import { Play, Square, Settings, HardDrive, Cpu, CheckSquare } from 'lucide-react';
+import { Play, Square, Loader2, CheckSquare } from 'lucide-react';
 import { AVAILABLE_ENGINES, AVAILABLE_SCENARIOS, EngineId, ScenarioId } from '../adapters/index.js';
+import { ProgressUpdate } from '../engine/runner.js';
 
 interface Props {
   datasetSize: number;
@@ -12,6 +13,7 @@ interface Props {
   iterations: number;
   setIterations: (iters: number) => void;
   isRunning: boolean;
+  progress: ProgressUpdate | null;
   onRun: () => void;
   onStop: () => void;
 }
@@ -26,6 +28,7 @@ export const BenchmarkControls: React.FC<Props> = ({
   iterations,
   setIterations,
   isRunning,
+  progress,
   onRun,
   onStop,
 }) => {
@@ -62,178 +65,141 @@ export const BenchmarkControls: React.FC<Props> = ({
     }
   };
 
+  const percentComplete = progress
+    ? Math.round((progress.currentStep / progress.totalSteps) * 100)
+    : 0;
+
   return (
-    <div className="controls-card">
-      <div className="controls-section">
-        {/* Dataset Scale */}
-        <div className="config-group">
-          <label className="config-label">
-            <Settings size={15} />
-            <span>Dataset Scale (Rows)</span>
-          </label>
-          <div className="button-group">
-            {[1000, 5000, 10000, 25000].map((size) => (
-              <button
-                key={size}
-                disabled={isRunning}
-                onClick={() => setDatasetSize(size)}
-                className={`pill-btn ${datasetSize === size ? 'active' : ''}`}
-              >
-                {size.toLocaleString()}
-              </button>
-            ))}
-          </div>
-        </div>
+    <aside className="sidebar-controls">
+      {/* Primary Action Button */}
+      <div className="action-box">
+        {!isRunning ? (
+          <button className="btn-run" onClick={onRun}>
+            <Play size={15} fill="currentColor" />
+            <span>Run Benchmark</span>
+          </button>
+        ) : (
+          <button className="btn-stop" onClick={onStop}>
+            <Square size={14} fill="currentColor" />
+            <span>Cancel Benchmark</span>
+          </button>
+        )}
 
-        {/* Iterations */}
-        <div className="config-group">
-          <label className="config-label">
-            <CheckSquare size={15} />
-            <span>Sample Iterations</span>
-          </label>
-          <div className="button-group">
-            {[3, 5, 10].map((count) => (
-              <button
-                key={count}
-                disabled={isRunning}
-                onClick={() => setIterations(count)}
-                className={`pill-btn ${iterations === count ? 'active' : ''}`}
-              >
-                {count}x
-              </button>
-            ))}
+        {/* Inline Progress Bar */}
+        {isRunning && progress && (
+          <div className="sidebar-progress">
+            <div className="progress-info-row">
+              <span className="progress-current">
+                <Loader2 size={12} className="spinner" />
+                <strong>{progress.engineName}</strong>
+              </span>
+              <span className="progress-step">
+                {progress.currentStep}/{progress.totalSteps} ({percentComplete}%)
+              </span>
+            </div>
+            <div className="progress-bar-track">
+              <div className="progress-bar-fill" style={{ width: `${percentComplete}%` }} />
+            </div>
           </div>
-        </div>
+        )}
+      </div>
 
-        {/* Quick Filter */}
-        <div className="config-group">
-          <label className="config-label">
-            <span>Filter Presets</span>
-          </label>
-          <div className="button-group">
+      {/* Dataset Scale & Iterations */}
+      <div className="control-section">
+        <div className="section-label">Dataset Size (Rows)</div>
+        <div className="segmented-control">
+          {[1000, 5000, 10000, 25000].map((size) => (
             <button
+              key={size}
               disabled={isRunning}
-              onClick={() => selectFilter('all')}
-              className="preset-btn"
+              onClick={() => setDatasetSize(size)}
+              className={`seg-btn ${datasetSize === size ? 'active' : ''}`}
             >
-              All Engines
+              {size >= 1000 ? `${size / 1000}k` : size}
             </button>
-            <button
-              disabled={isRunning}
-              onClick={() => selectFilter('memory')}
-              className="preset-btn"
-            >
-              In-Memory Only
-            </button>
-            <button
-              disabled={isRunning}
-              onClick={() => selectFilter('persistent')}
-              className="preset-btn"
-            >
-              Persistent Only
-            </button>
-          </div>
-        </div>
-
-        {/* Action Button */}
-        <div className="run-action-container">
-          {!isRunning ? (
-            <button className="primary-run-btn" onClick={onRun}>
-              <Play size={18} fill="currentColor" />
-              <span>Run Suite</span>
-            </button>
-          ) : (
-            <button className="stop-run-btn" onClick={onStop}>
-              <Square size={16} fill="currentColor" />
-              <span>Cancel Run</span>
-            </button>
-          )}
+          ))}
         </div>
       </div>
 
-      {/* Engine Selection Grid */}
-      <div className="selection-grid-container">
-        <div className="grid-header">
-          <span className="grid-title">Database Engines ({selectedEngines.length} selected)</span>
+      <div className="control-section">
+        <div className="section-label">Iterations</div>
+        <div className="segmented-control">
+          {[3, 5, 10].map((count) => (
+            <button
+              key={count}
+              disabled={isRunning}
+              onClick={() => setIterations(count)}
+              className={`seg-btn ${iterations === count ? 'active' : ''}`}
+            >
+              {count}x
+            </button>
+          ))}
         </div>
-        <div className="engines-grid">
+      </div>
+
+      {/* Target Database Engines */}
+      <div className="control-section">
+        <div className="section-header-row">
+          <span className="section-label">Database Engines ({selectedEngines.length})</span>
+          <div className="mini-presets">
+            <button onClick={() => selectFilter('all')} disabled={isRunning}>All</button>
+            <button onClick={() => selectFilter('memory')} disabled={isRunning}>RAM</button>
+            <button onClick={() => selectFilter('persistent')} disabled={isRunning}>Disk</button>
+          </div>
+        </div>
+
+        <div className="items-list">
           {AVAILABLE_ENGINES.map((engine) => {
-            const isSelected = selectedEngines.includes(engine.id);
+            const checked = selectedEngines.includes(engine.id);
             return (
-              <div
+              <label
                 key={engine.id}
-                onClick={() => toggleEngine(engine.id)}
-                className={`engine-card ${isSelected ? 'selected' : ''} ${isRunning ? 'disabled' : ''}`}
+                className={`item-row ${checked ? 'checked' : ''} ${isRunning ? 'disabled' : ''}`}
               >
-                <div className="engine-card-header">
-                  <div className="engine-card-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      readOnly
-                      disabled={isRunning}
-                    />
-                  </div>
-                  <div className="engine-card-titles">
-                    <div className="engine-card-name">{engine.name}</div>
-                    <div className="engine-card-sub">{engine.subtitle}</div>
-                  </div>
-                  <span
-                    className={`storage-tag ${
-                      engine.storage === 'memory' ? 'tag-mem' : 'tag-disk'
-                    }`}
-                  >
-                    {engine.storage === 'memory' ? (
-                      <>
-                        <Cpu size={11} /> RAM
-                      </>
-                    ) : (
-                      <>
-                        <HardDrive size={11} /> Disk
-                      </>
-                    )}
-                  </span>
-                </div>
-                <div className="engine-card-desc">{engine.description}</div>
-              </div>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleEngine(engine.id)}
+                  disabled={isRunning}
+                />
+                <span className="item-name">{engine.name}</span>
+                <span className={`type-tag ${engine.storage === 'memory' ? 'tag-ram' : 'tag-disk'}`}>
+                  {engine.storage === 'memory' ? 'RAM' : 'Disk'}
+                </span>
+              </label>
             );
           })}
         </div>
       </div>
 
-      {/* Scenario Selection Grid */}
-      <div className="selection-grid-container">
-        <div className="grid-header">
-          <span className="grid-title">Benchmark Scenarios ({selectedScenarios.length} selected)</span>
+      {/* Benchmark Scenarios */}
+      <div className="control-section">
+        <div className="section-header-row">
+          <span className="section-label">Test Scenarios ({selectedScenarios.length})</span>
         </div>
-        <div className="scenarios-grid">
+
+        <div className="items-list">
           {AVAILABLE_SCENARIOS.map((scen) => {
-            const isSelected = selectedScenarios.includes(scen.id);
+            const checked = selectedScenarios.includes(scen.id);
             return (
-              <div
+              <label
                 key={scen.id}
-                onClick={() => toggleScenario(scen.id)}
-                className={`scenario-card ${isSelected ? 'selected' : ''} ${isRunning ? 'disabled' : ''}`}
+                className={`item-row ${checked ? 'checked' : ''} ${isRunning ? 'disabled' : ''}`}
               >
-                <div className="scenario-card-header">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    readOnly
-                    disabled={isRunning}
-                  />
-                  <span className="scenario-card-name">{scen.name}</span>
-                  <span className={`category-tag cat-${scen.category}`}>
-                    {scen.category}
-                  </span>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleScenario(scen.id)}
+                  disabled={isRunning}
+                />
+                <div className="item-details">
+                  <span className="item-name">{scen.name}</span>
                 </div>
-                <p className="scenario-card-desc">{scen.description}</p>
-                <code className="scenario-card-code">{scen.queryHint}</code>
-              </div>
+              </label>
             );
           })}
         </div>
       </div>
-    </div>
+    </aside>
   );
 };

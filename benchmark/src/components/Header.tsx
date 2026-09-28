@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Database, ShieldCheck, AlertTriangle, Cpu, Layers } from 'lucide-react';
+import { Database, ShieldCheck, AlertTriangle, Cpu, Layers, ExternalLink } from 'lucide-react';
 import { SqliteWasmAdapter } from '../adapters/sqlite_adapter.js';
 
 export const Header: React.FC = () => {
@@ -8,14 +8,11 @@ export const Header: React.FC = () => {
   const [heapSize, setHeapSize] = useState<string>('N/A');
 
   useEffect(() => {
-    // Check Cross-Origin Isolation (COOP + COEP)
     const isolated = typeof window !== 'undefined' && window.crossOriginIsolated;
     setIsIsolated(!!isolated);
 
-    // Check OPFS support in SQLite Wasm
     SqliteWasmAdapter.isOpfsSupported().then(setHasOpfs);
 
-    // Heap stats
     const updateHeap = () => {
       const perfWithMemory = performance as unknown as {
         memory?: { usedJSHeapSize: number };
@@ -31,39 +28,47 @@ export const Header: React.FC = () => {
   }, []);
 
   return (
-    <header className="header-container">
-      <div className="header-top">
-        <div className="header-brand">
-          <div className="brand-icon">
-            <Database size={26} className="text-brand" />
-          </div>
-          <div>
-            <div className="brand-title-row">
-              <h1 className="brand-title">Browser Database Benchmark Suite</h1>
-              <span className="version-pill">v0.1.0</span>
-            </div>
-            <p className="brand-subtitle">
-              High-precision latency, throughput, and memory profiling between Raw JS Arrays, WebDB, IndexedDB, and SQLite WASM.
-            </p>
-          </div>
+    <header className="app-header">
+      <div className="header-left">
+        <div className="app-logo">
+          <Database size={18} className="logo-icon" />
+          <span className="logo-title">WebDB Benchmark</span>
+          <span className="logo-badge">v0.1</span>
+        </div>
+        <span className="header-divider" />
+        <span className="header-subtitle">Performance & Memory Comparison</span>
+      </div>
+
+      <div className="header-center">
+        <div className={`status-chip ${isIsolated ? 'chip-success' : 'chip-neutral'}`} title={isIsolated ? 'COOP/COEP headers active. High-precision timers & SharedArrayBuffer enabled.' : 'Cross-Origin-Isolation inactive.'}>
+          {isIsolated ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
+          <span>COOP/COEP: {isIsolated ? 'Isolated' : 'Restricted'}</span>
         </div>
 
-        <div className="header-badges">
-          <div className={`env-badge ${isIsolated ? 'badge-success' : 'badge-warning'}`} title={isIsolated ? 'COOP/COEP headers active. High-precision timers & SharedArrayBuffer enabled.' : 'Cross-Origin-Isolation inactive.'}>
-            {isIsolated ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
-            <span>COOP/COEP: {isIsolated ? 'Isolated' : 'Restricted'}</span>
-          </div>
-
-          <div className={`env-badge ${hasOpfs ? 'badge-success' : 'badge-neutral'}`} title="Origin Private File System support for SQLite WASM">
-            <Layers size={14} />
-            <span>OPFS: {hasOpfs ? 'Ready' : 'In-Memory Only'}</span>
-          </div>
-
-          <div className="env-badge badge-neutral" title="Current V8 JavaScript Heap">
-            <Cpu size={14} />
-            <span>Heap: {heapSize}</span>
-          </div>
+        <div className={`status-chip ${hasOpfs ? 'chip-success' : 'chip-neutral'}`} title="Origin Private File System support for SQLite WASM">
+          <Layers size={13} />
+          <span>OPFS: {hasOpfs ? 'Ready' : 'In-Memory Only'}</span>
         </div>
+
+        <div className="status-chip chip-neutral" title="V8 JavaScript Heap Size">
+          <Cpu size={13} />
+          <span>Heap: {heapSize}</span>
+        </div>
+      </div>
+
+      <div className="header-right">
+        <a href="../" className="nav-btn" title="Documentation">Docs</a>
+        <a href="../playground/" className="nav-btn" title="WebDB Studio IDE">Studio IDE</a>
+        <a
+          href="https://github.com/ahmad-moussawi/webdb"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="nav-btn nav-btn-github"
+          title="GitHub Repository"
+        >
+          <span>GitHub</span>
+          <ExternalLink size={11} />
+        </a>
       </div>
     </header>
   );
