@@ -1230,6 +1230,12 @@ function page_decode_index_cell(
       ),
     };
   }
+  if (context_type === DataType.BLOB) {
+    if (k_len === 5 || k_len === 6) {
+      return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
+    }
+    return { cellType: DataType.BLOB, cellVal: k_data };
+  }
   return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
 }
 
@@ -1405,3 +1411,77 @@ export function page_binary_search_index_leaf(
 
   return { found: false, slot_idx: lo };
 }
+
+/**
+ * @export_c
+ * Encodes a single column value to a byte array based on its DataType.
+ */
+export function serialize_single_key(type: DataType, val: any): Uint8Array {
+  if (val === null || val === undefined) {
+    return new Uint8Array(0);
+  }
+  if (type === DataType.INT32) {
+    const b = new Uint8Array(4);
+    new DataView(b.buffer).setInt32(0, Number(val), true);
+    return b;
+  }
+  if (type === DataType.INT64) {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setBigInt64(0, BigInt(val), true);
+    return b;
+  }
+  if (type === DataType.FLOAT64) {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setFloat64(0, Number(val), true);
+    return b;
+  }
+  if (type === DataType.UUID) {
+    const b = new Uint8Array(16);
+    UuidCodec.encode(String(val), b, 0);
+    return b;
+  }
+  if (type === DataType.ULID) {
+    const b = new Uint8Array(16);
+    UlidCodec.encode(String(val), b, 0);
+    return b;
+  }
+  if (type === DataType.TEXT) {
+    return text_encoder.encode(String(val));
+  }
+  return val instanceof Uint8Array ? val : new Uint8Array(val);
+}
+
+/**
+ * @export_c
+ * Serializes a composite key tuple into a deterministic, comparable binary buffer.
+ */
+export function serialize_composite_key(
+  columns: ColumnMeta[],
+  col_indices: number[],
+  col_count: number,
+  row: DbRow,
+): Uint8Array {
+  const parts: Uint8Array[] = [];
+  let total_len = 0;
+  for (let i = 0; i < col_count; i++) {
+    const col = columns[col_indices[i]];
+    const val = row[col.name];
+    const encoded = serialize_single_key(col.type, val);
+    const part = new Uint8Array(1 + 2 + encoded.byteLength);
+    part[0] = col.type;
+    part[1] = encoded.byteLength & 0xff;
+    part[2] = (encoded.byteLength >> 8) & 0xff;
+    part.set(encoded, 3);
+    parts.push(part);
+    total_len += part.byteLength;
+  }
+  const result = new Uint8Array(total_len);
+  let offset = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    result.set(p, offset);
+    offset += p.byteLength;
+  }
+  return result;
+}
+

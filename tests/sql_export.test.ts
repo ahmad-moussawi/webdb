@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { WebDB } from '../src/host/api/webdb';
-import { exportDatabaseToSql } from '../playground/src/utils/sqlExporter';
+import { WebDB } from '../src/host/api/webdb.js';
+import { exportDatabaseToSql } from '../playground/src/utils/sqlExporter.js';
 
 describe('SQLite SQL Exporter', () => {
   it('exports tables and records to a valid SQLite .sql dump', async () => {

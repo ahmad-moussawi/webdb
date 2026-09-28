@@ -9,6 +9,7 @@ import {
   TooManyGroupByColumnsError,
   TooManyCursorsError,
   UnknownFunctionError,
+  JoinType,
 } from "../../types/index.js";
 import { VmKeyInfo } from "../../shared/vm_context.js";
 import {
@@ -87,8 +88,6 @@ export interface AggExpr {
   colName?: string;
   alias?: string;
 }
-
-export type JoinType = 'inner' | 'left';
 
 export interface JoinPlan {
   type: JoinType;

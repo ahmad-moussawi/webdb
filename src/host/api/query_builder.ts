@@ -1,6 +1,7 @@
 import {
   DbRow,
   AggregateNotAllowedInWhereError,
+  JoinType,
 } from '../../types/index.js';
 import {
   ComparisonOp,
@@ -226,6 +227,7 @@ export interface ExplainOutput {
     aggregates?: AggExpr[];
     having?: QueryFilter[];
     select?: NormalizedSelectField[];
+    joins?: JoinClause[];
     limit?: number;
     offset?: number;
   };
@@ -233,8 +235,6 @@ export interface ExplainOutput {
   instructions: DisassembledInstruction[];
   assembly: string;
 }
-
-export type JoinType = 'inner' | 'left';
 
 export interface JoinClause {
   type: JoinType;
@@ -1485,7 +1485,7 @@ export class QueryBuilder {
     });
   }
 
-  private getOrderKeyValue(row: DbRow, k: OrderKey): any {
+  private getOrderKeyValue(row: DbRow, k: SortKey): any {
     const rawKey =
       k.colName ?? (k.expr ? deriveDefaultAlias(k.expr) : undefined);
     if (!rawKey) return undefined;

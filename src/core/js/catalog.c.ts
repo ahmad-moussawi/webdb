@@ -32,6 +32,7 @@ import {
   DataType,
   ColumnFlag,
   TableFlag,
+  IndexFlag,
   ColumnDefinition,
   ColumnMeta,
   TableDescriptor,
@@ -47,6 +48,7 @@ import {
   CorruptPageError,
 } from "../../types/index.ts";
 import { IPageProvider } from "../../shared/index.ts";
+import { page_init_index_leaf } from "./page.c.ts";
 
 import {
   computePage1Checksum,
@@ -515,6 +517,65 @@ export function catalog_write_index_descriptor(
   uint8.fill(0, offset + 98, offset + INDEX_DESCRIPTOR_SIZE);
 }
 
+export const MAX_INDEXES_PAGE1 = 8;
+
+/**
+ * @export_c
+ */
+export function catalog_find_free_index_slot(view: DataView): number {
+  for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+    const offset = INDEX_CATALOG_OFFSET + i * INDEX_DESCRIPTOR_SIZE;
+    const index_id = view.getUint16(offset + 0, true);
+    if (index_id === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * @export_c
+ */
+export function catalog_find_index_by_name(
+  view: DataView,
+  name: string,
+): { slotIdx: number; desc: IndexDescriptor } | null {
+  for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+    const desc = catalog_read_index_descriptor(view, i);
+    if (desc && desc.name === name) {
+      return { slotIdx: i, desc };
+    }
+  }
+  return null;
+}
+
+/**
+ * @export_c
+ */
+export function catalog_list_table_indexes(
+  view: DataView,
+  table_id: number,
+): IndexDescriptor[] {
+  const indexes: IndexDescriptor[] = [];
+  for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+    const desc = catalog_read_index_descriptor(view, i);
+    if (desc && desc.tableId === table_id) {
+      indexes.push(desc);
+    }
+  }
+  return indexes;
+}
+
+/**
+ * @export_c
+ */
+export function catalog_delete_index_descriptor(
+  view: DataView,
+  slot_idx: number,
+): void {
+  const offset = INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
+  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
+  uint8.fill(0, offset, offset + INDEX_DESCRIPTOR_SIZE);
+}
+
 // ============================================================================
 // 5. Dedicated Column Catalog Pages (page_type = 0x0C)
 // ============================================================================
@@ -785,13 +846,70 @@ export function catalog_create_table(
   };
 
   catalog_write_table_descriptor(page1_view, slot_idx, desc);
+
+  // Auto-create primary key index if PRIMARY_KEY columns are defined
+  const pk_cols: ColumnMeta[] = [];
+  for (let i = 0; i < columns.length; i++) {
+    if ((columns[i].flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+      pk_cols.push(columns[i]);
+    }
+  }
+
+  if (pk_cols.length > 0) {
+    const index_slot = catalog_find_free_index_slot(page1_view);
+    if (index_slot !== -1) {
+      const index_root_page_id = pager.allocateNewPage();
+      const index_root_bytes = pager.getPageBytes(index_root_page_id);
+      const index_root_view = new DataView(
+        index_root_bytes.buffer,
+        index_root_bytes.byteOffset,
+      );
+      page_init_index_leaf(index_root_view, 0, 0);
+      pager.markPageDirty(index_root_page_id);
+
+      const col_indices = [0, 0, 0, 0, 0, 0, 0, 0];
+      const col_directions = [0, 0, 0, 0, 0, 0, 0, 0];
+      for (let k = 0; k < pk_cols.length && k < 8; k++) {
+        const pk_col_name = pk_cols[k].name;
+        let matched_idx = -1;
+        for (let c = 0; c < columns.length; c++) {
+          if (columns[c].name === pk_col_name) {
+            matched_idx = c;
+            break;
+          }
+        }
+        col_indices[k] = matched_idx;
+      }
+
+      const pk_desc: IndexDescriptor = {
+        indexId: index_slot + 1,
+        tableId: table_id,
+        rootPageId: index_root_page_id,
+        columnCount: pk_cols.length,
+        flags: IndexFlag.PRIMARY | IndexFlag.UNIQUE,
+        columnIndices: col_indices,
+        colDirections: col_directions,
+        name: `pk_${name}`,
+      };
+      catalog_write_index_descriptor(page1_view, index_slot, pk_desc);
+    }
+  }
+
   catalog_increment_schema_version(page1_view);
   catalog_increment_change_counter(page1_view);
   catalog_update_page1_checksum(page1_view);
 
+  const indexes = catalog_list_table_indexes(page1_view, table_id);
+  const primary_key: string[] = [];
+  for (let i = 0; i < pk_cols.length; i++) {
+    primary_key.push(pk_cols[i].name);
+  }
+
   return {
     ...desc,
     columns,
+    primaryKey: primary_key.length > 0 ? primary_key : undefined,
+    indexes: indexes.length > 0 ? indexes : undefined,
   };
 }
 
@@ -831,9 +949,19 @@ export function catalog_load_table_meta(
     current_cat_page_id = header.nextColCatalogPageId;
   }
 
+  const indexes = catalog_list_table_indexes(page1_view, desc.tableId);
+  const primary_key: string[] = [];
+  for (let i = 0; i < columns.length; i++) {
+    if ((columns[i].flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+      primary_key.push(columns[i].name);
+    }
+  }
+
   return {
     ...desc,
     columns,
+    primaryKey: primary_key.length > 0 ? primary_key : undefined,
+    indexes: indexes.length > 0 ? indexes : undefined,
   };
 }
 

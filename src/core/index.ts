@@ -46,6 +46,8 @@ export {
   page_compare_index_keys,
   page_insert_index_leaf_cell,
   page_binary_search_index_leaf,
+  serialize_single_key,
+  serialize_composite_key,
 } from "./js/page.c.js";
 
 // ============================================================================
@@ -114,6 +116,10 @@ export {
   catalog_list_table_descriptors,
   catalog_read_index_descriptor,
   catalog_write_index_descriptor,
+  catalog_find_free_index_slot,
+  catalog_find_index_by_name,
+  catalog_list_table_indexes,
+  catalog_delete_index_descriptor,
   catalog_init_page,
   catalog_read_page_header,
   catalog_write_page_header,

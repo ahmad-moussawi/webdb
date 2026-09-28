@@ -190,6 +190,8 @@ export interface CatalogPageHeader {
   pageChecksum: number;
 }
 
+export type JoinType = 'inner' | 'left';
+
 export interface TableMeta {
   tableId: number;
   columnCount: number;
@@ -200,6 +202,9 @@ export interface TableMeta {
   rowCountEstimate: number;
   autoIncNext: bigint;
   columns: ColumnMeta[];
+  primaryKey?: string[];
+  indexes?: IndexDescriptor[];
+  schemaVersion?: number;
 }
 
 // Backward-compat alias
@@ -248,6 +253,13 @@ export class IndexAlreadyExistsError extends Error {
   constructor(indexName: string) {
     super(`Index already exists: "${indexName}"`);
     this.name = 'IndexAlreadyExistsError';
+  }
+}
+
+export class UniqueConstraintViolationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UniqueConstraintViolationError';
   }
 }
 

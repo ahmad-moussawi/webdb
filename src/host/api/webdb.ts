@@ -16,6 +16,9 @@ import {
   InvalidBytecodeError,
   QueryArenaExhaustedError,
   TooManyCursorsError,
+  UniqueConstraintViolationError,
+  NotNullConstraintError,
+  IndexFlag,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
@@ -36,11 +39,16 @@ import {
   catalog_write_table_descriptor,
   catalog_list_table_descriptors,
   catalog_read_page_header,
+  catalog_list_table_indexes,
   page_insert_row,
   page_get_next_page_id,
   page_set_next_page_id,
   page_serialize_row,
   page_deserialize_row,
+  page_init_index_leaf,
+  page_insert_index_leaf_cell,
+  page_binary_search_index_leaf,
+  serialize_composite_key,
 } from "../../core/index.ts";
 import {
   createVmContext,
@@ -263,7 +271,18 @@ export class WebDB implements IDatabaseQueryExecutor {
     const table = await this.getTable(tableName);
     const page1View = this.pool.getSlotDataView(0);
 
-    // Auto-Inc handling: if table has AUTO_INC column and row lacks it, assign next
+    // 1. Primary Key NOT NULL validation
+    for (const c of table.columns) {
+      if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+        if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
+          if (row[c.name] === undefined || row[c.name] === null) {
+            throw new NotNullConstraintError(c.name, tableName);
+          }
+        }
+      }
+    }
+
+    // 2. Auto-Inc handling: if table has AUTO_INC column and row lacks it, assign next
     const autoIncCol = table.columns.find(
       (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
     );
@@ -282,6 +301,52 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
+    // 3. Uniqueness constraint probe across all unique & primary indexes
+    const indexes = catalog_list_table_indexes(page1View, table.tableId);
+    const uniqueIndexes = indexes.filter(
+      (idx) => (idx.flags & (IndexFlag.UNIQUE | IndexFlag.PRIMARY)) !== 0,
+    );
+
+    for (const idx of uniqueIndexes) {
+      let keyVal: any;
+      let keyType: DataType;
+
+      if (idx.columnCount === 1) {
+        const col = table.columns[idx.columnIndices[0]];
+        keyVal = row[col.name];
+        keyType = col.type;
+      } else {
+        keyVal = serialize_composite_key(
+          table.columns,
+          idx.columnIndices,
+          idx.columnCount,
+          row,
+        );
+        keyType = DataType.BLOB;
+      }
+
+      if (keyVal !== undefined && keyVal !== null) {
+        let currIdxPageId = idx.rootPageId;
+        while (currIdxPageId !== 0) {
+          const slot = await this.driver.acquirePage(currIdxPageId);
+          const view = this.pool.getSlotDataView(slot);
+          const search = page_binary_search_index_leaf(
+            view,
+            0,
+            keyType,
+            keyVal,
+          );
+          if (search.found) {
+            throw new UniqueConstraintViolationError(
+              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+            );
+          }
+          currIdxPageId = page_get_next_page_id(view, 0);
+        }
+      }
+    }
+
+    // 4. Data page insertion
     const rowBytes = page_serialize_row(table.columns, row);
 
     // Navigate to the tail data page for this table
@@ -298,6 +363,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     // Attempt insertion into current page
+    let targetPageId = currentPageId;
     let insertSlot = page_insert_row(
       view,
       0,
@@ -328,6 +394,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             throw new Error("Unexpected error: row does not fit in empty page");
           }
           this.pool.markDirty(newSlot);
+          targetPageId = newPageId;
         } finally {
           this.pool.unpinSlot(newSlot);
         }
@@ -338,7 +405,85 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.pool.markDirty(slot);
     }
 
-    // Update row count estimate
+    // 5. Compute physical rowid and insert into all active indexes
+    const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
+
+    for (const idx of indexes) {
+      let keyVal: any;
+      let keyType: DataType;
+
+      if (idx.columnCount === 1) {
+        const col = table.columns[idx.columnIndices[0]];
+        keyVal = row[col.name];
+        keyType = col.type;
+      } else {
+        keyVal = serialize_composite_key(
+          table.columns,
+          idx.columnIndices,
+          idx.columnCount,
+          row,
+        );
+        keyType = DataType.BLOB;
+      }
+
+      if (keyVal !== undefined && keyVal !== null) {
+        let idxPageId = idx.rootPageId;
+        let idxSlot = await this.driver.acquirePage(idxPageId);
+        let idxView = this.pool.getSlotDataView(idxSlot);
+
+        while (true) {
+          const nextIdxPageId = page_get_next_page_id(idxView, 0);
+          if (nextIdxPageId === 0) break;
+          idxPageId = nextIdxPageId;
+          idxSlot = await this.driver.acquirePage(idxPageId);
+          idxView = this.pool.getSlotDataView(idxSlot);
+        }
+
+        let idxInsertRes = page_insert_index_leaf_cell(
+          idxView,
+          0,
+          keyType,
+          keyVal,
+          rowid,
+          this.pool.pageScratchpadOffset,
+        );
+
+        if (idxInsertRes === -1) {
+          this.pool.pinSlot(idxSlot);
+          try {
+            const newIdxPageId = await this.driver.allocateAndPinPage();
+            const newIdxSlot = this.pool.getResidentSlot(newIdxPageId);
+            try {
+              page_set_next_page_id(idxView, 0, newIdxPageId);
+              this.pool.markDirty(idxSlot);
+
+              const newIdxView = this.pool.getSlotDataView(newIdxSlot);
+              page_init_index_leaf(newIdxView, 0, 0);
+              idxInsertRes = page_insert_index_leaf_cell(
+                newIdxView,
+                0,
+                keyType,
+                keyVal,
+                rowid,
+                this.pool.pageScratchpadOffset,
+              );
+              if (idxInsertRes === -1) {
+                throw new Error("Unexpected error: index entry does not fit in empty page");
+              }
+              this.pool.markDirty(newIdxSlot);
+            } finally {
+              this.pool.unpinSlot(newIdxSlot);
+            }
+          } finally {
+            this.pool.unpinSlot(idxSlot);
+          }
+        } else {
+          this.pool.markDirty(idxSlot);
+        }
+      }
+    }
+
+    // 6. Update row count estimate
     const slotIdx = catalog_find_table_slot(page1View, tableName);
     if (slotIdx !== -1) {
       const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
@@ -347,7 +492,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.pool.markDirty(0);
     }
 
-    // Durably flush modified pages
+    // 7. Durably flush modified pages
     await this.driver.flushAllDirty();
   }
 
