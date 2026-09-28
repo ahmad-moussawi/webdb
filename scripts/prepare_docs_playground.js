@@ -15,19 +15,17 @@ fs.mkdirSync(targetPlaygroundDir, { recursive: true });
 fs.mkdirSync(targetDistDir, { recursive: true });
 
 // Source files
-const playgroundSrc = path.join(rootDir, 'playground', 'index.html');
 const distSrc = path.join(rootDir, 'dist', 'webdb.js');
-
-if (fs.existsSync(playgroundSrc)) {
-  fs.copyFileSync(playgroundSrc, path.join(targetPlaygroundDir, 'index.html'));
-  console.log('✓ Copied playground/index.html -> docs/public/playground/index.html');
-} else {
-  console.error('✗ playground/index.html not found');
-}
+const logoSrc = path.join(rootDir, 'playground', 'logo.svg');
 
 if (fs.existsSync(distSrc)) {
   fs.copyFileSync(distSrc, path.join(targetDistDir, 'webdb.js'));
   console.log('✓ Copied dist/webdb.js -> docs/public/dist/webdb.js');
 } else {
   console.warn('! dist/webdb.js not found. Make sure to run "npm run build" first.');
+}
+
+if (fs.existsSync(logoSrc)) {
+  fs.copyFileSync(logoSrc, path.join(targetPlaygroundDir, 'logo.svg'));
+  console.log('✓ Copied playground/logo.svg -> docs/public/playground/logo.svg');
 }
