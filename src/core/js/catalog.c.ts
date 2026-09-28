@@ -538,9 +538,10 @@ export function catalog_find_index_by_name(
   view: DataView,
   name: string,
 ): { slotIdx: number; desc: IndexDescriptor } | null {
+  const target = name.toLowerCase();
   for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
     const desc = catalog_read_index_descriptor(view, i);
-    if (desc && desc.name === name) {
+    if (desc && desc.name.toLowerCase() === target) {
       return { slotIdx: i, desc };
     }
   }
@@ -574,6 +575,18 @@ export function catalog_delete_index_descriptor(
   const offset = INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
   const uint8 = new Uint8Array(view.buffer, view.byteOffset);
   uint8.fill(0, offset, offset + INDEX_DESCRIPTOR_SIZE);
+}
+
+/**
+ * @export_c
+ */
+export function catalog_delete_table_descriptor(
+  view: DataView,
+  slot_idx: number,
+): void {
+  const offset = MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
+  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
+  uint8.fill(0, offset, offset + TABLE_DESCRIPTOR_SIZE);
 }
 
 // ============================================================================
@@ -763,11 +776,15 @@ export function catalog_create_table(
         : (def.type as DataType);
 
     let flags = 0;
-    if (def.primaryKey || def.flags?.primaryKey)
-      flags |= ColumnFlag.PRIMARY_KEY;
-    if (def.notNull || def.flags?.notNull) flags |= ColumnFlag.NOT_NULL;
-    if (def.indexed || def.flags?.indexed) flags |= ColumnFlag.INDEXED;
-    if (def.autoInc || def.flags?.autoInc) flags |= ColumnFlag.AUTO_INC;
+    if (typeof (def as any).flags === "number") {
+      flags = (def as any).flags;
+    } else {
+      if (def.primaryKey || def.flags?.primaryKey)
+        flags |= ColumnFlag.PRIMARY_KEY;
+      if (def.notNull || def.flags?.notNull) flags |= ColumnFlag.NOT_NULL;
+      if (def.indexed || def.flags?.indexed) flags |= ColumnFlag.INDEXED;
+      if (def.autoInc || def.flags?.autoInc) flags |= ColumnFlag.AUTO_INC;
+    }
 
     const col_offset = current_fixed_offset;
 

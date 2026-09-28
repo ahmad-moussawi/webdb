@@ -3,9 +3,11 @@ import {
   RESULT_BUFFER_OFFSET,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
+  MAX_INDEXES_PAGE1,
 } from "../../constants.ts";
 import {
   ColumnDefinition,
+  ColumnMeta,
   TableMeta,
   DbRow,
   TableNotFoundError,
@@ -19,6 +21,12 @@ import {
   UniqueConstraintViolationError,
   NotNullConstraintError,
   IndexFlag,
+  IndexOptions,
+  ColumnNotFoundError,
+  IndexNotFoundError,
+  IndexAlreadyExistsError,
+  TooManyIndexesError,
+  IndexDescriptor,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
@@ -40,6 +48,17 @@ import {
   catalog_list_table_descriptors,
   catalog_read_page_header,
   catalog_list_table_indexes,
+  catalog_find_index_by_name,
+  catalog_find_free_index_slot,
+  catalog_write_index_descriptor,
+  catalog_delete_index_descriptor,
+  catalog_delete_table_descriptor,
+  catalog_read_index_descriptor,
+  catalog_increment_schema_version,
+  catalog_increment_change_counter,
+  catalog_update_page1_checksum,
+  page_get_cell_count,
+  page_get_cell_offset,
   page_insert_row,
   page_get_next_page_id,
   page_set_next_page_id,
@@ -267,6 +286,332 @@ export class WebDB implements IDatabaseQueryExecutor {
     return tables;
   }
 
+  async dropTable(tableName: string): Promise<void> {
+    const page1View = this.pool.getSlotDataView(0);
+    const slotIdx = catalog_find_table_slot(page1View, tableName);
+    if (slotIdx === -1) {
+      throw new TableNotFoundError(tableName);
+    }
+
+    const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
+
+    // 1. Cascade drop all indexes belonging to this table
+    for (let slot = 0; slot < MAX_INDEXES_PAGE1; slot++) {
+      const idx = catalog_read_index_descriptor(page1View, slot);
+      if (idx && idx.tableId === desc.tableId) {
+        let curIdxPageId = idx.rootPageId;
+        while (curIdxPageId !== 0) {
+          const s = await this.driver.acquirePage(curIdxPageId);
+          const v = this.pool.getSlotDataView(s);
+          const nextId = page_get_next_page_id(v, 0);
+          await this.driver.freePage(curIdxPageId);
+          curIdxPageId = nextId;
+        }
+        catalog_delete_index_descriptor(page1View, slot);
+      }
+    }
+
+    // 2. Free all data pages belonging to this table
+    let curDataPageId = desc.rootPageId;
+    while (curDataPageId !== 0) {
+      const slot = await this.driver.acquirePage(curDataPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const nextId = page_get_next_page_id(view, 0);
+      await this.driver.freePage(curDataPageId);
+      curDataPageId = nextId;
+    }
+
+    // 3. Clear table descriptor in Page 1
+    catalog_delete_table_descriptor(page1View, slotIdx);
+    catalog_increment_schema_version(page1View);
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+    await this.driver.flushAllDirty();
+  }
+
+  async createIndex(
+    tableName: string,
+    columns: string | string[],
+    options?: IndexOptions,
+  ): Promise<void> {
+    const table = await this.getTable(tableName);
+    const colNames = Array.isArray(columns) ? columns : [columns];
+
+    if (colNames.length === 0) {
+      throw new Error(
+        `At least one column must be specified for createIndex on table "${tableName}"`,
+      );
+    }
+    if (colNames.length > 8) {
+      throw new Error(
+        `Maximum 8 columns allowed per index (requested ${colNames.length})`,
+      );
+    }
+
+    const colIndices: number[] = [];
+    for (const name of colNames) {
+      const idx = table.columns.findIndex((c) => c.name === name);
+      if (idx === -1) {
+        throw new ColumnNotFoundError(name, tableName);
+      }
+      colIndices.push(idx);
+    }
+
+    const indexName = options?.name ?? `idx_${tableName}_${colNames.join('_')}`;
+
+    const page1View = this.pool.getSlotDataView(0);
+
+    // Prevent two indices with the same name across the catalog
+    const existing = catalog_find_index_by_name(page1View, indexName);
+    if (existing !== null) {
+      throw new IndexAlreadyExistsError(indexName);
+    }
+
+    // Prevent creating the same index twice (same columns in the same order on the same table)
+    const tableIndexes = catalog_list_table_indexes(page1View, table.tableId);
+    const duplicateColIndex = tableIndexes.find((idx) => {
+      if (idx.columnCount !== colIndices.length) return false;
+      for (let i = 0; i < idx.columnCount; i++) {
+        if (idx.columnIndices[i] !== colIndices[i]) return false;
+      }
+      return true;
+    });
+    if (duplicateColIndex) {
+      throw new IndexAlreadyExistsError(
+        duplicateColIndex.name || indexName,
+      );
+    }
+
+    const freeSlot = catalog_find_free_index_slot(page1View);
+    if (freeSlot === -1) {
+      throw new TooManyIndexesError(MAX_INDEXES_PAGE1, MAX_INDEXES_PAGE1);
+    }
+
+    // Allocate and initialize index root page
+    const indexRootPageId = await this.driver.allocateAndPinPage();
+    const indexSlot = this.pool.getResidentSlot(indexRootPageId);
+    const indexView = this.pool.getSlotDataView(indexSlot);
+    page_init_index_leaf(indexView, 0, 0);
+    this.pool.markDirty(indexSlot);
+    this.pool.unpinSlot(indexSlot);
+
+    const isUnique = !!options?.unique;
+
+    // Backfill: iterate all data pages and insert existing rows into new index
+    let currentPageId = table.rootPageId;
+    while (currentPageId !== 0) {
+      const pageSlot = await this.driver.acquirePage(currentPageId);
+      const pageView = this.pool.getSlotDataView(pageSlot);
+      const cellCount = page_get_cell_count(pageView, 0);
+
+      for (let i = 0; i < cellCount; i++) {
+        const cellOffset = page_get_cell_offset(pageView, 0, i);
+        const row = page_deserialize_row(table.columns, pageView, cellOffset);
+        if (row) {
+          const rowid = (BigInt(currentPageId) << 16n) | BigInt(i);
+          const { keyVal, keyType } = this.extractIndexKey(
+            table.columns,
+            { columnCount: colIndices.length, columnIndices: colIndices },
+            row,
+          );
+
+          if (keyVal !== undefined && keyVal !== null) {
+            if (isUnique) {
+              const duplicate = await this.probeIndexUnique(
+                indexRootPageId,
+                keyType,
+                keyVal,
+              );
+              if (duplicate) {
+                await this.driver.freePage(indexRootPageId);
+                throw new UniqueConstraintViolationError(
+                  `Duplicate key value violates unique constraint "${indexName}" on table "${tableName}"`,
+                );
+              }
+            }
+
+            await this.insertIntoIndex(indexRootPageId, keyType, keyVal, rowid);
+          }
+        }
+      }
+
+      currentPageId = page_get_next_page_id(pageView, 0);
+    }
+
+    // Write index descriptor into Page 1 catalog
+    const column_indices = [0, 0, 0, 0, 0, 0, 0, 0];
+    const col_directions = [0, 0, 0, 0, 0, 0, 0, 0];
+    for (let k = 0; k < colIndices.length && k < 8; k++) {
+      column_indices[k] = colIndices[k];
+    }
+
+    const flags = isUnique ? IndexFlag.UNIQUE : 0;
+    catalog_write_index_descriptor(page1View, freeSlot, {
+      indexId: freeSlot + 1,
+      tableId: table.tableId,
+      rootPageId: indexRootPageId,
+      columnCount: colIndices.length,
+      flags,
+      columnIndices: column_indices,
+      colDirections: col_directions,
+      name: indexName,
+    });
+
+    catalog_increment_schema_version(page1View);
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+    await this.driver.flushAllDirty();
+  }
+
+  async dropIndex(indexName: string): Promise<void> {
+    const page1View = this.pool.getSlotDataView(0);
+    const found = catalog_find_index_by_name(page1View, indexName);
+    if (!found) {
+      throw new IndexNotFoundError(indexName);
+    }
+
+    // Free all pages in the index leaf chain
+    let curPageId = found.desc.rootPageId;
+    while (curPageId !== 0) {
+      const slot = await this.driver.acquirePage(curPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const nextId = page_get_next_page_id(view, 0);
+      await this.driver.freePage(curPageId);
+      curPageId = nextId;
+    }
+
+    catalog_delete_index_descriptor(page1View, found.slotIdx);
+    catalog_increment_schema_version(page1View);
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+    await this.driver.flushAllDirty();
+  }
+
+  async listIndexes(tableName?: string): Promise<IndexDescriptor[]> {
+    const page1View = this.pool.getSlotDataView(0);
+    if (tableName) {
+      const table = await this.getTable(tableName);
+      return catalog_list_table_indexes(page1View, table.tableId);
+    }
+    const allIndexes: IndexDescriptor[] = [];
+    for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+      const desc = catalog_read_index_descriptor(page1View, i);
+      if (desc) {
+        allIndexes.push(desc);
+      }
+    }
+    return allIndexes;
+  }
+
+  private extractIndexKey(
+    columns: ColumnMeta[],
+    idx: { columnCount: number; columnIndices: number[] },
+    row: DbRow,
+  ): { keyVal: any; keyType: DataType } {
+    if (idx.columnCount === 1) {
+      const col = columns[idx.columnIndices[0]];
+      return { keyVal: row[col.name], keyType: col.type };
+    }
+    return {
+      keyVal: serialize_composite_key(
+        columns,
+        idx.columnIndices,
+        idx.columnCount,
+        row,
+      ),
+      keyType: DataType.BLOB,
+    };
+  }
+
+  private async probeIndexUnique(
+    rootPageId: number,
+    keyType: DataType,
+    keyVal: any,
+  ): Promise<boolean> {
+    let currIdxPageId = rootPageId;
+    while (currIdxPageId !== 0) {
+      const slot = await this.driver.acquirePage(currIdxPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const search = page_binary_search_index_leaf(
+        view,
+        0,
+        keyType,
+        keyVal,
+      );
+      if (search.found) {
+        return true;
+      }
+      currIdxPageId = page_get_next_page_id(view, 0);
+    }
+    return false;
+  }
+
+  private async insertIntoIndex(
+    rootPageId: number,
+    keyType: DataType,
+    keyVal: any,
+    rowid: bigint,
+  ): Promise<void> {
+    let idxPageId = rootPageId;
+    let idxSlot = await this.driver.acquirePage(idxPageId);
+    let idxView = this.pool.getSlotDataView(idxSlot);
+
+    while (true) {
+      const nextIdxPageId = page_get_next_page_id(idxView, 0);
+      if (nextIdxPageId === 0) break;
+      idxPageId = nextIdxPageId;
+      idxSlot = await this.driver.acquirePage(idxPageId);
+      idxView = this.pool.getSlotDataView(idxSlot);
+    }
+
+    let idxInsertRes = page_insert_index_leaf_cell(
+      idxView,
+      0,
+      keyType,
+      keyVal,
+      rowid,
+      this.pool.pageScratchpadOffset,
+    );
+
+    if (idxInsertRes === -1) {
+      this.pool.pinSlot(idxSlot);
+      try {
+        const newIdxPageId = await this.driver.allocateAndPinPage();
+        const newIdxSlot = this.pool.getResidentSlot(newIdxPageId);
+        try {
+          page_set_next_page_id(idxView, 0, newIdxPageId);
+          this.pool.markDirty(idxSlot);
+
+          const newIdxView = this.pool.getSlotDataView(newIdxSlot);
+          page_init_index_leaf(newIdxView, 0, 0);
+          idxInsertRes = page_insert_index_leaf_cell(
+            newIdxView,
+            0,
+            keyType,
+            keyVal,
+            rowid,
+            this.pool.pageScratchpadOffset,
+          );
+          if (idxInsertRes === -1) {
+            throw new Error(
+              "Unexpected error: index entry does not fit in empty page",
+            );
+          }
+          this.pool.markDirty(newIdxSlot);
+        } finally {
+          this.pool.unpinSlot(newIdxSlot);
+        }
+      } finally {
+        this.pool.unpinSlot(idxSlot);
+      }
+    } else {
+      this.pool.markDirty(idxSlot);
+    }
+  }
+
   async insert(tableName: string, row: DbRow): Promise<void> {
     const table = await this.getTable(tableName);
     const page1View = this.pool.getSlotDataView(0);
@@ -308,40 +653,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
 
     for (const idx of uniqueIndexes) {
-      let keyVal: any;
-      let keyType: DataType;
-
-      if (idx.columnCount === 1) {
-        const col = table.columns[idx.columnIndices[0]];
-        keyVal = row[col.name];
-        keyType = col.type;
-      } else {
-        keyVal = serialize_composite_key(
-          table.columns,
-          idx.columnIndices,
-          idx.columnCount,
-          row,
-        );
-        keyType = DataType.BLOB;
-      }
-
+      const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
       if (keyVal !== undefined && keyVal !== null) {
-        let currIdxPageId = idx.rootPageId;
-        while (currIdxPageId !== 0) {
-          const slot = await this.driver.acquirePage(currIdxPageId);
-          const view = this.pool.getSlotDataView(slot);
-          const search = page_binary_search_index_leaf(
-            view,
-            0,
-            keyType,
-            keyVal,
+        const duplicate = await this.probeIndexUnique(
+          idx.rootPageId,
+          keyType,
+          keyVal,
+        );
+        if (duplicate) {
+          throw new UniqueConstraintViolationError(
+            `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
           );
-          if (search.found) {
-            throw new UniqueConstraintViolationError(
-              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
-            );
-          }
-          currIdxPageId = page_get_next_page_id(view, 0);
         }
       }
     }
@@ -409,77 +731,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
 
     for (const idx of indexes) {
-      let keyVal: any;
-      let keyType: DataType;
-
-      if (idx.columnCount === 1) {
-        const col = table.columns[idx.columnIndices[0]];
-        keyVal = row[col.name];
-        keyType = col.type;
-      } else {
-        keyVal = serialize_composite_key(
-          table.columns,
-          idx.columnIndices,
-          idx.columnCount,
-          row,
-        );
-        keyType = DataType.BLOB;
-      }
-
+      const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
       if (keyVal !== undefined && keyVal !== null) {
-        let idxPageId = idx.rootPageId;
-        let idxSlot = await this.driver.acquirePage(idxPageId);
-        let idxView = this.pool.getSlotDataView(idxSlot);
-
-        while (true) {
-          const nextIdxPageId = page_get_next_page_id(idxView, 0);
-          if (nextIdxPageId === 0) break;
-          idxPageId = nextIdxPageId;
-          idxSlot = await this.driver.acquirePage(idxPageId);
-          idxView = this.pool.getSlotDataView(idxSlot);
-        }
-
-        let idxInsertRes = page_insert_index_leaf_cell(
-          idxView,
-          0,
-          keyType,
-          keyVal,
-          rowid,
-          this.pool.pageScratchpadOffset,
-        );
-
-        if (idxInsertRes === -1) {
-          this.pool.pinSlot(idxSlot);
-          try {
-            const newIdxPageId = await this.driver.allocateAndPinPage();
-            const newIdxSlot = this.pool.getResidentSlot(newIdxPageId);
-            try {
-              page_set_next_page_id(idxView, 0, newIdxPageId);
-              this.pool.markDirty(idxSlot);
-
-              const newIdxView = this.pool.getSlotDataView(newIdxSlot);
-              page_init_index_leaf(newIdxView, 0, 0);
-              idxInsertRes = page_insert_index_leaf_cell(
-                newIdxView,
-                0,
-                keyType,
-                keyVal,
-                rowid,
-                this.pool.pageScratchpadOffset,
-              );
-              if (idxInsertRes === -1) {
-                throw new Error("Unexpected error: index entry does not fit in empty page");
-              }
-              this.pool.markDirty(newIdxSlot);
-            } finally {
-              this.pool.unpinSlot(newIdxSlot);
-            }
-          } finally {
-            this.pool.unpinSlot(idxSlot);
-          }
-        } else {
-          this.pool.markDirty(idxSlot);
-        }
+        await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
       }
     }
 

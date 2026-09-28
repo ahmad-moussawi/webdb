@@ -120,6 +120,7 @@ export {
   catalog_find_index_by_name,
   catalog_list_table_indexes,
   catalog_delete_index_descriptor,
+  catalog_delete_table_descriptor,
   catalog_init_page,
   catalog_read_page_header,
   catalog_write_page_header,

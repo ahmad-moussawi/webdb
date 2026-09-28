@@ -228,6 +228,22 @@ export class NotNullConstraintError extends Error {
   }
 }
 
+export interface IndexOptions {
+  unique?: boolean;
+  name?: string;
+}
+
+export class ColumnNotFoundError extends Error {
+  constructor(columnName: string, tableName?: string) {
+    super(
+      tableName
+        ? `Column "${columnName}" not found on table "${tableName}"`
+        : `Column "${columnName}" not found`,
+    );
+    this.name = 'ColumnNotFoundError';
+  }
+}
+
 export class TableNotFoundError extends Error {
   constructor(tableName: string) {
     super(`Table not found: "${tableName}"`);
