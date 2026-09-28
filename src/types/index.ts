@@ -348,5 +348,19 @@ export class TooManyGroupByColumnsError extends Error {
   }
 }
 
+export class UnknownFunctionError extends Error {
+  constructor(funcName: string) {
+    super(`Function "${funcName}" is neither a native built-in function nor a registered UDF`);
+    this.name = 'UnknownFunctionError';
+  }
+}
+
+export class AggregateNotAllowedInWhereError extends Error {
+  constructor(funcName: string) {
+    super(`Aggregate function "${funcName}" cannot be used in WHERE clause`);
+    this.name = 'AggregateNotAllowedInWhereError';
+  }
+}
+
 export * from '../shared/vm_context.js';
 export * from '../shared/page_provider.js';

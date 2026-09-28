@@ -57,12 +57,19 @@ import {
   disassembleBytecode,
   formatDisassembly,
 } from "../compiler/compiler.ts";
+import { ParsedSelectExpr } from "../compiler/expr_parser.ts";
 import {
   QueryBuilder,
   type ExplainOutput,
   type IDatabaseQueryExecutor,
   type QueryExecutionOptions,
 } from "./query_builder.ts";
+
+export interface UdfDefinition {
+  deterministic?: boolean;
+  returnType?: DataType;
+  call: (...args: any[]) => any;
+}
 
 export {
   QueryBuilder,
@@ -92,6 +99,8 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   private vmCtx: VmContext;
+  private udfs: Map<string, { id: number; def: UdfDefinition }> = new Map();
+  private nextUdfId = 1;
 
   private constructor(vfs: IVfsAdapter, io: Io, driver: BufferPoolDriver) {
     this.vfs = vfs;
@@ -328,6 +337,70 @@ export class WebDB implements IDatabaseQueryExecutor {
     await this.driver.flushAllDirty();
   }
 
+  registerFunction(
+    name: string,
+    def: UdfDefinition | ((...args: any[]) => any),
+  ): this {
+    const normName = name.toLowerCase();
+    const fnDef: UdfDefinition =
+      typeof def === "function" ? { call: def } : { ...def };
+
+    if (!fnDef.returnType) {
+      try {
+        const sample = fnDef.call(1, 1, 1, 1, 1);
+        if (typeof sample === "number") {
+          fnDef.returnType = Number.isInteger(sample)
+            ? DataType.INT32
+            : DataType.FLOAT64;
+        } else if (typeof sample === "string") {
+          fnDef.returnType = DataType.TEXT;
+        }
+      } catch {
+        try {
+          const sample = fnDef.call("", "", "", "", "");
+          if (typeof sample === "number") {
+            fnDef.returnType = Number.isInteger(sample)
+              ? DataType.INT32
+              : DataType.FLOAT64;
+          } else if (typeof sample === "string") {
+            fnDef.returnType = DataType.TEXT;
+          }
+        } catch {
+          // Fall back if probing fails
+        }
+      }
+    }
+
+    let entry = this.udfs.get(normName);
+    if (!entry) {
+      entry = { id: this.nextUdfId++, def: fnDef };
+      this.udfs.set(normName, entry);
+    } else {
+      entry.def = fnDef;
+    }
+    return this;
+  }
+
+  getUdf(name: string): { id: number; def: UdfDefinition } | undefined {
+    return this.udfs.get(name.toLowerCase());
+  }
+
+  getUdfMap(): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const [name, entry] of this.udfs.entries()) {
+      map.set(name, entry.id);
+    }
+    return map;
+  }
+
+  getUdfDefs(): Map<string, UdfDefinition> {
+    const map = new Map<string, UdfDefinition>();
+    for (const [name, entry] of this.udfs.entries()) {
+      map.set(name, entry.def);
+    }
+    return map;
+  }
+
   from(tableName: string): QueryBuilder {
     return new QueryBuilder(this, tableName);
   }
@@ -340,6 +413,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       groupBy?: string[];
       aggregates?: AggExpr[];
       select?: any;
+      selectExprs?: ParsedSelectExpr[];
       limit?: number;
       offset?: number;
     },
@@ -351,6 +425,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy: options?.orderBy,
       groupBy: options?.groupBy,
       aggregates: options?.aggregates,
+      selectExprs: options?.selectExprs,
+      udfNameMap: this.getUdfMap(),
+      udfDefs: this.getUdfDefs(),
       limit: options?.limit,
       offset: options?.offset,
     });
@@ -402,6 +479,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy,
       groupBy: options.groupBy,
       aggregates: options.aggregates,
+      selectExprs: options.selectExprs,
+      udfNameMap: this.getUdfMap(),
+      udfDefs: this.getUdfDefs(),
       limit: options.limit !== null ? options.limit : undefined,
       offset: options.offset !== null ? options.offset : undefined,
     };
@@ -413,8 +493,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.vmCtx.keyInfos = plan.keyInfos;
     }
 
+    const udfsRecord: Record<number, (...args: any[]) => any> = {};
+    for (const entry of this.udfs.values()) {
+      udfsRecord[entry.id] = entry.def.call;
+    }
+    this.vmCtx.udfs = udfsRecord;
+
     // Determine output columns for page_deserialize_row
-    let outputColumns = table.columns;
+    let outputColumns =
+      (bytecode as any).outputColumns ?? plan.outputColumns ?? table.columns;
     if (plan.aggregates && plan.aggregates.length > 0) {
       outputColumns = [];
       const groupByCols = plan.groupBy ?? [];

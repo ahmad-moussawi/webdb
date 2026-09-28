@@ -1,4 +1,7 @@
-import { DbRow } from '../../types/index.js';
+import {
+  DbRow,
+  AggregateNotAllowedInWhereError,
+} from '../../types/index.js';
 import {
   ComparisonOp,
   QueryFilter,
@@ -7,6 +10,17 @@ import {
   AggFunc,
   DisassembledInstruction,
 } from '../compiler/compiler.js';
+import {
+  ExprNode,
+  ParsedSelectExpr,
+  parseSelectExpr,
+  parseExpression,
+  evalExprNode,
+  validateClause,
+  isAggregateFunction,
+  ExpressionBuilder,
+  deriveDefaultAlias,
+} from '../compiler/expr_parser.js';
 
 export type SelectFunction =
   | 'count'
@@ -34,12 +48,15 @@ export interface NormalizedSelectField {
   alias: string;
   fn?: SelectFunction | string;
   args?: any[];
+  expr?: ExprNode;
 }
 
 export type SelectItem =
   | string
   | SelectColumnSpec
-  | Record<string, string>;
+  | Record<string, string>
+  | ExpressionBuilder
+  | ParsedSelectExpr;
 
 export function normalizeSelectItem(item: any): NormalizedSelectField[] {
   if (!item) return [];
@@ -52,58 +69,69 @@ export function normalizeSelectItem(item: any): NormalizedSelectField[] {
     return fields;
   }
 
+  if (
+    item instanceof ExpressionBuilder ||
+    (typeof item === 'object' && item !== null && 'node' in item)
+  ) {
+    const expr: ExprNode = item.node;
+    const alias = deriveDefaultAlias(expr);
+    return [
+      {
+        alias,
+        expr,
+        sourceCol:
+          expr.type === 'col' && expr.name !== '*' ? expr.name : undefined,
+        fn: expr.type === 'fn' ? expr.name : undefined,
+      },
+    ];
+  }
+
   if (typeof item === 'string') {
     const trimmed = item.trim();
     if (!trimmed) return [];
 
-    const asMatch = trimmed.match(/^(.+?)\s+as\s+(.+)$/i);
-    let expr: string;
-    let alias: string;
-    if (asMatch) {
-      expr = asMatch[1].trim();
-      alias = asMatch[2].trim();
-    } else {
-      expr = trimmed;
-      alias = expr;
-    }
+    const parsed = parseSelectExpr(trimmed);
+    return [
+      {
+        alias: parsed.alias,
+        expr: parsed.expr,
+        sourceCol:
+          parsed.expr.type === 'col' && parsed.expr.name !== '*'
+            ? parsed.expr.name
+            : undefined,
+        fn: parsed.expr.type === 'fn' ? parsed.expr.name : undefined,
+      },
+    ];
+  }
 
-    const fnMatch = expr.match(/^(\w+)\s*\((.*)\)$/);
-    if (fnMatch) {
-      const funcName = fnMatch[1].toLowerCase();
-      const rawArg = fnMatch[2].trim();
-      let sourceCol: string | undefined = rawArg === '*' ? undefined : rawArg;
-      let args: any[] | undefined = undefined;
-      if (rawArg.includes(',')) {
-        const parts = rawArg.split(',').map((p) => p.trim());
-        sourceCol = parts[0];
-        args = parts.slice(1).map((p) => {
-          const num = Number(p);
-          return isNaN(num) ? p.replace(/^['"]|['"]$/g, '') : num;
-        });
-      }
-      if (!asMatch) {
-        alias = sourceCol ? `${funcName}_${sourceCol}` : funcName;
-      }
+  if (typeof item === 'object' && item !== null) {
+    if ('expr' in item && 'alias' in item) {
+      const expr: ExprNode = item.expr;
       return [
         {
-          sourceCol,
-          alias,
-          fn: funcName,
-          args,
+          alias: item.alias,
+          expr,
+          sourceCol:
+            expr.type === 'col' && expr.name !== '*' ? expr.name : undefined,
+          fn: expr.type === 'fn' ? expr.name : undefined,
         },
       ];
     }
 
-    return [{ sourceCol: expr, alias }];
-  }
-
-  if (typeof item === 'object') {
     // SelectColumnSpec: { col: string; as: string }
-    if ('col' in item && 'as' in item && typeof item.col === 'string' && typeof item.as === 'string') {
+    if (
+      'col' in item &&
+      'as' in item &&
+      typeof item.col === 'string' &&
+      typeof item.as === 'string'
+    ) {
+      const parsed = parseSelectExpr(`${item.col} as ${item.as}`);
       return [
         {
           sourceCol: item.col === '*' ? undefined : item.col,
           alias: item.as,
+          expr: parsed.expr,
+          fn: parsed.expr.type === 'fn' ? parsed.expr.name : undefined,
         },
       ];
     }
@@ -112,9 +140,12 @@ export function normalizeSelectItem(item: any): NormalizedSelectField[] {
     const fields: NormalizedSelectField[] = [];
     for (const [col, val] of Object.entries(item)) {
       if (typeof val === 'string') {
+        const parsed = parseSelectExpr(`${col} as ${val}`);
         fields.push({
           sourceCol: col === '*' ? undefined : col,
           alias: val,
+          expr: parsed.expr,
+          fn: parsed.expr.type === 'fn' ? parsed.expr.name : undefined,
         });
       }
     }
@@ -151,6 +182,7 @@ export interface QueryExecutionOptions {
   groupBy?: string[];
   aggregates?: AggExpr[];
   select?: NormalizedSelectField[];
+  selectExprs?: ParsedSelectExpr[];
 }
 
 export interface IDatabaseQueryExecutor {
@@ -162,6 +194,7 @@ export interface IDatabaseQueryExecutor {
       groupBy?: string[];
       aggregates?: AggExpr[];
       select?: NormalizedSelectField[];
+      selectExprs?: ParsedSelectExpr[];
       limit?: number;
       offset?: number;
     },
@@ -171,6 +204,36 @@ export interface IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options: QueryExecutionOptions,
   ): Promise<DbRow[]>;
+}
+
+function assertNotAggregateInWhere(colOrExpr: any): void {
+  if (typeof colOrExpr === 'string') {
+    const trimmed = colOrExpr.trim();
+    if (isAggregateFunction(trimmed)) {
+      throw new AggregateNotAllowedInWhereError(trimmed);
+    }
+    if (trimmed.includes('(')) {
+      try {
+        const expr = parseExpression(trimmed);
+        validateClause(expr, 'where');
+      } catch (e) {
+        if (e instanceof AggregateNotAllowedInWhereError) {
+          throw e;
+        }
+      }
+    }
+  } else if (
+    colOrExpr instanceof ExpressionBuilder ||
+    (typeof colOrExpr === 'object' && colOrExpr !== null && 'node' in colOrExpr)
+  ) {
+    validateClause(colOrExpr.node, 'where');
+  } else if (
+    typeof colOrExpr === 'object' &&
+    colOrExpr !== null &&
+    'type' in colOrExpr
+  ) {
+    validateClause(colOrExpr as ExprNode, 'where');
+  }
 }
 
 export class QueryBuilder {
@@ -191,108 +254,266 @@ export class QueryBuilder {
     this.tableName = tableName;
   }
 
+  where(exprSql: string): this;
+  where(expr: ExprNode | ExpressionBuilder): this;
   where(colName: string, op: ComparisonOp, value: any): this;
   where(callback: (qb: QueryBuilder) => void): this;
   where(
-    colOrCb: string | ((qb: QueryBuilder) => void),
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
     op?: ComparisonOp,
     value?: any,
   ): this {
-    if (typeof colOrCb === 'function') {
+    if (typeof colOrCbOrExpr === 'function') {
       const sub = new QueryBuilder(this.db, this.tableName);
-      colOrCb(sub);
+      colOrCbOrExpr(sub);
       const subFilter = sub.getRootFilter();
       if (subFilter) {
         this.filters.push(subFilter);
       }
-    } else {
-      this.filters.push({ type: 'cmp', colName: colOrCb, op: op!, value });
-    }
-    return this;
-  }
-
-  orWhere(colName: string, op: ComparisonOp, value: any): this;
-  orWhere(callback: (qb: QueryBuilder) => void): this;
-  orWhere(
-    colOrCb: string | ((qb: QueryBuilder) => void),
-    op?: ComparisonOp,
-    value?: any,
-  ): this {
-    if (typeof colOrCb === 'function') {
-      const sub = new QueryBuilder(this.db, this.tableName);
-      colOrCb(sub);
-      const subFilter = sub.getRootFilter();
-      if (subFilter) {
-        this.addOrFilter(subFilter);
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        const expr = parseExpression(colOrCbOrExpr);
+        this.filters.push({ type: 'expr', expr });
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.filters.push({
+          type: 'expr',
+          expr: (colOrCbOrExpr as any).node,
+        });
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.filters.push({ type: 'expr', expr: colOrCbOrExpr as ExprNode });
       }
     } else {
-      this.addOrFilter({ type: 'cmp', colName: colOrCb, op: op!, value });
-    }
-    return this;
-  }
-
-  whereNot(colName: string, op: ComparisonOp, value: any): this;
-  whereNot(callback: (qb: QueryBuilder) => void): this;
-  whereNot(
-    colOrCb: string | ((qb: QueryBuilder) => void),
-    op?: ComparisonOp,
-    value?: any,
-  ): this {
-    if (typeof colOrCb === 'function') {
-      const sub = new QueryBuilder(this.db, this.tableName);
-      colOrCb(sub);
-      const subFilter = sub.getRootFilter();
-      if (subFilter) {
-        this.filters.push({ type: 'not', child: subFilter });
-      }
-    } else {
+      assertNotAggregateInWhere(colOrCbOrExpr);
+      assertNotAggregateInWhere(value);
       this.filters.push({
-        type: 'not',
-        child: { type: 'cmp', colName: colOrCb, op: op!, value },
+        type: 'cmp',
+        colName: colOrCbOrExpr as string,
+        op: op!,
+        value,
       });
     }
     return this;
   }
 
-  orWhereNot(colName: string, op: ComparisonOp, value: any): this;
-  orWhereNot(callback: (qb: QueryBuilder) => void): this;
-  orWhereNot(
-    colOrCb: string | ((qb: QueryBuilder) => void),
+  orWhere(exprSql: string): this;
+  orWhere(expr: ExprNode | ExpressionBuilder): this;
+  orWhere(colName: string, op: ComparisonOp, value: any): this;
+  orWhere(callback: (qb: QueryBuilder) => void): this;
+  orWhere(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
     op?: ComparisonOp,
     value?: any,
   ): this {
-    if (typeof colOrCb === 'function') {
+    if (typeof colOrCbOrExpr === 'function') {
       const sub = new QueryBuilder(this.db, this.tableName);
-      colOrCb(sub);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootFilter();
+      if (subFilter) {
+        this.addOrFilter(subFilter);
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        const expr = parseExpression(colOrCbOrExpr);
+        this.addOrFilter({ type: 'expr', expr });
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.addOrFilter({
+          type: 'expr',
+          expr: (colOrCbOrExpr as any).node,
+        });
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.addOrFilter({ type: 'expr', expr: colOrCbOrExpr as ExprNode });
+      }
+    } else {
+      assertNotAggregateInWhere(colOrCbOrExpr);
+      assertNotAggregateInWhere(value);
+      this.addOrFilter({
+        type: 'cmp',
+        colName: colOrCbOrExpr as string,
+        op: op!,
+        value,
+      });
+    }
+    return this;
+  }
+
+  whereNot(exprSql: string): this;
+  whereNot(expr: ExprNode | ExpressionBuilder): this;
+  whereNot(colName: string, op: ComparisonOp, value: any): this;
+  whereNot(callback: (qb: QueryBuilder) => void): this;
+  whereNot(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootFilter();
+      if (subFilter) {
+        this.filters.push({ type: 'not', child: subFilter });
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        const expr = parseExpression(colOrCbOrExpr);
+        this.filters.push({ type: 'not', child: { type: 'expr', expr } });
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.filters.push({
+          type: 'not',
+          child: { type: 'expr', expr: (colOrCbOrExpr as any).node },
+        });
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.filters.push({
+          type: 'not',
+          child: { type: 'expr', expr: colOrCbOrExpr as ExprNode },
+        });
+      }
+    } else {
+      assertNotAggregateInWhere(colOrCbOrExpr);
+      assertNotAggregateInWhere(value);
+      this.filters.push({
+        type: 'not',
+        child: {
+          type: 'cmp',
+          colName: colOrCbOrExpr as string,
+          op: op!,
+          value,
+        },
+      });
+    }
+    return this;
+  }
+
+  orWhereNot(exprSql: string): this;
+  orWhereNot(expr: ExprNode | ExpressionBuilder): this;
+  orWhereNot(colName: string, op: ComparisonOp, value: any): this;
+  orWhereNot(callback: (qb: QueryBuilder) => void): this;
+  orWhereNot(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
       const subFilter = sub.getRootFilter();
       if (subFilter) {
         this.addOrFilter({ type: 'not', child: subFilter });
       }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        const expr = parseExpression(colOrCbOrExpr);
+        this.addOrFilter({ type: 'not', child: { type: 'expr', expr } });
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.addOrFilter({
+          type: 'not',
+          child: { type: 'expr', expr: (colOrCbOrExpr as any).node },
+        });
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        assertNotAggregateInWhere(colOrCbOrExpr);
+        this.addOrFilter({
+          type: 'not',
+          child: { type: 'expr', expr: colOrCbOrExpr as ExprNode },
+        });
+      }
     } else {
+      assertNotAggregateInWhere(colOrCbOrExpr);
+      assertNotAggregateInWhere(value);
       this.addOrFilter({
         type: 'not',
-        child: { type: 'cmp', colName: colOrCb, op: op!, value },
+        child: {
+          type: 'cmp',
+          colName: colOrCbOrExpr as string,
+          op: op!,
+          value,
+        },
       });
     }
     return this;
   }
 
   whereNull(colName: string): this {
+    assertNotAggregateInWhere(colName);
     this.filters.push({ type: 'null', colName, isNull: true });
     return this;
   }
 
   whereNotNull(colName: string): this {
+    assertNotAggregateInWhere(colName);
     this.filters.push({ type: 'null', colName, isNull: false });
     return this;
   }
 
   orWhereNull(colName: string): this {
+    assertNotAggregateInWhere(colName);
     this.addOrFilter({ type: 'null', colName, isNull: true });
     return this;
   }
 
   orWhereNotNull(colName: string): this {
+    assertNotAggregateInWhere(colName);
     this.addOrFilter({ type: 'null', colName, isNull: false });
     return this;
   }
@@ -409,13 +630,30 @@ export class QueryBuilder {
 
     // Auto-register aggregate functions into aggExprs if present
     for (const f of fields) {
-      if (typeof f.fn === 'string') {
-        const fn = f.fn.toLowerCase();
-        if (['count', 'sum', 'avg', 'min', 'max'].includes(fn)) {
+      if (f.expr && f.expr.type === 'fn') {
+        const fnName = f.expr.name.toLowerCase();
+        if (isAggregateFunction(fnName)) {
+          const already = this.aggExprs.some((a) => a.alias === f.alias);
+          if (!already) {
+            const arg0 = f.expr.args[0];
+            const colName =
+              arg0 && arg0.type === 'col' && arg0.name !== '*'
+                ? arg0.name
+                : undefined;
+            this.aggExprs.push({
+              func: fnName as AggFunc,
+              colName,
+              alias: f.alias,
+            });
+          }
+        }
+      } else if (typeof f.fn === 'string') {
+        const fnName = f.fn.toLowerCase();
+        if (isAggregateFunction(fnName)) {
           const already = this.aggExprs.some((a) => a.alias === f.alias);
           if (!already) {
             this.aggExprs.push({
-              func: fn as AggFunc,
+              func: fnName as AggFunc,
               colName: f.sourceCol === '*' ? undefined : f.sourceCol,
               alias: f.alias,
             });
@@ -432,92 +670,70 @@ export class QueryBuilder {
   }
 
   private projectRow(row: DbRow): DbRow {
+    // Fast-path: If rawRows was already projected by VDBE OP_RESULT_ROW,
+    // the row contains exactly the target aliases.
+    const keys = Object.keys(row);
+    if (
+      this.selectFields.length > 0 &&
+      keys.length === this.selectFields.length &&
+      this.selectFields.every((f) => f.alias in row)
+    ) {
+      return row;
+    }
+
     const projected: DbRow = {};
     for (const field of this.selectFields) {
-      const sourceCol = field.sourceCol;
       const targetAlias = field.alias;
-
-      let val: any;
-      if (sourceCol !== undefined) {
-        val = row[sourceCol];
+      if (
+        field.expr &&
+        field.expr.type === 'fn' &&
+        isAggregateFunction(field.expr.name) &&
+        row[targetAlias] !== undefined
+      ) {
+        projected[targetAlias] = row[targetAlias];
+      } else if (field.expr) {
+        let udfs: any;
+        if (typeof (this.db as any).getUdf === 'function') {
+          udfs = (name: string) => (this.db as any).getUdf(name)?.def?.call;
+        }
+        projected[targetAlias] = evalExprNode(field.expr, row, udfs);
+      } else if (
+        field.sourceCol !== undefined &&
+        row[field.sourceCol] !== undefined
+      ) {
+        projected[targetAlias] = row[field.sourceCol];
+      } else if (row[targetAlias] !== undefined) {
+        projected[targetAlias] = row[targetAlias];
       } else {
-        if (row[targetAlias] !== undefined) {
-          val = row[targetAlias];
-        }
+        projected[targetAlias] = null;
       }
-
-      if (field.fn) {
-        const fn = field.fn.toLowerCase();
-        if (fn === 'upper') {
-          val =
-            val !== null && val !== undefined
-              ? String(val).toUpperCase()
-              : null;
-        } else if (fn === 'lower') {
-          val =
-            val !== null && val !== undefined
-              ? String(val).toLowerCase()
-              : null;
-        } else if (fn === 'length') {
-          val =
-            val !== null && val !== undefined ? String(val).length : null;
-        } else if (fn === 'substr') {
-          if (val === null || val === undefined) {
-            val = null;
-          } else {
-            const start = (field.args?.[0] ?? 1) - 1;
-            const len = field.args?.[1];
-            val =
-              len !== undefined
-                ? String(val).substring(start, start + len)
-                : String(val).substring(start);
-          }
-        } else if (fn === 'round') {
-          val =
-            val !== null && val !== undefined
-              ? Math.round(Number(val))
-              : null;
-        } else if (fn === 'floor') {
-          val =
-            val !== null && val !== undefined
-              ? Math.floor(Number(val))
-              : null;
-        } else if (fn === 'ceil') {
-          val =
-            val !== null && val !== undefined ? Math.ceil(Number(val)) : null;
-        } else if (fn === 'abs') {
-          val =
-            val !== null && val !== undefined ? Math.abs(Number(val)) : null;
-        } else if (fn === 'trim') {
-          val = val !== null && val !== undefined ? String(val).trim() : null;
-        } else if (['count', 'sum', 'avg', 'min', 'max'].includes(fn)) {
-          if (val === undefined && row[field.alias] !== undefined) {
-            val = row[field.alias];
-          }
-        }
-      }
-
-      if (val === undefined && row[targetAlias] !== undefined) {
-        val = row[targetAlias];
-      }
-
-      projected[targetAlias] = val !== undefined ? val : null;
     }
     return projected;
   }
 
   async explain(): Promise<ExplainOutput> {
+    const selectExprs: ParsedSelectExpr[] = this.selectFields.map((f) => ({
+      expr: f.expr ?? { type: 'col', name: f.sourceCol ?? f.alias },
+      alias: f.alias,
+    }));
+
     return this.db.explainQuery(this.tableName, this.filters, {
       orderBy: this.orderKeys.length > 0 ? this.orderKeys : undefined,
       groupBy: this.groupCols.length > 0 ? this.groupCols : undefined,
       aggregates: this.aggExprs.length > 0 ? this.aggExprs : undefined,
       select: this.selectFields.length > 0 ? this.selectFields : undefined,
+      selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
       limit: this.limitCount !== null ? this.limitCount : undefined,
       offset: this.offsetCount !== null ? this.offsetCount : undefined,
     });
   }
 
   async toArray(): Promise<DbRow[]> {
+    const selectExprs: ParsedSelectExpr[] = this.selectFields.map((f) => ({
+      expr: f.expr ?? { type: 'col', name: f.sourceCol ?? f.alias },
+      alias: f.alias,
+    }));
+
     const rawRows = await this.db.executeQuery(this.tableName, this.filters, {
       limit: this.limitCount,
       offset: this.offsetCount,
@@ -527,6 +743,7 @@ export class QueryBuilder {
       groupBy: this.groupCols.length > 0 ? this.groupCols : undefined,
       aggregates: this.aggExprs.length > 0 ? this.aggExprs : undefined,
       select: this.selectFields.length > 0 ? this.selectFields : undefined,
+      selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
     });
 
     if (this.selectFields.length === 0) {

@@ -80,6 +80,7 @@ export interface VmContext {
   aggregators: VmAggregator[];
   table: TableMeta | null;
   outputColumns?: ColumnMeta[];
+  udfs?: Record<number, (...args: any[]) => any>;
 }
 
 export function createVmContext(): VmContext {

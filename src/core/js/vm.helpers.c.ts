@@ -71,6 +71,13 @@ export function compare_3vl(
     return { result: 0, is_unknown: true };
   }
 
+  if (typeof val_a === "boolean" || typeof val_b === "boolean") {
+    const num_a = val_a ? 1 : 0;
+    const num_b = val_b ? 1 : 0;
+    if (num_a === num_b) return { result: 0, is_unknown: false };
+    return { result: num_a > num_b ? 1 : -1, is_unknown: false };
+  }
+
   if (typeof val_a === "number" && typeof val_b === "number") {
     if (val_a === val_b) return { result: 0, is_unknown: false };
     return { result: val_a > val_b ? 1 : -1, is_unknown: false };

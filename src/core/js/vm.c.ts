@@ -992,6 +992,38 @@ export function vm_step(
         }
         break;
       }
+      /**
+       * OP_CALL_UDF (0x28)
+       * Operands: [udf_id: uint16] [start_arg_reg: uint8] [num_args: uint8] [dest_reg: uint8] (5 bytes)
+       * Synchronously invokes registered Host UDF callback.
+       */
+      case OpCode.OP_CALL_UDF: {
+        const udf_id = code_view.getUint16(ctx.pc, true);
+        const start_arg_reg = bytecode[ctx.pc + 2];
+        const num_args = bytecode[ctx.pc + 3];
+        const dest_reg = bytecode[ctx.pc + 4];
+        ctx.pc += 5;
+
+        const fn = ctx.udfs?.[udf_id];
+        if (!fn) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const args: any[] = [];
+        for (let a = 0; a < num_args; a++) {
+          args.push(ctx.registers[start_arg_reg + a]);
+        }
+
+        try {
+          const res = fn(...args);
+          ctx.registers[dest_reg] = res !== undefined ? res : null;
+        } catch {
+          ctx.status = VmStatus.ERROR;
+          return VmStatus.ERROR;
+        }
+        break;
+      }
 
       /**
        * OP_STR_LOWER (0x29)

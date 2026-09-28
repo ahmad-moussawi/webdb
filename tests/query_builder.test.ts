@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { QueryBuilder } from '../src/host/api/query_builder.js';
+import {
+  col,
+  fn,
+  AggregateNotAllowedInWhereError,
+  UnknownFunctionError,
+} from '../src/index.js';
 
 describe('QueryBuilder Unit & Integration Tests', () => {
   describe('AST Construction & Boolean Precedence', () => {
@@ -480,5 +486,159 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       expect(explain.plan.select![0].alias).toBe('id');
       expect(explain.plan.select![1].alias).toBe('full_name');
     });
+
+    it('executes compound arithmetic expressions in SELECT', async () => {
+      const rows = await db.from('users')
+        .select([
+          'id',
+          'salary * 1.1 as adjusted_salary',
+          'floor(salary / 1000) as salary_k',
+          'salary + 500 * 2 as total_comp',
+        ])
+        .where('id', '=', 1)
+        .toArray();
+
+      expect(rows).toEqual([
+        {
+          id: 1,
+          adjusted_salary: 159500,
+          salary_k: 145,
+          total_comp: 146000,
+        },
+      ]);
+    });
+
+    it('supports Drizzle-style standalone expression helpers (col, fn)', async () => {
+      const rows = await db.from('users')
+        .select([
+          'id',
+          col('salary').mul(1.1).as('adjusted_salary'),
+          fn.floor(col('salary').div(1000)).as('salary_k'),
+          fn.upper(col('name')).as('upper_name'),
+        ])
+        .where('id', '=', 1)
+        .toArray();
+
+      expect(rows).toEqual([
+        {
+          id: 1,
+          adjusted_salary: 159500,
+          salary_k: 145,
+          upper_name: 'ALICE CHEN',
+        },
+      ]);
+    });
+
+    it('enforces function clause validation: disallows aggregates in WHERE', () => {
+      expect(() => {
+        db.from('users').where('count(*)', '>', 0);
+      }).toThrow(AggregateNotAllowedInWhereError);
+
+      expect(() => {
+        db.from('users').where(fn.count(), '>', 0);
+      }).toThrow(AggregateNotAllowedInWhereError);
+
+      expect(() => {
+        db.from('users').where('sum(salary)', '>', 1000);
+      }).toThrow(AggregateNotAllowedInWhereError);
+
+      expect(() => {
+        db.from('users').where('avg(salary) + 10', '>', 5000);
+      }).toThrow(AggregateNotAllowedInWhereError);
+
+      expect(() => {
+        db.from('users').orWhere('min(age)', '<', 18);
+      }).toThrow(AggregateNotAllowedInWhereError);
+
+      expect(() => {
+        db.from('users').whereNot('max(salary)', '>', 50000);
+      }).toThrow(AggregateNotAllowedInWhereError);
+    });
+
+    it('supports implicit UDF registration and execution across host boundary', async () => {
+      // Register custom UDFs
+      db.registerFunction('slugify', (val: string) => {
+        return String(val).toLowerCase().replace(/\s+/g, '-');
+      });
+
+      db.registerFunction('calc_bonus', (salary: number, multiplier: number) => {
+        return Number(salary) * Number(multiplier);
+      });
+
+      // Execute query using implicit UDF calling via SQL string syntax
+      const rows = await db.from('users')
+        .select([
+          'id',
+          'slugify(name) as name_slug',
+          'calc_bonus(salary, 0.15) as bonus',
+        ])
+        .where('id', '=', 1)
+        .toArray();
+
+      expect(rows).toEqual([
+        {
+          id: 1,
+          name_slug: 'alice-chen',
+          bonus: 21750,
+        },
+      ]);
+
+      // Execute query using standalone helper fn() for UDF
+      const helperRows = await db.from('users')
+        .select([
+          'id',
+          fn('slugify', col('name')).as('slug'),
+        ])
+        .where('id', '=', 2)
+        .toArray();
+
+      expect(helperRows).toEqual([
+        {
+          id: 2,
+          slug: 'bob-miller',
+        },
+      ]);
+    });
+
+    it('throws UnknownFunctionError when calling unregistered function', async () => {
+      await expect(
+        db.from('users')
+          .select(['id', 'mystery_func(name) as result'])
+          .where('id', '=', 1)
+          .toArray(),
+      ).rejects.toThrow(UnknownFunctionError);
+    });
+
+    it('filters rows using expression UDF in WHERE clause e.g. .where("regex_match(name, \'^[A-Z][a-z]+\')")', async () => {
+      // Register regex_match UDF
+      db.registerFunction('regex_match', (val: string, pattern: string) => {
+        if (val === null || val === undefined) return false;
+        return new RegExp(pattern).test(val);
+      });
+
+      // Match users whose name starts with capital letter followed by lowercase (Alice, Bob, Charlie)
+      // but not Dana Scully whose name starts with whitespace '   Dana Scully   '
+      const rows = await db.from('users')
+        .select(['id', 'name'])
+        .where("regex_match(name, '^[A-Z][a-z]+')")
+        .toArray();
+
+      expect(rows).toEqual([
+        { id: 1, name: 'Alice Chen' },
+        { id: 2, name: 'Bob Miller' },
+        { id: 3, name: 'Charlie Kim' },
+      ]);
+
+      // Narrow filter further to match only 'Alice'
+      const aliceOnly = await db.from('users')
+        .select(['id', 'name'])
+        .where("regex_match(name, '^Alice')")
+        .toArray();
+
+      expect(aliceOnly).toEqual([
+        { id: 1, name: 'Alice Chen' },
+      ]);
+    });
   });
 });
+
