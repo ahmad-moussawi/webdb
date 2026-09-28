@@ -55,6 +55,17 @@ export const ResultsHeader: React.FC = () => {
         </button>
 
         <button
+          id="tabPoolBtn"
+          className={`result-tab-btn ${resultTab === 'pool' ? 'active' : ''}`}
+          onClick={() => {
+            if (!isResultsOpen) toggleResults();
+            setResultTab('pool');
+          }}
+        >
+          POOL
+        </button>
+
+        <button
           id="tabBytecodeBtn"
           className={`result-tab-btn ${resultTab === 'bytecode' ? 'active' : ''}`}
           onClick={() => {

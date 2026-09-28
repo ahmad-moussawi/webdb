@@ -329,52 +329,64 @@ export async function discoverDatabasePages(db: any, tables: TableMeta[]): Promi
 
   const visited = new Set<number>([1]);
 
-  // Map known tables and follow page chains
+  // Map known tables and follow page chains (BFS queue for interior and leaf nodes)
   for (const tbl of tables) {
     if (tbl.rootPageId > 1 && !visited.has(tbl.rootPageId)) {
-      visited.add(tbl.rootPageId);
-      const rootBytes = await readPageBytes(db, tbl.rootPageId);
-      const rootStats = computePageStats(rootBytes, tbl.rootPageId);
+      const queue = [tbl.rootPageId];
+      let isFirst = true;
 
-      result.push({
-        pageId: tbl.rootPageId,
-        label: `Page ${tbl.rootPageId} • ${tbl.name} [Root]`,
-        tableName: tbl.name,
-        role: 'root',
-        pageType: rootStats.pageType,
-        cellCount: rootStats.cellCount,
-        usedBytes: rootStats.usedBytes,
-        freeBytes: rootStats.freeBytes,
-        usagePercent: rootStats.usagePercent,
-      });
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
 
-      // Follow next_page_id scan chain
-      let cur = tbl.rootPageId;
-      while (cur > 0 && cur <= 500) {
         const curBytes = await readPageBytes(db, cur);
-        if (!curBytes || curBytes.byteLength < 16) break;
+        if (!curBytes || curBytes.byteLength < 16) continue;
+        const curStats = computePageStats(curBytes, cur);
         const v = new DataView(curBytes.buffer, curBytes.byteOffset, curBytes.byteLength);
-        const nextId = v.getUint32(PAGE_HEADER_OFFSET_NEXT_PAGE_ID, true);
-        if (nextId > 0 && nextId <= Math.max(totalPages, 500) && !visited.has(nextId)) {
-          visited.add(nextId);
-          const leafBytes = await readPageBytes(db, nextId);
-          const leafStats = computePageStats(leafBytes, nextId);
 
-          result.push({
-            pageId: nextId,
-            label: `Page ${nextId} • ${tbl.name} [Leaf]`,
-            tableName: tbl.name,
-            role: 'leaf',
-            pageType: leafStats.pageType,
-            cellCount: leafStats.cellCount,
-            usedBytes: leafStats.usedBytes,
-            freeBytes: leafStats.freeBytes,
-            usagePercent: leafStats.usagePercent,
-          });
-          cur = nextId;
-        } else {
-          break;
+        let role: DiscoveredPage['role'] = isFirst ? 'root' : 'leaf';
+        if (curStats.pageType === PAGE_TYPE_TABLE_INTERIOR) {
+          role = isFirst ? 'root' : 'interior';
+          // Queue routing cell children
+          const cellCount = curStats.cellCount || v.getUint16(PAGE_HEADER_OFFSET_CELL_COUNT, true);
+          for (let i = 0; i < cellCount; i++) {
+            const off = v.getUint16(16 + i * 2, true);
+            if (off > 0 && off + 4 <= PAGE_SIZE) {
+              const childId = v.getUint32(off, true);
+              if (childId > 1 && !visited.has(childId)) {
+                queue.push(childId);
+              }
+            }
+          }
+          // Queue rightmost child
+          const rightChildId = v.getUint32(PAGE_HEADER_OFFSET_NEXT_PAGE_ID, true);
+          if (rightChildId > 1 && !visited.has(rightChildId)) {
+            queue.push(rightChildId);
+          }
+        } else if (curStats.pageType === PAGE_TYPE_LEAF_DATA) {
+          role = isFirst ? 'root' : 'leaf';
+          // Queue next sibling leaf in scan chain
+          const nextId = v.getUint32(PAGE_HEADER_OFFSET_NEXT_PAGE_ID, true);
+          if (nextId > 1 && !visited.has(nextId) && nextId <= Math.max(totalPages, 500)) {
+            queue.push(nextId);
+          }
         }
+
+        const roleLabel = role === 'root' ? 'Root' : role === 'interior' ? 'Interior' : 'Leaf';
+        result.push({
+          pageId: cur,
+          label: `Page ${cur} • ${tbl.name} [${roleLabel}]`,
+          tableName: tbl.name,
+          role,
+          pageType: curStats.pageType,
+          cellCount: curStats.cellCount,
+          usedBytes: curStats.usedBytes,
+          freeBytes: curStats.freeBytes,
+          usagePercent: curStats.usagePercent,
+        });
+
+        isFirst = false;
       }
     }
 
@@ -430,17 +442,53 @@ export async function discoverDatabasePages(db: any, tables: TableMeta[]): Promi
       const pb = await readPageBytes(db, p);
       const pStats = computePageStats(pb, p);
       let role: DiscoveredPage['role'] = 'unknown';
+      let matchedTableName: string | undefined;
 
-      if (pStats.pageType === PAGE_TYPE_LEAF_DATA) role = 'leaf';
-      else if (pStats.pageType === PAGE_TYPE_TABLE_INTERIOR) role = 'interior';
-      else if (pStats.pageType === PAGE_TYPE_CATALOG_PAGE) role = 'catalog';
-      else if (pStats.pageType === PAGE_TYPE_INDEX_LEAF || pStats.pageType === PAGE_TYPE_INDEX_INTERIOR) role = 'index';
-      else if (pStats.pageType === PAGE_TYPE_FREE) role = 'free';
+      if (pStats.pageType === PAGE_TYPE_LEAF_DATA) {
+        role = 'leaf';
+        // Try matching table via row deserialization
+        if (pb && pb.byteLength === PAGE_SIZE && tables.length > 0) {
+          const pv = new DataView(pb.buffer, pb.byteOffset, pb.byteLength);
+          const cellCount = pv.getUint16(PAGE_HEADER_OFFSET_CELL_COUNT, true);
+          if (cellCount > 0) {
+            const firstOff = pv.getUint16(16, true);
+            if (firstOff >= 16 && firstOff < PAGE_SIZE) {
+              for (const tbl of tables) {
+                if (tbl.columns && tbl.columns.length > 0) {
+                  try {
+                    const colMetas = tbl.columns.map((c, cIdx) => ({
+                      name: c.name,
+                      type: typeof c.type === 'number' ? c.type : 4,
+                      flags: typeof c.flags === 'number' ? c.flags : 0,
+                      columnIndex: cIdx,
+                    }));
+                    const row = page_deserialize_row(colMetas as any, pv, firstOff);
+                    if (row && typeof row === 'object' && Object.keys(row).length > 0) {
+                      matchedTableName = tbl.name;
+                      break;
+                    }
+                  } catch {}
+                }
+              }
+            }
+          }
+        }
+      } else if (pStats.pageType === PAGE_TYPE_TABLE_INTERIOR) {
+        role = 'interior';
+      } else if (pStats.pageType === PAGE_TYPE_CATALOG_PAGE) {
+        role = 'catalog';
+      } else if (pStats.pageType === PAGE_TYPE_INDEX_LEAF || pStats.pageType === PAGE_TYPE_INDEX_INTERIOR) {
+        role = 'index';
+      } else if (pStats.pageType === PAGE_TYPE_FREE) {
+        role = 'free';
+      }
 
       const typeName = PAGE_TYPE_NAMES[pStats.pageType] || `Type 0x${pStats.pageType.toString(16)}`;
+      const label = matchedTableName ? `Page ${p} • ${matchedTableName} [Leaf]` : `Page ${p} • ${typeName}`;
       result.push({
         pageId: p,
-        label: `Page ${p} • ${typeName}`,
+        label,
+        tableName: matchedTableName,
         role,
         pageType: pStats.pageType,
         cellCount: pStats.cellCount,

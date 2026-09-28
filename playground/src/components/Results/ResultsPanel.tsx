@@ -6,6 +6,7 @@ import { StructureView } from './StructureView';
 import { BytecodeView } from './BytecodeView';
 import { ConsoleView } from './ConsoleView';
 import { PageInspector } from './PageInspector';
+import { BufferPoolInspector } from './BufferPoolInspector';
 
 export const ResultsPanel: React.FC = () => {
   const { resultTab, isResultsOpen } = useStudio();
@@ -21,6 +22,7 @@ export const ResultsPanel: React.FC = () => {
           {resultTab === 'results' && <DataGrid />}
           {resultTab === 'structure' && <StructureView />}
           {resultTab === 'pages' && <PageInspector />}
+          {resultTab === 'pool' && <BufferPoolInspector />}
           {resultTab === 'bytecode' && <BytecodeView />}
           {resultTab === 'console' && <ConsoleView />}
         </div>
