@@ -1633,14 +1633,24 @@
       }
 
       .page-inspector-body-layout.view-split .hex-viewer-panel {
-        flex: 0 0 520px;
-        min-width: 480px;
-        max-width: 580px;
+        flex: 1 1 0;
+        min-width: 320px;
+        max-width: none;
+        border-right: none;
       }
       .page-inspector-body-layout.view-split .records-viewer-panel {
-        flex: 1;
-        min-width: 0;
-        width: 100%;
+        flex-shrink: 0;
+        min-width: 240px;
+        overflow: hidden;
+      }
+      .page-inspector-body-layout .splitter-vertical {
+        background: var(--card-border);
+        width: 5px;
+        margin: 0;
+      }
+      .page-inspector-body-layout .splitter-vertical:hover,
+      .page-inspector-body-layout .splitter-vertical.resizing {
+        background: var(--accent);
       }
 
       .page-inspector-body-layout.view-hex .hex-viewer-panel {
@@ -1816,6 +1826,18 @@
       .hex-byte-item.hovered {
         background: var(--accent) !important;
         color: #ffffff !important;
+      }
+
+      .hex-line-row {
+        transition: background 0.15s ease;
+      }
+      .hex-line-row.row-has-active-cell {
+        background: rgba(16, 185, 129, 0.08);
+      }
+      .hex-line-row.row-has-active-cell .hex-addr-cell {
+        color: #10b981;
+        font-weight: 700;
+        border-right-color: #10b981;
       }
 
       /* Records Panel */

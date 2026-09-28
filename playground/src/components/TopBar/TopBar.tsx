@@ -1,9 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useStudio } from '../../context/StudioContext';
-import { Eraser, Play, PanelLeft, PanelBottom, PanelRight } from 'lucide-react';
+import { Eraser, Play, PanelLeft, PanelBottom, PanelRight, Download } from 'lucide-react';
+import { exportDatabaseToSql, downloadSqlFile } from '../../utils/sqlExporter';
 
 export const TopBar: React.FC = () => {
   const {
+    db,
+    activeDbName,
+    showToast,
     clearActiveTabCode,
     executeCode,
     loadSnippet,
@@ -14,6 +18,26 @@ export const TopBar: React.FC = () => {
     toggleDetails,
     toggleResults,
   } = useStudio();
+
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+
+  const handleExportSql = async () => {
+    if (!db) {
+      showToast('No active database to export.');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      showToast('Generating SQLite dump...');
+      const { sql, tableCount, rowCount } = await exportDatabaseToSql(db, activeDbName);
+      downloadSqlFile(`${activeDbName}.sqlite.sql`, sql);
+      showToast(`Exported ${tableCount} table(s) (${rowCount} rows) to ${activeDbName}.sqlite.sql`);
+    } catch (err: any) {
+      showToast(`Export failed: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   const handleSnippetChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const key = e.target.value;
@@ -98,6 +122,17 @@ export const TopBar: React.FC = () => {
         </div>
 
         <div className="topbar-divider" />
+
+        <button
+          id="exportSqlBtn"
+          className="btn btn-secondary"
+          title="Export database as SQLite-compatible .sql file"
+          onClick={handleExportSql}
+          disabled={isExporting}
+        >
+          <Download size={13} style={{ strokeWidth: 2.2 }} />
+          <span>{isExporting ? 'Exporting...' : 'Export SQL'}</span>
+        </button>
 
         <button
           id="clearBtn"

@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useStudio } from '../../context/StudioContext';
+import { VerticalSplitter } from '../Common/Splitters';
 import {
   discoverDatabasePages,
   parsePage,
@@ -51,6 +52,51 @@ export const PageInspector: React.FC = () => {
   const [hoveredColumnRange, setHoveredColumnRange] = useState<ColumnByteRange | null>(null);
   const [hoveredByteOffset, setHoveredByteOffset] = useState<number | null>(null);
   const [activeSubTab, setActiveSubTab] = useState<'split' | 'hex' | 'records' | 'heatmap' | 'tree'>('split');
+
+  // Split view resizable panel state
+  const hexScrollerRef = useRef<HTMLDivElement>(null);
+  const inspectorBodyRef = useRef<HTMLDivElement>(null);
+
+  const [recordsPanelWidth, setRecordsPanelWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('webdb_page_records_width');
+      if (saved) {
+        const parsed = Number(saved);
+        if (!isNaN(parsed) && parsed >= 240) return parsed;
+      }
+    } catch {}
+    return 540;
+  });
+
+  const handleRecordsPanelDrag = useCallback((newWidth: number) => {
+    const containerWidth = inspectorBodyRef.current?.getBoundingClientRect().width || window.innerWidth;
+    const maxW = Math.max(300, containerWidth - 320);
+    const clamped = Math.max(240, Math.min(newWidth, maxW));
+    setRecordsPanelWidth(clamped);
+    try {
+      localStorage.setItem('webdb_page_records_width', String(clamped));
+    } catch {}
+  }, []);
+
+  const scrollToHexOffset = useCallback((byteOffset: number) => {
+    if (byteOffset < 0 || isNaN(byteOffset)) return;
+    const lineOffset = Math.floor(byteOffset / 16) * 16;
+    const el = document.getElementById(`hex-line-${lineOffset}`);
+    const scroller = hexScrollerRef.current;
+    if (el && scroller) {
+      const scrollerRect = scroller.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const targetScrollTop =
+        scroller.scrollTop +
+        (elRect.top - scrollerRect.top) -
+        scrollerRect.height / 2 +
+        elRect.height / 2;
+      scroller.scrollTo({
+        top: Math.max(0, targetScrollTop),
+        behavior: 'smooth',
+      });
+    }
+  }, []);
 
   // B-Tree hierarchy state
   const [btreeRoot, setBtreeRoot] = useState<BTreeNode | null>(null);
@@ -793,7 +839,7 @@ export const PageInspector: React.FC = () => {
 
       {/* --- VIEW MODE 3: SPLIT, HEX, OR RECORDS VIEW --- */}
       {parsedPage && activeSubTab !== 'heatmap' && activeSubTab !== 'tree' && (
-        <div className={`page-inspector-body-layout view-${activeSubTab}`}>
+        <div ref={inspectorBodyRef} className={`page-inspector-body-layout view-${activeSubTab}`}>
           {/* LEFT: HEX DUMP VIEWER */}
           {(activeSubTab === 'split' || activeSubTab === 'hex') && (
             <div className="hex-viewer-panel">
@@ -812,7 +858,7 @@ export const PageInspector: React.FC = () => {
                 ) : null}
               </div>
 
-              <div className="hex-dump-scroller">
+              <div className="hex-dump-scroller" ref={hexScrollerRef}>
                 <table className="hex-dump-table">
                   <thead>
                     <tr>
@@ -824,64 +870,87 @@ export const PageInspector: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {hexLines.map((line) => (
-                      <tr key={line.offset} className="hex-line-row">
-                        <td className="hex-addr-cell font-mono">{line.offsetHex}</td>
-                        <td className="hex-bytes-cell font-mono">
-                          {line.bytes.map((b, bIdx) => {
-                            const { category, tooltip } = getByteCategory(
-                              b.index,
-                              parsedPage,
-                              activeHighlighted,
-                              hoveredColumnRange
-                            );
-                            const isHovered = hoveredByteOffset === b.index;
-                            return (
-                              <React.Fragment key={b.index}>
-                                {bIdx === 8 && <span className="hex-byte-sep">&nbsp;</span>}
+                    {hexLines.map((line) => {
+                      const isLineInActiveCell =
+                        activeHighlighted &&
+                        line.offset + 16 > activeHighlighted.offset &&
+                        line.offset < activeHighlighted.offset + activeHighlighted.length;
+
+                      return (
+                        <tr
+                          key={line.offset}
+                          id={`hex-line-${line.offset}`}
+                          className={`hex-line-row ${isLineInActiveCell ? 'row-has-active-cell' : ''}`}
+                        >
+                          <td className="hex-addr-cell font-mono">{line.offsetHex}</td>
+                          <td className="hex-bytes-cell font-mono">
+                            {line.bytes.map((b, bIdx) => {
+                              const { category, tooltip } = getByteCategory(
+                                b.index,
+                                parsedPage,
+                                activeHighlighted,
+                                hoveredColumnRange
+                              );
+                              const isHovered = hoveredByteOffset === b.index;
+                              return (
+                                <React.Fragment key={b.index}>
+                                  {bIdx === 8 && <span className="hex-byte-sep">&nbsp;</span>}
+                                  <span
+                                    className={`hex-byte-item byte-cat-${category} ${isHovered ? 'hovered' : ''}`}
+                                    title={tooltip}
+                                    onMouseEnter={() => setHoveredByteOffset(b.index)}
+                                    onMouseLeave={() => setHoveredByteOffset(null)}
+                                  >
+                                    {b.hex}
+                                  </span>
+                                </React.Fragment>
+                              );
+                            })}
+                          </td>
+                          <td className="hex-ascii-cell font-mono">
+                            {line.bytes.map((b) => {
+                              const { category } = getByteCategory(
+                                b.index,
+                                parsedPage,
+                                activeHighlighted,
+                                hoveredColumnRange
+                              );
+                              return (
                                 <span
-                                  className={`hex-byte-item byte-cat-${category} ${isHovered ? 'hovered' : ''}`}
-                                  title={tooltip}
+                                  key={b.index}
+                                  className={`hex-ascii-char ascii-cat-${category}`}
                                   onMouseEnter={() => setHoveredByteOffset(b.index)}
                                   onMouseLeave={() => setHoveredByteOffset(null)}
                                 >
-                                  {b.hex}
+                                  {b.char}
                                 </span>
-                              </React.Fragment>
-                            );
-                          })}
-                        </td>
-                        <td className="hex-ascii-cell font-mono">
-                          {line.bytes.map((b) => {
-                            const { category } = getByteCategory(
-                              b.index,
-                              parsedPage,
-                              activeHighlighted,
-                              hoveredColumnRange
-                            );
-                            return (
-                              <span
-                                key={b.index}
-                                className={`hex-ascii-char ascii-cat-${category}`}
-                                onMouseEnter={() => setHoveredByteOffset(b.index)}
-                                onMouseLeave={() => setHoveredByteOffset(null)}
-                              >
-                                {b.char}
-                              </span>
-                            );
-                          })}
-                        </td>
-                      </tr>
-                    ))}
+                              );
+                            })}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
           )}
 
+          {/* SPLITTER IN SPLIT VIEW */}
+          {activeSubTab === 'split' && (
+            <VerticalSplitter
+              currentWidth={recordsPanelWidth}
+              onDrag={handleRecordsPanelDrag}
+              direction="right"
+            />
+          )}
+
           {/* RIGHT: DECODED RECORDS & CATALOG VIEW */}
           {(activeSubTab === 'split' || activeSubTab === 'records') && (
-            <div className="records-viewer-panel">
+            <div
+              className="records-viewer-panel"
+              style={activeSubTab === 'split' ? { width: `${recordsPanelWidth}px`, flex: `0 0 ${recordsPanelWidth}px` } : undefined}
+            >
               <div className="panel-subtitle-bar">
                 <span className="panel-subtitle-title">
                   {parsedPage.isPage1
@@ -919,14 +988,22 @@ export const PageInspector: React.FC = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {parsedPage.header.tables.map((t) => (
-                            <tr key={t.name}>
+                          {parsedPage.header.tables.map((t, idx) => (
+                            <tr
+                              key={t.name}
+                              style={{ cursor: 'pointer' }}
+                              onClick={() => scrollToHexOffset(100 + idx * 128)}
+                              title="Click to autoscroll to 128-byte table descriptor in Hex Dump"
+                            >
                               <td className="font-mono">#{t.tableId}</td>
                               <td style={{ fontWeight: 600 }}>{t.name}</td>
                               <td>
                                 <button
                                   className="link-btn-highlight"
-                                  onClick={() => inspectPage(t.rootPageId)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    inspectPage(t.rootPageId);
+                                  }}
                                   title={`Inspect Page ${t.rootPageId}`}
                                 >
                                   Page {t.rootPageId} &rarr;
@@ -938,7 +1015,10 @@ export const PageInspector: React.FC = () => {
                                 <button
                                   className="btn btn-sm"
                                   style={{ padding: '2px 8px', fontSize: '0.72rem' }}
-                                  onClick={() => inspectPage(t.rootPageId)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    inspectPage(t.rootPageId);
+                                  }}
                                 >
                                   Inspect Root
                                 </button>
@@ -967,15 +1047,23 @@ export const PageInspector: React.FC = () => {
                             </tr>
                           </thead>
                           <tbody>
-                            {parsedPage.header.indexes.map((idx) => (
-                              <tr key={idx.name}>
+                            {parsedPage.header.indexes.map((idx, i) => (
+                              <tr
+                                key={idx.name}
+                                style={{ cursor: 'pointer' }}
+                                onClick={() => scrollToHexOffset(2148 + i * 128)}
+                                title="Click to autoscroll to 128-byte index descriptor in Hex Dump"
+                              >
                                 <td className="font-mono">#{idx.indexId}</td>
                                 <td style={{ fontWeight: 600 }}>{idx.name}</td>
                                 <td>Table #{idx.tableId}</td>
                                 <td>
                                   <button
                                     className="link-btn-highlight"
-                                    onClick={() => inspectPage(idx.rootPageId)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      inspectPage(idx.rootPageId);
+                                    }}
                                   >
                                     Page {idx.rootPageId} &rarr;
                                   </button>
@@ -1018,10 +1106,11 @@ export const PageInspector: React.FC = () => {
                                   });
                                 }}
                                 onMouseLeave={() => setHighlightedCell(null)}
-                                onClick={() =>
-                                  setPinnedCellIndex(pinnedCellIndex === col.columnIndex ? null : col.columnIndex)
-                                }
-                                title="Hover to highlight the 72 raw bytes in Hex Viewer. Click to pin."
+                                onClick={() => {
+                                  setPinnedCellIndex(pinnedCellIndex === col.columnIndex ? null : col.columnIndex);
+                                  scrollToHexOffset(col.rawOffset);
+                                }}
+                                title="Hover to highlight the 72 raw bytes in Hex Viewer. Click to pin & autoscroll."
                               >
                                 <td className="slot-col-idx font-mono" style={{ textAlign: 'center' }}>
                                   #{col.columnIndex}
@@ -1111,10 +1200,11 @@ export const PageInspector: React.FC = () => {
                                 className={`slot-table-row ${isRowActive ? 'active-slot-row' : ''}`}
                                 onMouseEnter={() => setHighlightedCell(cell)}
                                 onMouseLeave={() => setHighlightedCell(null)}
-                                onClick={() =>
-                                  setPinnedCellIndex(isPinned ? null : cell.cellIndex)
-                                }
-                                title="Hover to highlight row bytes. Click to pin/unpin byte highlighting."
+                                onClick={() => {
+                                  setPinnedCellIndex(isPinned ? null : cell.cellIndex);
+                                  scrollToHexOffset(cell.offset);
+                                }}
+                                title="Hover to highlight row bytes. Click to pin & autoscroll to hex bytes."
                               >
                                 {/* 1. Slot Number */}
                                 <td className="slot-col-idx font-mono" style={{ textAlign: 'center' }}>
@@ -1152,9 +1242,17 @@ export const PageInspector: React.FC = () => {
                                         onMouseLeave={() => {
                                           setHoveredColumnRange(null);
                                         }}
+                                        onClick={(e) => {
+                                          if (colRange && !colRange.isNull) {
+                                            e.stopPropagation();
+                                            setPinnedCellIndex(cell.cellIndex);
+                                            setHoveredColumnRange(colRange);
+                                            scrollToHexOffset(colRange.start);
+                                          }
+                                        }}
                                         title={
                                           colRange && !colRange.isNull
-                                            ? `Column '${col.name}': 0x${colRange.start.toString(16)}..0x${colRange.end.toString(16)} (${colRange.length}B)`
+                                            ? `Column '${col.name}': 0x${colRange.start.toString(16)}..0x${colRange.end.toString(16)} (${colRange.length}B). Click to focus & autoscroll.`
                                             : undefined
                                         }
                                       >

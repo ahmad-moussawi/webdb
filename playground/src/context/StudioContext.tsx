@@ -71,7 +71,7 @@ interface StudioContextValue {
   openDb: (name: string, storage: VfsType) => Promise<void>;
   createDb: (name: string, storage: VfsType, templateKey: string) => Promise<void>;
   refreshSchema: () => Promise<void>;
-  executeCode: () => Promise<void>;
+  executeCode: (codeOverride?: string) => Promise<void>;
   updateActiveCode: (code: string) => void;
   openNewTab: (initialCode?: string, title?: string) => void;
   closeTab: (tabId: string) => void;
@@ -111,6 +111,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [tabs, setTabs] = useState<EditorTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>('tab-1');
   const tabCounterRef = useRef<number>(1);
+  const activeTabIdRef = useRef<string>('tab-1');
+  activeTabIdRef.current = activeTabId;
+  const tabsRef = useRef<EditorTab[]>([]);
+  tabsRef.current = tabs;
 
   const [themeMode, setThemeModeState] = useState<ThemeMode>(() => getStoredThemePreference());
   const [activeTheme, setActiveTheme] = useState<'dark' | 'light'>('light');
@@ -324,11 +328,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const updateActiveCode = useCallback((newCode: string) => {
     setTabs((prev) => {
-      const updated = prev.map((t) => (t.id === activeTabId ? { ...t, code: newCode } : t));
-      persistTabs(updated, activeTabId, tabCounterRef.current);
+      const targetId = activeTabIdRef.current;
+      const updated = prev.map((t) => (t.id === targetId ? { ...t, code: newCode } : t));
+      tabsRef.current = updated;
+      persistTabs(updated, targetId, tabCounterRef.current);
       return updated;
     });
-  }, [activeTabId, persistTabs]);
+  }, [persistTabs]);
 
   const openNewTab = useCallback((initialCode?: string, customTitle?: string) => {
     tabCounterRef.current++;
@@ -339,12 +345,14 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       : `// ${title}\nreturn db.from("products")\n  .limit(25);`;
 
     const newTabObj: EditorTab = { id: newId, title, code };
+    activeTabIdRef.current = newId;
+    setActiveTabId(newId);
     setTabs((prev) => {
       const updated = [...prev, newTabObj];
+      tabsRef.current = updated;
       persistTabs(updated, newId, tabCounterRef.current);
       return updated;
     });
-    setActiveTabId(newId);
   }, [persistTabs]);
 
   const closeTab = useCallback((tabId: string) => {
@@ -354,16 +362,18 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (idx === -1) return prev;
 
       const updated = prev.filter((t) => t.id !== tabId);
-      let nextActive = activeTabId;
-      if (activeTabId === tabId) {
+      let nextActive = activeTabIdRef.current;
+      if (activeTabIdRef.current === tabId) {
         const nextTab = updated[Math.max(0, idx - 1)];
         nextActive = nextTab.id;
+        activeTabIdRef.current = nextActive;
         setActiveTabId(nextActive);
       }
+      tabsRef.current = updated;
       persistTabs(updated, nextActive, tabCounterRef.current);
       return updated;
     });
-  }, [activeTabId, persistTabs]);
+  }, [persistTabs]);
 
   const clearActiveTabCode = useCallback(() => {
     updateActiveCode('');
@@ -467,8 +477,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [openDb, showToast]);
 
   // Execute User Code
-  const executeCode = useCallback(async () => {
-    if (!activeTab) return;
+  const executeCode = useCallback(async (codeOverride?: string) => {
     let currentDb = db;
     if (!currentDb) {
       currentDb = await WebDB.open({ name: activeDbName, storage: activeStorage });
@@ -476,7 +485,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       (window as any).db = currentDb;
     }
 
-    const rawCode = activeTab.code;
+    const currentTab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    const rawCode = codeOverride !== undefined ? codeOverride : (currentTab?.code || '');
+    if (!rawCode || !rawCode.trim()) return;
+
     const t0 = performance.now();
     setStatusText('RUNNING...');
     setStatusColor('#3b82f6');
@@ -580,7 +592,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setResultColumns([]);
       setSelectedRowIndex(-1);
     }
-  }, [activeTab, db, activeDbName, activeStorage]);
+  }, [db, activeDbName, activeStorage]);
 
   const selectRow = useCallback((idx: number) => {
     setSelectedRowIndex(idx);
@@ -606,43 +618,52 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const queryTable = useCallback((tableName: string) => {
     const queryCode = `// Query all rows from "${tableName}"\nreturn db.from("${tableName}")\n  .limit(25);`;
 
-    let firstTab = tabs.find((t) => t.id === 'tab-1');
+    let firstTab = tabsRef.current.find((t) => t.id === 'tab-1');
     if (!firstTab) {
-      const newFirstTab: EditorTab = {
-        id: 'tab-1',
-        title: 'Query 1',
-        code: queryCode,
-      };
-      setTabs((prev) => [newFirstTab, ...prev]);
-      setActiveTabId('tab-1');
+      openNewTab(queryCode, `Query ${tableName}`);
     } else {
-      setTabs((prev) =>
-        prev.map((t) => (t.id === 'tab-1' ? { ...t, code: queryCode } : t))
-      );
+      activeTabIdRef.current = 'tab-1';
       setActiveTabId('tab-1');
+      setTabs((prev) => {
+        const updated = prev.map((t) => (t.id === 'tab-1' ? { ...t, code: queryCode } : t));
+        tabsRef.current = updated;
+        persistTabs(updated, 'tab-1', tabCounterRef.current);
+        return updated;
+      });
     }
 
-    // Auto-execute query
-    setTimeout(() => {
-      executeCode();
-    }, 50);
-  }, [tabs, executeCode]);
+    // Auto-execute query immediately with fresh queryCode
+    executeCode(queryCode);
+  }, [openNewTab, persistTabs, executeCode]);
 
   const loadSnippet = useCallback((key: string, label: string) => {
     const snippetCode = SNIPPETS[key];
     if (!snippetCode) return;
 
-    const currentCode = activeTab?.code.trim() || '';
+    const currentTab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    const currentCode = currentTab?.code.trim() || '';
     const snippetName = label.split('(')[0].trim();
 
     if (currentCode === '') {
       updateActiveCode(snippetCode);
-      setTimeout(() => executeCode(), 50);
+      executeCode(snippetCode);
     } else {
       openNewTab(snippetCode, snippetName);
-      setTimeout(() => executeCode(), 50);
+      executeCode(snippetCode);
     }
-  }, [activeTab, updateActiveCode, openNewTab, executeCode]);
+  }, [updateActiveCode, openNewTab, executeCode]);
+
+  // Global Cmd+Enter / Ctrl+Enter execution shortcut listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        executeCode();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [executeCode]);
 
   return (
     <StudioContext.Provider

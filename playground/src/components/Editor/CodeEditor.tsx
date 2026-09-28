@@ -28,6 +28,10 @@ export const CodeEditor: React.FC = () => {
   const editorRef = useRef<any>(null);
   const tablesRef = useRef(tables);
   tablesRef.current = tables;
+  const executeCodeRef = useRef(executeCode);
+  executeCodeRef.current = executeCode;
+  const updateActiveCodeRef = useRef(updateActiveCode);
+  updateActiveCodeRef.current = updateActiveCode;
 
   const handleBeforeMount: BeforeMount = (monaco) => {
     monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
@@ -237,7 +241,9 @@ export const CodeEditor: React.FC = () => {
 
     // Bind Cmd+Enter / Ctrl+Enter to execute query
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-      executeCode();
+      const currentCode = editor.getValue();
+      updateActiveCodeRef.current(currentCode);
+      executeCodeRef.current(currentCode);
     });
   };
 

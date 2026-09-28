@@ -1,9 +1,29 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useStudio } from '../../context/StudioContext';
-import { RotateCw, Table, PanelLeftClose, Layers } from 'lucide-react';
+import { RotateCw, Table, PanelLeftClose, Layers, Download } from 'lucide-react';
+import { exportDatabaseToSql, downloadSqlFile } from '../../utils/sqlExporter';
 
 export const TableTree: React.FC = () => {
-  const { tables, refreshSchema, queryTable, viewTableStructure, toggleExplorer, inspectPage } = useStudio();
+  const { db, activeDbName, showToast, tables, refreshSchema, queryTable, viewTableStructure, toggleExplorer, inspectPage } = useStudio();
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+
+  const handleExportSql = async () => {
+    if (!db) {
+      showToast('No active database to export.');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      showToast('Generating SQLite dump...');
+      const { sql, tableCount, rowCount } = await exportDatabaseToSql(db, activeDbName);
+      downloadSqlFile(`${activeDbName}.sqlite.sql`, sql);
+      showToast(`Exported ${tableCount} table(s) (${rowCount} rows) to ${activeDbName}.sqlite.sql`);
+    } catch (err: any) {
+      showToast(`Export failed: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <>
@@ -13,6 +33,15 @@ export const TableTree: React.FC = () => {
           <span id="tableCountBadge" className="badge-count">
             {tables.length}
           </span>
+          <button
+            id="exportSqlTreeBtn"
+            className="panel-icon-btn"
+            title="Export to SQLite (.sql)"
+            onClick={handleExportSql}
+            disabled={isExporting}
+          >
+            <Download size={12} />
+          </button>
           <button
             id="refreshSchemaBtn"
             className="panel-icon-btn"
