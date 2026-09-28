@@ -196,10 +196,11 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 | | **`OP_COLUMN_FLOAT`** | `0x05` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 64-bit IEEE float from row into `r[reg]`; sets NULL if null. |
 | | **`OP_COLUMN_TEXT`** | `0x06` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads string byte offset & length from row into `r[reg]`. |
 | | **`OP_COLUMN_BLOB`** | `0x07` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads binary byte slice & length from row into `r[reg]`. |
-| | **`OP_COLUMN_UUID`** | `0x0A` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw UUID binary payload into `r[reg]` (`type = 6`). |
-| | **`OP_COLUMN_ULID`** | `0x0B` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw ULID binary payload into `r[reg]` (`type = 7`). |
 | | **`OP_LAST`** | `0x08` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at rightmost leaf cell for reverse B-tree scan. |
 | | **`OP_PREV_ROW`** | `0x09` | `cursor: uint8`, `jump_target: uint16` | Decrements cell; follows `prev_page_id`; yields `STATUS_PAGE_FAULT` on miss; jumps on BOF. |
+| | **`OP_COLUMN_UUID`** | `0x0A` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw UUID binary payload into `r[reg]` (`type = 6`). |
+| | **`OP_COLUMN_ULID`** | `0x0B` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw ULID binary payload into `r[reg]` (`type = 7`). |
+| | **`OP_OPEN_EPHEMERAL`** | `0x0C` | `cursor: uint8`, `num_cols: uint8` | Initializes transient in-memory B-Tree cursor for subquery materialization. |
 | **Logic / Control** | **`OP_IS_NULL`** | `0x10` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if set (`NULL`). |
 | | **`OP_IS_NOT_NULL`** | `0x11` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if clear (not null). |
 | | **`OP_EQ`** | `0x12` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL equality: jumps if `r[A] == r[B]` (both non-null). |
@@ -220,15 +221,29 @@ All opcodes are encoded as packed binary bytes in shared memory. Numerical param
 | | **`OP_LOAD_NULL`** | `0x23` | `reg: uint8` | Sets `r[reg] = NULL` (`type = 0`). |
 | | **`OP_EMIT_ROW`** | `0x24` | `cursor: uint8` | Streams raw serialized row from cursor into 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
 | | **`OP_RESULT_ROW`** | `0x25` | `start_reg: uint8`, `num_cols: uint8` | Serializes projected registers into binary row in 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
-| | **`OP_CALL_UDF`** | `0x28` | `udf_id: uint16`, `arg_reg: uint8`, `out_reg: uint8` | Dispatches registered JS UDF function synchronously. |
+| | **`OP_OFFSET`** | `0x26` | `count_reg: uint8`, `jump_target: uint16` | If `r[count_reg] > 0`, decrements counter and jumps to skip emission. |
+| | **`OP_LIMIT`** | `0x27` | `count_reg: uint8`, `jump_target: uint16` | If `r[count_reg] == 0`, jumps to terminate query (`OP_HALT`); decrements counter. |
+| | **`OP_CALL_UDF`** | `0x28` | `udf_id: uint16`, `start_arg_reg: uint8`, `num_args: uint8`, `out_reg: uint8` | Dispatches registered JS UDF function synchronously via Host bridge. |
 | | **`OP_STR_LOWER`** | `0x29` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to lowercase into `r[dest]`. |
 | | **`OP_STR_UPPER`** | `0x2A` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to uppercase into `r[dest]`. |
 | | **`OP_STR_LENGTH`** | `0x2B` | `src_reg: uint8`, `dest_reg: uint8` | Computes UTF-8 string character/byte length into `r[dest]` (int32). |
 | | **`OP_STR_SUBSTR`** | `0x2C` | `src_reg: uint8`, `start_reg: uint8`, `len_reg: uint8`, `dest_reg: uint8` | Extracts 1-indexed substring into `r[dest]`. |
-| **Sorter (ORDER BY)** | **`OP_SORTER_OPEN`** | `0x30` | `sorter_id: uint8`, `key_info_idx: uint8` | Initializes Sorter in Transient Query Arena with `KeyInfo`. |
+| | **`OP_STR_TRIM`** | `0x2D` | `src_reg: uint8`, `dest_reg: uint8` | Strips leading and trailing ASCII whitespace into `r[dest]`. |
+| | **`OP_MATH_ABS`** | `0x2E` | `src_reg: uint8`, `dest_reg: uint8` | Computes absolute value `\|x\|` into `r[dest]`. |
+| | **`OP_MATH_ROUND`** | `0x2F` | `src_reg: uint8`, `dest_reg: uint8` | Rounds float in `r[src]` to nearest integer in `r[dest]`. |
+| **Sorter / Math** | **`OP_SORTER_OPEN`** | `0x30` | `sorter_id: uint8`, `key_info_idx: uint8` | Initializes Sorter in Transient Query Arena with `KeyInfo`. |
 | | **`OP_SORTER_INSERT`** | `0x31` | `sorter_id: uint8`, `start_reg: uint8`, `num_keys: uint8`, `cursor: uint8` | Appends `SorterEntry` (16B) and sort keys in arena. |
 | | **`OP_SORTER_SORT`** | `0x32` | `sorter_id: uint8` | Executes in-place Introsort on `SorterEntry[]`. |
 | | **`OP_SORTER_NEXT`** | `0x33` | `sorter_id: uint8`, `jump_target: uint16` | Yields next sorted row; jumps to emit loop; falls through on EOF. |
+| | **`OP_MATH_FLOOR`** | `0x34` | `src_reg: uint8`, `dest_reg: uint8` | Computes mathematical floor $\lfloor x \rfloor$ into `r[dest]`. |
+| | **`OP_MATH_CEIL`** | `0x35` | `src_reg: uint8`, `dest_reg: uint8` | Computes mathematical ceiling $\lceil x \rceil$ into `r[dest]`. |
+| | **`OP_ADD`** | `0x36` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric addition `r[dest] = r[A] + r[B]`. |
+| | **`OP_SUB`** | `0x37` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric subtraction `r[dest] = r[A] - r[B]`. |
+| | **`OP_MUL`** | `0x38` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric multiplication `r[dest] = r[A] * r[B]`. |
+| | **`OP_DIV`** | `0x39` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric division `r[dest] = r[A] / r[B]` (NULL on zero). |
+| | **`OP_MOD`** | `0x3A` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL integer modulo `r[dest] = r[A] % r[B]`. |
+| | **`OP_ENTER_SUBQUERY`**| `0x3B` | `frame_depth: uint8` | Increments `ctx->depth`, initializing fresh register frame. |
+| | **`OP_RETURN_SUBQUERY`**| `0x3C` | `src_reg: uint8`, `parent_dest_reg: uint8` | Copies result register to parent frame and decrements `ctx->depth`. |
 | **Agg (GROUP BY)** | **`OP_AGG_INIT`** | `0x40` | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `mode: uint8` | Initializes Hash Table in arena (`0x00`) or Stream Aggregation (`0x01`). |
 | | **`OP_AGG_STEP`** | `0x41` | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `val_reg: uint8`, `func_id: uint8` | Updates `AggBucket` accumulators (`COUNT`, `SUM`, `MIN`, `MAX`). |
 | | **`OP_AGG_NEXT`** | `0x42` | `agg_id: uint8`, `out_key_reg: uint8`, `out_acc_reg: uint8`, `jump_target: uint16` | Iterates next group bucket into registers; jumps to emit loop. |
@@ -538,7 +553,525 @@ WebDB executes all data modification operations through the VDBE step loop using
 
 ---
 
-## 6. Exhaustive Edge Cases & Failure Modes
+## 6. Query Compilation & Execution Instruction Patterns
+
+Every high-level SQL / QueryBuilder query compiles into a structured, linear stream of VDBE bytecode. This section details how query clauses are compiled and executed in the VM.
+
+### 6.1 `SELECT` Projection & Table Scans
+
+The engine distinguishes between two projection paths: **full row emission** and **columnar projection**:
+
+```
+Full Scan:       OP_OPEN_CURSOR -> OP_REWIND -> [Loop: OP_EMIT_ROW -> OP_NEXT_ROW] -> OP_HALT
+Projected Cols:  OP_OPEN_CURSOR -> OP_REWIND -> [Loop: OP_COLUMN_xxx -> OP_RESULT_ROW -> OP_NEXT_ROW] -> OP_HALT
+```
+
+#### A. Full Table Scan (`SELECT *`)
+When all columns are requested without transformation, the engine streams records directly from cache slots without unpacking fields into registers:
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_OPEN_CURSOR   0   1    0    ; Open Cursor 0 on root page 1
+0005  OP_REWIND        0   15   0    ; If table is empty, jump to HALT (addr 15)
+0008  OP_EMIT_ROW      0   0    0    ; Copy raw binary record from Cursor 0 to Result Buffer
+0010  OP_NEXT_ROW      0   8    0    ; Advance cell; if not EOF, jump to addr 8
+0015  OP_HALT          0   0    0    ; Finish execution (STATUS_DONE)
+```
+
+#### B. Column Projection (`SELECT id, name`)
+When specific columns are selected, the compiler extracts fields into contiguous registers and emits them via `OP_RESULT_ROW`:
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_OPEN_CURSOR   0   1    0    ; Open Cursor 0 on table root page
+0005  OP_REWIND        0   23   0    ; If empty, jump to HALT (addr 23)
+0008  OP_COLUMN_INT    0   0    1    ; r[1] = col 0 (id)
+0012  OP_COLUMN_TEXT   0   1    2    ; r[2] = col 1 (name)
+0016  OP_RESULT_ROW    1   2    0    ; Emit 2 columns starting at r[1] (r[1]..r[2])
+0019  OP_NEXT_ROW      0   8    0    ; Next row; loop to addr 8
+0023  OP_HALT          0   0    0    ; Done
+```
+
+---
+
+### 6.2 `WHERE` Clause Filter Execution (Boolean Logic & Short-Circuiting)
+
+`WHERE` conditions compile into register load and comparison opcodes positioned immediately after cursor cell positioning, guarding the emission instruction.
+
+#### A. Single Predicate (`WHERE age > 21`)
+Non-matching rows jump directly to the loop advance (`OP_NEXT_ROW`), skipping projection:
+```
+addr  opcode           p1  p2   p3   comment
+0008  OP_COLUMN_INT    0   2    1    ; r[1] = col 2 (age)
+0012  OP_LOAD_INT      2   21   0    ; r[2] = 21
+0017  OP_LE            1   2    22   ; If r[1] <= r[2], skip row -> jump to addr 22 (OP_NEXT_ROW)
+0021  OP_EMIT_ROW      0   0    0    ; Row passed filter; emit
+0022  OP_NEXT_ROW      0   8    0    ; Advance to next row
+```
+
+#### B. Compound Conditions (`AND`, `OR`, `NOT`) & Short-Circuit Evaluation
+
+Boolean trees compile into deterministic jump graphs where branches evaluate with minimal instruction steps:
+
+1. **`A AND B`**: Condition A checks first; on failure, jumps immediately to `OP_NEXT_ROW` (B is never evaluated).
+2. **`A OR B`**: Condition A checks first; on success, jumps immediately to the emission block (B is never evaluated). If A fails, falls through to test B.
+3. **`NOT (A OR B)` (De Morgan's Equivalent: `NOT A AND NOT B`)**: Evaluates branch A; if true, jumps to next row. Evaluates branch B; if true, jumps to next row. Falls through to emit only if neither matched.
+
+```
+       [ Read Column Values into Registers ]
+                         │
+                 Condition A True?
+                    /         \
+                 YES           NO (Jump to next row for AND / Test B for OR)
+                  │             │
+          Condition B True?   Condition B True? (OR branch)
+             /        \          /         \
+          YES          NO      YES          NO
+           │            │       │            │
+      [ Emit Row ]   [ Skip ] [ Emit Row ] [ Skip ]
+```
+
+---
+
+### 6.3 `GROUP BY` & Aggregations Execution
+
+Aggregation compiles into a two-phase state machine: **Accumulation Scan** followed by **Group Bucket Emission**:
+
+```
+Phase 1 (Scan):   OP_AGG_INIT -> [Scan: Extract Keys -> OP_AGG_STEP -> OP_NEXT_ROW]
+                                                │ (EOF reached)
+Phase 2 (Emit):   [Bucket Loop: OP_AGG_NEXT -> OP_AGG_FINAL -> OP_RESULT_ROW] -> OP_HALT
+```
+
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_AGG_INIT      0   1    1    ; Init Aggregator 0 in arena, 1 group key
+0005  OP_OPEN_CURSOR   0   1    0    ; Open table cursor
+0010  OP_REWIND        0   35   0    ; If empty, skip scan to emission
+0013  OP_COLUMN_TEXT   0   3    1    ; r[1] = col 3 (dept, grouping key)
+0017  OP_COLUMN_FLOAT  0   5    2    ; r[2] = col 5 (salary, aggregated value)
+0021  OP_AGG_STEP      0   1    1    ; Agg 0: step with key r[1], value r[2] (SUM)
+0027  OP_NEXT_ROW      0   13   0    ; Loop scan
+; --- Phase 2: Emit aggregated groups ---
+0035  OP_AGG_NEXT      0   3    4    ; Load next group key -> r[3], accumulators -> r[4..5]
+0041  OP_AGG_FINAL     4   5    6    ; Finalize AVG: r[6] = sum(r[4]) / count(r[5])
+0046  OP_RESULT_ROW    3   2    0    ; Emit group: [r[3] (dept), r[6] (avg_salary)]
+0050  OP_JUMP          35  0    0    ; Loop to next aggregate bucket until EOF
+0053  OP_HALT          0   0    0    ; Done
+```
+
+---
+
+### 6.4 `ORDER BY` Sorting Pipeline & Top-K Optimization
+
+When sorting cannot be satisfied by an existing B+Tree index, the engine executes an in-arena sort using `OP_SORTER_OPEN`, `OP_SORTER_INSERT`, `OP_SORTER_SORT`, and `OP_SORTER_NEXT`.
+
+Depending on whether a `LIMIT` clause is present and within bounds, the engine automatically chooses between a **Full In-Arena Introsort** and a **Bounded Top-K Max-Heap**.
+
+```
+                           ORDER BY Execution Path
+                                     │
+                    Is LIMIT specified and within threshold?
+                    requested_k = (offset ?? 0) + limit
+                    0 < requested_k <= MAX_TOPK_HEAP_LIMIT (4096)
+                                    / \
+                                  YES  NO (No LIMIT or requested_k > 4096)
+                                  /     \
+                Bounded Top-K Max-Heap    Full In-Arena Sorter
+                - Arena memory: O(K)       - Arena memory: O(N)
+                - Sift-down: O(log K)      - Full collection: O(N)
+                - Discards non-top in O(1) - Introsort: O(N log N)
+```
+
+#### A. Full In-Arena Sorter Pipeline (No LIMIT or Large Limits)
+When sorting an unbounded result set or when `requested_k > MAX_TOPK_HEAP_LIMIT`:
+```
+Phase 1 (Collect): OP_SORTER_OPEN -> [Scan: Read Keys -> OP_SORTER_INSERT -> OP_NEXT_ROW]
+                                                    │ (EOF reached)
+Phase 2 (Sort):    OP_SORTER_SORT (In-place Introsort on SorterEntry array, O(N log N))
+                                                    │
+Phase 3 (Stream):  [Emit Loop: OP_SORTER_NEXT -> OP_RESULT_ROW / OP_EMIT_ROW] -> OP_HALT
+```
+- **Phase 1 (Collect):** Every row matching the query filters is copied into the Transient Query Arena as a `SorterEntry` with its sort keys.
+- **Phase 2 (Sort):** When the table scan finishes, `OP_SORTER_SORT` runs an in-place Introsort (quicksort switching to heapsort on deep recursion) over all $N$ entries in $O(N \log N)$ time.
+- **Phase 3 (Stream):** `OP_SORTER_NEXT` yields sorted rows sequentially into the 64KB Result Buffer.
+
+---
+
+#### B. Bounded Top-K Max-Heap Optimization (`ORDER BY ... LIMIT K`)
+
+Sorting $1,000,000$ rows simply to return the top $10$ rows is an immense waste of CPU cycles and arena memory. When `ORDER BY` is paired with `LIMIT`, the engine activates a **Bounded Max-Heap** directly inside `OP_SORTER_INSERT`:
+
+```
+               [ Candidate Row Extracted ]
+                            │
+               Heap count < max_k ?
+                  /            \
+               YES              NO (Heap is at full capacity K)
+                │                │
+        Append to heap      Compare keys against Root (entries[0])
+        Sift-up in O(log K)      │
+                            Candidate is worse than Root? (cmp >= 0)
+                               /            \
+                            YES              NO (Candidate is strictly better!)
+                             │                │
+                      Discard row in O(1)    Replace Root with Candidate
+                      Zero arena allocation  Sift-down in O(log K)
+```
+
+1. **Heap Initialization:**
+   `KeyInfo` records the target capacity:
+   $$\text{requested\_k} = (\text{offset} \mathbin{??} 0) + \text{limit}$$
+   If $0 < \text{requested\_k} \le \text{MAX\_TOPK\_HEAP\_LIMIT}$, `max_k = requested_k`.
+
+2. **The "Worst-Element" Root Invariant:**
+   The heap is organized as a **Max-Heap** (relative to the desired sort order). The root element (`sorter.entries[0]`) always stores the **worst candidate currently qualifying for the top $K$**:
+   - For an `ASC` query (`ORDER BY score ASC LIMIT 10`), the root is the *maximum* score among the current top 10.
+   - For a `DESC` query (`ORDER BY score DESC LIMIT 10`), the root is the *minimum* score among the current top 10.
+
+3. **$O(1)$ Early Discard:**
+   Once $K$ rows have accumulated in the heap, any incoming candidate row is compared against the root (`entries[0]`):
+   - **`cmp >= 0` (Worse or Equal):** The candidate cannot possibly qualify for the final top $K$. It is **instantly discarded** in $O(1)$ time with **zero memory allocation** and zero row-copying overhead.
+   - **`cmp < 0` (Better than Root):** The candidate qualifies! It replaces the root at `entries[0]` and executes a `heap_sift_down` in $O(\log K)$ steps, maintaining the heap invariant.
+
+4. **Fast Heapsort:**
+   At scan completion, instead of sorting $N$ rows, `OP_SORTER_SORT` sorts only the $K$ elements in $O(K \log K)$ time.
+
+---
+
+#### C. The `MAX_TOPK_HEAP_LIMIT` Threshold (4,096 Rows)
+
+WebDB enforces a strict ceiling on the maximum size of the bounded heap:
+
+```typescript
+export const MAX_TOPK_HEAP_LIMIT = 4096;
+```
+
+> [!IMPORTANT]
+> **Why `MAX_TOPK_HEAP_LIMIT = 4096`?**
+> 1. **Cache Locality vs Tree Depth:**
+>    For $K \le 4096$, the binary heap tree has depth $\le 12$ ($\log_2(4096) = 12$). Every sift-down requires at most 12 comparisons, and the entire `SorterEntry` array ($4096 \times 16\text{ B} = 64\text{ KB}$) fits entirely within the CPU's **L1/L2 cache**.
+> 2. **Branch Misprediction & Quicksort Crossover:**
+>    When $K > 4096$ (e.g. `LIMIT 50000` or deep pagination like `OFFSET 100000 LIMIT 10`), the cost of repeated sift-downs over deep memory hierarchies exceeds the throughput of contiguous cache-line memory moves in Introsort.
+> 3. **Automatic Fallback:**
+>    If `(offset + limit) > 4096`, `max_k` is automatically set to `0`. `OP_SORTER_INSERT` falls back transparently to contiguous array collection, and `OP_SORTER_SORT` performs a full Introsort across all matching rows.
+
+---
+
+#### D. Bytecode Walkthrough: `ORDER BY salary DESC LIMIT 5`
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_SORTER_OPEN   0   0    0    ; Open Sorter 0 with KeyInfo 0 (limit=5, max_k=5)
+0005  OP_OPEN_CURSOR   0   1    0    ; Open employees table cursor
+0010  OP_REWIND        0   30   0    ; If empty, jump to HALT
+; --- Scan & Top-K Sorter Insert ---
+0013  OP_COLUMN_FLOAT  0   4    1    ; r[1] = salary (sort key)
+0017  OP_SORTER_INSERT 0   1    1    ; Insert into Sorter 0 with Top-K bound (max_k=5)
+0022  OP_NEXT_ROW      0   13   0    ; Loop scan
+; --- Phase 2: Sort top 5 elements ---
+0030  OP_SORTER_SORT   0   0    0    ; Sorts only 5 elements in O(K log K)
+; --- Phase 3: Emit Top-K rows ---
+0035  OP_SORTER_NEXT   0   45   0    ; Yield next sorted entry; jump to addr 45 on EOF
+0040  OP_EMIT_ROW      0   0    0    ; Emit row
+0042  OP_JUMP          35  0    0    ; Loop to next sorted row
+0045  OP_HALT          0   0    0    ; Done
+```
+
+---
+
+### 6.5 `LIMIT` & `OFFSET` Pagination
+
+Pagination uses hardware-style countdown registers initialized before the scan loop:
+- **`OP_OFFSET (0x26, count_reg: uint8, jump_target: uint16)`**: If `r[count_reg] > 0`, decrements `r[count_reg]` and jumps to `jump_target` (bypassing `OP_RESULT_ROW` / `OP_EMIT_ROW`).
+- **`OP_LIMIT (0x27, count_reg: uint8, jump_target: uint16)`**: Checks if `r[count_reg] == 0`. If 0, jumps to `jump_target` (which points to `OP_HALT`), terminating the query early. Otherwise decrements `r[count_reg]` and proceeds to emission.
+
+```
+       [ Row Evaluated & Filter Passed ]
+                         │
+                 r[offset] > 0 ?
+                    /         \
+                 YES           NO
+                  │             │
+          r[offset]--      r[limit] == 0 ?
+          Jump to next row   /         \
+                          YES           NO
+                           │             │
+                      OP_HALT        r[limit]--
+                                     OP_RESULT_ROW
+```
+
+---
+
+## 7. Function Calling Architecture (Built-In Scalars & UDFs)
+
+To guarantee optimal performance and seamless composability across subqueries and clauses, function calls run directly within the VDBE register pipeline rather than through client-side JavaScript object wrappers.
+
+### 7.1 Built-in Scalar Functions
+
+The VM natively implements standard SQL functions over registers:
+
+| Category | Function | Opcode | Operands | Register Transformation |
+| :--- | :--- | :---: | :--- | :--- |
+| **String** | `UPPER(s)` | `OP_STR_UPPER` (`0x2A`) | `src, dest` | `r[dest] = UPPER(r[src])` |
+| | `LOWER(s)` | `OP_STR_LOWER` (`0x29`) | `src, dest` | `r[dest] = LOWER(r[src])` |
+| | `LENGTH(s)` | `OP_STR_LENGTH` (`0x2B`) | `src, dest` | `r[dest] = character_length(r[src])` |
+| | `SUBSTR(s, p, l)` | `OP_STR_SUBSTR` (`0x2C`) | `src, start, len, dest` | `r[dest] = substring(r[src], r[start], r[len])` |
+| | `TRIM(s)` | `OP_STR_TRIM` (`0x2D`) | `src, dest` | `r[dest] = trim_whitespace(r[src])` |
+| **Math** | `ABS(x)` | `OP_MATH_ABS` (`0x2E`) | `src, dest` | `r[dest] = \|r[src]\|` |
+| | `ROUND(x)` | `OP_MATH_ROUND` (`0x2F`) | `src, dest` | `r[dest] = round(r[src])` |
+| | `FLOOR(x)` | `OP_MATH_FLOOR` (`0x34`) | `src, dest` | `r[dest] = floor(r[src])` |
+| | `CEIL(x)` | `OP_MATH_CEIL` (`0x35`) | `src, dest` | `r[dest] = ceil(r[src])` |
+| **Arithmetic**| `+` | `OP_ADD` (`0x36`) | `regA, regB, dest` | `r[dest] = r[A] + r[B]` |
+| | `-` | `OP_SUB` (`0x37`) | `regA, regB, dest` | `r[dest] = r[A] - r[B]` |
+| | `*` | `OP_MUL` (`0x38`) | `regA, regB, dest` | `r[dest] = r[A] * r[B]` |
+| | `/` | `OP_DIV` (`0x39`) | `regA, regB, dest` | `r[dest] = r[A] / r[B]` (NULL if `r[B] == 0`) |
+| | `%` | `OP_MOD` (`0x3A`) | `regA, regB, dest` | `r[dest] = r[A] % r[B]` |
+
+---
+
+### 7.2 Function Invocation Across Different Clauses
+
+Because scalar functions operate on generic register indices, the compiler can place them in any clause pipeline:
+
+#### 1. In `SELECT` (Projections)
+Computes output fields into result registers immediately prior to row emission:
+```sql
+SELECT upper(name), floor(score) FROM students;
+```
+Bytecode:
+```
+OP_COLUMN_TEXT  0  1  1       ; r[1] = students.name
+OP_COLUMN_FLOAT 0  2  2       ; r[2] = students.score
+OP_STR_UPPER    1  3  0       ; r[3] = upper(r[1])
+OP_MATH_FLOOR   2  4  0       ; r[4] = floor(r[2])
+OP_RESULT_ROW   3  2  0       ; Emit [r[3], r[4]]
+```
+
+#### 2. In `WHERE` (Filter Predicates)
+Computes dynamic values before executing jump comparisons:
+```sql
+WHERE lower(email) = 'user@example.com' AND abs(balance) > 100
+```
+Bytecode:
+```
+OP_COLUMN_TEXT  0  2  1       ; r[1] = email
+OP_STR_LOWER    1  2  0       ; r[2] = lower(r[1])
+OP_LOAD_TEXT    3  "user@example.com"
+OP_NE           2  3  skip    ; If lower(email) != 'user@example.com', skip row
+OP_COLUMN_FLOAT 0  4  4       ; r[4] = balance
+OP_MATH_ABS     4  5  0       ; r[5] = abs(r[4])
+OP_LOAD_FLOAT   6  100.0      ; r[6] = 100.0
+OP_LE           5  6  skip    ; If abs(balance) <= 100, skip row
+```
+
+#### 3. In `ORDER BY` (Sorting Expressions)
+Computes sorting keys into temporary registers before inserting into the Sorter:
+```sql
+ORDER BY length(name) DESC, round(score) ASC
+```
+Bytecode:
+```
+OP_COLUMN_TEXT  0  1  1       ; r[1] = name
+OP_STR_LENGTH   1  2  0       ; r[2] = length(name)  [Key 0]
+OP_COLUMN_FLOAT 0  2  3       ; r[3] = score
+OP_MATH_ROUND   3  4  0       ; r[4] = round(score)  [Key 1]
+OP_SORTER_INSERT 0 2  2  0    ; Insert sorter entry with 2 keys starting at r[2]
+```
+
+#### 4. In `GROUP BY` (Grouping Expressions)
+Groups rows by computed expressions instead of raw columns:
+```sql
+GROUP BY substr(created_at, 1, 7)  -- Group by Year-Month "YYYY-MM"
+```
+Bytecode:
+```
+OP_COLUMN_TEXT  0  3  1       ; r[1] = created_at
+OP_LOAD_INT     2  1  0       ; r[2] = 1 (start)
+OP_LOAD_INT     3  7  0       ; r[3] = 7 (length)
+OP_STR_SUBSTR   1  2  3  4    ; r[4] = substr(r[1], 1, 7) [Group Key]
+OP_AGG_STEP     0  4  1  ...  ; Accumulate bucket under key r[4]
+```
+
+#### 5. In `HAVING` (Post-Aggregation Filtering)
+Evaluates expressions on finalized aggregate buckets before emitting:
+```sql
+HAVING count(*) * 10 > 500
+```
+Bytecode:
+```
+OP_AGG_NEXT     0  1  2  ...  ; r[2] = count(*)
+OP_LOAD_INT     3  10 0       ; r[3] = 10
+OP_MUL          2  3  4       ; r[4] = count(*) * 10
+OP_LOAD_INT     5  500 0      ; r[5] = 500
+OP_LE           4  5  skip_bucket ; If count * 10 <= 500, skip bucket
+```
+
+---
+
+### 7.3 User-Defined Functions (UDFs) & Host-Core Dispatch
+
+WebDB supports custom JavaScript and TypeScript functions via `OP_CALL_UDF (0x28)`.
+
+#### A. Registration API
+Applications register custom functions on the `WebDB` instance:
+```typescript
+db.registerFunction('hash_token', {
+  deterministic: true,
+  call: (val: string, row?: DbRow) => sha256(val),
+});
+```
+
+#### B. Execution Bridge (`OP_CALL_UDF`)
+```
+Core (Wasm / C)                                   Host (JavaScript)
+───────────────                                   ─────────────────
+OP_CALL_UDF(udf_id, start_reg, num_args, out_reg)
+       │
+       ├── Marshal argument registers (r[start_reg..+num_args])
+       └── Calls Host Bridge: host_dispatch_udf(udf_id, args) ────► Executes JS UDF
+                                                                          │
+       ┌── Receives return value and writes into r[out_reg] ◄──────────────┘
+       ▼
+Advances pc += 5 to next opcode
+```
+
+#### C. Determinism & Optimizations
+- **Deterministic Functions (`deterministic: true`)**: If all arguments to a deterministic function are literals (e.g. `hash_token('static_salt')`), the query compiler evaluates the function once at **compile time** (constant folding) and emits `OP_LOAD_TEXT` instead of invoking `OP_CALL_UDF` on every row during table scan.
+- **Non-Deterministic Functions (e.g. `random()`, `now()`)**: Must execute on every row iteration.
+
+---
+
+## 8. Nested Queries, Ephemeral Materialization & Subquery Flattening
+
+When a query selects from a subquery (`FROM (SELECT ...)`), WebDB uses two architectural strategies: **Subquery Flattening** (zero-overhead query rewrites) and **Ephemeral Table Materialization** (isolated multi-frame execution).
+
+```
+                            Nested Query in FROM
+                                     │
+                     Can subquery be flattened safely?
+                     - No GROUP BY / Aggregates
+                     - No LIMIT / OFFSET
+                     - No DISTINCT / UNION
+                                    / \
+                                  YES  NO
+                                  /     \
+             Subquery Flattening        Ephemeral Materialization
+          Inline expressions into outer       OP_OPEN_EPHEMERAL
+          Single-pass scan; 0 temp tables    Inner query populates temp B-tree
+                                              Outer query scans temp cursor
+```
+
+### 8.1 The Multi-Frame Subquery Stack (`VmContext.depth`)
+
+The engine maintains an 8-frame execution stack (`ctx->frames[0..7]`, total 10,248 bytes in shared memory):
+1. **Frame Push (`OP_ENTER_SUBQUERY`, `ctx->depth++`)**:
+   - Activates a completely fresh 64-register namespace and 16 cursor slots.
+   - Preserves all parent registers and cursors without risking register clobbering.
+2. **Correlated Register Access**:
+   - Inner queries can read outer query registers via negative depth indexing: `parent_frame = ctx->frames[ctx->depth - 1]`.
+3. **Frame Pop (`OP_RETURN_SUBQUERY`, `ctx->depth--`)**:
+   - Copies scalar subquery result from child `src_reg` into parent `parent_dest_reg`.
+   - Decrements `ctx->depth`, resuming outer execution cleanly.
+
+---
+
+### 8.2 Subquery Materialization via Ephemeral Tables (`OP_OPEN_EPHEMERAL`)
+
+When a subquery contains `GROUP BY`, `ORDER BY`, `LIMIT`, or aggregates, it cannot be flattened. The engine materializes the inner query into an **ephemeral B-Tree cursor**:
+
+```sql
+SELECT dept, total_payroll * 1.1 AS projected_cost
+FROM (
+  SELECT dept, sum(salary) AS total_payroll
+  FROM employees
+  GROUP BY dept
+)
+WHERE total_payroll > 100000;
+```
+
+#### Bytecode Execution Walkthrough:
+```
+; === Phase 1: Inner Subquery Materialization ===
+0000  OP_OPEN_EPHEMERAL 1   2   0    ; Open Ephemeral Cursor 1 with 2 columns
+0005  OP_AGG_INIT       0   1   1    ; Aggregate employees by dept...
+0010  ... [Scan employees, execute OP_AGG_STEP] ...
+0025  OP_AGG_NEXT       0   1   2    ; r[1] = dept, r[2] = sum(salary)
+0030  OP_INSERT_ROW     1   1   2    ; Insert [r[1], r[2]] into Ephemeral Cursor 1
+0035  ... [Loop until all group buckets inserted] ...
+
+; === Phase 2: Outer Query Execution over Ephemeral Cursor ===
+0040  OP_REWIND         1   70  0    ; Rewind Ephemeral Cursor 1 to beginning
+0045  OP_COLUMN_FLOAT   1   1   3    ; r[3] = total_payroll
+0049  OP_LOAD_FLOAT     4   100000.0 ; r[4] = 100000.0
+0054  OP_LE             3   4   66   ; If total_payroll <= 100000, skip -> addr 66
+0058  OP_LOAD_FLOAT     5   1.1      ; r[5] = 1.1
+0063  OP_MUL            3   5   6    ; r[6] = total_payroll * 1.1 (projected_cost)
+0067  OP_COLUMN_TEXT    1   0   7    ; r[7] = dept
+0071  OP_RESULT_ROW     7   2   0    ; Emit [dept, projected_cost]
+0075  OP_NEXT_ROW       1   45  0    ; Advance Ephemeral Cursor 1 -> loop to addr 45
+0080  OP_HALT           0   0   0    ; Done
+```
+
+---
+
+### 8.3 Subquery Flattening Optimization (View / Subquery Inlining)
+
+Whenever a derived table contains only linear projections and filters, materializing an ephemeral table is an unnecessary $O(N)$ memory and CPU penalty.
+
+The query planner automatically **inlines** inner expressions into the outer query:
+
+#### Example Query:
+```sql
+SELECT name, score * 2
+FROM (
+  SELECT upper(name) AS name, floor(score) AS score
+  FROM students
+  WHERE active = 1
+)
+WHERE score >= 60;
+```
+
+#### Flattening Transformation Steps:
+1. **Alias Substitution**: The outer query references to `name` and `score` are substituted with the inner query expressions:
+   - Outer `name` $\to$ Inner `upper(name)`
+   - Outer `score * 2` $\to$ Inner `floor(score) * 2`
+2. **Predicate Merging**: Outer filter `score >= 60` merges with inner filter `active = 1`:
+   - `WHERE active = 1 AND floor(score) >= 60`
+3. **Optimized Unified Query**:
+```sql
+SELECT upper(name) AS name, floor(score) * 2 AS score
+FROM students
+WHERE active = 1 AND floor(score) >= 60;
+```
+
+#### Resulting Bytecode (Zero Ephemeral Tables, Single Streaming Pass):
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_OPEN_CURSOR   0   1    0    ; Open students table cursor
+0005  OP_REWIND        0   48   0    ; If empty, jump to HALT
+; --- Merged WHERE Predicates ---
+0008  OP_COLUMN_INT    0   3    1    ; r[1] = active
+0012  OP_LOAD_INT      2   1    0    ; r[2] = 1
+0016  OP_NE            1   2    44   ; If active != 1, skip row -> addr 44
+0020  OP_COLUMN_FLOAT  0   2    3    ; r[3] = score
+0024  OP_MATH_FLOOR    3   4    0    ; r[4] = floor(score)
+0028  OP_LOAD_INT      5   60   0    ; r[5] = 60
+0032  OP_LT            4   5    44   ; If floor(score) < 60, skip row -> addr 44
+; --- Merged SELECT Expressions ---
+0036  OP_COLUMN_TEXT   0   1    6    ; r[6] = name
+0040  OP_STR_UPPER     6   7    0    ; r[7] = upper(name)
+0044  OP_LOAD_INT      8   2    0    ; r[8] = 2
+0048  OP_MUL           4   8    9    ; r[9] = floor(score) * 2
+0052  OP_RESULT_ROW    7   2    0    ; Emit [r[7] (name), r[9] (score*2)]
+0056  OP_NEXT_ROW      0   8    0    ; Loop scan
+0060  OP_HALT          0   0    0    ; Done
+```
+**Benefits:**
+- **Zero Temporary Memory:** Bypasses ephemeral B-Tree and Transient Arena allocations.
+- **Single-Pass Stream:** Rows stream directly into the 64KB Result Buffer in $O(1)$ space.
+- **Cache Friendly:** Evaluates directly inside registers without writing and re-reading memory pages.
+
+---
+
+## 9. Exhaustive Edge Cases & Failure Modes
 
 * [ ] **Infinite Loop Guard:** Malformed bytecode loops jumping backward indefinitely must be trapped by a maximum instruction cycle counter (e.g. 10,000,000 cycles per step call) yielding `STATUS_TIMEOUT`.
 * [ ] **Invalid Jump Offset:** Any jump target pointing outside the `[0, bytecode.byteLength]` range must halt with `STATUS_ERR_INVALID_BYTECODE`.
@@ -549,12 +1082,19 @@ WebDB executes all data modification operations through the VDBE step loop using
 * [ ] **Subquery Nesting Overflow:** Correlated subquery nesting deeper than 7 levels (`ctx->depth` attempting to exceed 7) must throw `SubqueryNestingTooDeepError` at compile time.
 * [ ] **Frame Depth Underflow:** `ctx->depth--` when already at 0 must halt with `STATUS_ERR_INVALID_BYTECODE` (guard against malformed subquery pop opcodes).
 * [ ] **Zero-Length Text/Blob Emission:** Emitting empty strings `""` or 0-byte BLOBs must encode length 0 without corrupting buffer framing.
+* [ ] **Ephemeral Cursor ID Collisions:** Ephemeral cursors must occupy distinct cursor indices from base table cursors ($0 \le \text{cursor} < 16$).
+* [ ] **Divide by Zero in Expression Opcode:** `OP_DIV` and `OP_MOD` with divisor 0 must produce `NULL` (`type = 0`) instead of crashing or generating IEEE `Infinity`/`NaN`.
+* [ ] **UDF Exception Propagation:** Exceptions thrown inside JS UDF callbacks must be caught by the Host bridge, setting `ctx->status = STATUS_ERROR` and reporting the JavaScript error stack to the caller.
 
 ---
 
-## 7. Verification & Test Suite (`tests/vdbe_engine.test.ts`)
+## 10. Verification & Test Suite (`tests/vdbe_engine.test.ts`)
 
 1. **3VL Register Comparisons:** Assert `NULL = NULL` and `NULL != NULL` do not trigger jump targets.
 2. **Result Buffer Chunking:** Insert 2,000 rows; assert `STATUS_BUFFER_FULL` yields across multiple chunks and hydrates all 2,000 rows without loss or duplication.
 3. **Page Fault Yield & Resume:** Simulate disk page miss midway through scan; inject page into cache; resume `vm_step()`; assert scan continues without missing rows.
 4. **Arena Exhaustion:** Simulate pathological cardinality exceeding 16 MB; assert clean `QueryArenaExhaustedError` and $O(1)$ memory recovery.
+5. **Expression & Function Evaluation:** Verify native `OP_STR_UPPER`, `OP_STR_LOWER`, `OP_MATH_FLOOR`, `OP_MATH_CEIL`, `OP_ADD`, `OP_MUL` across projection, `WHERE` filtering, and `ORDER BY`.
+6. **Subquery Flattening:** Verify compiler generates a single-cursor scan for inlinable derived tables without `OP_OPEN_EPHEMERAL`.
+7. **Ephemeral Subquery Execution:** Verify derived tables with `GROUP BY` correctly populate ephemeral cursor and stream outer query results.
+8. **UDF Dispatch:** Assert `OP_CALL_UDF` correctly executes registered JavaScript functions and preserves 3VL semantics when passing NULL registers.
