@@ -48,6 +48,7 @@ gtag('config', 'G-SK750XLF2Y');`,
     nav: [
       { text: "Getting Started", link: "/getting-started" },
       { text: "Roadmap & Plans", link: "/plans/plan" },
+      { text: "Studio IDE", link: "/playground/", target: "_self" },
       // { text: 'Future Extensions', link: '/plans/future_extensions_roadmap' },
       // { text: 'Limitations', link: '/plans/limitations' },
       // {

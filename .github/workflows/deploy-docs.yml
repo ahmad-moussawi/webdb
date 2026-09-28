@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'playground/**'
+      - 'src/**'
+      - 'scripts/**'
       - '.github/workflows/deploy-docs.yml'
       - 'package.json'
       - 'package-lock.json'

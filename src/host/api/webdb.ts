@@ -245,6 +245,16 @@ export class WebDB implements IDatabaseQueryExecutor {
     return catalog_load_table_meta(page1View, pager, tableName);
   }
 
+  async listTables(): Promise<TableMeta[]> {
+    const page1View = this.pool.getSlotDataView(0);
+    const descriptors = catalog_list_table_descriptors(page1View);
+    const tables: TableMeta[] = [];
+    for (const desc of descriptors) {
+      tables.push(await this.getTable(desc.name));
+    }
+    return tables;
+  }
+
   async insert(tableName: string, row: DbRow): Promise<void> {
     const table = await this.getTable(tableName);
     const page1View = this.pool.getSlotDataView(0);

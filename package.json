@@ -26,8 +26,9 @@
     "lint:fix": "eslint . --fix",
     "demo": "vite-node examples/demo.ts",
     "playground": "node scripts/serve.js",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
+    "docs:prepare": "npm run build && node scripts/prepare_docs_playground.js",
+    "docs:dev": "node scripts/prepare_docs_playground.js && vitepress dev docs",
+    "docs:build": "npm run docs:prepare && vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {

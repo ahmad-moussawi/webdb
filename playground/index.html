@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebDB Interactive Playground & VDBE Inspector</title>
+    <title>WebDB Studio - Relational Database IDE</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -12,19 +12,25 @@
     />
     <style>
       :root {
-        --bg: #0b0f19;
-        --card-bg: rgba(18, 26, 43, 0.85);
-        --card-border: rgba(255, 255, 255, 0.08);
-        --accent: #3b82f6;
-        --accent-glow: rgba(59, 130, 246, 0.35);
+        --bg-main: #0c0f17;
+        --bg-surface: #121722;
+        --bg-panel: #161c2b;
+        --bg-hover: rgba(255, 255, 255, 0.05);
+        --bg-active: rgba(59, 130, 246, 0.15);
+        --card-border: #232c3f;
+        --border-subtle: #1c2433;
+        --accent: #2563eb;
+        --accent-hover: #1d4ed8;
         --cyan: #06b6d4;
         --emerald: #10b981;
-        --purple: #8b5cf6;
         --amber: #f59e0b;
-        --text: #f3f4f6;
-        --text-muted: #9ca3af;
+        --rose: #ef4444;
+        --text: #e2e8f0;
+        --text-secondary: #94a3b8;
+        --text-muted: #64748b;
         --font-mono: "Fira Code", monospace;
-        --font-sans: "Inter", system-ui, sans-serif;
+        --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+        --radius: 2px;
       }
 
       * {
@@ -32,572 +38,1849 @@
         margin: 0;
         padding: 0;
       }
+
       body {
-        background-color: var(--bg);
-        background-image:
-          radial-gradient(
-            at 0% 0%,
-            rgba(59, 130, 246, 0.12) 0px,
-            transparent 50%
-          ),
-          radial-gradient(
-            at 100% 100%,
-            rgba(139, 92, 246, 0.12) 0px,
-            transparent 50%
-          );
+        background-color: var(--bg-main);
         color: var(--text);
         font-family: var(--font-sans);
-        min-height: 100vh;
-        padding: 24px;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
       }
 
+      /* ================= TOP NAVBAR ================= */
       header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 24px;
-        padding-bottom: 20px;
+        height: 48px;
+        background: var(--bg-surface);
         border-bottom: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+        flex-shrink: 0;
+        z-index: 10;
       }
 
       .brand {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 10px;
       }
 
-      .logo-badge {
-        background: linear-gradient(135deg, var(--accent), var(--purple));
-        color: white;
-        font-weight: 700;
-        font-size: 1.25rem;
-        padding: 6px 12px;
-        border-radius: 8px;
-        box-shadow: 0 0 16px var(--accent-glow);
+      .logo-img {
+        width: 26px;
+        height: 26px;
+        flex-shrink: 0;
+        border-radius: var(--radius);
       }
 
-      .brand h1 {
-        font-size: 1.4rem;
-        font-weight: 700;
-        letter-spacing: -0.02em;
+      .brand-title {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
       }
-      .brand p {
+
+      .brand-title h1 {
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        color: #fff;
+      }
+
+      .brand-title span {
+        font-size: 0.72rem;
         color: var(--text-muted);
-        font-size: 0.85rem;
-        margin-top: 2px;
+        font-family: var(--font-mono);
       }
 
-      .header-controls {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-
-      .select-pill {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid var(--card-border);
-        color: var(--text);
-        padding: 8px 14px;
-        border-radius: 8px;
-        font-size: 0.85rem;
-        outline: none;
-        cursor: pointer;
-      }
-
-      .btn {
-        background: var(--accent);
-        color: white;
-        border: none;
-        padding: 8px 16px;
-        border-radius: 8px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        cursor: pointer;
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        transition: all 0.15s ease;
-      }
-      .btn:hover {
-        filter: brightness(1.15);
-        transform: translateY(-1px);
-      }
-      .btn-secondary {
-        background: rgba(255, 255, 255, 0.07);
-        border: 1px solid var(--card-border);
-      }
-
-      .grid-container {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 20px;
-      }
-
-      .card {
-        background: var(--card-bg);
-        border: 1px solid var(--card-border);
-        border-radius: 12px;
-        padding: 20px;
-        backdrop-filter: blur(12px);
-      }
-
-      .card-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 16px;
-      }
-      .card-title {
-        font-size: 1rem;
-        font-weight: 600;
+      .header-actions {
         display: flex;
         align-items: center;
         gap: 8px;
       }
 
-      .badge {
+      .select-pill {
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        color: var(--text);
+        padding: 5px 10px;
+        border-radius: var(--radius);
         font-size: 0.75rem;
         font-family: var(--font-mono);
-        padding: 3px 8px;
-        border-radius: 6px;
-        background: rgba(59, 130, 246, 0.15);
-        color: #93c5fd;
-        border: 1px solid rgba(59, 130, 246, 0.3);
+        outline: none;
+        cursor: pointer;
+      }
+      .select-pill:focus {
+        border-color: var(--accent);
       }
 
-      .controls-row {
+      .btn {
+        background: var(--accent);
+        color: white;
+        border: 1px solid transparent;
+        padding: 5px 12px;
+        border-radius: var(--radius);
+        font-size: 0.76rem;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: background 0.15s ease;
+      }
+      .btn:hover {
+        background: var(--accent-hover);
+      }
+      .btn-secondary {
+        background: var(--bg-panel);
+        color: var(--text);
+        border: 1px solid var(--card-border);
+      }
+      .btn-secondary:hover {
+        background: var(--bg-hover);
+        color: #fff;
+      }
+      .btn-sm {
+        padding: 4px 8px;
+        font-size: 0.72rem;
+      }
+
+      /* ================= 3-COLUMN WORKSPACE ================= */
+      .ide-workspace {
+        flex: 1;
         display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        margin-bottom: 16px;
-        background: rgba(0, 0, 0, 0.25);
-        padding: 12px;
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.04);
+        min-height: 0;
+        overflow: hidden;
       }
 
-      .control-group {
+      .ide-panel {
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-surface);
+        border-right: 1px solid var(--card-border);
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .panel-header {
+        height: 34px;
+        padding: 0 10px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-shrink: 0;
+      }
+
+      .panel-title {
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      /* ================= LEFT COLUMN: DB EXPLORER ================= */
+      .panel-explorer {
+        width: 250px;
+        min-width: 200px;
+        max-width: 320px;
+        flex-shrink: 0;
+      }
+
+      .explorer-selector-box {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--card-border);
+        background: var(--bg-surface);
         display: flex;
         flex-direction: column;
         gap: 4px;
-        font-size: 0.8rem;
       }
-      .control-group label {
+
+      .explorer-selector-box label {
+        font-size: 0.68rem;
         color: var(--text-muted);
+        text-transform: uppercase;
+        font-weight: 600;
       }
-      .input-field {
-        background: rgba(255, 255, 255, 0.06);
-        border: 1px solid var(--card-border);
-        color: var(--text);
+
+      .explorer-tree {
+        flex: 1;
+        overflow-y: auto;
+        padding: 4px 0;
+      }
+
+      .tree-section-title {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--text-muted);
         padding: 6px 10px;
-        border-radius: 6px;
-        font-size: 0.85rem;
-        outline: none;
-        min-width: 110px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border-subtle);
       }
 
-      /* Terminal Disassembly Box */
-      .terminal-box {
-        background: #060911;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 8px;
-        padding: 14px;
+      .tree-table-item {
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .table-item-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.1s;
+      }
+      .table-item-header:hover {
+        background: var(--bg-hover);
+      }
+      .table-item-header.active {
+        background: var(--bg-active);
+        border-left: 2px solid var(--accent);
+      }
+
+      .table-title-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.8rem;
         font-family: var(--font-mono);
-        font-size: 0.82rem;
-        line-height: 1.45;
-        color: #e2e8f0;
-        white-space: pre;
-        overflow-x: auto;
-        max-height: 480px;
-        overflow-y: auto;
       }
 
-      .terminal-box::-webkit-scrollbar {
-        width: 6px;
-        height: 6px;
+      .table-icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-secondary);
+        padding: 3px;
+        border-radius: var(--radius);
+        transition: all 0.15s;
+        border: 1px solid transparent;
       }
-      .terminal-box::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.15);
-        border-radius: 3px;
+      .table-icon-btn:hover {
+        color: var(--accent);
+        background: rgba(37, 99, 235, 0.15);
+        border-color: rgba(37, 99, 235, 0.3);
       }
 
-      /* Results Table */
-      .table-wrapper {
-        overflow-x: auto;
+      .table-name-link {
+        color: var(--text);
+        cursor: pointer;
+      }
+      .table-name-link:hover {
+        color: #fff;
+      }
+
+      .badge-count {
+        font-size: 0.65rem;
+        padding: 1px 5px;
+        background: var(--bg-panel);
         border: 1px solid var(--card-border);
-        border-radius: 8px;
-        max-height: 420px;
-        overflow-y: auto;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.85rem;
-        text-align: left;
-      }
-      th {
-        background: rgba(255, 255, 255, 0.04);
+        border-radius: var(--radius);
         color: var(--text-muted);
-        padding: 10px 14px;
+        font-family: var(--font-mono);
+      }
+
+      /* ================= MIDDLE COLUMN: EDITOR & RESULTS ================= */
+      .panel-middle {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 400px;
+        border-right: 1px solid var(--card-border);
+      }
+
+      .editor-container-wrapper {
+        height: 48%;
+        min-height: 180px;
+        display: flex;
+        flex-direction: column;
         border-bottom: 1px solid var(--card-border);
+      }
+
+      .editor-toolbar {
+        height: 34px;
+        padding: 0 10px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .editor-tab-pill {
+        font-size: 0.74rem;
+        font-family: var(--font-mono);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .snippet-select {
+        background: var(--bg-surface);
+        border: 1px solid var(--card-border);
+        color: var(--text-secondary);
+        font-size: 0.72rem;
+        font-family: var(--font-mono);
+        padding: 3px 6px;
+        border-radius: var(--radius);
+        outline: none;
+      }
+
+      #monacoEditor {
+        flex: 1;
+        width: 100%;
+        min-height: 0;
+      }
+
+      /* Lower Subpanel: Results Viewer */
+      .results-container-wrapper {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: var(--bg-surface);
+      }
+
+      .results-tabs-bar {
+        height: 32px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--card-border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 6px;
+      }
+
+      .tab-buttons {
+        display: flex;
+        gap: 2px;
+      }
+
+      .result-tab-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 0.72rem;
         font-weight: 600;
         text-transform: uppercase;
-        font-size: 0.75rem;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.04em;
+        padding: 6px 10px;
+        border-radius: var(--radius);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: all 0.12s;
       }
-      td {
-        padding: 10px 14px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      .result-tab-btn:hover {
+        color: var(--text);
+        background: var(--bg-hover);
       }
-      tr:hover td {
-        background: rgba(255, 255, 255, 0.02);
+      .result-tab-btn.active {
+        color: #fff;
+        background: var(--bg-surface);
+        border-bottom: 2px solid var(--accent);
       }
 
-      .null-pill {
-        background: rgba(239, 68, 68, 0.15);
-        color: #fca5a5;
+      .results-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.7rem;
+        color: var(--text-secondary);
+      }
+
+      .meta-pill {
+        background: var(--bg-surface);
+        padding: 2px 6px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border-subtle);
+        font-family: var(--font-mono);
+      }
+
+      .tab-view-content {
+        flex: 1;
+        overflow: auto;
+        position: relative;
+      }
+
+      /* Results Table View (Data Dense) */
+      .table-view {
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+      }
+
+      table.results-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+        text-align: left;
+      }
+
+      table.results-table th {
+        position: sticky;
+        top: 0;
+        background: #151a26;
+        color: var(--text-secondary);
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--card-border);
+        font-weight: 600;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+        z-index: 1;
+      }
+
+      table.results-table td {
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+        white-space: nowrap;
+        color: var(--text);
+        line-height: 1.25;
+      }
+
+      table.results-table tbody tr {
+        cursor: pointer;
+        transition: background 0.08s;
+      }
+      table.results-table tbody tr:hover td {
+        background: rgba(37, 99, 235, 0.08);
+      }
+      table.results-table tbody tr.selected td {
+        background: rgba(37, 99, 235, 0.22);
+        color: #fff;
+      }
+
+      .null-badge {
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        padding: 1px 4px;
+        border-radius: var(--radius);
+        border: 1px solid rgba(239, 68, 68, 0.25);
+      }
+
+      /* Structure Table View */
+      .structure-view {
+        display: none;
+        padding: 14px;
+        height: 100%;
+        overflow-y: auto;
+      }
+
+      .structure-card {
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        margin-bottom: 14px;
+      }
+
+      .structure-header {
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.02);
+        border-bottom: 1px solid var(--card-border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.78rem;
+      }
+
+      /* Bytecode Terminal View */
+      .bytecode-view {
+        display: none;
+        padding: 10px;
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        line-height: 1.45;
+        color: #cbd5e1;
+        white-space: pre;
+        background: #080b11;
+        min-height: 100%;
+      }
+
+      /* Console Logs View */
+      .console-view {
+        display: none;
+        padding: 10px;
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        line-height: 1.45;
+        color: #94a3b8;
+        white-space: pre-wrap;
+        background: #080b11;
+        min-height: 100%;
+      }
+
+      /* ================= RIGHT COLUMN: ROW DETAILS ================= */
+      .panel-details {
+        width: 300px;
+        min-width: 250px;
+        max-width: 380px;
+        flex-shrink: 0;
+        background: var(--bg-surface);
+        border-right: none;
+      }
+
+      .details-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .details-empty-state {
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        margin-top: 40px;
+        padding: 0 16px;
+        line-height: 1.5;
+      }
+
+      .row-card {
+        background: var(--bg-panel);
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+
+      .row-card-header {
+        padding: 6px 10px;
+        background: rgba(255, 255, 255, 0.02);
+        border-bottom: 1px solid var(--card-border);
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .fields-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+      }
+
+      .fields-table tr {
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .fields-table tr:last-child {
+        border-bottom: none;
+      }
+
+      .fields-table td {
+        padding: 6px 8px;
+        vertical-align: top;
+      }
+
+      .field-key {
+        color: var(--text-secondary);
         font-family: var(--font-mono);
         font-size: 0.72rem;
-        padding: 2px 6px;
-        border-radius: 4px;
-        border: 1px solid rgba(239, 68, 68, 0.3);
+        width: 35%;
+        word-break: break-all;
       }
 
-      .meta-box {
-        margin-top: 16px;
-        font-size: 0.8rem;
-        color: var(--text-muted);
-        display: flex;
-        gap: 16px;
-      }
-      .meta-box span strong {
+      .field-val {
         color: var(--text);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        word-break: break-all;
+      }
+
+      .col-type-pill {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        color: var(--text-muted);
+        background: rgba(255, 255, 255, 0.04);
+        padding: 1px 4px;
+        border-radius: var(--radius);
+      }
+      .col-pk-pill {
+        background: rgba(245, 158, 11, 0.15);
+        color: #fbbf24;
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        font-size: 0.65rem;
+        padding: 1px 4px;
+        border-radius: var(--radius);
+        font-family: var(--font-mono);
+        font-weight: 600;
+      }
+
+      .json-viewer-box {
+        background: #080b11;
+        border: 1px solid var(--card-border);
+        border-radius: var(--radius);
+        padding: 8px;
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        color: #38bdf8;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        max-height: 250px;
+      }
+
+      .toast-msg {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        background: #1e293b;
+        color: #38bdf8;
+        border: 1px solid var(--card-border);
+        padding: 6px 12px;
+        border-radius: var(--radius);
+        font-size: 0.76rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        opacity: 0;
+        transform: translateY(10px);
+        transition: all 0.15s ease;
+        pointer-events: none;
+        z-index: 100;
+      }
+      .toast-msg.show {
+        opacity: 1;
+        transform: translateY(0);
       }
     </style>
   </head>
   <body>
+    <!-- Top Header -->
     <header>
       <div class="brand">
-        <div class="logo-badge">W</div>
-        <div>
-          <h1>WebDB Engine Playground</h1>
-          <p>
-            Ultra-lean Relational Database • Slotted Page Engine • VDBE Bytecode
-            Disassembler
-          </p>
+        <!-- Official WebDB Logo -->
+        <svg class="logo-img" viewBox="0 0 100 100" fill="none">
+          <rect width="100" height="100" rx="14" fill="url(#logoGrad)" />
+          <path d="M25 35L50 20L75 35L50 50L25 35Z" fill="#ffffff" fill-opacity="0.9" />
+          <path d="M25 50L50 65L75 50" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M25 65L50 80L75 65" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+          <defs>
+            <linearGradient id="logoGrad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#3B82F6" />
+              <stop offset="1" stop-color="#8B5CF6" />
+            </linearGradient>
+          </defs>
+        </svg>
+        <div class="brand-title">
+          <h1>WebDB Studio</h1>
+          <span>SQL-less Relational Engine</span>
         </div>
       </div>
-      <div class="header-controls">
+      <div class="header-actions">
         <select id="storageSelect" class="select-pill">
-          <option value="memory">Storage: In-Memory VFS</option>
-          <option value="idb">Storage: IndexedDB (Persistent)</option>
+          <option value="memory">STORAGE: IN-MEMORY VFS</option>
+          <option value="idb">STORAGE: INDEXEDDB (PERSISTENT)</option>
         </select>
-        <button id="seedBtn" class="btn">⚡ Reset & Seed 10 Rows</button>
+        <select id="seedPresetSelect" class="select-pill" title="Choose Seed Dataset">
+          <option value="store_standard">SEED: E-COMMERCE (1,500 ROWS)</option>
+          <option value="store_large">SEED: LARGE STORE (10,000 ROWS)</option>
+          <option value="store_real_api">SEED: FETCH REAL PRODUCTS (DUMMYJSON)</option>
+          <option value="store_small">SEED: QUICK TEST (150 ROWS)</option>
+        </select>
+        <button id="seedBtn" class="btn btn-secondary btn-sm" title="Re-create and seed database">
+          RESET &amp; SEED
+        </button>
+        <button id="runBtn" class="btn btn-sm" title="Execute Query (Cmd+Enter / Ctrl+Enter)">
+          RUN <span style="font-size: 0.68rem; opacity: 0.8; margin-left: 4px; font-family: var(--font-mono);">⌘↵</span>
+        </button>
       </div>
     </header>
 
-    <div class="grid-container">
-      <!-- LEFT PANEL: Interactive Queries & Results -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">
-            <span>Query Execution</span>
-            <span id="timingBadge" class="badge">0 ms</span>
-          </div>
-          <button id="runBtn" class="btn btn-secondary">▶ Run Query</button>
+    <!-- 3-Column IDE Workspace -->
+    <div class="ide-workspace">
+      <!-- 1. LEFT COLUMN: DB EXPLORER -->
+      <div class="ide-panel panel-explorer">
+        <div class="panel-header">
+          <span class="panel-title">EXPLORER</span>
+          <button id="refreshSchemaBtn" class="btn btn-secondary btn-sm" style="padding: 1px 6px;" title="Refresh Schema">
+            REFRESH
+          </button>
         </div>
 
-        <div class="controls-row">
-          <div class="control-group">
-            <label>Filter: Age Operator</label>
-            <select id="ageOp" class="input-field">
-              <option value=">">&gt; Greater Than</option>
-              <option value=">=">&gt;= Greater or Equal</option>
-              <option value="<">&lt; Less Than</option>
-              <option value="<=">&lt;= Less or Equal</option>
-              <option value="=">= Equals</option>
-              <option value="none">No Filter</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <label>Age Value</label>
-            <input id="ageVal" type="number" class="input-field" value="25" />
-          </div>
-          <div class="control-group">
-            <label>Salary Null Filter (3VL)</label>
-            <select id="salaryNullOp" class="input-field">
-              <option value="all">Any (Include Nulls)</option>
-              <option value="whereNull">whereNull(salary)</option>
-              <option value="whereNotNull">whereNotNull(salary)</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <label>Order By</label>
-            <select id="orderCol" class="input-field">
-              <option value="id">id</option>
-              <option value="age">age</option>
-              <option value="salary">salary (SQLite Collation)</option>
-              <option value="name">name</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <label>Direction</label>
-            <select id="orderDir" class="input-field">
-              <option value="asc">ASC (Nulls First)</option>
-              <option value="desc">DESC (Nulls Last)</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <label>Limit</label>
-            <input id="limitVal" type="number" class="input-field" value="10" />
-          </div>
+        <div class="explorer-selector-box">
+          <label>DATABASE</label>
+          <select id="dbSelect" class="select-pill" style="width: 100%;">
+            <option value="ecommerce_db">ecommerce_db</option>
+          </select>
         </div>
 
-        <div class="table-wrapper">
-          <table id="resultsTable">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Age</th>
-                <th>Role</th>
-                <th>Salary</th>
-              </tr>
-            </thead>
-            <tbody id="resultsBody">
-              <tr>
-                <td
-                  colspan="5"
-                  style="
-                    text-align: center;
-                    color: var(--text-muted);
-                    padding: 24px;
-                  "
-                >
-                  Click "Reset & Seed" to populate sample data
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="meta-box">
-          <span>Rows: <strong id="rowCount">0</strong></span>
-          <span>Table Root Page: <strong id="rootPage">2</strong></span>
-          <span>Page Size: <strong>4096 B</strong></span>
+        <div class="explorer-tree">
+          <div class="tree-section-title">
+            <span>TABLES</span>
+            <span id="tableCountBadge" class="badge-count">0</span>
+          </div>
+          <div id="tablesTreeContainer">
+            <div style="padding: 10px; font-size: 0.74rem; color: var(--text-muted); text-align: center;">
+              Loading tables...
+            </div>
+          </div>
         </div>
       </div>
 
-      <!-- RIGHT PANEL: Bytecode Disassembly (EXPLAIN) -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">
-            <span>VDBE Bytecode Disassembly</span>
-            <span class="badge">SQLite-Style EXPLAIN</span>
+      <!-- 2. MIDDLE COLUMN: EDITOR & RESULTS -->
+      <div class="panel-middle">
+        <!-- Top: JS Query Editor -->
+        <div class="editor-container-wrapper">
+          <div class="editor-toolbar">
+            <div class="editor-tab-pill">
+              <span style="color: #60a5fa; font-weight: 700;">JS</span> query.js
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <select id="querySnippetSelect" class="snippet-select">
+                <option value="">-- CODE SNIPPETS --</option>
+                <option value="topRated">Top Rated Products (Rating &gt;= 4.5)</option>
+                <option value="lowStock">Low Stock Alert (&lt; 15 units)</option>
+                <option value="deliveredOrders">High-Value Delivered Orders (&gt; $200)</option>
+                <option value="vipCustomers">VIP Customers (Spent &gt; $1,000)</option>
+                <option value="verifiedReviews">5-Star Verified Reviews</option>
+                <option value="electronicsFilter">Electronics under $150</option>
+                <option value="insertProduct">Insert Product &amp; Query</option>
+                <option value="explainBytecode">Inspect VDBE Bytecode (EXPLAIN)</option>
+              </select>
+              <button id="clearEditorBtn" class="btn btn-secondary btn-sm" title="Clear Editor">CLEAR</button>
+            </div>
           </div>
-          <span id="bytecodeSizeBadge" class="badge">0 bytes</span>
+          <div id="monacoEditor"></div>
         </div>
 
-        <div id="terminalDisassembly" class="terminal-box">
-          Click "Run Query" or "Reset & Seed" to generate compiled VDBE
-          bytecode.
+        <!-- Bottom: Result Viewer -->
+        <div class="results-container-wrapper">
+          <div class="results-tabs-bar">
+            <div class="tab-buttons">
+              <button id="tabResultsBtn" class="result-tab-btn active">
+                RESULTS <span id="resCountBadge" class="badge-count">0</span>
+              </button>
+              <button id="tabStructureBtn" class="result-tab-btn" style="display: none;">
+                STRUCTURE: <span id="structTableName">NONE</span>
+              </button>
+              <button id="tabBytecodeBtn" class="result-tab-btn">
+                VDBE BYTECODE
+              </button>
+              <button id="tabConsoleBtn" class="result-tab-btn">
+                CONSOLE <span id="logCountBadge" class="badge-count" style="display: none;">0</span>
+              </button>
+            </div>
+            <div class="results-meta">
+              <span id="timingBadge" class="meta-pill">0.00 ms</span>
+              <span id="statusBadge" class="meta-pill" style="color: #10b981;">Ready</span>
+            </div>
+          </div>
+
+          <div class="tab-view-content">
+            <!-- Results Table -->
+            <div id="tableView" class="table-view">
+              <table id="resultsTable" class="results-table">
+                <thead id="resultsThead">
+                  <tr><th>Status</th></tr>
+                </thead>
+                <tbody id="resultsTbody">
+                  <tr>
+                    <td style="text-align: center; color: var(--text-muted); padding: 24px;">
+                      Hit "RUN" or press ⌘↵ to execute query
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Table Structure / Schema View -->
+            <div id="structureView" class="structure-view">
+              <div class="structure-card">
+                <div class="structure-header">
+                  <div>
+                    <strong id="structTitle">products</strong>
+                    <span id="structMeta" style="color: var(--text-muted); margin-left: 8px; font-family: var(--font-mono);"></span>
+                  </div>
+                  <button id="queryStructBtn" class="btn btn-sm">QUERY ROWS</button>
+                </div>
+                <table class="results-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 40px;">#</th>
+                      <th>Column Name</th>
+                      <th>Data Type</th>
+                      <th>Constraints</th>
+                    </tr>
+                  </thead>
+                  <tbody id="structTbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Bytecode Disassembly -->
+            <div id="bytecodeView" class="bytecode-view">
+              Execute a query to inspect compiled SQLite-style VDBE instructions...
+            </div>
+
+            <!-- Console Logs -->
+            <div id="consoleView" class="console-view">
+              No console logs captured. Use console.log() in your editor script.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. RIGHT COLUMN: ROW DETAILS -->
+      <div class="ide-panel panel-details">
+        <div class="panel-header">
+          <span class="panel-title">ROW DETAILS</span>
+          <button id="copyJsonBtn" class="btn btn-secondary btn-sm" title="Copy selected row as JSON">
+            COPY JSON
+          </button>
+        </div>
+
+        <div id="detailsContent" class="details-content">
+          <div class="details-empty-state">
+            Select any row from the query results table to inspect its fields, types, and raw JSON.
+          </div>
         </div>
       </div>
     </div>
 
+    <!-- Notification Toast -->
+    <div id="toast" class="toast-msg">Copied to clipboard!</div>
+
+    <!-- Monaco Editor Loader from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+
+    <!-- Main IDE Script -->
     <script type="module">
       import { WebDB } from "../dist/webdb.js";
 
-      let db;
+      // Global State
+      let db = null;
+      let editor = null;
+      let currentResultRows = [];
+      let selectedRowIndex = -1;
+      let lastExplainOutput = null;
+      let capturedLogs = [];
+      let cachedTablesMeta = [];
 
-      async function initDb() {
-        const storage = document.getElementById("storageSelect").value;
-        db = await WebDB.open({ name: "playground_db", storage });
+      // E-Commerce Curated Vocabulary for Realistic Deterministic Generation
+      const VOCAB = {
+        brands: ["Apple", "Sony", "Samsung", "Logitech", "Dell", "Bose", "Anker", "Corsair", "Keychron", "ASUS", "Sennheiser", "LG", "Razer", "Microsoft", "Canon", "Nikon", "SteelSeries", "Belkin", "Sonos", "HyperX"],
+        adjectives: ["Pro", "Ultra", "Wireless", "Mechanical", "Ergonomic", "Studio", "Elite", "Compact", "Titanium", "Carbon", "Smart", "Precision", "Max", "Modular", "RGB", "Gaming", "Acoustic", "Speed", "Prime"],
+        nouns: ["Headphones", "Mechanical Keyboard", "Wireless Mouse", "4K Monitor", "Webcam", "USB-C Microphone", "NVMe SSD", "Docking Station", "Noise-Cancelling Earbuds", "Gaming Controller", "Smart Speaker", "Wi-Fi Router", "Laptop Stand", "Power Bank"],
+        firstNames: ["James", "Emma", "Liam", "Olivia", "Noah", "Ava", "William", "Sophia", "Lucas", "Isabella", "Benjamin", "Mia", "Henry", "Evelyn", "Alexander", "Harper", "Mason", "Ella", "Ethan", "Charlotte"],
+        lastNames: ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Taylor", "Thomas", "Moore"],
+        countries: ["United States", "Germany", "United Kingdom", "Japan", "Canada", "France", "Australia", "Netherlands", "Sweden", "Singapore", "Switzerland", "Norway"],
+        orderStatuses: ["delivered", "delivered", "delivered", "shipped", "processing", "cancelled", "refunded"],
+        customerTiers: ["platinum", "gold", "silver", "standard"],
+        reviewHeadlines: [
+          "Incredible build quality and sound",
+          "Solid daily driver, very reliable",
+          "Best purchase this year by far",
+          "Exceeded all my expectations",
+          "Great value for the price point",
+          "Decent, but software needs work",
+          "Highly recommended for professionals",
+          "Fast shipping and flawless design",
+          "Battery life is outstanding"
+        ],
+      };
+
+      // Snippet Definitions
+      const SNIPPETS = {
+        topRated: `// Query top 10 products with rating >= 4.5 sorted by rating\nreturn db.from("products")\n  .where("rating", ">=", 4.5)\n  .orderBy("rating", "desc")\n  .limit(10);`,
+        lowStock: `// Inventory Alert: Find items running low on stock (< 15 units)\nreturn db.from("products")\n  .where("stock", "<", 15)\n  .orderBy("stock", "asc")\n  .limit(10);`,
+        deliveredOrders: `// High-value delivered orders over $200\nreturn db.from("orders")\n  .where("status", "=", "delivered")\n  .where("total_amount", ">", 200)\n  .orderBy("total_amount", "desc")\n  .limit(10);`,
+        vipCustomers: `// VIP Customers who spent over $1,000\nreturn db.from("customers")\n  .where("lifetime_spent", ">", 1000)\n  .orderBy("lifetime_spent", "desc")\n  .limit(10);`,
+        verifiedReviews: `// 5-Star Reviews from verified buyers\nreturn db.from("reviews")\n  .where("rating", "=", 5)\n  .where("verified_purchase", "=", 1)\n  .limit(10);`,
+        electronicsFilter: `// Category 1 (Electronics) under $150 sorted by price\nreturn db.from("products")\n  .where("category_id", "=", 1)\n  .where("price", "<", 150)\n  .orderBy("price", "asc")\n  .limit(10);`,
+        insertProduct: `// Insert a flagship product into the catalog and inspect\nawait db.insert("products", {\n  id: 99999,\n  category_id: 1,\n  title: "WebDB Ultra Studio Monitor",\n  brand: "WebDB Labs",\n  price: 349.99,\n  cost: 160.00,\n  stock: 45,\n  rating: 4.98\n});\n\nreturn db.from("products")\n  .where("brand", "=", "WebDB Labs");`,
+        explainBytecode: `// Inspect compiled SQLite-style VDBE instruction stream\nconst q = db.from("products")\n  .where("price", ">=", 99)\n  .where("rating", ">=", 4.0)\n  .orderBy("price", "desc")\n  .limit(10);\n\nconst explain = await q.explain();\nconsole.log("VDBE Instruction Count:", explain.instructions.length);\nconsole.log("Compiled Bytecode Size:", explain.bytecodeSize, "bytes");\n\nreturn q;`,
+      };
+
+      // Table Icon SVG
+      const TABLE_ICON_SVG = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="1"/>
+          <path d="M3 9h18M3 15h18M9 9v12M15 9v12"/>
+        </svg>
+      `;
+
+      // Initialize Monaco Editor with Custom Completion Provider
+      function initMonaco() {
+        require.config({
+          paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs" },
+        });
+
+        require(["vs/editor/editor.main"], function () {
+          monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+            noSemanticValidation: false,
+            noSyntaxValidation: false,
+          });
+
+          monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
+            target: monaco.languages.typescript.ScriptTarget.ES2020,
+            allowNonTextFiles: true,
+            allowJs: true,
+            checkJs: false,
+          });
+
+          // Intelligent WebDB Autocomplete Provider
+          monaco.languages.registerCompletionItemProvider("javascript", {
+            triggerCharacters: [".", '"', "'", "("],
+            provideCompletionItems: (model, position) => {
+              const lineContent = model.getLineContent(position.lineNumber);
+              const textUntilPosition = lineContent.substring(0, position.column - 1);
+              const suggestions = [];
+
+              // 1. After 'db.'
+              if (/\bdb\.\s*$/.test(textUntilPosition)) {
+                suggestions.push(
+                  {
+                    label: "from",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'from("${1:tableName}")',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Start a query on a database table.\nExample: db.from('products')",
+                  },
+                  {
+                    label: "insert",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'insert("${1:tableName}", ${2:rowObject})',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Insert a new row into the table.",
+                  },
+                  {
+                    label: "getTable",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'getTable("${1:tableName}")',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Retrieve table metadata and column schema.",
+                  },
+                  {
+                    label: "listTables",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "listTables()",
+                    documentation: "List all active tables in the database.",
+                  }
+                );
+              }
+              // 2. Inside db.from("...")
+              else if (/\bdb\.from\(\s*["']?[a-zA-Z0-9_]*$/.test(textUntilPosition)) {
+                for (const t of cachedTablesMeta) {
+                  suggestions.push({
+                    label: `"${t.name}"`,
+                    kind: monaco.languages.CompletionItemKind.Value,
+                    insertText: `"${t.name}"`,
+                    documentation: `Table: ${t.name} (~${t.rowCountEstimate} rows)`,
+                  });
+                }
+              }
+              // 3. Chained methods on QueryBuilder
+              else if (/\.\s*$/.test(textUntilPosition)) {
+                suggestions.push(
+                  {
+                    label: "where",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'where("${1:column}", "${2|=,!=,<,<=,>,>=|}", ${3:value})',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Filter rows with a comparison operator.",
+                  },
+                  {
+                    label: "whereNull",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'whereNull("${1:column}")',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Filter rows where column is NULL.",
+                  },
+                  {
+                    label: "whereNotNull",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'whereNotNull("${1:column}")',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Filter rows where column is NOT NULL.",
+                  },
+                  {
+                    label: "orderBy",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: 'orderBy("${1:column}", "${2|asc,desc|}")',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Order results by column ascending or descending.",
+                  },
+                  {
+                    label: "limit",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "limit(${1:10})",
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Limit maximum number of rows returned.",
+                  },
+                  {
+                    label: "offset",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "offset(${1:0})",
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "Skip rows before returning results.",
+                  },
+                  {
+                    label: "explain",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "explain()",
+                    documentation: "Compile and return VDBE bytecode disassembly.",
+                  },
+                  {
+                    label: "toArray",
+                    kind: monaco.languages.CompletionItemKind.Method,
+                    insertText: "toArray()",
+                    documentation: "Execute query and return rows array.",
+                  }
+                );
+              }
+              // 4. Global keywords
+              else if (!textUntilPosition.includes(".")) {
+                suggestions.push(
+                  {
+                    label: "db",
+                    kind: monaco.languages.CompletionItemKind.Variable,
+                    insertText: "db",
+                    documentation: "WebDB active database instance.",
+                  },
+                  {
+                    label: "return db.from",
+                    kind: monaco.languages.CompletionItemKind.Snippet,
+                    insertText: 'return db.from("${1:products}")\n  .where("${2:price}", ">=", ${3:100})\n  .orderBy("${4:rating}", "desc");',
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: "E-Commerce query template.",
+                  }
+                );
+              }
+
+              return { suggestions };
+            },
+          });
+
+          // Create Monaco Editor
+          editor = monaco.editor.create(document.getElementById("monacoEditor"), {
+            value: SNIPPETS.topRated,
+            language: "javascript",
+            theme: "vs-dark",
+            automaticLayout: true,
+            minimap: { enabled: false },
+            fontSize: 13,
+            fontFamily: '"Fira Code", monospace',
+            lineNumbers: "on",
+            scrollBeyondLastLine: false,
+            tabSize: 2,
+            scrollbar: {
+              verticalScrollbarSize: 6,
+              horizontalScrollbarSize: 6,
+            },
+          });
+
+          // Shortcut: Cmd+Enter or Ctrl+Enter to execute query
+          editor.addCommand(
+            monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
+            () => {
+              executeUserCode();
+            },
+          );
+        });
       }
 
-      async function seedData() {
-        await initDb();
-        try {
-          await db.createTable("users", [
-            {
-              name: "id",
-              type: "INT32",
-              flags: { primaryKey: true, notNull: true },
-            },
-            { name: "name", type: "TEXT", flags: { notNull: true } },
-            { name: "age", type: "INT32" },
-            { name: "role", type: "TEXT" },
-            { name: "salary", type: "FLOAT64" },
-          ]);
-        } catch (e) {
-          // Table already exists if previously created
+      // Initialize Database Connection
+      async function initDb() {
+        const storage = document.getElementById("storageSelect").value;
+        if (db) {
+          try {
+            await db.close();
+          } catch (e) {}
         }
+        db = await WebDB.open({ name: "ecommerce_db", storage });
+        window.db = db;
+        await refreshSchemaExplorer();
+      }
 
-        const sampleUsers = [
+      // Helpers for procedural generation
+      function pickRandom(arr) {
+        return arr[Math.floor(Math.random() * arr.length)];
+      }
+
+      function randomFloat(min, max, decimals = 2) {
+        const val = min + Math.random() * (max - min);
+        return parseFloat(val.toFixed(decimals));
+      }
+
+      function randomInt(min, max) {
+        return Math.floor(min + Math.random() * (max - min + 1));
+      }
+
+      // Fetch Real Products from DummyJSON API
+      async function fetchRealProductsFromApi() {
+        try {
+          const res = await fetch("https://dummyjson.com/products?limit=100");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = await res.json();
+          return json.products || [];
+        } catch (err) {
+          console.warn("Could not fetch real products, falling back to generator:", err);
+          return null;
+        }
+      }
+
+      // Comprehensive E-Commerce Seed System
+      async function seedSampleData() {
+        const preset = document.getElementById("seedPresetSelect").value;
+        const t0 = performance.now();
+        setStatus("INITIALIZING...", "#f59e0b");
+
+        await initDb();
+
+        // 1. Define E-Commerce Tables Schema
+        const tablesSchema = [
           {
-            id: 1,
-            name: "Alice Chen",
-            age: 29,
-            role: "Lead Architect",
-            salary: 145000,
+            name: "categories",
+            cols: [
+              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              { name: "name", type: "TEXT", flags: { notNull: true } },
+              { name: "department", type: "TEXT" },
+              { name: "item_count", type: "INT32" },
+            ],
           },
           {
-            id: 2,
-            name: "Bob Miller",
-            age: 22,
-            role: "Junior Dev",
-            salary: 75000,
+            name: "products",
+            cols: [
+              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              { name: "category_id", type: "INT32", flags: { notNull: true } },
+              { name: "title", type: "TEXT", flags: { notNull: true } },
+              { name: "brand", type: "TEXT" },
+              { name: "price", type: "FLOAT64" },
+              { name: "cost", type: "FLOAT64" },
+              { name: "stock", type: "INT32" },
+              { name: "rating", type: "FLOAT64" },
+            ],
           },
           {
-            id: 3,
-            name: "Charlie Kim",
-            age: 35,
-            role: "Staff Engineer",
-            salary: 160000,
+            name: "customers",
+            cols: [
+              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              { name: "name", type: "TEXT", flags: { notNull: true } },
+              { name: "email", type: "TEXT" },
+              { name: "country", type: "TEXT" },
+              { name: "tier", type: "TEXT" },
+              { name: "lifetime_spent", type: "FLOAT64" },
+            ],
           },
           {
-            id: 4,
-            name: "Diana Prince",
-            age: 19,
-            role: "Intern",
-            salary: null,
+            name: "orders",
+            cols: [
+              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              { name: "customer_id", type: "INT32", flags: { notNull: true } },
+              { name: "status", type: "TEXT" },
+              { name: "total_amount", type: "FLOAT64" },
+              { name: "tax", type: "FLOAT64" },
+              { name: "shipping_cost", type: "FLOAT64" },
+              { name: "items_count", type: "INT32" },
+            ],
           },
           {
-            id: 5,
-            name: "Evan Wright",
-            age: 41,
-            role: "Engineering Director",
-            salary: 195000,
-          },
-          {
-            id: 6,
-            name: "Fiona Gallagher",
-            age: 27,
-            role: null,
-            salary: 88000,
-          },
-          {
-            id: 7,
-            name: "George Clark",
-            age: 31,
-            role: "DevOps Lead",
-            salary: 130000,
-          },
-          {
-            id: 8,
-            name: "Hannah Abbott",
-            age: null,
-            role: "Consultant",
-            salary: 110000,
-          },
-          {
-            id: 9,
-            name: "Ian Malcolm",
-            age: 48,
-            role: "Chaos Theorist",
-            salary: null,
-          },
-          {
-            id: 10,
-            name: "Julia Roberts",
-            age: 24,
-            role: "UI/UX Designer",
-            salary: 92000,
+            name: "reviews",
+            cols: [
+              { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+              { name: "product_id", type: "INT32", flags: { notNull: true } },
+              { name: "customer_id", type: "INT32", flags: { notNull: true } },
+              { name: "rating", type: "INT32" },
+              { name: "verified_purchase", type: "INT32" },
+              { name: "headline", type: "TEXT" },
+            ],
           },
         ];
 
-        for (const u of sampleUsers) {
+        // Create tables if they do not exist
+        for (const tbl of tablesSchema) {
           try {
-            await db.insert("users", u);
+            await db.createTable(tbl.name, tbl.cols);
           } catch (e) {}
         }
 
-        await executeUserQuery();
+        // 2. Determine counts based on preset
+        let countProducts = 500;
+        let countCustomers = 250;
+        let countOrders = 500;
+        let countReviews = 250;
+        let useRealApi = false;
+
+        if (preset === "store_small") {
+          countProducts = 50;
+          countCustomers = 30;
+          countOrders = 50;
+          countReviews = 30;
+        } else if (preset === "store_large") {
+          countProducts = 4000;
+          countCustomers = 2000;
+          countOrders = 3000;
+          countReviews = 1000;
+        } else if (preset === "store_real_api") {
+          useRealApi = true;
+          countCustomers = 100;
+          countOrders = 200;
+          countReviews = 150;
+        }
+
+        // 3. Seed Categories (5 core departments)
+        const categoriesData = [
+          { id: 1, name: "Audio & Acoustics", department: "Electronics", item_count: 0 },
+          { id: 2, name: "Computers & Laptops", department: "Computers", item_count: 0 },
+          { id: 3, name: "Mobile & Accessories", department: "Mobile", item_count: 0 },
+          { id: 4, name: "Gaming Gear", department: "Gaming", item_count: 0 },
+          { id: 5, name: "Workspace & Office", department: "Office", item_count: 0 },
+        ];
+
+        for (const cat of categoriesData) {
+          try {
+            await db.insert("categories", cat);
+          } catch (e) {}
+        }
+
+        // 4. Seed Products
+        setStatus("SEEDING PRODUCTS...", "#3b82f6");
+        let realProducts = null;
+        if (useRealApi) {
+          setStatus("FETCHING REAL PRODUCTS (API)...", "#06b6d4");
+          realProducts = await fetchRealProductsFromApi();
+        }
+
+        if (realProducts && realProducts.length > 0) {
+          countProducts = realProducts.length;
+          for (let i = 0; i < realProducts.length; i++) {
+            const p = realProducts[i];
+            const catId = (i % 5) + 1;
+            try {
+              await db.insert("products", {
+                id: p.id,
+                category_id: catId,
+                title: p.title,
+                brand: p.brand || pickRandom(VOCAB.brands),
+                price: parseFloat(Number(p.price).toFixed(2)),
+                cost: parseFloat((Number(p.price) * 0.45).toFixed(2)),
+                stock: p.stock || randomInt(5, 120),
+                rating: parseFloat(Number(p.rating || 4.5).toFixed(2)),
+              });
+            } catch (e) {}
+          }
+        } else {
+          // Fast procedural generator
+          for (let i = 1; i <= countProducts; i++) {
+            const brand = pickRandom(VOCAB.brands);
+            const adj = pickRandom(VOCAB.adjectives);
+            const noun = pickRandom(VOCAB.nouns);
+            const title = `${brand} ${adj} ${noun} ${randomInt(100, 990)}`;
+            const price = randomFloat(19.99, 1299.99);
+            const cost = randomFloat(price * 0.35, price * 0.6);
+            const stock = randomInt(0, 180);
+            const rating = randomFloat(2.5, 5.0, 1);
+            const catId = (i % 5) + 1;
+
+            try {
+              await db.insert("products", {
+                id: i,
+                category_id: catId,
+                title,
+                brand,
+                price,
+                cost,
+                stock,
+                rating,
+              });
+            } catch (e) {}
+          }
+        }
+
+        // 5. Seed Customers
+        setStatus("SEEDING CUSTOMERS...", "#3b82f6");
+        for (let i = 1; i <= countCustomers; i++) {
+          const fn = pickRandom(VOCAB.firstNames);
+          const ln = pickRandom(VOCAB.lastNames);
+          const name = `${fn} ${ln}`;
+          const email = `${fn.toLowerCase()}.${ln.toLowerCase()}${randomInt(1, 99)}@example.com`;
+          const country = pickRandom(VOCAB.countries);
+          const tier = pickRandom(VOCAB.customerTiers);
+          const lifetime_spent = randomFloat(50.0, 4500.0);
+
+          try {
+            await db.insert("customers", {
+              id: i,
+              name,
+              email,
+              country,
+              tier,
+              lifetime_spent,
+            });
+          } catch (e) {}
+        }
+
+        // 6. Seed Orders
+        setStatus("SEEDING ORDERS...", "#3b82f6");
+        for (let i = 1; i <= countOrders; i++) {
+          const customer_id = randomInt(1, countCustomers);
+          const status = pickRandom(VOCAB.orderStatuses);
+          const total_amount = randomFloat(25.0, 1850.0);
+          const tax = randomFloat(total_amount * 0.07, total_amount * 0.1);
+          const shipping_cost = randomFloat(4.99, 29.99);
+          const items_count = randomInt(1, 8);
+
+          try {
+            await db.insert("orders", {
+              id: 1000 + i,
+              customer_id,
+              status,
+              total_amount,
+              tax,
+              shipping_cost,
+              items_count,
+            });
+          } catch (e) {}
+        }
+
+        // 7. Seed Reviews
+        setStatus("SEEDING REVIEWS...", "#3b82f6");
+        for (let i = 1; i <= countReviews; i++) {
+          const product_id = randomInt(1, countProducts);
+          const customer_id = randomInt(1, countCustomers);
+          const rating = randomInt(1, 5);
+          const verified_purchase = Math.random() > 0.2 ? 1 : 0;
+          const headline = pickRandom(VOCAB.reviewHeadlines);
+
+          try {
+            await db.insert("reviews", {
+              id: i,
+              product_id,
+              customer_id,
+              rating,
+              verified_purchase,
+              headline,
+            });
+          } catch (e) {}
+        }
+
+        const tTotal = (performance.now() - t0).toFixed(0);
+        const totalRows = 5 + countProducts + countCustomers + countOrders + countReviews;
+
+        await refreshSchemaExplorer();
+        setStatus("READY", "#10b981");
+        showToast(`Seeded ${totalRows.toLocaleString()} rows in ${tTotal}ms`);
+        await executeUserCode();
       }
 
-      async function executeUserQuery() {
-        if (!db) await initDb();
+      // Refresh Schema Explorer (Left Column)
+      async function refreshSchemaExplorer() {
+        if (!db) return;
+        const container = document.getElementById("tablesTreeContainer");
+        const countBadge = document.getElementById("tableCountBadge");
 
-        let q = db.from("users");
-        const ageOp = document.getElementById("ageOp").value;
-        const ageVal = parseInt(document.getElementById("ageVal").value, 10);
-        const salaryNullOp = document.getElementById("salaryNullOp").value;
-        const orderCol = document.getElementById("orderCol").value;
-        const orderDir = document.getElementById("orderDir").value;
-        const limitVal = parseInt(
-          document.getElementById("limitVal").value,
-          10,
-        );
+        try {
+          cachedTablesMeta = await db.listTables();
+          countBadge.innerText = cachedTablesMeta.length;
+          container.innerHTML = "";
 
-        if (ageOp !== "none" && !isNaN(ageVal)) {
-          q = q.where("age", ageOp, ageVal);
+          if (cachedTablesMeta.length === 0) {
+            container.innerHTML = `<div style="padding: 10px; font-size: 0.74rem; color: var(--text-muted); text-align: center;">No tables found.</div>`;
+            return;
+          }
+
+          for (const tbl of cachedTablesMeta) {
+            const tableItem = document.createElement("div");
+            tableItem.className = "tree-table-item";
+
+            const header = document.createElement("div");
+            header.className = "table-item-header";
+            header.id = `tbl-header-${tbl.name}`;
+            header.innerHTML = `
+              <div class="table-title-group">
+                <span class="table-icon-btn" title="View Table Structure" data-view-struct="${tbl.name}">
+                  ${TABLE_ICON_SVG}
+                </span>
+                <span class="table-name-link" title="Query Table Rows" data-table-name="${tbl.name}">
+                  ${tbl.name}
+                </span>
+              </div>
+              <span class="badge-count">${tbl.rowCountEstimate.toLocaleString()}</span>
+            `;
+
+            header.addEventListener("click", (e) => {
+              const iconBtn = e.target.closest("[data-view-struct]");
+              if (iconBtn) {
+                const tableName = iconBtn.getAttribute("data-view-struct");
+                showTableStructure(tableName);
+                return;
+              }
+
+              const nameLink = e.target.closest("[data-table-name]");
+              if (nameLink || e.currentTarget === header) {
+                selectTableForQuery(tbl.name);
+              }
+            });
+
+            tableItem.appendChild(header);
+            container.appendChild(tableItem);
+          }
+        } catch (err) {
+          console.error("Schema refresh error:", err);
+          container.innerHTML = `<div style="padding: 10px; font-size: 0.74rem; color: #ef4444;">Error: ${err.message}</div>`;
         }
+      }
 
-        if (salaryNullOp === "whereNull") {
-          q = q.whereNull("salary");
-        } else if (salaryNullOp === "whereNotNull") {
-          q = q.whereNotNull("salary");
+      function selectTableForQuery(tableName) {
+        document.querySelectorAll(".table-item-header").forEach((el) => el.classList.remove("active"));
+        const activeHeader = document.getElementById(`tbl-header-${tableName}`);
+        if (activeHeader) activeHeader.classList.add("active");
+
+        if (editor) {
+          editor.setValue(`// Query all rows from "${tableName}"\nreturn db.from("${tableName}")\n  .limit(25);`);
+          executeUserCode();
         }
+      }
 
-        if (orderCol) {
-          q = q.orderBy(orderCol, orderDir);
-        }
-        if (!isNaN(limitVal)) {
-          q = q.limit(limitVal);
-        }
+      // Show Table Structure in Center Panel
+      function showTableStructure(tableName) {
+        const tbl = cachedTablesMeta.find((t) => t.name === tableName);
+        if (!tbl) return;
 
-        // 1. Get Bytecode Disassembly via .explain()
-        const t0 = performance.now();
-        const explainInfo = await q.explain();
-        const tExplain = performance.now();
+        document.getElementById("structTitle").innerText = tbl.name;
+        document.getElementById("structMeta").innerText = `Root Page: ${tbl.rootPageId} • Col Catalog Page: ${tbl.colCatalogPageId} • ~${tbl.rowCountEstimate.toLocaleString()} rows`;
+        document.getElementById("structTableName").innerText = tbl.name;
 
-        // 2. Execute Query
-        const rows = await q.toArray();
-        const tExec = performance.now();
-
-        const totalMs = (tExec - t0).toFixed(2);
-        document.getElementById("timingBadge").innerText = `${totalMs} ms`;
-        document.getElementById("rowCount").innerText = rows.length;
-        document.getElementById("bytecodeSizeBadge").innerText =
-          `${explainInfo.bytecodeSize} bytes`;
-        document.getElementById("terminalDisassembly").innerText =
-          explainInfo.assembly;
-
-        // Render Rows
-        const tbody = document.getElementById("resultsBody");
+        const tbody = document.getElementById("structTbody");
         tbody.innerHTML = "";
 
+        const typeMap = { 0: "NULL", 1: "INT32", 2: "INT64", 3: "FLOAT64", 4: "TEXT", 5: "BLOB", 6: "UUID", 7: "ULID" };
+
+        tbl.columns.forEach((col, idx) => {
+          const tr = document.createElement("tr");
+          const typeStr = typeof col.type === "number" ? (typeMap[col.type] || `TYPE_${col.type}`) : col.type;
+          const flagsNum = typeof col.flags === "number" ? col.flags : 0;
+          const isPk = (flagsNum & 0x01) !== 0 || col.flags?.primaryKey;
+          const isNotNull = (flagsNum & 0x02) !== 0 || col.flags?.notNull;
+          const isAutoInc = (flagsNum & 0x08) !== 0 || col.flags?.autoInc;
+
+          let constraints = [];
+          if (isPk) constraints.push(`<span class="col-pk-pill">PRIMARY KEY</span>`);
+          if (isNotNull) constraints.push(`<span class="col-type-pill">NOT NULL</span>`);
+          if (isAutoInc) constraints.push(`<span class="col-type-pill">AUTO_INC</span>`);
+          if (constraints.length === 0) constraints.push(`<span style="color: var(--text-muted);">-</span>`);
+
+          tr.innerHTML = `
+            <td style="color: var(--text-muted); font-size: 0.72rem;">${idx + 1}</td>
+            <td style="font-family: var(--font-mono); font-weight: 600;">${col.name}</td>
+            <td><span class="col-type-pill">${typeStr}</span></td>
+            <td>${constraints.join(" ")}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+        const queryBtn = document.getElementById("queryStructBtn");
+        queryBtn.onclick = () => {
+          selectTableForQuery(tableName);
+        };
+
+        const structTabBtn = document.getElementById("tabStructureBtn");
+        structTabBtn.style.display = "inline-flex";
+        switchTab(structTabBtn, document.getElementById("structureView"));
+      }
+
+      // Execute User JavaScript Code (Middle Column)
+      async function executeUserCode() {
+        if (!editor) return;
+        if (!db) await initDb();
+
+        const rawCode = editor.getValue();
+        const t0 = performance.now();
+        setStatus("RUNNING...", "#3b82f6");
+
+        capturedLogs = [];
+        const customConsole = {
+          log: (...args) => {
+            const line = args.map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" ");
+            capturedLogs.push(line);
+          },
+          warn: (...args) => {
+            capturedLogs.push("[WARN] " + args.join(" "));
+          },
+          error: (...args) => {
+            capturedLogs.push("[ERR] " + args.join(" "));
+          },
+        };
+
+        try {
+          let trimmed = rawCode.trim();
+          let codeToRun = rawCode;
+
+          // Wrap single expression in return if missing
+          if (
+            !trimmed.includes("return") &&
+            !trimmed.startsWith("let ") &&
+            !trimmed.startsWith("const ") &&
+            !trimmed.startsWith("var ") &&
+            !trimmed.startsWith("//")
+          ) {
+            codeToRun = `return (${rawCode});`;
+          }
+
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          let fn;
+          try {
+            fn = new AsyncFunction("db", "WebDB", "console", codeToRun);
+          } catch (syntaxErr) {
+            fn = new AsyncFunction("db", "WebDB", "console", rawCode);
+          }
+
+          let result = await fn(db, WebDB, customConsole);
+
+          // If result is QueryBuilder, generate both Explain and Results
+          if (result && typeof result.toArray === "function") {
+            try {
+              lastExplainOutput = await result.explain();
+              updateBytecodeView(lastExplainOutput);
+            } catch (explainErr) {
+              console.warn("Explain error:", explainErr);
+            }
+            result = await result.toArray();
+          } else {
+            updateBytecodeView(null);
+          }
+
+          const tExec = performance.now();
+          const totalMs = (tExec - t0).toFixed(2);
+
+          document.getElementById("timingBadge").innerText = `${totalMs} ms`;
+          setStatus("SUCCESS", "#10b981");
+
+          if (Array.isArray(result)) {
+            currentResultRows = result;
+            renderResultsTable(result);
+          } else if (result !== undefined) {
+            currentResultRows = [result];
+            renderResultsTable([result]);
+          } else {
+            currentResultRows = [];
+            renderEmptyResults("Code executed successfully (no return value).");
+          }
+
+          switchTab(document.getElementById("tabResultsBtn"), document.getElementById("tableView"));
+          updateConsoleView();
+          await refreshSchemaExplorer();
+        } catch (err) {
+          const tErr = performance.now();
+          document.getElementById("timingBadge").innerText = `${(tErr - t0).toFixed(2)} ms`;
+          setStatus("ERROR", "#ef4444");
+          renderError(err);
+          capturedLogs.push(`[Execution Error] ${err.stack || err.message}`);
+          updateConsoleView();
+        }
+      }
+
+      // Render Results Table (Data Dense)
+      function renderResultsTable(rows) {
+        const thead = document.getElementById("resultsThead");
+        const tbody = document.getElementById("resultsTbody");
+        const resCount = document.getElementById("resCountBadge");
+
+        resCount.innerText = rows.length.toLocaleString();
+        selectedRowIndex = -1;
+        clearRowDetails();
+
         if (rows.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">No matching rows found</td></tr>`;
+          thead.innerHTML = `<tr><th>Status</th></tr>`;
+          tbody.innerHTML = `<tr><td style="text-align: center; color: var(--text-muted); padding: 20px;">0 matching rows returned</td></tr>`;
           return;
         }
 
+        const colSet = new Set();
         for (const r of rows) {
+          if (r && typeof r === "object") {
+            Object.keys(r).forEach((k) => colSet.add(k));
+          }
+        }
+        const columns = Array.from(colSet);
+        if (columns.length === 0) columns.push("value");
+
+        let headerHtml = "<tr><th style='width: 36px; text-align: center;'>#</th>";
+        for (const col of columns) {
+          headerHtml += `<th>${col}</th>`;
+        }
+        headerHtml += "</tr>";
+        thead.innerHTML = headerHtml;
+
+        tbody.innerHTML = "";
+        rows.forEach((row, idx) => {
           const tr = document.createElement("tr");
-          tr.innerHTML = `
-          <td><strong>${r.id}</strong></td>
-          <td>${r.name ?? '<span class="null-pill">NULL</span>'}</td>
-          <td>${r.age !== null ? r.age : '<span class="null-pill">NULL</span>'}</td>
-          <td>${r.role !== null ? r.role : '<span class="null-pill">NULL</span>'}</td>
-          <td>${r.salary !== null ? "$" + Number(r.salary).toLocaleString() : '<span class="null-pill">NULL</span>'}</td>
-        `;
+          let rowHtml = `<td style='text-align: center; color: var(--text-muted); font-size: 0.7rem;'>${idx + 1}</td>`;
+
+          for (const col of columns) {
+            const val = row && typeof row === "object" ? row[col] : row;
+            if (val === null || val === undefined) {
+              rowHtml += `<td><span class="null-badge">NULL</span></td>`;
+            } else if (typeof val === "number") {
+              const colLower = col.toLowerCase();
+              const isMoney = colLower.includes("price") || colLower.includes("cost") || colLower.includes("amount") || colLower.includes("spent") || colLower.includes("tax");
+              const formatted = isMoney ? "$" + Number(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : val.toLocaleString();
+              rowHtml += `<td style="font-family: var(--font-mono);">${formatted}</td>`;
+            } else if (typeof val === "boolean") {
+              rowHtml += `<td><span style="color: ${val ? '#10b981' : '#ef4444'}; font-weight: 600;">${val}</span></td>`;
+            } else {
+              rowHtml += `<td>${escapeHtml(String(val))}</td>`;
+            }
+          }
+          tr.innerHTML = rowHtml;
+
+          tr.addEventListener("click", () => {
+            selectRow(idx, tr);
+          });
+
           tbody.appendChild(tr);
+        });
+
+        if (rows.length > 0) {
+          const firstTr = tbody.querySelector("tr");
+          if (firstTr) selectRow(0, firstTr);
         }
       }
 
-      document.getElementById("seedBtn").addEventListener("click", seedData);
-      document
-        .getElementById("runBtn")
-        .addEventListener("click", executeUserQuery);
-      document
-        .getElementById("storageSelect")
-        .addEventListener("change", seedData);
+      function renderEmptyResults(msg) {
+        document.getElementById("resultsThead").innerHTML = `<tr><th>Status</th></tr>`;
+        document.getElementById("resultsTbody").innerHTML = `<tr><td style="text-align: center; color: var(--text-muted); padding: 20px;">${msg}</td></tr>`;
+        document.getElementById("resCountBadge").innerText = 0;
+        clearRowDetails();
+      }
 
-      // Initial run
-      seedData().then(async () => {
-        window.db = db;
-        const query = db.from("users").whereNotNull("salary").limit(2);
-        console.log(await query.toArray());
+      function renderError(err) {
+        document.getElementById("resultsThead").innerHTML = `<tr><th>Execution Error</th></tr>`;
+        document.getElementById("resultsTbody").innerHTML = `
+          <tr>
+            <td style="color: #ef4444; padding: 14px; font-family: var(--font-mono); white-space: pre-wrap; line-height: 1.4;">
+              ${err.name}: ${err.message}\n\n${err.stack || ""}
+            </td>
+          </tr>`;
+        document.getElementById("resCountBadge").innerText = 0;
+      }
+
+      // Right Column: Row Details Inspector
+      function selectRow(index, trElement) {
+        selectedRowIndex = index;
+        const allTrs = document.querySelectorAll("#resultsTbody tr");
+        allTrs.forEach((tr) => tr.classList.remove("selected"));
+        if (trElement) trElement.classList.add("selected");
+
+        const row = currentResultRows[index];
+        const container = document.getElementById("detailsContent");
+
+        if (!row || typeof row !== "object") {
+          container.innerHTML = `
+            <div class="row-card">
+              <div class="row-card-header">Row #${index + 1}</div>
+              <div style="padding: 10px; font-family: var(--font-mono); font-size: 0.75rem;">${String(row)}</div>
+            </div>`;
+          return;
+        }
+
+        let fieldsRowsHtml = "";
+        for (const [key, val] of Object.entries(row)) {
+          let valDisplay = "";
+          let valType = typeof val;
+
+          if (val === null || val === undefined) {
+            valDisplay = `<span class="null-badge">NULL</span>`;
+            valType = "null";
+          } else if (typeof val === "number") {
+            const keyLower = key.toLowerCase();
+            const isMoney = keyLower.includes("price") || keyLower.includes("cost") || keyLower.includes("amount") || keyLower.includes("spent") || keyLower.includes("tax");
+            const formatted = isMoney ? "$" + Number(val).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : val;
+            valDisplay = `<span style="color: #38bdf8;">${formatted}</span>`;
+          } else if (typeof val === "boolean") {
+            valDisplay = `<span style="color: ${val ? '#10b981' : '#ef4444'}; font-weight: 600;">${val}</span>`;
+          } else {
+            valDisplay = `<span>"${escapeHtml(String(val))}"</span>`;
+          }
+
+          fieldsRowsHtml += `
+            <tr>
+              <td class="field-key">${key}</td>
+              <td class="field-val">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>${valDisplay}</span>
+                  <span class="col-type-pill">${valType}</span>
+                </div>
+              </td>
+            </tr>
+          `;
+        }
+
+        const jsonStr = JSON.stringify(row, null, 2);
+
+        container.innerHTML = `
+          <div class="row-card">
+            <div class="row-card-header">
+              <span>Row #${index + 1} Attributes</span>
+              <span class="badge-count">${Object.keys(row).length} Fields</span>
+            </div>
+            <table class="fields-table">
+              <tbody>${fieldsRowsHtml}</tbody>
+            </table>
+          </div>
+
+          <div class="row-card">
+            <div class="row-card-header">
+              <span>Raw JSON Object</span>
+            </div>
+            <div style="padding: 6px;">
+              <div class="json-viewer-box">${escapeHtml(jsonStr)}</div>
+            </div>
+          </div>
+        `;
+      }
+
+      function clearRowDetails() {
+        selectedRowIndex = -1;
+        document.getElementById("detailsContent").innerHTML = `
+          <div class="details-empty-state">
+            Select any row from the query results table to inspect its fields, types, and raw JSON.
+          </div>
+        `;
+      }
+
+      // Update Bytecode (EXPLAIN) Tab
+      function updateBytecodeView(explainInfo) {
+        const box = document.getElementById("bytecodeView");
+        if (!explainInfo) {
+          box.innerText = `// VDBE Bytecode Disassembly & Plan\n// Note: To automatically inspect the compiled VDBE bytecode plan, return\n// the query builder directly without calling .toArray():\n//\n//   return db.from("products").where("price", ">=", 100);\n//\n// WebDB Studio will automatically compile, explain, and execute it.`;
+          return;
+        }
+
+        box.innerText = `// VDBE Bytecode Size: ${explainInfo.bytecodeSize} bytes\n// Plan: ${JSON.stringify(explainInfo.plan, null, 2)}\n\n${explainInfo.assembly}`;
+      }
+
+      // Update Console View Tab
+      function updateConsoleView() {
+        const box = document.getElementById("consoleView");
+        const badge = document.getElementById("logCountBadge");
+
+        if (capturedLogs.length === 0) {
+          box.innerText = "No console logs captured for this query.";
+          badge.style.display = "none";
+        } else {
+          box.innerText = capturedLogs.join("\n");
+          badge.innerText = capturedLogs.length;
+          badge.style.display = "inline-block";
+        }
+      }
+
+      function setStatus(text, color) {
+        const badge = document.getElementById("statusBadge");
+        badge.innerText = text;
+        badge.style.color = color;
+      }
+
+      function showToast(msg) {
+        const toast = document.getElementById("toast");
+        toast.innerText = msg;
+        toast.classList.add("show");
+        setTimeout(() => toast.classList.remove("show"), 2200);
+      }
+
+      function escapeHtml(str) {
+        return str
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+      }
+
+      // Tab Switching in Results Viewer
+      function switchTab(activeBtn, activeView) {
+        const allBtns = [
+          document.getElementById("tabResultsBtn"),
+          document.getElementById("tabStructureBtn"),
+          document.getElementById("tabBytecodeBtn"),
+          document.getElementById("tabConsoleBtn"),
+        ];
+        const allViews = [
+          document.getElementById("tableView"),
+          document.getElementById("structureView"),
+          document.getElementById("bytecodeView"),
+          document.getElementById("consoleView"),
+        ];
+
+        allBtns.forEach((b) => b.classList.remove("active"));
+        allViews.forEach((v) => (v.style.display = "none"));
+
+        activeBtn.classList.add("active");
+        activeView.style.display = "block";
+      }
+
+      // Setup Event Listeners
+      function setupListeners() {
+        document.getElementById("runBtn").addEventListener("click", executeUserCode);
+        document.getElementById("seedBtn").addEventListener("click", seedSampleData);
+
+        document.getElementById("storageSelect").addEventListener("change", async () => {
+          await initDb();
+          await seedSampleData();
+        });
+
+        document.getElementById("refreshSchemaBtn").addEventListener("click", refreshSchemaExplorer);
+
+        document.getElementById("querySnippetSelect").addEventListener("change", (e) => {
+          const key = e.target.value;
+          if (key && SNIPPETS[key] && editor) {
+            editor.setValue(SNIPPETS[key]);
+            executeUserCode();
+          }
+        });
+
+        document.getElementById("clearEditorBtn").addEventListener("click", () => {
+          if (editor) editor.setValue("");
+        });
+
+        document.getElementById("copyJsonBtn").addEventListener("click", () => {
+          if (selectedRowIndex >= 0 && currentResultRows[selectedRowIndex]) {
+            const json = JSON.stringify(currentResultRows[selectedRowIndex], null, 2);
+            navigator.clipboard.writeText(json);
+            showToast("Copied row JSON to clipboard");
+          } else {
+            showToast("Please select a row first");
+          }
+        });
+
+        const tabResults = document.getElementById("tabResultsBtn");
+        const tabStructure = document.getElementById("tabStructureBtn");
+        const tabBytecode = document.getElementById("tabBytecodeBtn");
+        const tabConsole = document.getElementById("tabConsoleBtn");
+        const tableView = document.getElementById("tableView");
+        const structureView = document.getElementById("structureView");
+        const bytecodeView = document.getElementById("bytecodeView");
+        const consoleView = document.getElementById("consoleView");
+
+        tabResults.addEventListener("click", () => switchTab(tabResults, tableView));
+        tabStructure.addEventListener("click", () => switchTab(tabStructure, structureView));
+        tabBytecode.addEventListener("click", () => switchTab(tabBytecode, bytecodeView));
+        tabConsole.addEventListener("click", () => switchTab(tabConsole, consoleView));
+      }
+
+      // Bootstrapping
+      window.addEventListener("DOMContentLoaded", async () => {
+        initMonaco();
+        setupListeners();
+        await initDb();
+        await seedSampleData();
       });
     </script>
   </body>

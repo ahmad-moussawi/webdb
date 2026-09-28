@@ -1,5 +1,8 @@
 node_modules/
-dist/
+/dist/
 docs/.vitepress/dist
 docs/.vitepress/cache
+docs/public/playground/
+docs/public/dist/
 .DS_Store
+
