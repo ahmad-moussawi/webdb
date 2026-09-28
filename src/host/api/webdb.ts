@@ -870,12 +870,16 @@ export class WebDB implements IDatabaseQueryExecutor {
     });
     const instructions = disassembleBytecode(bytecode, table);
     const assembly = formatDisassembly(instructions);
+    const indexScan = (bytecode as any).indexScan;
+    const scanType = indexScan ? "IndexScan" : "TableScan";
+    const indexName = indexScan ? indexScan.index.name : undefined;
 
     return {
       plan: {
         table: table.name,
         rootPageId: table.rootPageId,
-        scanType: "TableScan",
+        scanType,
+        indexName,
         filters,
         orderBy: options?.orderBy,
         groupBy: options?.groupBy,

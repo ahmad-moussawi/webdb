@@ -13,6 +13,7 @@ import {
   page_get_cell_count,
   page_get_cell_offset,
   page_get_next_page_id,
+  page_binary_search_index_leaf,
 } from "./page.c.ts";
 import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
 import { UuidCodec, UlidCodec } from "./codecs.c.ts";
@@ -527,6 +528,314 @@ export function vm_step(
       }
 
       /**
+       * OP_OPEN_INDEX (0x0c)
+       * Operands: [cursor_idx: uint8] [root_page_id: uint32] (5 bytes)
+       * Binds cursor[cursor_idx] to an index root page ID.
+       */
+      case OpCode.OP_OPEN_INDEX: {
+        const cursor_idx = bytecode[ctx.pc];
+        const root_page_id = code_view.getUint32(ctx.pc + 1, true);
+        ctx.pc += 5;
+
+        const cursor = get_cursor(ctx, cursor_idx);
+        cursor.pageId = root_page_id;
+        cursor.cellIdx = 0;
+        cursor.rowOffset = 0;
+
+        if (has_buffer_pool && root_page_id > 0) {
+          const slot = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            root_page_id,
+          );
+          if (slot < 0) {
+            ctx.fault_page_id = root_page_id;
+            ctx.status = VmStatus.PAGE_FAULT;
+            ctx.pc = instr_pc;
+            return VmStatus.PAGE_FAULT;
+          }
+          cursor.slotIdx = slot;
+        }
+        break;
+      }
+
+      /**
+       * OP_INDEX_SEEK_EQ (0x0d)
+       * Operands: [index_cursor: uint8] [data_cursor: uint8] [reg_key: uint8] [key_type: uint8] [jump_not_found: uint16] (6 bytes)
+       * Performs binary search on index leaf for target key.
+       * If found: positions data_cursor at matched rowid (data page + cell).
+       * If not found: jumps to jump_not_found.
+       */
+      case OpCode.OP_INDEX_SEEK_EQ: {
+        const index_cursor_idx = bytecode[ctx.pc];
+        const data_cursor_idx = bytecode[ctx.pc + 1];
+        const reg_key = bytecode[ctx.pc + 2];
+        const key_type = bytecode[ctx.pc + 3] as DataType;
+        const jump_not_found = code_view.getUint16(ctx.pc + 4, true);
+        ctx.pc += 6;
+
+        if (jump_not_found > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const key_val = ctx.registers[reg_key];
+        const idx_cursor = get_cursor(ctx, index_cursor_idx);
+
+        let curr_page_id = idx_cursor.pageId;
+        let found = false;
+        let matched_rowid = 0n;
+
+        while (curr_page_id !== 0) {
+          if (has_buffer_pool && curr_page_id > 0) {
+            const slot = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              ctx.fault_page_id = curr_page_id;
+              ctx.status = VmStatus.PAGE_FAULT;
+              ctx.pc = instr_pc;
+              return VmStatus.PAGE_FAULT;
+            }
+            idx_cursor.slotIdx = slot;
+          }
+
+          const page_offset = resolve_page_offset(view, curr_page_id);
+          const search = page_binary_search_index_leaf(
+            view,
+            page_offset,
+            key_type,
+            key_val,
+          );
+
+          if (search.found) {
+            found = true;
+            idx_cursor.pageId = curr_page_id;
+            idx_cursor.cellIdx = search.slot_idx;
+            const cell_offset = page_get_cell_offset(view, page_offset, search.slot_idx);
+            const k_len = view.getUint16(page_offset + cell_offset, true);
+            matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+            break;
+          }
+
+          curr_page_id = page_get_next_page_id(view, page_offset);
+        }
+
+        if (!found) {
+          ctx.pc = jump_not_found;
+        } else {
+          const data_page_id = Number(matched_rowid >> 16n);
+          const data_cell_idx = Number(matched_rowid & 0xffffn);
+
+          if (has_buffer_pool && data_page_id > 0) {
+            const slot = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              data_page_id,
+            );
+            if (slot < 0) {
+              ctx.fault_page_id = data_page_id;
+              ctx.status = VmStatus.PAGE_FAULT;
+              ctx.pc = instr_pc;
+              return VmStatus.PAGE_FAULT;
+            }
+          }
+
+          const data_cursor = get_cursor(ctx, data_cursor_idx);
+          data_cursor.pageId = data_page_id;
+          data_cursor.cellIdx = data_cell_idx;
+          const data_page_offset = resolve_page_offset(view, data_page_id);
+          const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+          data_cursor.rowOffset = data_page_offset + rel_cell_offset;
+        }
+        break;
+      }
+
+      /**
+       * OP_INDEX_SEEK_GE (0x0e)
+       * Operands: [index_cursor: uint8] [data_cursor: uint8] [reg_key: uint8] [key_type: uint8] [jump_eof: uint16] (6 bytes)
+       * Seeks index_cursor to the first entry >= key_val.
+       * If found: positions data_cursor at the matched rowid.
+       * If EOF / not found: jumps to jump_eof.
+       */
+      case OpCode.OP_INDEX_SEEK_GE: {
+        const index_cursor_idx = bytecode[ctx.pc];
+        const data_cursor_idx = bytecode[ctx.pc + 1];
+        const reg_key = bytecode[ctx.pc + 2];
+        const key_type = bytecode[ctx.pc + 3] as DataType;
+        const jump_eof = code_view.getUint16(ctx.pc + 4, true);
+        ctx.pc += 6;
+
+        if (jump_eof > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const key_val = ctx.registers[reg_key];
+        const idx_cursor = get_cursor(ctx, index_cursor_idx);
+
+        let curr_page_id = idx_cursor.pageId;
+        let found = false;
+        let matched_rowid = 0n;
+
+        while (curr_page_id !== 0) {
+          if (has_buffer_pool && curr_page_id > 0) {
+            const slot = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              ctx.fault_page_id = curr_page_id;
+              ctx.status = VmStatus.PAGE_FAULT;
+              ctx.pc = instr_pc;
+              return VmStatus.PAGE_FAULT;
+            }
+            idx_cursor.slotIdx = slot;
+          }
+
+          const page_offset = resolve_page_offset(view, curr_page_id);
+          const cell_count = page_get_cell_count(view, page_offset);
+          const search = page_binary_search_index_leaf(
+            view,
+            page_offset,
+            key_type,
+            key_val,
+          );
+
+          if (search.found || search.slot_idx < cell_count) {
+            found = true;
+            idx_cursor.pageId = curr_page_id;
+            idx_cursor.cellIdx = search.slot_idx;
+            const cell_offset = page_get_cell_offset(view, page_offset, search.slot_idx);
+            const k_len = view.getUint16(page_offset + cell_offset, true);
+            matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+            break;
+          }
+
+          curr_page_id = page_get_next_page_id(view, page_offset);
+        }
+
+        if (!found) {
+          ctx.pc = jump_eof;
+        } else {
+          const data_page_id = Number(matched_rowid >> 16n);
+          const data_cell_idx = Number(matched_rowid & 0xffffn);
+
+          if (has_buffer_pool && data_page_id > 0) {
+            const slot = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              data_page_id,
+            );
+            if (slot < 0) {
+              ctx.fault_page_id = data_page_id;
+              ctx.status = VmStatus.PAGE_FAULT;
+              ctx.pc = instr_pc;
+              return VmStatus.PAGE_FAULT;
+            }
+          }
+
+          const data_cursor = get_cursor(ctx, data_cursor_idx);
+          data_cursor.pageId = data_page_id;
+          data_cursor.cellIdx = data_cell_idx;
+          const data_page_offset = resolve_page_offset(view, data_page_id);
+          const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+          data_cursor.rowOffset = data_page_offset + rel_cell_offset;
+        }
+        break;
+      }
+
+      /**
+       * OP_INDEX_NEXT (0x0f)
+       * Operands: [index_cursor: uint8] [data_cursor: uint8] [jump_eof: uint16] (4 bytes)
+       * Advances index_cursor to the next index cell and positions data_cursor.
+       * If index exhausted (EOF), jumps to jump_eof.
+       */
+      case OpCode.OP_INDEX_NEXT: {
+        const index_cursor_idx = bytecode[ctx.pc];
+        const data_cursor_idx = bytecode[ctx.pc + 1];
+        const jump_eof = code_view.getUint16(ctx.pc + 2, true);
+        ctx.pc += 4;
+
+        if (jump_eof > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const idx_cursor = get_cursor(ctx, index_cursor_idx);
+        let curr_page_id = idx_cursor.pageId;
+        let page_offset = resolve_page_offset(view, curr_page_id);
+        const cell_count = page_get_cell_count(view, page_offset);
+
+        let next_cell_idx = idx_cursor.cellIdx + 1;
+        if (next_cell_idx >= cell_count) {
+          curr_page_id = page_get_next_page_id(view, page_offset);
+          if (curr_page_id === 0) {
+            ctx.pc = jump_eof;
+            break;
+          }
+          if (has_buffer_pool && curr_page_id > 0) {
+            const slot = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              ctx.fault_page_id = curr_page_id;
+              ctx.status = VmStatus.PAGE_FAULT;
+              ctx.pc = instr_pc;
+              return VmStatus.PAGE_FAULT;
+            }
+            idx_cursor.slotIdx = slot;
+          }
+          page_offset = resolve_page_offset(view, curr_page_id);
+          next_cell_idx = 0;
+        }
+
+        idx_cursor.pageId = curr_page_id;
+        idx_cursor.cellIdx = next_cell_idx;
+
+        const cell_offset = page_get_cell_offset(view, page_offset, next_cell_idx);
+        const k_len = view.getUint16(page_offset + cell_offset, true);
+        const matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+
+        const data_page_id = Number(matched_rowid >> 16n);
+        const data_cell_idx = Number(matched_rowid & 0xffffn);
+
+        if (has_buffer_pool && data_page_id > 0) {
+          const slot = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            data_page_id,
+          );
+          if (slot < 0) {
+            ctx.fault_page_id = data_page_id;
+            ctx.status = VmStatus.PAGE_FAULT;
+            ctx.pc = instr_pc;
+            return VmStatus.PAGE_FAULT;
+          }
+        }
+
+        const data_cursor = get_cursor(ctx, data_cursor_idx);
+        data_cursor.pageId = data_page_id;
+        data_cursor.cellIdx = data_cell_idx;
+        const data_page_offset = resolve_page_offset(view, data_page_id);
+        const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+        data_cursor.rowOffset = data_page_offset + rel_cell_offset;
+        break;
+      }
+
+      /**
        * OP_IS_NULL (0x10)
        * Operands: [cursor_idx: uint8] [col_idx: uint8] [jump_target: uint16] (4 bytes)
        * Evaluates SQL "col IS NULL". Tests the row's Null-Bitmap at col_idx.
@@ -896,6 +1205,27 @@ export function vm_step(
           len,
         );
         ctx.registers[reg_idx] = text_decoder.decode(text_bytes);
+        ctx.pc += 3 + len;
+        break;
+      }
+
+      /**
+       * OP_LOAD_BLOB (0x1e)
+       * Operands: [reg_idx: uint8] [len: uint16] [blob_bytes: len bytes]
+       * Loads a raw byte array into register r[reg_idx].
+       */
+      case OpCode.OP_LOAD_BLOB: {
+        const reg_idx = bytecode[ctx.pc];
+        const len = code_view.getUint16(ctx.pc + 1, true);
+        const blob_bytes = new Uint8Array(len);
+        blob_bytes.set(
+          new Uint8Array(
+            bytecode.buffer,
+            bytecode.byteOffset + ctx.pc + 3,
+            len,
+          ),
+        );
+        ctx.registers[reg_idx] = blob_bytes;
         ctx.pc += 3 + len;
         break;
       }

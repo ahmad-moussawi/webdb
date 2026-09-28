@@ -4,6 +4,8 @@ import {
   TableMeta,
   ColumnMeta,
   ColumnFlag,
+  IndexFlag,
+  IndexDescriptor,
   TooManyRegistersError,
   TooManyOrderByColumnsError,
   TooManyGroupByColumnsError,
@@ -11,6 +13,7 @@ import {
   UnknownFunctionError,
   JoinType,
 } from "../../types/index.js";
+import { serialize_composite_key } from "../../core/index.js";
 import { VmKeyInfo } from "../../shared/vm_context.js";
 import {
   ExprNode,
@@ -158,6 +161,14 @@ export class BytecodeEmitter {
 
   emitString(str: string): number {
     const bytes = this.textEncoder.encode(str);
+    const pos = this.emitUint16(bytes.byteLength);
+    for (let i = 0; i < bytes.byteLength; i++) {
+      this.buffer.push(bytes[i]);
+    }
+    return pos;
+  }
+
+  emitBytes(bytes: Uint8Array): number {
     const pos = this.emitUint16(bytes.byteLength);
     for (let i = 0; i < bytes.byteLength; i++) {
       this.buffer.push(bytes[i]);
@@ -1489,6 +1500,172 @@ export function emitExpression(
   }
 }
 
+export interface CandidateIndexScan {
+  index: IndexDescriptor;
+  scanType: 'point' | 'range';
+  seekFilter: QueryFilter;
+  filterIndex: number; // index into leafFilters
+  keyType: DataType;
+  compositeValue?: Uint8Array;
+}
+
+export function chooseIndexScan(
+  table: TableMeta,
+  leafFilters: QueryFilter[],
+): CandidateIndexScan | null {
+  if (!table.indexes || table.indexes.length === 0) return null;
+
+  // 1. Single-column equality match on PRIMARY KEY (highest priority)
+  for (const idx of table.indexes) {
+    if ((idx.flags & IndexFlag.PRIMARY) !== 0 && idx.columnCount === 1) {
+      const colMeta = table.columns[idx.columnIndices[0]];
+      for (let i = 0; i < leafFilters.length; i++) {
+        const f = leafFilters[i];
+        if (
+          f.type === 'cmp' &&
+          (f.op === '=' || f.op === undefined) &&
+          f.colName === colMeta.name &&
+          f.value !== undefined &&
+          f.value !== null
+        ) {
+          return {
+            index: idx,
+            scanType: 'point',
+            seekFilter: f,
+            filterIndex: i,
+            keyType: colMeta.type,
+          };
+        }
+      }
+    }
+  }
+
+  // 2. Single-column equality match on UNIQUE secondary index
+  for (const idx of table.indexes) {
+    if ((idx.flags & IndexFlag.UNIQUE) !== 0 && idx.columnCount === 1) {
+      const colMeta = table.columns[idx.columnIndices[0]];
+      for (let i = 0; i < leafFilters.length; i++) {
+        const f = leafFilters[i];
+        if (
+          f.type === 'cmp' &&
+          (f.op === '=' || f.op === undefined) &&
+          f.colName === colMeta.name &&
+          f.value !== undefined &&
+          f.value !== null
+        ) {
+          return {
+            index: idx,
+            scanType: 'point',
+            seekFilter: f,
+            filterIndex: i,
+            keyType: colMeta.type,
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Composite index exact equality match (all indexed columns matched with =)
+  for (const idx of table.indexes) {
+    if (idx.columnCount > 1) {
+      const matchedFilters: QueryFilter[] = [];
+      let allFound = true;
+
+      for (let c = 0; c < idx.columnCount; c++) {
+        const colMeta = table.columns[idx.columnIndices[c]];
+        const f = leafFilters.find(
+          (lf) =>
+            lf.type === 'cmp' &&
+            (lf.op === '=' || lf.op === undefined) &&
+            lf.colName === colMeta.name &&
+            lf.value !== undefined &&
+            lf.value !== null,
+        );
+        if (f) {
+          matchedFilters.push(f);
+        } else {
+          allFound = false;
+          break;
+        }
+      }
+
+      if (allFound) {
+        const dummyRow: Record<string, any> = {};
+        for (const f of matchedFilters) {
+          dummyRow[f.colName!] = f.value;
+        }
+        const compositeKeyBytes = serialize_composite_key(
+          table.columns,
+          idx.columnIndices,
+          idx.columnCount,
+          dummyRow,
+        );
+
+        return {
+          index: idx,
+          scanType: 'point',
+          seekFilter: matchedFilters[0],
+          filterIndex: leafFilters.indexOf(matchedFilters[0]),
+          keyType: DataType.BLOB,
+          compositeValue: compositeKeyBytes,
+        };
+      }
+    }
+  }
+
+  // 4. Single-column equality match on non-unique index
+  for (const idx of table.indexes) {
+    if (idx.columnCount === 1) {
+      const colMeta = table.columns[idx.columnIndices[0]];
+      for (let i = 0; i < leafFilters.length; i++) {
+        const f = leafFilters[i];
+        if (
+          f.type === 'cmp' &&
+          (f.op === '=' || f.op === undefined) &&
+          f.colName === colMeta.name &&
+          f.value !== undefined &&
+          f.value !== null
+        ) {
+          return {
+            index: idx,
+            scanType: 'range',
+            seekFilter: f,
+            filterIndex: i,
+            keyType: colMeta.type,
+          };
+        }
+      }
+    }
+  }
+
+  // 5. Single-column range match (>= or >)
+  for (const idx of table.indexes) {
+    if (idx.columnCount === 1) {
+      const colMeta = table.columns[idx.columnIndices[0]];
+      for (let i = 0; i < leafFilters.length; i++) {
+        const f = leafFilters[i];
+        if (
+          f.type === 'cmp' &&
+          (f.op === '>=' || f.op === '>') &&
+          f.colName === colMeta.name &&
+          f.value !== undefined &&
+          f.value !== null
+        ) {
+          return {
+            index: idx,
+            scanType: 'range',
+            seekFilter: f,
+            filterIndex: i,
+            keyType: colMeta.type,
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Compiles a QueryPlan into an executable bytecode array.
  */
@@ -2510,7 +2687,196 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     return result;
   }
 
-  // Open Cursor
+  // Check if an active index covers the query filters
+  const indexScan = !isJoinQuery ? chooseIndexScan(table, leafFilters) : null;
+
+  if (indexScan) {
+    let regKey: number;
+    if (indexScan.compositeValue) {
+      regKey = nextReg++;
+      if (regKey >= 64) throw new TooManyRegistersError(regKey);
+      emitter.emitUint8(OpCode.OP_LOAD_BLOB);
+      emitter.emitUint8(regKey);
+      emitter.emitBytes(indexScan.compositeValue);
+    } else {
+      regKey = indexScan.filterIndex * 2 + 1;
+    }
+
+    if (indexScan.scanType === 'point') {
+      // 1. Open data cursor 0 on table
+      emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
+      emitter.emitUint8(0);
+      emitter.emitUint32(table.rootPageId);
+
+      // 2. Open index cursor 1 on index rootPageId
+      emitter.emitUint8(OpCode.OP_OPEN_INDEX);
+      emitter.emitUint8(1);
+      emitter.emitUint32(indexScan.index.rootPageId);
+
+      // 3. Exact point seek in index
+      emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
+      emitter.emitUint8(1); // index cursor
+      emitter.emitUint8(0); // data cursor
+      emitter.emitUint8(regKey);
+      emitter.emitUint8(indexScan.keyType);
+      const seekNotFoundPatch = emitter.emitUint16(0);
+
+      // 4. Run remaining filter predicates on the row (if any)
+      const nextRowPatches: number[] = [];
+      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+
+      let offsetSkipPatch = -1;
+      if (hasOffset) {
+        emitter.emitUint8(OpCode.OP_OFFSET);
+        emitter.emitUint8(regOffset);
+        offsetSkipPatch = emitter.emitUint16(0);
+      }
+
+      // 5. Emit matching row
+      if (hasSelectExprs) {
+        let exprTempReg = nextReg;
+        const allocExprReg = () => {
+          if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
+          return exprTempReg++;
+        };
+        for (let i = 0; i < plan.selectExprs!.length; i++) {
+          emitExpression(
+            plan.selectExprs![i].expr,
+            table,
+            emitter,
+            0,
+            outStartReg + i,
+            allocExprReg,
+            plan.udfNameMap,
+          );
+        }
+        emitter.emitUint8(OpCode.OP_RESULT_ROW);
+        emitter.emitUint8(outStartReg);
+        emitter.emitUint8(plan.selectExprs!.length);
+      } else {
+        emitter.emitUint8(OpCode.OP_EMIT_ROW);
+        emitter.emitUint8(0);
+      }
+
+      // 6. Point match handled: jump to EOF
+      emitter.emitUint8(OpCode.OP_JUMP);
+      const jumpEofPatch = emitter.emitUint16(0);
+
+      // EOF Label
+      const eofPos = emitter.currentOffset();
+      emitter.patchUint16(seekNotFoundPatch, eofPos);
+      emitter.patchUint16(jumpEofPatch, eofPos);
+      if (offsetSkipPatch !== -1) {
+        emitter.patchUint16(offsetSkipPatch, eofPos);
+      }
+      for (const patch of nextRowPatches) {
+        emitter.patchUint16(patch, eofPos);
+      }
+
+      emitter.emitUint8(OpCode.OP_HALT);
+
+      const result = emitter.toByteArray();
+      (result as any).indexScan = indexScan;
+      if (plan.outputColumns) {
+        (result as any).outputColumns = plan.outputColumns;
+      }
+      return result;
+    } else {
+      // Range seek in index
+      emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
+      emitter.emitUint8(0);
+      emitter.emitUint32(table.rootPageId);
+
+      emitter.emitUint8(OpCode.OP_OPEN_INDEX);
+      emitter.emitUint8(1);
+      emitter.emitUint32(indexScan.index.rootPageId);
+
+      emitter.emitUint8(OpCode.OP_INDEX_SEEK_GE);
+      emitter.emitUint8(1);
+      emitter.emitUint8(0);
+      emitter.emitUint8(regKey);
+      emitter.emitUint8(indexScan.keyType);
+      const seekEofPatch = emitter.emitUint16(0);
+
+      const loopStartPos = emitter.currentOffset();
+      const nextRowPatches: number[] = [];
+
+      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+
+      let offsetSkipPatch = -1;
+      if (hasOffset) {
+        emitter.emitUint8(OpCode.OP_OFFSET);
+        emitter.emitUint8(regOffset);
+        offsetSkipPatch = emitter.emitUint16(0);
+      }
+
+      if (hasSelectExprs) {
+        let exprTempReg = nextReg;
+        const allocExprReg = () => {
+          if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
+          return exprTempReg++;
+        };
+        for (let i = 0; i < plan.selectExprs!.length; i++) {
+          emitExpression(
+            plan.selectExprs![i].expr,
+            table,
+            emitter,
+            0,
+            outStartReg + i,
+            allocExprReg,
+            plan.udfNameMap,
+          );
+        }
+        emitter.emitUint8(OpCode.OP_RESULT_ROW);
+        emitter.emitUint8(outStartReg);
+        emitter.emitUint8(plan.selectExprs!.length);
+      } else {
+        emitter.emitUint8(OpCode.OP_EMIT_ROW);
+        emitter.emitUint8(0);
+      }
+
+      let limitHaltPatch = -1;
+      if (hasLimit) {
+        emitter.emitUint8(OpCode.OP_LIMIT);
+        emitter.emitUint8(regLimit);
+        limitHaltPatch = emitter.emitUint16(0);
+      }
+
+      const nextRowPos = emitter.currentOffset();
+      if (offsetSkipPatch !== -1) {
+        emitter.patchUint16(offsetSkipPatch, nextRowPos);
+      }
+      for (const patch of nextRowPatches) {
+        emitter.patchUint16(patch, nextRowPos);
+      }
+
+      emitter.emitUint8(OpCode.OP_INDEX_NEXT);
+      emitter.emitUint8(1);
+      emitter.emitUint8(0);
+      const nextRowEofPatch = emitter.emitUint16(0);
+
+      emitter.emitUint8(OpCode.OP_JUMP);
+      emitter.emitUint16(loopStartPos);
+
+      const eofPos = emitter.currentOffset();
+      emitter.patchUint16(seekEofPatch, eofPos);
+      emitter.patchUint16(nextRowEofPatch, eofPos);
+      if (limitHaltPatch !== -1) {
+        emitter.patchUint16(limitHaltPatch, eofPos);
+      }
+
+      emitter.emitUint8(OpCode.OP_HALT);
+
+      const result = emitter.toByteArray();
+      (result as any).indexScan = indexScan;
+      if (plan.outputColumns) {
+        (result as any).outputColumns = plan.outputColumns;
+      }
+      return result;
+    }
+  }
+
+  // Open Cursor (Fallback Table Scan)
   emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
   emitter.emitUint8(0);
   emitter.emitUint32(table.rootPageId);
@@ -2662,6 +3028,73 @@ export function disassembleBytecode(
           p2: `page=${rootPage}`,
           p3: "",
           comment: `Open cursor ${cursor} on root page ${rootPage}${table ? ` ('${table.name}')` : ""}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_OPEN_INDEX: {
+        const cursor = bytecode[pc++];
+        const rootPage = view.getUint32(pc, true);
+        pc += 4;
+        instructions.push({
+          addr,
+          opcode: "OP_OPEN_INDEX",
+          p1: `c[${cursor}]`,
+          p2: `page=${rootPage}`,
+          p3: "",
+          comment: `Open index cursor ${cursor} on root page ${rootPage}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_INDEX_SEEK_EQ: {
+        const idxCursor = bytecode[pc++];
+        const dataCursor = bytecode[pc++];
+        const regKey = bytecode[pc++];
+        const keyType = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_INDEX_SEEK_EQ",
+          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
+          p2: `key=r[${regKey}], type=${keyType}`,
+          p3: fmtAddr(jumpTarget),
+          comment: `Seek exact key in index; position data cursor or jump to ${fmtAddr(jumpTarget)} if not found`,
+        });
+        break;
+      }
+
+      case OpCode.OP_INDEX_SEEK_GE: {
+        const idxCursor = bytecode[pc++];
+        const dataCursor = bytecode[pc++];
+        const regKey = bytecode[pc++];
+        const keyType = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_INDEX_SEEK_GE",
+          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
+          p2: `key=r[${regKey}], type=${keyType}`,
+          p3: fmtAddr(jumpTarget),
+          comment: `Seek first entry >= key in index; position data cursor or jump to ${fmtAddr(jumpTarget)} if EOF`,
+        });
+        break;
+      }
+
+      case OpCode.OP_INDEX_NEXT: {
+        const idxCursor = bytecode[pc++];
+        const dataCursor = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_INDEX_NEXT",
+          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: "",
+          comment: `Advance index cursor to next entry; jump to ${fmtAddr(jumpTarget)} if EOF`,
         });
         break;
       }
@@ -2981,6 +3414,21 @@ export function disassembleBytecode(
           p2: `"${str}"`,
           p3: "",
           comment: `Load literal text "${str}" into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_BLOB: {
+        const regIdx = bytecode[pc++];
+        const len = view.getUint16(pc, true);
+        pc += 2 + len;
+        instructions.push({
+          addr,
+          opcode: "OP_LOAD_BLOB",
+          p1: `r[${regIdx}]`,
+          p2: `len=${len}`,
+          p3: "",
+          comment: `Load literal BLOB (${len} bytes) into r[${regIdx}]`,
         });
         break;
       }

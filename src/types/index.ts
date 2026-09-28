@@ -44,6 +44,10 @@ export enum OpCode {
   OP_PREV_ROW = 0x09,
   OP_COLUMN_UUID = 0x0a,
   OP_COLUMN_ULID = 0x0b,
+  OP_OPEN_INDEX = 0x0c,
+  OP_INDEX_SEEK_EQ = 0x0d,
+  OP_INDEX_SEEK_GE = 0x0e,
+  OP_INDEX_NEXT = 0x0f,
 
   // Logic / Control
   OP_IS_NULL = 0x10,
@@ -60,6 +64,7 @@ export enum OpCode {
   OP_STR_CONTAINS = 0x1b,
   OP_STR_STARTS_WITH = 0x1c,
   OP_STR_ENDS_WITH = 0x1d,
+  OP_LOAD_BLOB = 0x1e,
 
   // Data / Output
   OP_LOAD_INT = 0x20,

@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { WebDB } from "../src/host/api/webdb.js";
 import {
-  DataType,
-  ColumnFlag,
   IndexFlag,
   UniqueConstraintViolationError,
   IndexNotFoundError,

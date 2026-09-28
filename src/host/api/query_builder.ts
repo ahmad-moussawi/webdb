@@ -220,7 +220,8 @@ export interface ExplainOutput {
   plan: {
     table: string;
     rootPageId: number;
-    scanType: 'TableScan';
+    scanType: 'TableScan' | 'IndexScan';
+    indexName?: string;
     filters: QueryFilter[];
     orderBy?: SortKey[];
     groupBy?: (string | GroupKey)[];
