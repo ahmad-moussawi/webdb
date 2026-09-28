@@ -1523,6 +1523,19 @@ export function vm_step(
       }
 
       /**
+       * OP_COPY (0x3F)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Copies r[src_reg] to r[dest_reg].
+       */
+      case OpCode.OP_COPY: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        ctx.registers[dest_reg] = ctx.registers[src_reg];
+        break;
+      }
+
+      /**
        * OP_AGG_INIT (0x40)
        * Operands: [agg_id: uint8] [start_key_reg: uint8] [num_keys: uint8] [mode: uint8] (4 bytes)
        * Initializes Hash Table in arena (0x00) or Stream Aggregation (0x01).
@@ -1771,6 +1784,50 @@ export function vm_step(
           ctx.registers[out_reg] = count > 0 ? Number(sum) / count : null;
         } else if (func_id === 3 || func_id === 4) {
           ctx.registers[out_reg] = ctx.registers[sum_reg];
+        }
+        break;
+      }
+
+      /**
+       * OP_REG_IS_NULL (0x48)
+       * Operands: [reg: uint8] [jump_target: uint16] (3 bytes)
+       * Jumps to jump_target if r[reg] is NULL or undefined.
+       */
+      case OpCode.OP_REG_IS_NULL: {
+        const reg = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const val = ctx.registers[reg];
+        if (val === null || val === undefined) {
+          ctx.pc = jump_target;
+        }
+        break;
+      }
+
+      /**
+       * OP_REG_IS_NOT_NULL (0x49)
+       * Operands: [reg: uint8] [jump_target: uint16] (3 bytes)
+       * Jumps to jump_target if r[reg] is not NULL and not undefined.
+       */
+      case OpCode.OP_REG_IS_NOT_NULL: {
+        const reg = bytecode[ctx.pc];
+        const jump_target = code_view.getUint16(ctx.pc + 1, true);
+        ctx.pc += 3;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const val = ctx.registers[reg];
+        if (val !== null && val !== undefined) {
+          ctx.pc = jump_target;
         }
         break;
       }

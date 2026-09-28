@@ -103,12 +103,17 @@ export enum OpCode {
   // Multi-Arg Functions
   OP_STR_CONCAT = 0x3d,
   OP_COALESCE = 0x3e,
+  OP_COPY = 0x3f,
 
   // Agg (GROUP BY)
   OP_AGG_INIT = 0x40,
   OP_AGG_STEP = 0x41,
   OP_AGG_NEXT = 0x42,
   OP_AGG_FINAL = 0x43,
+
+  // Register Null Checks
+  OP_REG_IS_NULL = 0x48,
+  OP_REG_IS_NOT_NULL = 0x49,
 
   // DML Mutation
   OP_DELETE_ROW = 0x50,

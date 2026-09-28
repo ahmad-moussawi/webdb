@@ -4,6 +4,8 @@ import { QueryBuilder } from '../src/host/api/query_builder.js';
 import {
   col,
   fn,
+  exp,
+  sql,
   AggregateNotAllowedInWhereError,
   UnknownFunctionError,
 } from '../src/index.js';
@@ -638,6 +640,316 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       expect(aliceOnly).toEqual([
         { id: 1, name: 'Alice Chen' },
       ]);
+    });
+
+    it('supports smart expression filtering in where(expr, op, value) e.g. .where("days_ago(hire_date)", "<=", 30)', async () => {
+      // Create a table with date strings
+      await db.createTable('orders', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
+        { name: 'customer_id', type: 'INT32' },
+        { name: 'order_date', type: 'TEXT' },
+        { name: 'total_amount', type: 'FLOAT64' },
+      ]);
+
+      await db.insert('orders', { id: 1, customer_id: 101, order_date: '2026-09-20', total_amount: 150.0 });
+      await db.insert('orders', { id: 2, customer_id: 102, order_date: '2026-09-01', total_amount: 320.0 });
+      await db.insert('orders', { id: 3, customer_id: 103, order_date: '2026-07-15', total_amount: 80.0 });
+
+      // Register a mock days_ago function: calculates days between 2026-09-28 and order_date
+      db.registerFunction('days_ago', (dateStr: string) => {
+        if (!dateStr) return null;
+        const now = new Date('2026-09-28T00:00:00Z').getTime();
+        const past = new Date(`${dateStr}T00:00:00Z`).getTime();
+        return Math.floor((now - past) / (1000 * 60 * 60 * 24));
+      });
+
+      // 1. 3-argument smart expression: .where("days_ago(order_date)", "<=", 30)
+      const recentOrders = await db.from('orders')
+        .select(['id', 'customer_id', 'total_amount'])
+        .where('days_ago(order_date)', '<=', 30)
+        .orderBy('total_amount', 'desc')
+        .toArray();
+
+      expect(recentOrders).toEqual([
+        { id: 2, customer_id: 102, total_amount: 320.0 },
+        { id: 1, customer_id: 101, total_amount: 150.0 },
+      ]);
+
+      // 2. 1-argument comparison expression: .where("days_ago(order_date) <= 30")
+      const recentBySingleExpr = await db.from('orders')
+        .select(['id', 'customer_id'])
+        .where('days_ago(order_date) <= 30')
+        .orderBy('id', 'asc')
+        .toArray();
+
+      expect(recentBySingleExpr).toEqual([
+        { id: 1, customer_id: 101 },
+        { id: 2, customer_id: 102 },
+      ]);
+
+      // 3. Using exp() / sql() helper: .where(exp("days_ago(order_date)"), "<=", 30)
+      const recentByExpHelper = await db.from('orders')
+        .select(['id', 'customer_id'])
+        .where(exp('days_ago(order_date)'), '<=', 30)
+        .where(sql('total_amount'), '>', 100)
+        .orderBy('id', 'asc')
+        .toArray();
+
+      expect(recentByExpHelper).toEqual([
+        { id: 1, customer_id: 101 },
+        { id: 2, customer_id: 102 },
+      ]);
+
+      // 4. Using whereRaw: .whereRaw("days_ago(order_date) <= 30")
+      const recentByWhereRaw = await db.from('orders')
+        .select(['id'])
+        .whereRaw('days_ago(order_date) <= 30')
+        .toArray();
+
+      expect(recentByWhereRaw).toEqual([
+        { id: 1 },
+        { id: 2 },
+      ]);
+
+      // 5. Using ExpressionBuilder comparison methods: col.lte(30)
+      const recentByBuilder = await db.from('orders')
+        .select(['id'])
+        .where(fn('days_ago', col('order_date')).lte(30))
+        .toArray();
+
+      expect(recentByBuilder).toEqual([
+        { id: 1 },
+        { id: 2 },
+      ]);
+
+      // 6. Order by expression string directly
+      const byDaysDesc = await db.from('orders')
+        .select(['id'])
+        .orderBy('days_ago(order_date)', 'desc')
+        .toArray();
+
+      expect(byDaysDesc).toEqual([
+        { id: 3 }, // ~75 days ago
+        { id: 2 }, // 27 days ago
+        { id: 1 }, // 8 days ago
+      ]);
+
+      // 7. Order by select alias
+      const byAliasAsc = await db.from('orders')
+        .select(['id', 'days_ago(order_date) as days_since'])
+        .orderBy('days_since', 'asc')
+        .toArray();
+
+      expect(byAliasAsc).toEqual([
+        { id: 1, days_since: 8 },
+        { id: 2, days_since: 27 },
+        { id: 3, days_since: 75 },
+      ]);
+
+      // 8. Order by ExpressionBuilder
+      const byBuilderDesc = await db.from('orders')
+        .select(['id'])
+        .orderBy(fn('days_ago', col('order_date')), 'desc')
+        .toArray();
+
+      expect(byBuilderDesc).toEqual([
+        { id: 3 },
+        { id: 2 },
+        { id: 1 },
+      ]);
+    });
+  });
+
+  describe('Smart GroupBy and Having Support', () => {
+    let db: WebDB;
+
+    beforeEach(async () => {
+      db = await WebDB.open({ name: 'test_qb_groupby_having', storage: 'memory' });
+
+      await db.createTable('employees', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'name', type: 'TEXT' },
+        { name: 'dept', type: 'TEXT' },
+        { name: 'salary', type: 'FLOAT64' },
+        { name: 'join_date', type: 'TEXT' },
+      ]);
+
+      await db.insert('employees', { id: 1, name: 'Alice', dept: 'Engineering', salary: 120000, join_date: '2023-01-15' });
+      await db.insert('employees', { id: 2, name: 'Bob', dept: 'Engineering', salary: 140000, join_date: '2023-03-20' });
+      await db.insert('employees', { id: 3, name: 'Charlie', dept: 'Sales', salary: 90000, join_date: '2023-01-10' });
+      await db.insert('employees', { id: 4, name: 'Diana', dept: 'Sales', salary: 110000, join_date: '2024-05-12' });
+      await db.insert('employees', { id: 5, name: 'Eve', dept: 'Marketing', salary: 80000, join_date: '2024-06-01' });
+    });
+
+    it('filters aggregated groups with having using aggregate function', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'count(*) as headcount', 'sum(salary) as total_salary'])
+        .groupBy('dept')
+        .having('count(*)', '>', 1)
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering', headcount: 2, total_salary: 260000 },
+        { dept: 'Sales', headcount: 2, total_salary: 200000 },
+      ]);
+    });
+
+    it('filters aggregated groups with having using select alias', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'sum(salary) as total_salary'])
+        .groupBy('dept')
+        .having('total_salary', '>=', 250000)
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering', total_salary: 260000 },
+      ]);
+    });
+
+    it('filters aggregated groups using single expression string in having()', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'count(*) as cnt'])
+        .groupBy('dept')
+        .having('count(*) = 1')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Marketing', cnt: 1 },
+      ]);
+    });
+
+    it('supports havingRaw and orHaving', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'sum(salary) as total_salary', 'count(*) as cnt'])
+        .groupBy('dept')
+        .havingRaw('total_salary > 250000')
+        .orHaving('cnt', '=', 1)
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering', total_salary: 260000, cnt: 2 },
+        { dept: 'Marketing', total_salary: 80000, cnt: 1 },
+      ]);
+    });
+
+    it('supports ExpressionBuilder in having()', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'count(*) as cnt'])
+        .groupBy('dept')
+        .having(exp('count(*)').gt(1))
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering', cnt: 2 },
+        { dept: 'Sales', cnt: 2 },
+      ]);
+    });
+
+    it('auto-registers aggregate functions from having when not in select', async () => {
+      const rows = await db.from('employees')
+        .select(['dept'])
+        .groupBy('dept')
+        .having('count(*)', '>', 1)
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering' },
+        { dept: 'Sales' },
+      ]);
+    });
+
+    it('supports groupBy with expressions (e.g. substr)', async () => {
+      const rows = await db.from('employees')
+        .select(['substr(join_date, 1, 4) as join_year', 'count(*) as cnt'])
+        .groupBy('substr(join_date, 1, 4)')
+        .having('cnt', '>=', 2)
+        .orderBy('join_year', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { join_year: '2023', cnt: 3 },
+        { join_year: '2024', cnt: 2 },
+      ]);
+    });
+
+    it('supports groupBy with select alias', async () => {
+      const rows = await db.from('employees')
+        .select(['substr(join_date, 1, 4) as year', 'count(*) as cnt'])
+        .groupBy('year')
+        .having('cnt', '>', 2)
+        .toArray();
+
+      expect(rows).toEqual([
+        { year: '2023', cnt: 3 },
+      ]);
+    });
+
+    it('supports groupBy with ExpressionBuilder', async () => {
+      const rows = await db.from('employees')
+        .select(['substr(join_date, 1, 4) as year', 'count(*) as cnt'])
+        .groupBy(fn('substr', col('join_date'), 1, 4))
+        .having('cnt', '>', 2)
+        .toArray();
+
+      expect(rows).toEqual([
+        { year: '2023', cnt: 3 },
+      ]);
+    });
+
+    it('supports groupBy without aggregates (distinct groups)', async () => {
+      const rows = await db.from('employees')
+        .select(['dept'])
+        .groupBy('dept')
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering' },
+        { dept: 'Marketing' },
+        { dept: 'Sales' },
+      ]);
+    });
+
+    it('supports having filtering on grouping column', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'count(*) as cnt'])
+        .groupBy('dept')
+        .having('dept', '=', 'Marketing')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Marketing', cnt: 1 },
+      ]);
+    });
+
+    it('supports having with callback / subquery grouping', async () => {
+      const rows = await db.from('employees')
+        .select(['dept', 'count(*) as cnt'])
+        .groupBy('dept')
+        .having((q) => {
+          q.having('count(*)', '=', 1).orHaving('dept', '=', 'Engineering');
+        })
+        .orderBy('dept', 'asc')
+        .toArray();
+
+      expect(rows).toEqual([
+        { dept: 'Engineering', cnt: 2 },
+        { dept: 'Marketing', cnt: 1 },
+      ]);
+    });
+
+    it('throws error when having references a column not in groupBy or aggregates', async () => {
+      await expect(
+        db.from('employees')
+          .select(['dept', 'count(*) as cnt'])
+          .groupBy('dept')
+          .having('name', '=', 'Alice')
+          .toArray()
+      ).rejects.toThrow(/Column "name" in HAVING clause must be an aggregate or grouping column/);
     });
   });
 });

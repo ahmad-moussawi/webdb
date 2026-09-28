@@ -52,12 +52,13 @@ import {
   compileQuery,
   QueryFilter,
   SortKey,
+  GroupKey,
   AggExpr,
   QueryPlan,
   disassembleBytecode,
   formatDisassembly,
 } from "../compiler/compiler.ts";
-import { ParsedSelectExpr } from "../compiler/expr_parser.ts";
+import { ParsedSelectExpr, deriveDefaultAlias } from "../compiler/expr_parser.ts";
 import {
   QueryBuilder,
   type ExplainOutput,
@@ -420,8 +421,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options?: {
       orderBy?: SortKey[];
-      groupBy?: string[];
+      groupBy?: (string | GroupKey)[];
       aggregates?: AggExpr[];
+      having?: QueryFilter[];
       select?: any;
       selectExprs?: ParsedSelectExpr[];
       limit?: number;
@@ -435,6 +437,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy: options?.orderBy,
       groupBy: options?.groupBy,
       aggregates: options?.aggregates,
+      having: options?.having,
       selectExprs: options?.selectExprs,
       udfNameMap: this.getUdfMap(),
       udfDefs: this.getUdfDefs(),
@@ -453,6 +456,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         orderBy: options?.orderBy,
         groupBy: options?.groupBy,
         aggregates: options?.aggregates,
+        having: options?.having,
         select: options?.select,
         limit: options?.limit,
         offset: options?.offset,
@@ -489,6 +493,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       orderBy,
       groupBy: options.groupBy,
       aggregates: options.aggregates,
+      having: options.having,
       selectExprs: options.selectExprs,
       udfNameMap: this.getUdfMap(),
       udfDefs: this.getUdfDefs(),
@@ -512,33 +517,44 @@ export class WebDB implements IDatabaseQueryExecutor {
     // Determine output columns for page_deserialize_row
     let outputColumns =
       (bytecode as any).outputColumns ?? plan.outputColumns ?? table.columns;
-    if (plan.aggregates && plan.aggregates.length > 0) {
-      outputColumns = [];
-      const groupByCols = plan.groupBy ?? [];
-      for (const gColName of groupByCols) {
-        const col = table.columns.find((c) => c.name === gColName);
-        if (col) {
-          outputColumns.push(col);
-        } else {
+    if (
+      (plan.aggregates && plan.aggregates.length > 0) ||
+      (plan.groupBy && plan.groupBy.length > 0)
+    ) {
+      if ((bytecode as any).outputColumns) {
+        outputColumns = (bytecode as any).outputColumns;
+      } else {
+        outputColumns = [];
+        const groupByCols = plan.groupBy ?? [];
+        for (const gItem of groupByCols) {
+          const gColName =
+            typeof gItem === 'string'
+              ? gItem
+              : (gItem.colName ?? (gItem.expr ? deriveDefaultAlias(gItem.expr) : 'group_key'));
+          const col = table.columns.find((c) => c.name === gColName);
+          if (col) {
+            outputColumns.push(col);
+          } else {
+            outputColumns.push({
+              name: gColName,
+              type: DataType.TEXT,
+              flags: ColumnFlag.NONE,
+              colOffset: 0,
+            });
+          }
+        }
+        for (let j = 0; j < (plan.aggregates?.length ?? 0); j++) {
+          const agg = plan.aggregates![j];
+          const aggName =
+            agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+          const aggType = agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
           outputColumns.push({
-            name: gColName,
-            type: DataType.TEXT,
+            name: aggName,
+            type: aggType,
             flags: ColumnFlag.NONE,
             colOffset: 0,
           });
         }
-      }
-      for (let j = 0; j < plan.aggregates.length; j++) {
-        const agg = plan.aggregates[j];
-        const aggName =
-          agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
-        const aggType = agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
-        outputColumns.push({
-          name: aggName,
-          type: aggType,
-          flags: ColumnFlag.NONE,
-          colOffset: 0,
-        });
       }
     }
 

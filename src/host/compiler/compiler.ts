@@ -13,6 +13,8 @@ import { VmKeyInfo } from "../../shared/vm_context.js";
 import {
   ExprNode,
   ParsedSelectExpr,
+  parseExpression,
+  deriveDefaultAlias,
 } from "./expr_parser.js";
 
 export type ComparisonOp =
@@ -42,9 +44,15 @@ export interface QueryFilter {
 }
 
 export interface SortKey {
-  colName: string;
+  colName?: string;
+  expr?: ExprNode;
   direction?: "asc" | "desc";
   nullOrder?: "nulls_first" | "nulls_last";
+}
+
+export interface GroupKey {
+  colName?: string;
+  expr?: ExprNode;
 }
 
 export type AggFunc = "count" | "sum" | "avg" | "min" | "max";
@@ -59,8 +67,9 @@ export interface QueryPlan {
   table: TableMeta;
   filters: QueryFilter[];
   orderBy?: SortKey[];
-  groupBy?: string[];
+  groupBy?: (string | GroupKey)[];
   aggregates?: AggExpr[];
+  having?: QueryFilter[];
   selectExprs?: ParsedSelectExpr[];
   udfNameMap?: Map<string, number>;
   udfDefs?: Map<string, { returnType?: DataType }>;
@@ -325,18 +334,16 @@ function emitLeafJumpOnTrue(
     return;
   }
 
-  if (!filter.colName) {
-    throw new Error(`Filter leaf node missing colName`);
-  }
-  const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-  if (colIdx === -1) {
-    throw new Error(
-      `Column "${filter.colName}" not found in table "${table.name}"`,
-    );
-  }
-  const col = table.columns[colIdx];
-
   if (filter.type === "null") {
+    if (!filter.colName) {
+      throw new Error(`Filter leaf node missing colName`);
+    }
+    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
+    if (colIdx === -1) {
+      throw new Error(
+        `Column "${filter.colName}" not found in table "${table.name}"`,
+      );
+    }
     if (filter.isNull) {
       emitter.emitUint8(OpCode.OP_IS_NULL);
     } else {
@@ -350,7 +357,38 @@ function emitLeafJumpOnTrue(
 
   const regCol = leafIdx * 2;
   const regConst = leafIdx * 2 + 1;
-  emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+
+  if (filter.expr) {
+    let tempReg = 50;
+    const allocReg = () => {
+      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+      return tempReg++;
+    };
+    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap);
+  } else {
+    if (!filter.colName) {
+      throw new Error(`Filter leaf node missing colName`);
+    }
+    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
+    if (colIdx !== -1) {
+      const col = table.columns[colIdx];
+      emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+    } else {
+      try {
+        const parsed = parseExpression(filter.colName);
+        let tempReg = 50;
+        const allocReg = () => {
+          if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+          return tempReg++;
+        };
+        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap);
+      } catch {
+        throw new Error(
+          `Column "${filter.colName}" not found in table "${table.name}"`,
+        );
+      }
+    }
+  }
 
   let cmpOpcode = OpCode.OP_EQ;
   if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
@@ -404,18 +442,16 @@ function emitLeafJumpOnFalse(
     return;
   }
 
-  if (!filter.colName) {
-    throw new Error(`Filter leaf node missing colName`);
-  }
-  const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
-  if (colIdx === -1) {
-    throw new Error(
-      `Column "${filter.colName}" not found in table "${table.name}"`,
-    );
-  }
-  const col = table.columns[colIdx];
-
   if (filter.type === "null") {
+    if (!filter.colName) {
+      throw new Error(`Filter leaf node missing colName`);
+    }
+    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
+    if (colIdx === -1) {
+      throw new Error(
+        `Column "${filter.colName}" not found in table "${table.name}"`,
+      );
+    }
     if (filter.isNull) {
       emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
     } else {
@@ -429,7 +465,38 @@ function emitLeafJumpOnFalse(
 
   const regCol = leafIdx * 2;
   const regConst = leafIdx * 2 + 1;
-  emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+
+  if (filter.expr) {
+    let tempReg = 50;
+    const allocReg = () => {
+      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+      return tempReg++;
+    };
+    emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap);
+  } else {
+    if (!filter.colName) {
+      throw new Error(`Filter leaf node missing colName`);
+    }
+    const colIdx = table.columns.findIndex((c) => c.name === filter.colName);
+    if (colIdx !== -1) {
+      const col = table.columns[colIdx];
+      emitReadColumn(emitter, 0, colIdx, regCol, col.type);
+    } else {
+      try {
+        const parsed = parseExpression(filter.colName);
+        let tempReg = 50;
+        const allocReg = () => {
+          if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+          return tempReg++;
+        };
+        emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap);
+      } catch {
+        throw new Error(
+          `Column "${filter.colName}" not found in table "${table.name}"`,
+        );
+      }
+    }
+  }
 
   let cmpOpcode = OpCode.OP_EQ;
   if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
@@ -610,6 +677,446 @@ function compileFilterNode(
   }
 }
 
+function emitHavingLeafJumpOnFalse(
+  filter: QueryFilter,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  falsePatches: number[],
+  udfNameMap?: Map<string, number>,
+): void {
+  if (filter.type === "cmp") {
+    let regLhs: number;
+    const resolved = resolveReg(filter.colName, filter.expr);
+    if (resolved !== undefined) {
+      regLhs = resolved;
+    } else if (filter.expr) {
+      regLhs = allocReg();
+      emitExpression(filter.expr, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else if (filter.colName) {
+      regLhs = allocReg();
+      const parsed = parseExpression(filter.colName);
+      emitExpression(parsed, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else {
+      regLhs = allocReg();
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regLhs);
+    }
+
+    const regConst = allocReg();
+    const val = filter.value;
+    if (val === null || val === undefined) {
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regConst);
+    } else if (typeof val === "number") {
+      if (Number.isInteger(val)) {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regConst);
+        emitter.emitInt32(val);
+      } else {
+        emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
+        emitter.emitUint8(regConst);
+        emitter.emitFloat64(val);
+      }
+    } else if (typeof val === "string") {
+      emitter.emitUint8(OpCode.OP_LOAD_TEXT);
+      emitter.emitUint8(regConst);
+      emitter.emitString(val);
+    } else if (typeof val === "boolean") {
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(regConst);
+      emitter.emitInt32(val ? 1 : 0);
+    } else if (typeof val === "bigint") {
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(regConst);
+      emitter.emitInt32(Number(val));
+    }
+
+    let cmpOpcode = OpCode.OP_EQ;
+    if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
+    else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
+    else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
+    else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
+    else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
+    else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
+    else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
+    else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
+    else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
+    else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
+    else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+
+    emitter.emitUint8(cmpOpcode);
+    emitter.emitUint8(regLhs);
+    emitter.emitUint8(regConst);
+    const passPatch = emitter.emitUint16(0);
+
+    emitter.emitUint8(OpCode.OP_JUMP);
+    falsePatches.push(emitter.emitUint16(0));
+
+    emitter.patchUint16(passPatch, emitter.currentOffset());
+    return;
+  }
+
+  if (filter.type === "null") {
+    let regLhs: number;
+    const resolved = resolveReg(filter.colName, filter.expr);
+    if (resolved !== undefined) {
+      regLhs = resolved;
+    } else if (filter.expr) {
+      regLhs = allocReg();
+      emitExpression(filter.expr, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else if (filter.colName) {
+      regLhs = allocReg();
+      const parsed = parseExpression(filter.colName);
+      emitExpression(parsed, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else {
+      regLhs = allocReg();
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regLhs);
+    }
+
+    if (filter.isNull) {
+      emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
+      emitter.emitUint8(regLhs);
+      falsePatches.push(emitter.emitUint16(0));
+    } else {
+      emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+      emitter.emitUint8(regLhs);
+      falsePatches.push(emitter.emitUint16(0));
+    }
+    return;
+  }
+
+  if (filter.type === "expr" && filter.expr) {
+    const regRes = allocReg();
+    emitExpression(filter.expr, table, emitter, -1, regRes, allocReg, udfNameMap, resolveReg);
+
+    const regOne = allocReg();
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(regOne);
+    emitter.emitInt32(1);
+
+    emitter.emitUint8(OpCode.OP_EQ);
+    emitter.emitUint8(regRes);
+    emitter.emitUint8(regOne);
+    const passPatch = emitter.emitUint16(0);
+
+    emitter.emitUint8(OpCode.OP_JUMP);
+    falsePatches.push(emitter.emitUint16(0));
+
+    emitter.patchUint16(passPatch, emitter.currentOffset());
+    return;
+  }
+}
+
+function emitHavingLeafJumpOnTrue(
+  filter: QueryFilter,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  truePatches: number[],
+  udfNameMap?: Map<string, number>,
+): void {
+  if (filter.type === "cmp") {
+    let regLhs: number;
+    const resolved = resolveReg(filter.colName, filter.expr);
+    if (resolved !== undefined) {
+      regLhs = resolved;
+    } else if (filter.expr) {
+      regLhs = allocReg();
+      emitExpression(filter.expr, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else if (filter.colName) {
+      regLhs = allocReg();
+      const parsed = parseExpression(filter.colName);
+      emitExpression(parsed, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else {
+      regLhs = allocReg();
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regLhs);
+    }
+
+    const regConst = allocReg();
+    const val = filter.value;
+    if (val === null || val === undefined) {
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regConst);
+    } else if (typeof val === "number") {
+      if (Number.isInteger(val)) {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regConst);
+        emitter.emitInt32(val);
+      } else {
+        emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
+        emitter.emitUint8(regConst);
+        emitter.emitFloat64(val);
+      }
+    } else if (typeof val === "string") {
+      emitter.emitUint8(OpCode.OP_LOAD_TEXT);
+      emitter.emitUint8(regConst);
+      emitter.emitString(val);
+    } else if (typeof val === "boolean") {
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(regConst);
+      emitter.emitInt32(val ? 1 : 0);
+    } else if (typeof val === "bigint") {
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(regConst);
+      emitter.emitInt32(Number(val));
+    }
+
+    let cmpOpcode = OpCode.OP_EQ;
+    if (filter.op === "=") cmpOpcode = OpCode.OP_EQ;
+    else if (filter.op === "!=") cmpOpcode = OpCode.OP_NE;
+    else if (filter.op === ">") cmpOpcode = OpCode.OP_GT;
+    else if (filter.op === ">=") cmpOpcode = OpCode.OP_GE;
+    else if (filter.op === "<") cmpOpcode = OpCode.OP_LT;
+    else if (filter.op === "<=") cmpOpcode = OpCode.OP_LE;
+    else if (filter.op === "LIKE") cmpOpcode = OpCode.OP_STR_LIKE;
+    else if (filter.op === "NOT LIKE") cmpOpcode = OpCode.OP_STR_NOT_LIKE;
+    else if (filter.op === "CONTAINS") cmpOpcode = OpCode.OP_STR_CONTAINS;
+    else if (filter.op === "STARTS_WITH") cmpOpcode = OpCode.OP_STR_STARTS_WITH;
+    else if (filter.op === "ENDS_WITH") cmpOpcode = OpCode.OP_STR_ENDS_WITH;
+
+    emitter.emitUint8(cmpOpcode);
+    emitter.emitUint8(regLhs);
+    emitter.emitUint8(regConst);
+    truePatches.push(emitter.emitUint16(0));
+    return;
+  }
+
+  if (filter.type === "null") {
+    let regLhs: number;
+    const resolved = resolveReg(filter.colName, filter.expr);
+    if (resolved !== undefined) {
+      regLhs = resolved;
+    } else if (filter.expr) {
+      regLhs = allocReg();
+      emitExpression(filter.expr, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else if (filter.colName) {
+      regLhs = allocReg();
+      const parsed = parseExpression(filter.colName);
+      emitExpression(parsed, table, emitter, -1, regLhs, allocReg, udfNameMap, resolveReg);
+    } else {
+      regLhs = allocReg();
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(regLhs);
+    }
+
+    if (filter.isNull) {
+      emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+      emitter.emitUint8(regLhs);
+      truePatches.push(emitter.emitUint16(0));
+    } else {
+      emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
+      emitter.emitUint8(regLhs);
+      truePatches.push(emitter.emitUint16(0));
+    }
+    return;
+  }
+
+  if (filter.type === "expr" && filter.expr) {
+    const regRes = allocReg();
+    emitExpression(filter.expr, table, emitter, -1, regRes, allocReg, udfNameMap, resolveReg);
+
+    const regOne = allocReg();
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(regOne);
+    emitter.emitInt32(1);
+
+    emitter.emitUint8(OpCode.OP_EQ);
+    emitter.emitUint8(regRes);
+    emitter.emitUint8(regOne);
+    truePatches.push(emitter.emitUint16(0));
+    return;
+  }
+}
+
+function emitHavingLeafCondition(
+  filter: QueryFilter,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  truePatches: number[],
+  falsePatches: number[],
+  fallthrough: "true" | "false" | "none",
+  udfNameMap?: Map<string, number>,
+): void {
+  if (fallthrough === "true") {
+    emitHavingLeafJumpOnFalse(filter, table, emitter, resolveReg, allocReg, falsePatches, udfNameMap);
+  } else if (fallthrough === "false") {
+    emitHavingLeafJumpOnTrue(filter, table, emitter, resolveReg, allocReg, truePatches, udfNameMap);
+  } else {
+    emitHavingLeafJumpOnTrue(filter, table, emitter, resolveReg, allocReg, truePatches, udfNameMap);
+    emitter.emitUint8(OpCode.OP_JUMP);
+    falsePatches.push(emitter.emitUint16(0));
+  }
+}
+
+function compileHavingFilterNode(
+  node: QueryFilter,
+  emitter: BytecodeEmitter,
+  table: TableMeta,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  truePatches: number[],
+  falsePatches: number[],
+  fallthrough: "true" | "false" | "none",
+  udfNameMap?: Map<string, number>,
+): void {
+  if (node.type === "cmp" || node.type === "null" || node.type === "expr") {
+    emitHavingLeafCondition(
+      node,
+      table,
+      emitter,
+      resolveReg,
+      allocReg,
+      truePatches,
+      falsePatches,
+      fallthrough,
+      udfNameMap,
+    );
+    return;
+  }
+
+  if (node.type === "not") {
+    if (!node.child) return;
+    const leaf = node.child;
+    if (fallthrough === "true") {
+      compileHavingFilterNode(leaf, emitter, table, resolveReg, allocReg, falsePatches, truePatches, "false", udfNameMap);
+    } else if (fallthrough === "false") {
+      compileHavingFilterNode(leaf, emitter, table, resolveReg, allocReg, truePatches, falsePatches, "true", udfNameMap);
+    } else {
+      compileHavingFilterNode(leaf, emitter, table, resolveReg, allocReg, falsePatches, truePatches, "none", udfNameMap);
+    }
+    return;
+  }
+
+  if (node.type === "and") {
+    const children = node.children ?? [];
+    if (children.length === 0) {
+      if (fallthrough === "false") {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        truePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const isLast = i === children.length - 1;
+      if (!isLast) {
+        const subTruePatches: number[] = [];
+        compileHavingFilterNode(
+          child,
+          emitter,
+          table,
+          resolveReg,
+          allocReg,
+          subTruePatches,
+          falsePatches,
+          "true",
+          udfNameMap,
+        );
+        const nextChildPos = emitter.currentOffset();
+        for (const patch of subTruePatches) {
+          emitter.patchUint16(patch, nextChildPos);
+        }
+      } else {
+        compileHavingFilterNode(
+          child,
+          emitter,
+          table,
+          resolveReg,
+          allocReg,
+          truePatches,
+          falsePatches,
+          fallthrough,
+          udfNameMap,
+        );
+      }
+    }
+    return;
+  }
+
+  if (node.type === "or") {
+    const children = node.children ?? [];
+    if (children.length === 0) {
+      if (fallthrough === "true") {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        falsePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const isLast = i === children.length - 1;
+      if (!isLast) {
+        const subFalsePatches: number[] = [];
+        compileHavingFilterNode(
+          child,
+          emitter,
+          table,
+          resolveReg,
+          allocReg,
+          truePatches,
+          subFalsePatches,
+          "false",
+          udfNameMap,
+        );
+        const nextChildPos = emitter.currentOffset();
+        for (const patch of subFalsePatches) {
+          emitter.patchUint16(patch, nextChildPos);
+        }
+      } else {
+        compileHavingFilterNode(
+          child,
+          emitter,
+          table,
+          resolveReg,
+          allocReg,
+          truePatches,
+          falsePatches,
+          fallthrough,
+          udfNameMap,
+        );
+      }
+    }
+    return;
+  }
+}
+
+function emitHavingTree(
+  root: QueryFilter | null,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  failPatches: number[],
+  udfNameMap?: Map<string, number>,
+): void {
+  if (!root) return;
+  const truePatches: number[] = [];
+  compileHavingFilterNode(
+    root,
+    emitter,
+    table,
+    resolveReg,
+    allocReg,
+    truePatches,
+    failPatches,
+    "true",
+    udfNameMap,
+  );
+  const passPos = emitter.currentOffset();
+  for (const patch of truePatches) {
+    emitter.patchUint16(patch, passPos);
+  }
+}
+
 function emitFilterTree(
   root: QueryFilter | null,
   table: TableMeta,
@@ -685,7 +1192,21 @@ export function emitExpression(
   targetReg: number,
   allocReg: () => number,
   udfNameMap?: Map<string, number>,
+  resolveReg?: (name?: string, expr?: ExprNode) => number | undefined,
 ): void {
+  if (resolveReg) {
+    const colName = expr.type === 'col' ? expr.name : undefined;
+    const resolved = resolveReg(colName, expr);
+    if (resolved !== undefined) {
+      if (resolved !== targetReg) {
+        emitter.emitUint8(OpCode.OP_COPY);
+        emitter.emitUint8(resolved);
+        emitter.emitUint8(targetReg);
+      }
+      return;
+    }
+  }
+
   if (expr.type === 'literal') {
     const val = expr.value;
     if (val === null || val === undefined) {
@@ -714,6 +1235,9 @@ export function emitExpression(
   }
 
   if (expr.type === 'col') {
+    if (cursor === -1) {
+      throw new Error(`Column "${expr.name}" in HAVING clause must be an aggregate or grouping column`);
+    }
     const colIdx = table.columns.findIndex((c) => c.name === expr.name);
     if (colIdx === -1) {
       if (expr.name === '*') {
@@ -731,8 +1255,8 @@ export function emitExpression(
   if (expr.type === 'binary') {
     const regLeft = allocReg();
     const regRight = allocReg();
-    emitExpression(expr.left, table, emitter, cursor, regLeft, allocReg, udfNameMap);
-    emitExpression(expr.right, table, emitter, cursor, regRight, allocReg, udfNameMap);
+    emitExpression(expr.left, table, emitter, cursor, regLeft, allocReg, udfNameMap, resolveReg);
+    emitExpression(expr.right, table, emitter, cursor, regRight, allocReg, udfNameMap, resolveReg);
 
     let opCode = OpCode.OP_ADD;
     if (expr.op === '+') opCode = OpCode.OP_ADD;
@@ -740,6 +1264,43 @@ export function emitExpression(
     else if (expr.op === '*') opCode = OpCode.OP_MUL;
     else if (expr.op === '/') opCode = OpCode.OP_DIV;
     else if (expr.op === '%') opCode = OpCode.OP_MOD;
+    else if (
+      expr.op === '=' ||
+      expr.op === '!=' ||
+      expr.op === '<' ||
+      expr.op === '<=' ||
+      expr.op === '>' ||
+      expr.op === '>='
+    ) {
+      let cmpOp = OpCode.OP_EQ;
+      if (expr.op === '=') cmpOp = OpCode.OP_EQ;
+      else if (expr.op === '!=') cmpOp = OpCode.OP_NE;
+      else if (expr.op === '<') cmpOp = OpCode.OP_LT;
+      else if (expr.op === '<=') cmpOp = OpCode.OP_LE;
+      else if (expr.op === '>') cmpOp = OpCode.OP_GT;
+      else if (expr.op === '>=') cmpOp = OpCode.OP_GE;
+
+      emitter.emitUint8(cmpOp);
+      emitter.emitUint8(regLeft);
+      emitter.emitUint8(regRight);
+      const truePatch = emitter.emitUint16(0);
+
+      // False branch: targetReg = 0
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(targetReg);
+      emitter.emitInt32(0);
+      emitter.emitUint8(OpCode.OP_JUMP);
+      const donePatch = emitter.emitUint16(0);
+
+      // True branch: targetReg = 1
+      emitter.patchUint16(truePatch, emitter.currentOffset());
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(targetReg);
+      emitter.emitInt32(1);
+
+      emitter.patchUint16(donePatch, emitter.currentOffset());
+      return;
+    }
 
     emitter.emitUint8(opCode);
     emitter.emitUint8(regLeft);
@@ -765,7 +1326,7 @@ export function emitExpression(
     if (unaryOps[fnName]) {
       const srcReg = allocReg();
       const arg = expr.args[0] ?? { type: 'literal', value: null };
-      emitExpression(arg, table, emitter, cursor, srcReg, allocReg, udfNameMap);
+      emitExpression(arg, table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg);
       emitter.emitUint8(unaryOps[fnName]);
       emitter.emitUint8(srcReg);
       emitter.emitUint8(targetReg);
@@ -776,10 +1337,10 @@ export function emitExpression(
       const srcReg = allocReg();
       const startReg = allocReg();
       const lenReg = allocReg();
-      emitExpression(expr.args[0], table, emitter, cursor, srcReg, allocReg, udfNameMap);
-      emitExpression(expr.args[1] ?? { type: 'literal', value: 1 }, table, emitter, cursor, startReg, allocReg, udfNameMap);
+      emitExpression(expr.args[0], table, emitter, cursor, srcReg, allocReg, udfNameMap, resolveReg);
+      emitExpression(expr.args[1] ?? { type: 'literal', value: 1 }, table, emitter, cursor, startReg, allocReg, udfNameMap, resolveReg);
       if (expr.args[2] !== undefined) {
-        emitExpression(expr.args[2], table, emitter, cursor, lenReg, allocReg, udfNameMap);
+        emitExpression(expr.args[2], table, emitter, cursor, lenReg, allocReg, udfNameMap, resolveReg);
       } else {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
         emitter.emitUint8(lenReg);
@@ -799,7 +1360,7 @@ export function emitExpression(
         allocReg();
       }
       for (let i = 0; i < numArgs; i++) {
-        emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap);
+        emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg);
       }
       const op = fnName === 'concat' ? OpCode.OP_STR_CONCAT : OpCode.OP_COALESCE;
       emitter.emitUint8(op);
@@ -819,7 +1380,7 @@ export function emitExpression(
           allocReg();
         }
         for (let i = 0; i < numArgs; i++) {
-          emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap);
+          emitExpression(expr.args[i], table, emitter, cursor, startReg + i, allocReg, udfNameMap, resolveReg);
         }
       }
       emitter.emitUint8(OpCode.OP_CALL_UDF);
@@ -887,8 +1448,14 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
         emitter.emitUint8(regConst);
       } else if (typeof val === "number") {
-        const col = table.columns.find((c) => c.name === filter.colName);
+        const col = filter.colName
+          ? table.columns.find((c) => c.name === filter.colName)
+          : undefined;
         if (col && col.type === DataType.FLOAT64) {
+          emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
+          emitter.emitUint8(regConst);
+          emitter.emitFloat64(val);
+        } else if (!Number.isInteger(val)) {
           emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
           emitter.emitUint8(regConst);
           emitter.emitFloat64(val);
@@ -905,6 +1472,10 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         emitter.emitUint8(OpCode.OP_LOAD_TEXT);
         emitter.emitUint8(regConst);
         emitter.emitString(val);
+      } else if (typeof val === "boolean") {
+        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(regConst);
+        emitter.emitInt32(val ? 1 : 0);
       }
     }
   }
@@ -922,27 +1493,53 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   }
 
   // Case 1: In-Arena Hash Aggregation (GROUP BY / Aggregates)
-  if (plan.aggregates && plan.aggregates.length > 0) {
+  if (
+    (plan.aggregates && plan.aggregates.length > 0) ||
+    (plan.groupBy && plan.groupBy.length > 0)
+  ) {
     const G = plan.groupBy?.length ?? 0;
-    const A = plan.aggregates.length;
+    const aggregates = plan.aggregates ?? [];
+    const A = aggregates.length;
 
     // Determine output columns
     const outputColumns: ColumnMeta[] = [];
-    for (const gColName of plan.groupBy ?? []) {
-      const col = table.columns.find((c) => c.name === gColName);
+    for (const gItem of plan.groupBy ?? []) {
+      const gColName =
+        typeof gItem === 'string'
+          ? gItem
+          : (gItem.colName ?? (gItem.expr ? deriveDefaultAlias(gItem.expr) : 'group_key'));
+
+      const matchingSelect = plan.selectExprs?.find((s) => {
+        if (s.alias === gColName) return true;
+        if (typeof gItem === 'object' && gItem.expr) {
+          return JSON.stringify(s.expr) === JSON.stringify(gItem.expr);
+        }
+        if (typeof gItem === 'string' && gItem.includes('(')) {
+          try {
+            const parsed = parseExpression(gItem);
+            return JSON.stringify(s.expr) === JSON.stringify(parsed);
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      });
+
+      const finalColName = matchingSelect?.alias ?? gColName;
+      const col = table.columns.find((c) => c.name === gColName || c.name === finalColName);
       if (col) {
-        outputColumns.push(col);
+        outputColumns.push({ ...col, name: finalColName });
       } else {
         outputColumns.push({
-          name: gColName,
+          name: finalColName,
           type: DataType.TEXT,
           flags: ColumnFlag.NONE,
           colOffset: 0,
         });
       }
     }
-    for (let j = 0; j < plan.aggregates.length; j++) {
-      const agg = plan.aggregates[j];
+    for (let j = 0; j < aggregates.length; j++) {
+      const agg = aggregates[j];
       const aggName =
         agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
       const aggType = agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
@@ -993,28 +1590,61 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     // Extract group keys into registers
     if (plan.groupBy) {
       for (let k = 0; k < plan.groupBy.length; k++) {
-        const colName = plan.groupBy[k];
-        const colIdx = table.columns.findIndex((c) => c.name === colName);
-        if (colIdx === -1) {
-          throw new Error(
-            `Grouping column "${colName}" not found in table "${table.name}"`,
-          );
+        const gItem = plan.groupBy[k];
+        const targetReg = groupKeyStartReg + k;
+        let tempReg = Math.max(totalRegs + 4, 40);
+        const allocReg = () => {
+          if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+          return tempReg++;
+        };
+
+        if (typeof gItem === 'object' && gItem.expr) {
+          emitExpression(gItem.expr, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+        } else {
+          const colName = typeof gItem === 'string' ? gItem : gItem.colName!;
+          const aliasExpr = plan.selectExprs?.find((s) => s.alias === colName)?.expr;
+          if (aliasExpr) {
+            emitExpression(aliasExpr, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+          } else {
+            const colIdx = table.columns.findIndex((c) => c.name === colName);
+            if (colIdx !== -1) {
+              const col = table.columns[colIdx];
+              emitReadColumn(emitter, 0, colIdx, targetReg, col.type);
+            } else {
+              try {
+                const parsed = parseExpression(colName);
+                emitExpression(parsed, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+              } catch {
+                throw new Error(
+                  `Grouping column "${colName}" not found in table "${table.name}"`,
+                );
+              }
+            }
+          }
         }
-        const col = table.columns[colIdx];
-        emitReadColumn(emitter, 0, colIdx, groupKeyStartReg + k, col.type);
       }
     }
 
+    // If grouping without any aggregate functions, perform a COUNT step to register the group keys in the hash table
+    if (A === 0 && G > 0) {
+      emitter.emitUint8(OpCode.OP_AGG_STEP);
+      emitter.emitUint8(0);
+      emitter.emitUint8(groupKeyStartReg);
+      emitter.emitUint8(G);
+      emitter.emitUint8(255);
+      emitter.emitUint8(0);
+    }
+
     // Identify unique aggregate operations to step
-    const hasCount = plan.aggregates.some((a) => a.func === "count");
-    const hasAvg = plan.aggregates.some((a) => a.func === "avg");
-    const hasSum = plan.aggregates.some((a) => a.func === "sum");
-    const hasMin = plan.aggregates.some((a) => a.func === "min");
-    const hasMax = plan.aggregates.some((a) => a.func === "max");
+    const hasCount = aggregates.some((a) => a.func === "count");
+    const hasAvg = aggregates.some((a) => a.func === "avg");
+    const hasSum = aggregates.some((a) => a.func === "sum");
+    const hasMin = aggregates.some((a) => a.func === "min");
+    const hasMax = aggregates.some((a) => a.func === "max");
 
     // 1. COUNT step (funcId 0)
-    if (hasCount || hasAvg) {
-      const countAgg = plan.aggregates.find((a) => a.func === "count");
+    if (hasCount || hasAvg || hasSum) {
+      const countAgg = aggregates.find((a) => a.func === "count");
       let valReg = 255;
       if (countAgg && countAgg.colName && countAgg.colName !== "*") {
         const colIdx = table.columns.findIndex(
@@ -1036,7 +1666,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     // 2. SUM step (funcId 1) - used for SUM and AVG
     if (hasSum || hasAvg) {
-      const sumAgg = plan.aggregates.find(
+      const sumAgg = aggregates.find(
         (a) => a.func === "sum" || a.func === "avg",
       );
       let valReg = 255;
@@ -1060,7 +1690,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     // 3. MIN step (funcId 3)
     if (hasMin) {
-      const minAgg = plan.aggregates.find((a) => a.func === "min");
+      const minAgg = aggregates.find((a) => a.func === "min");
       let valReg = 255;
       if (minAgg && minAgg.colName && minAgg.colName !== "*") {
         const colIdx = table.columns.findIndex(
@@ -1082,7 +1712,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     // 4. MAX step (funcId 4)
     if (hasMax) {
-      const maxAgg = plan.aggregates.find((a) => a.func === "max");
+      const maxAgg = aggregates.find((a) => a.func === "max");
       let valReg = 255;
       if (maxAgg && maxAgg.colName && maxAgg.colName !== "*") {
         const colIdx = table.columns.findIndex(
@@ -1139,8 +1769,8 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     emitter.patchUint16(processGroupPatch, processGroupPos);
 
     // Finalize each aggregate
-    for (let j = 0; j < plan.aggregates.length; j++) {
-      const agg = plan.aggregates[j];
+    for (let j = 0; j < aggregates.length; j++) {
+      const agg = aggregates[j];
       const outReg = finalAggStartReg + j;
       let sumReg = outAccReg;
       let funcId = 0;
@@ -1166,6 +1796,121 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       emitter.emitUint8(outAccReg + 1); // countReg
       emitter.emitUint8(outReg);
       emitter.emitUint8(funcId);
+    }
+
+    // Symbol/register resolver for HAVING evaluation
+    const resolveReg = (name?: string, expr?: ExprNode): number | undefined => {
+      // 1. Check aggregates
+      for (let j = 0; j < aggregates.length; j++) {
+        const agg = aggregates[j];
+        const aggReg = finalAggStartReg + j;
+
+        if (name) {
+          if (agg.alias && agg.alias === name) return aggReg;
+          const defaultName = agg.colName ? `${agg.func}_${agg.colName}` : agg.func;
+          if (defaultName === name) return aggReg;
+          const sig = `${agg.func}(${agg.colName ?? '*'})`;
+          if (sig === name.replace(/\s+/g, '')) return aggReg;
+          if (agg.func === name) return aggReg;
+        }
+
+        if (expr && expr.type === 'fn') {
+          const fnName = expr.name.toLowerCase();
+          if (agg.func === fnName) {
+            if (fnName === 'count') {
+              const arg0 = expr.args[0];
+              const argCol = arg0 && arg0.type === 'col' ? arg0.name : undefined;
+              if (
+                agg.colName === undefined ||
+                agg.colName === '*' ||
+                agg.colName === argCol
+              ) {
+                return aggReg;
+              }
+            } else {
+              const arg0 = expr.args[0];
+              const argCol = arg0 && arg0.type === 'col' ? arg0.name : undefined;
+              if (agg.colName === argCol) {
+                return aggReg;
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Check group keys
+      if (plan.groupBy) {
+        for (let k = 0; k < plan.groupBy.length; k++) {
+          const gItem = plan.groupBy[k];
+          const gReg = outGroupKeyReg + k;
+          const gColName = typeof gItem === 'string' ? gItem : gItem.colName;
+          const gExpr = typeof gItem === 'object' ? gItem.expr : undefined;
+
+          if (name) {
+            if (gColName === name) return gReg;
+            if (gExpr && deriveDefaultAlias(gExpr) === name) return gReg;
+            const selectAlias = plan.selectExprs?.find((s) => s.alias === name);
+            if (selectAlias) {
+              if (gColName === selectAlias.alias) return gReg;
+              if (gExpr && JSON.stringify(gExpr) === JSON.stringify(selectAlias.expr)) return gReg;
+              if (typeof gItem === 'string' && gItem.includes('(')) {
+                try {
+                  const parsed = parseExpression(gItem);
+                  if (JSON.stringify(parsed) === JSON.stringify(selectAlias.expr)) return gReg;
+                } catch {}
+              }
+            }
+          }
+
+          if (expr) {
+            if (gExpr && JSON.stringify(gExpr) === JSON.stringify(expr)) {
+              return gReg;
+            }
+            if (expr.type === 'col' && gColName === expr.name) {
+              return gReg;
+            }
+            if (typeof gItem === 'string' && gItem.includes('(')) {
+              try {
+                const parsed = parseExpression(gItem);
+                if (JSON.stringify(parsed) === JSON.stringify(expr)) return gReg;
+              } catch {}
+            }
+          }
+        }
+      }
+
+      return undefined;
+    };
+
+    // Evaluate HAVING clause if present
+    if (plan.having && plan.having.length > 0) {
+      let rootHaving: QueryFilter | null = null;
+      if (plan.having.length === 1) {
+        rootHaving = plan.having[0];
+      } else {
+        rootHaving = { type: 'and', children: plan.having };
+      }
+
+      const failPatches: number[] = [];
+      let tempHavingReg = Math.max(totalRegs + 4, 40);
+      const allocHavingReg = () => {
+        if (tempHavingReg >= 64) throw new TooManyRegistersError(tempHavingReg);
+        return tempHavingReg++;
+      };
+
+      emitHavingTree(
+        rootHaving,
+        table,
+        emitter,
+        resolveReg,
+        allocHavingReg,
+        failPatches,
+        plan.udfNameMap,
+      );
+
+      for (const patch of failPatches) {
+        emitter.patchUint16(patch, aggEmitLoopPos);
+      }
     }
 
     if (hasOffset) {
@@ -1245,15 +1990,41 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     // Extract sort keys into registers
     for (let k = 0; k < K; k++) {
-      const colName = plan.orderBy[k].colName;
-      const colIdx = table.columns.findIndex((c) => c.name === colName);
-      if (colIdx === -1) {
-        throw new Error(
-          `Order by column "${colName}" not found in table "${table.name}"`,
-        );
+      const sortKey = plan.orderBy[k];
+      const targetReg = sortKeyStartReg + k;
+      let tempReg = 50;
+      const allocReg = () => {
+        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+        return tempReg++;
+      };
+
+      if (sortKey.expr) {
+        emitExpression(sortKey.expr, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+      } else if (sortKey.colName) {
+        const colName = sortKey.colName;
+        // 1. Check if colName matches a select alias
+        const aliasExpr = plan.selectExprs?.find((s) => s.alias === colName)?.expr;
+        if (aliasExpr) {
+          emitExpression(aliasExpr, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+        } else {
+          // 2. Check if colName is a physical table column
+          const colIdx = table.columns.findIndex((c) => c.name === colName);
+          if (colIdx !== -1) {
+            const col = table.columns[colIdx];
+            emitReadColumn(emitter, 0, colIdx, targetReg, col.type);
+          } else {
+            // 3. Fallback: parse as expression
+            try {
+              const parsed = parseExpression(colName);
+              emitExpression(parsed, table, emitter, 0, targetReg, allocReg, plan.udfNameMap);
+            } catch {
+              throw new Error(
+                `Order by column "${colName}" not found in table "${table.name}"`,
+              );
+            }
+          }
+        }
       }
-      const col = table.columns[colIdx];
-      emitReadColumn(emitter, 0, colIdx, sortKeyStartReg + k, col.type);
     }
 
     // Insert into sorter
@@ -1981,6 +2752,20 @@ export function disassembleBytecode(
         break;
       }
 
+      case OpCode.OP_COPY: {
+        const srcReg = bytecode[pc++];
+        const destReg = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: "OP_COPY",
+          p1: `r[${srcReg}]`,
+          p2: `r[${destReg}]`,
+          p3: "",
+          comment: `Copy r[${srcReg}] to r[${destReg}]`,
+        });
+        break;
+      }
+
       case OpCode.OP_SORTER_OPEN: {
         const sorterId = bytecode[pc++];
         const keyInfoIdx = bytecode[pc++];
@@ -2103,6 +2888,36 @@ export function disassembleBytecode(
           p2: `r[${outReg}]`,
           p3: funcNames[funcId] ?? `${funcId}`,
           comment: `Finalize ${funcNames[funcId] ?? funcId} into r[${outReg}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_REG_IS_NULL: {
+        const reg = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_REG_IS_NULL",
+          p1: `r[${reg}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: "",
+          comment: `Jump to ${fmtAddr(jumpTarget)} if r[${reg}] is NULL`,
+        });
+        break;
+      }
+
+      case OpCode.OP_REG_IS_NOT_NULL: {
+        const reg = bytecode[pc++];
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_REG_IS_NOT_NULL",
+          p1: `r[${reg}]`,
+          p2: fmtAddr(jumpTarget),
+          p3: "",
+          comment: `Jump to ${fmtAddr(jumpTarget)} if r[${reg}] is NOT NULL`,
         });
         break;
       }

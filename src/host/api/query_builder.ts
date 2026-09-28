@@ -6,6 +6,7 @@ import {
   ComparisonOp,
   QueryFilter,
   SortKey,
+  GroupKey,
   AggExpr,
   AggFunc,
   DisassembledInstruction,
@@ -57,6 +58,65 @@ export type SelectItem =
   | Record<string, string>
   | ExpressionBuilder
   | ParsedSelectExpr;
+
+export function parseFilterTarget(
+  target: string | ExprNode | ExpressionBuilder,
+): { colName?: string; expr?: ExprNode } {
+  if (
+    target instanceof ExpressionBuilder ||
+    (typeof target === 'object' && target !== null && 'node' in target)
+  ) {
+    return { expr: (target as any).node };
+  }
+  if (typeof target === 'object' && target !== null && 'type' in target) {
+    return { expr: target as ExprNode };
+  }
+  if (typeof target === 'string') {
+    const trimmed = target.trim();
+    if (
+      trimmed.includes('(') ||
+      trimmed.includes('+') ||
+      trimmed.includes('-') ||
+      trimmed.includes('*') ||
+      trimmed.includes('/') ||
+      trimmed.includes('%')
+    ) {
+      return { expr: parseExpression(trimmed), colName: trimmed };
+    }
+    return { colName: trimmed };
+  }
+  return {};
+}
+
+export type GroupByItem = string | ExprNode | ExpressionBuilder;
+
+export function extractAggregatesFromExpr(expr: ExprNode): AggExpr[] {
+  const aggs: AggExpr[] = [];
+  function walk(node: ExprNode) {
+    if (node.type === 'fn') {
+      const fnName = node.name.toLowerCase();
+      if (isAggregateFunction(fnName)) {
+        const arg0 = node.args[0];
+        const colName =
+          arg0 && arg0.type === 'col' && arg0.name !== '*'
+            ? arg0.name
+            : undefined;
+        aggs.push({
+          func: fnName as AggFunc,
+          colName,
+        });
+      }
+      for (const arg of node.args) {
+        walk(arg);
+      }
+    } else if (node.type === 'binary') {
+      walk(node.left);
+      walk(node.right);
+    }
+  }
+  walk(expr);
+  return aggs;
+}
 
 export function normalizeSelectItem(item: any): NormalizedSelectField[] {
   if (!item) return [];
@@ -162,8 +222,9 @@ export interface ExplainOutput {
     scanType: 'TableScan';
     filters: QueryFilter[];
     orderBy?: SortKey[];
-    groupBy?: string[];
+    groupBy?: (string | GroupKey)[];
     aggregates?: AggExpr[];
+    having?: QueryFilter[];
     select?: NormalizedSelectField[];
     limit?: number;
     offset?: number;
@@ -179,8 +240,9 @@ export interface QueryExecutionOptions {
   sortCol: string | null;
   sortDir: 'asc' | 'desc';
   orderBy?: SortKey[];
-  groupBy?: string[];
+  groupBy?: (string | GroupKey)[];
   aggregates?: AggExpr[];
+  having?: QueryFilter[];
   select?: NormalizedSelectField[];
   selectExprs?: ParsedSelectExpr[];
 }
@@ -191,8 +253,9 @@ export interface IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options?: {
       orderBy?: SortKey[];
-      groupBy?: string[];
+      groupBy?: (string | GroupKey)[];
       aggregates?: AggExpr[];
+      having?: QueryFilter[];
       select?: NormalizedSelectField[];
       selectExprs?: ParsedSelectExpr[];
       limit?: number;
@@ -247,7 +310,9 @@ export class QueryBuilder {
   private sortDir: 'asc' | 'desc' = 'asc';
   private orderKeys: SortKey[] = [];
   private groupCols: string[] = [];
+  private groupKeys: GroupKey[] = [];
   private aggExprs: AggExpr[] = [];
+  private havingFilters: QueryFilter[] = [];
 
   constructor(db: IDatabaseQueryExecutor, tableName: string) {
     this.db = db;
@@ -256,7 +321,11 @@ export class QueryBuilder {
 
   where(exprSql: string): this;
   where(expr: ExprNode | ExpressionBuilder): this;
-  where(colName: string, op: ComparisonOp, value: any): this;
+  where(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
   where(callback: (qb: QueryBuilder) => void): this;
   where(
     colOrCbOrExpr:
@@ -301,9 +370,11 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      const target = parseFilterTarget(colOrCbOrExpr);
       this.filters.push({
         type: 'cmp',
-        colName: colOrCbOrExpr as string,
+        colName: target.colName,
+        expr: target.expr,
         op: op!,
         value,
       });
@@ -313,7 +384,11 @@ export class QueryBuilder {
 
   orWhere(exprSql: string): this;
   orWhere(expr: ExprNode | ExpressionBuilder): this;
-  orWhere(colName: string, op: ComparisonOp, value: any): this;
+  orWhere(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
   orWhere(callback: (qb: QueryBuilder) => void): this;
   orWhere(
     colOrCbOrExpr:
@@ -358,9 +433,11 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      const target = parseFilterTarget(colOrCbOrExpr);
       this.addOrFilter({
         type: 'cmp',
-        colName: colOrCbOrExpr as string,
+        colName: target.colName,
+        expr: target.expr,
         op: op!,
         value,
       });
@@ -370,7 +447,11 @@ export class QueryBuilder {
 
   whereNot(exprSql: string): this;
   whereNot(expr: ExprNode | ExpressionBuilder): this;
-  whereNot(colName: string, op: ComparisonOp, value: any): this;
+  whereNot(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
   whereNot(callback: (qb: QueryBuilder) => void): this;
   whereNot(
     colOrCbOrExpr:
@@ -418,11 +499,13 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      const target = parseFilterTarget(colOrCbOrExpr);
       this.filters.push({
         type: 'not',
         child: {
           type: 'cmp',
-          colName: colOrCbOrExpr as string,
+          colName: target.colName,
+          expr: target.expr,
           op: op!,
           value,
         },
@@ -433,7 +516,11 @@ export class QueryBuilder {
 
   orWhereNot(exprSql: string): this;
   orWhereNot(expr: ExprNode | ExpressionBuilder): this;
-  orWhereNot(colName: string, op: ComparisonOp, value: any): this;
+  orWhereNot(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
   orWhereNot(callback: (qb: QueryBuilder) => void): this;
   orWhereNot(
     colOrCbOrExpr:
@@ -481,17 +568,27 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      const target = parseFilterTarget(colOrCbOrExpr);
       this.addOrFilter({
         type: 'not',
         child: {
           type: 'cmp',
-          colName: colOrCbOrExpr as string,
+          colName: target.colName,
+          expr: target.expr,
           op: op!,
           value,
         },
       });
     }
     return this;
+  }
+
+  whereRaw(sqlStr: string): this {
+    return this.where(sqlStr);
+  }
+
+  orWhereRaw(sqlStr: string): this {
+    return this.orWhere(sqlStr);
   }
 
   whereNull(colName: string): this {
@@ -561,25 +658,533 @@ export class QueryBuilder {
   }
 
   orderBy(
-    colOrKeys: string | SortKey | SortKey[],
+    colOrKeys: string | SortKey | SortKey[] | ExpressionBuilder | ExprNode,
     direction: 'asc' | 'desc' = 'asc',
     nullOrder?: 'nulls_first' | 'nulls_last',
   ): this {
     if (typeof colOrKeys === 'string') {
       this.sortCol = colOrKeys;
       this.sortDir = direction;
-      this.orderKeys.push({ colName: colOrKeys, direction, nullOrder });
+      const target = parseFilterTarget(colOrKeys);
+      this.orderKeys.push({
+        colName: target.colName ?? colOrKeys,
+        expr: target.expr,
+        direction,
+        nullOrder,
+      });
+    } else if (
+      colOrKeys instanceof ExpressionBuilder ||
+      (typeof colOrKeys === 'object' && colOrKeys !== null && 'node' in colOrKeys)
+    ) {
+      this.orderKeys.push({
+        expr: (colOrKeys as any).node,
+        direction,
+        nullOrder,
+      });
+    } else if (
+      typeof colOrKeys === 'object' &&
+      colOrKeys !== null &&
+      'type' in colOrKeys
+    ) {
+      this.orderKeys.push({
+        expr: colOrKeys as ExprNode,
+        direction,
+        nullOrder,
+      });
     } else if (Array.isArray(colOrKeys)) {
-      this.orderKeys.push(...colOrKeys);
+      for (const item of colOrKeys) {
+        if (typeof item === 'string') {
+          const target = parseFilterTarget(item);
+          this.orderKeys.push({
+            colName: target.colName ?? item,
+            expr: target.expr,
+            direction: 'asc',
+          });
+        } else {
+          this.orderKeys.push(item);
+        }
+      }
     } else {
       this.orderKeys.push(colOrKeys);
     }
     return this;
   }
 
-  groupBy(...columns: string[]): this {
-    this.groupCols.push(...columns);
+  groupBy(...columns: (GroupByItem | GroupByItem[])[]): this {
+    for (const item of columns) {
+      if (Array.isArray(item)) {
+        for (const sub of item) {
+          this.addGroupByItem(sub);
+        }
+      } else {
+        this.addGroupByItem(item);
+      }
+    }
     return this;
+  }
+
+  private addGroupByItem(item: GroupByItem): void {
+    if (
+      item instanceof ExpressionBuilder ||
+      (typeof item === 'object' && item !== null && 'node' in item)
+    ) {
+      this.groupKeys.push({ expr: (item as any).node });
+      this.groupCols.push(deriveDefaultAlias((item as any).node));
+    } else if (
+      typeof item === 'object' &&
+      item !== null &&
+      'type' in item
+    ) {
+      this.groupKeys.push({ expr: item as ExprNode });
+      this.groupCols.push(deriveDefaultAlias(item as ExprNode));
+    } else if (typeof item === 'string') {
+      const target = parseFilterTarget(item);
+      this.groupKeys.push({
+        colName: target.colName ?? item,
+        expr: target.expr,
+      });
+      this.groupCols.push(item);
+    }
+  }
+
+  private registerAggregatesFromFilter(filter: QueryFilter): void {
+    const checkTarget = (colName?: string, expr?: ExprNode) => {
+      if (expr) {
+        const aggs = extractAggregatesFromExpr(expr);
+        for (const agg of aggs) {
+          const already = this.aggExprs.some(
+            (a) =>
+              a.func === agg.func &&
+              (a.colName === agg.colName ||
+                (a.colName === undefined && agg.colName === undefined)),
+          );
+          if (!already) {
+            this.aggExprs.push(agg);
+          }
+        }
+      } else if (colName && colName.includes('(')) {
+        try {
+          const parsed = parseExpression(colName);
+          const aggs = extractAggregatesFromExpr(parsed);
+          for (const agg of aggs) {
+            const already = this.aggExprs.some(
+              (a) =>
+                a.func === agg.func &&
+                (a.colName === agg.colName ||
+                  (a.colName === undefined && agg.colName === undefined)),
+            );
+            if (!already) {
+              this.aggExprs.push(agg);
+            }
+          }
+        } catch {
+          // ignore unparseable
+        }
+      }
+    };
+
+    if (filter.type === 'cmp') {
+      checkTarget(filter.colName, filter.expr);
+    } else if (filter.type === 'expr' && filter.expr) {
+      checkTarget(undefined, filter.expr);
+    } else if (filter.type === 'null') {
+      checkTarget(filter.colName, filter.expr);
+    } else if (filter.type === 'not' && filter.child) {
+      this.registerAggregatesFromFilter(filter.child);
+    } else if (
+      (filter.type === 'and' || filter.type === 'or') &&
+      filter.children
+    ) {
+      for (const child of filter.children) {
+        this.registerAggregatesFromFilter(child);
+      }
+    }
+  }
+
+  having(exprSql: string): this;
+  having(expr: ExprNode | ExpressionBuilder): this;
+  having(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
+  having(callback: (qb: QueryBuilder) => void): this;
+  having(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootHavingFilter();
+      if (subFilter) {
+        this.havingFilters.push(subFilter);
+        this.registerAggregatesFromFilter(subFilter);
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        const expr = parseExpression(colOrCbOrExpr);
+        const filter: QueryFilter = { type: 'expr', expr };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        const filter: QueryFilter = {
+          type: 'expr',
+          expr: (colOrCbOrExpr as any).node,
+        };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        const filter: QueryFilter = {
+          type: 'expr',
+          expr: colOrCbOrExpr as ExprNode,
+        };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else {
+      const target = parseFilterTarget(colOrCbOrExpr);
+      const filter: QueryFilter = {
+        type: 'cmp',
+        colName: target.colName,
+        expr: target.expr,
+        op: op!,
+        value,
+      };
+      this.havingFilters.push(filter);
+      this.registerAggregatesFromFilter(filter);
+    }
+    return this;
+  }
+
+  orHaving(exprSql: string): this;
+  orHaving(expr: ExprNode | ExpressionBuilder): this;
+  orHaving(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
+  orHaving(callback: (qb: QueryBuilder) => void): this;
+  orHaving(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootHavingFilter();
+      if (subFilter) {
+        this.addHavingOrFilter(subFilter);
+        this.registerAggregatesFromFilter(subFilter);
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        const expr = parseExpression(colOrCbOrExpr);
+        const filter: QueryFilter = { type: 'expr', expr };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        const filter: QueryFilter = {
+          type: 'expr',
+          expr: (colOrCbOrExpr as any).node,
+        };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        const filter: QueryFilter = {
+          type: 'expr',
+          expr: colOrCbOrExpr as ExprNode,
+        };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else {
+      const target = parseFilterTarget(colOrCbOrExpr);
+      const filter: QueryFilter = {
+        type: 'cmp',
+        colName: target.colName,
+        expr: target.expr,
+        op: op!,
+        value,
+      };
+      this.addHavingOrFilter(filter);
+      this.registerAggregatesFromFilter(filter);
+    }
+    return this;
+  }
+
+  havingNot(exprSql: string): this;
+  havingNot(expr: ExprNode | ExpressionBuilder): this;
+  havingNot(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
+  havingNot(callback: (qb: QueryBuilder) => void): this;
+  havingNot(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootHavingFilter();
+      if (subFilter) {
+        const filter: QueryFilter = { type: 'not', child: subFilter };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        const expr = parseExpression(colOrCbOrExpr);
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr },
+        };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr: (colOrCbOrExpr as any).node },
+        };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr: colOrCbOrExpr as ExprNode },
+        };
+        this.havingFilters.push(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else {
+      const target = parseFilterTarget(colOrCbOrExpr);
+      const filter: QueryFilter = {
+        type: 'not',
+        child: {
+          type: 'cmp',
+          colName: target.colName,
+          expr: target.expr,
+          op: op!,
+          value,
+        },
+      };
+      this.havingFilters.push(filter);
+      this.registerAggregatesFromFilter(filter);
+    }
+    return this;
+  }
+
+  orHavingNot(exprSql: string): this;
+  orHavingNot(expr: ExprNode | ExpressionBuilder): this;
+  orHavingNot(
+    colOrExpr: string | ExprNode | ExpressionBuilder,
+    op: ComparisonOp,
+    value: any,
+  ): this;
+  orHavingNot(callback: (qb: QueryBuilder) => void): this;
+  orHavingNot(
+    colOrCbOrExpr:
+      | string
+      | ((qb: QueryBuilder) => void)
+      | ExprNode
+      | ExpressionBuilder,
+    op?: ComparisonOp,
+    value?: any,
+  ): this {
+    if (typeof colOrCbOrExpr === 'function') {
+      const sub = new QueryBuilder(this.db, this.tableName);
+      colOrCbOrExpr(sub);
+      const subFilter = sub.getRootHavingFilter();
+      if (subFilter) {
+        const filter: QueryFilter = { type: 'not', child: subFilter };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else if (op === undefined && value === undefined) {
+      if (typeof colOrCbOrExpr === 'string') {
+        const expr = parseExpression(colOrCbOrExpr);
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr },
+        };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        colOrCbOrExpr instanceof ExpressionBuilder ||
+        (typeof colOrCbOrExpr === 'object' &&
+          colOrCbOrExpr !== null &&
+          'node' in colOrCbOrExpr)
+      ) {
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr: (colOrCbOrExpr as any).node },
+        };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      } else if (
+        typeof colOrCbOrExpr === 'object' &&
+        colOrCbOrExpr !== null &&
+        'type' in colOrCbOrExpr
+      ) {
+        const filter: QueryFilter = {
+          type: 'not',
+          child: { type: 'expr', expr: colOrCbOrExpr as ExprNode },
+        };
+        this.addHavingOrFilter(filter);
+        this.registerAggregatesFromFilter(filter);
+      }
+    } else {
+      const target = parseFilterTarget(colOrCbOrExpr);
+      const filter: QueryFilter = {
+        type: 'not',
+        child: {
+          type: 'cmp',
+          colName: target.colName,
+          expr: target.expr,
+          op: op!,
+          value,
+        },
+      };
+      this.addHavingOrFilter(filter);
+      this.registerAggregatesFromFilter(filter);
+    }
+    return this;
+  }
+
+  havingRaw(sqlStr: string): this {
+    return this.having(sqlStr);
+  }
+
+  orHavingRaw(sqlStr: string): this {
+    return this.orHaving(sqlStr);
+  }
+
+  havingNull(colOrExpr: string | ExprNode | ExpressionBuilder): this {
+    const target = parseFilterTarget(colOrExpr);
+    const filter: QueryFilter = {
+      type: 'null',
+      colName: target.colName,
+      expr: target.expr,
+      isNull: true,
+    };
+    this.havingFilters.push(filter);
+    this.registerAggregatesFromFilter(filter);
+    return this;
+  }
+
+  havingNotNull(colOrExpr: string | ExprNode | ExpressionBuilder): this {
+    const target = parseFilterTarget(colOrExpr);
+    const filter: QueryFilter = {
+      type: 'null',
+      colName: target.colName,
+      expr: target.expr,
+      isNull: false,
+    };
+    this.havingFilters.push(filter);
+    this.registerAggregatesFromFilter(filter);
+    return this;
+  }
+
+  orHavingNull(colOrExpr: string | ExprNode | ExpressionBuilder): this {
+    const target = parseFilterTarget(colOrExpr);
+    const filter: QueryFilter = {
+      type: 'null',
+      colName: target.colName,
+      expr: target.expr,
+      isNull: true,
+    };
+    this.addHavingOrFilter(filter);
+    this.registerAggregatesFromFilter(filter);
+    return this;
+  }
+
+  orHavingNotNull(colOrExpr: string | ExprNode | ExpressionBuilder): this {
+    const target = parseFilterTarget(colOrExpr);
+    const filter: QueryFilter = {
+      type: 'null',
+      colName: target.colName,
+      expr: target.expr,
+      isNull: false,
+    };
+    this.addHavingOrFilter(filter);
+    this.registerAggregatesFromFilter(filter);
+    return this;
+  }
+
+  getHavingFilters(): QueryFilter[] {
+    return this.havingFilters;
+  }
+
+  getRootHavingFilter(): QueryFilter | null {
+    if (this.havingFilters.length === 0) return null;
+    if (this.havingFilters.length === 1) return this.havingFilters[0];
+    return { type: 'and', children: [...this.havingFilters] };
+  }
+
+  private addHavingOrFilter(filter: QueryFilter): void {
+    if (this.havingFilters.length === 0) {
+      this.havingFilters.push(filter);
+      return;
+    }
+    if (
+      this.havingFilters.length === 1 &&
+      this.havingFilters[0].type === 'or' &&
+      this.havingFilters[0].children
+    ) {
+      this.havingFilters[0].children.push(filter);
+      return;
+    }
+    let prev: QueryFilter;
+    if (this.havingFilters.length === 1) {
+      prev = this.havingFilters[0];
+    } else {
+      prev = { type: 'and', children: [...this.havingFilters] };
+    }
+    this.havingFilters = [{ type: 'or', children: [prev, filter] }];
   }
 
   aggregate(aggregates: AggExpr[]): this {
@@ -684,26 +1289,24 @@ export class QueryBuilder {
     const projected: DbRow = {};
     for (const field of this.selectFields) {
       const targetAlias = field.alias;
-      if (
-        field.expr &&
-        field.expr.type === 'fn' &&
-        isAggregateFunction(field.expr.name) &&
-        row[targetAlias] !== undefined
-      ) {
+      if (row[targetAlias] !== undefined) {
         projected[targetAlias] = row[targetAlias];
+      } else if (
+        field.expr &&
+        row[deriveDefaultAlias(field.expr)] !== undefined
+      ) {
+        projected[targetAlias] = row[deriveDefaultAlias(field.expr)];
+      } else if (
+        field.sourceCol !== undefined &&
+        row[field.sourceCol] !== undefined
+      ) {
+        projected[targetAlias] = row[field.sourceCol];
       } else if (field.expr) {
         let udfs: any;
         if (typeof (this.db as any).getUdf === 'function') {
           udfs = (name: string) => (this.db as any).getUdf(name)?.def?.call;
         }
         projected[targetAlias] = evalExprNode(field.expr, row, udfs);
-      } else if (
-        field.sourceCol !== undefined &&
-        row[field.sourceCol] !== undefined
-      ) {
-        projected[targetAlias] = row[field.sourceCol];
-      } else if (row[targetAlias] !== undefined) {
-        projected[targetAlias] = row[targetAlias];
       } else {
         projected[targetAlias] = null;
       }
@@ -719,12 +1322,43 @@ export class QueryBuilder {
 
     return this.db.explainQuery(this.tableName, this.filters, {
       orderBy: this.orderKeys.length > 0 ? this.orderKeys : undefined,
-      groupBy: this.groupCols.length > 0 ? this.groupCols : undefined,
+      groupBy:
+        this.groupKeys.length > 0
+          ? this.groupKeys
+          : this.groupCols.length > 0
+            ? this.groupCols
+            : undefined,
       aggregates: this.aggExprs.length > 0 ? this.aggExprs : undefined,
+      having: this.havingFilters.length > 0 ? this.havingFilters : undefined,
       select: this.selectFields.length > 0 ? this.selectFields : undefined,
       selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
       limit: this.limitCount !== null ? this.limitCount : undefined,
       offset: this.offsetCount !== null ? this.offsetCount : undefined,
+    });
+  }
+
+  private sortAggregatedRows(rows: DbRow[]): DbRow[] {
+    return [...rows].sort((a, b) => {
+      for (const k of this.orderKeys) {
+        const keyName =
+          k.colName ?? (k.expr ? deriveDefaultAlias(k.expr) : undefined);
+        if (!keyName) continue;
+        const valA = a[keyName];
+        const valB = b[keyName];
+        if (valA === valB) continue;
+        if (valA === null || valA === undefined) {
+          return k.nullOrder === 'nulls_first' ? -1 : 1;
+        }
+        if (valB === null || valB === undefined) {
+          return k.nullOrder === 'nulls_first' ? 1 : -1;
+        }
+        const dir = k.direction === 'desc' ? -1 : 1;
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          return (valA - valB) * dir;
+        }
+        return String(valA).localeCompare(String(valB)) * dir;
+      }
+      return 0;
     });
   }
 
@@ -740,17 +1374,33 @@ export class QueryBuilder {
       sortCol: this.sortCol,
       sortDir: this.sortDir,
       orderBy: this.orderKeys.length > 0 ? this.orderKeys : undefined,
-      groupBy: this.groupCols.length > 0 ? this.groupCols : undefined,
+      groupBy:
+        this.groupKeys.length > 0
+          ? this.groupKeys
+          : this.groupCols.length > 0
+            ? this.groupCols
+            : undefined,
       aggregates: this.aggExprs.length > 0 ? this.aggExprs : undefined,
+      having: this.havingFilters.length > 0 ? this.havingFilters : undefined,
       select: this.selectFields.length > 0 ? this.selectFields : undefined,
       selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
     });
 
-    if (this.selectFields.length === 0) {
-      return rawRows;
+    let rows = rawRows;
+    if (this.selectFields.length > 0) {
+      rows = rawRows.map((r) => this.projectRow(r));
     }
 
-    return rawRows.map((r) => this.projectRow(r));
+    if (
+      (this.aggExprs.length > 0 ||
+        this.groupKeys.length > 0 ||
+        this.groupCols.length > 0) &&
+      this.orderKeys.length > 0
+    ) {
+      rows = this.sortAggregatedRows(rows);
+    }
+
+    return rows;
   }
 
   async first(): Promise<DbRow | null> {

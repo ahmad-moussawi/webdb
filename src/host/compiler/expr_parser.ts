@@ -4,7 +4,18 @@ import {
   DbRow,
 } from '../../types/index.js';
 
-export type BinaryOp = '+' | '-' | '*' | '/' | '%';
+export type BinaryOp =
+  | '+'
+  | '-'
+  | '*'
+  | '/'
+  | '%'
+  | '='
+  | '!='
+  | '<'
+  | '<='
+  | '>'
+  | '>=';
 
 export type ExprNode =
   | { type: 'col'; name: string }
@@ -149,6 +160,43 @@ function tokenize(input: string): Token[] {
     }
 
     // Operators
+    if (ch === '<') {
+      if (i + 1 < len && input[i + 1] === '=') {
+        tokens.push({ type: 'OP', value: '<=', pos: i });
+        i += 2;
+        continue;
+      }
+      if (i + 1 < len && input[i + 1] === '>') {
+        tokens.push({ type: 'OP', value: '!=', pos: i });
+        i += 2;
+        continue;
+      }
+      tokens.push({ type: 'OP', value: '<', pos: i++ });
+      continue;
+    }
+    if (ch === '>') {
+      if (i + 1 < len && input[i + 1] === '=') {
+        tokens.push({ type: 'OP', value: '>=', pos: i });
+        i += 2;
+        continue;
+      }
+      tokens.push({ type: 'OP', value: '>', pos: i++ });
+      continue;
+    }
+    if (ch === '=') {
+      if (i + 1 < len && input[i + 1] === '=') {
+        tokens.push({ type: 'OP', value: '=', pos: i });
+        i += 2;
+        continue;
+      }
+      tokens.push({ type: 'OP', value: '=', pos: i++ });
+      continue;
+    }
+    if (ch === '!' && i + 1 < len && input[i + 1] === '=') {
+      tokens.push({ type: 'OP', value: '!=', pos: i });
+      i += 2;
+      continue;
+    }
     if (ch === '+' || ch === '-' || ch === '/' || ch === '%') {
       tokens.push({ type: 'OP', value: ch, pos: i++ });
       continue;
@@ -206,6 +254,16 @@ class ExpressionParser {
 
   private getPrecedence(token: Token): number {
     if (token.type === 'OP' || token.type === 'STAR') {
+      if (
+        token.value === '=' ||
+        token.value === '!=' ||
+        token.value === '<' ||
+        token.value === '<=' ||
+        token.value === '>' ||
+        token.value === '>='
+      ) {
+        return 5;
+      }
       if (token.value === '+' || token.value === '-') return 10;
       if (token.value === '*' || token.value === '/' || token.value === '%') return 20;
     }
@@ -469,6 +527,60 @@ export class ExpressionBuilder {
     });
   }
 
+  eq(other: ExprNode | ExpressionBuilder | number | string | boolean | null): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '=',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
+  ne(other: ExprNode | ExpressionBuilder | number | string | boolean | null): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '!=',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
+  lt(other: ExprNode | ExpressionBuilder | number | string): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '<',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
+  lte(other: ExprNode | ExpressionBuilder | number | string): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '<=',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
+  gt(other: ExprNode | ExpressionBuilder | number | string): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '>',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
+  gte(other: ExprNode | ExpressionBuilder | number | string): ExpressionBuilder {
+    return new ExpressionBuilder({
+      type: 'binary',
+      op: '>=',
+      left: this.node,
+      right: toExprNode(other),
+    });
+  }
+
   as(alias: string): ParsedSelectExpr {
     return {
       expr: this.node,
@@ -477,7 +589,13 @@ export class ExpressionBuilder {
   }
 }
 
-function toExprNode(val: ExprNode | ExpressionBuilder | number | string): ExprNode {
+function toExprNode(val: ExprNode | ExpressionBuilder | number | string | boolean | null): ExprNode {
+  if (val === null) {
+    return { type: 'literal', value: null };
+  }
+  if (typeof val === 'boolean') {
+    return { type: 'literal', value: val };
+  }
   if (val instanceof ExpressionBuilder) {
     return val.node;
   }
@@ -493,6 +611,12 @@ function toExprNode(val: ExprNode | ExpressionBuilder | number | string): ExprNo
 export function col(name: string): ExpressionBuilder {
   return new ExpressionBuilder({ type: 'col', name });
 }
+
+export function exp(sqlStr: string): ExpressionBuilder {
+  return new ExpressionBuilder(parseExpression(sqlStr));
+}
+
+export const sql = exp;
 
 export interface FnNamespace {
   (name: string, ...args: (ExprNode | ExpressionBuilder | number | string)[]): ExpressionBuilder;
