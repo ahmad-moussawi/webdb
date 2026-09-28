@@ -1197,6 +1197,25 @@ function page_decode_index_cell(
   if (k_len === 0) {
     return { cellType: DataType.NULL, cellVal: null };
   }
+  if (context_type === DataType.TEXT) {
+    if (
+      k_len === 4 &&
+      ((k_data[2] === 0 && k_data[3] === 0) ||
+        (k_data[2] === 0xff && k_data[3] === 0xff))
+    ) {
+      return {
+        cellType: DataType.INT32,
+        cellVal: new DataView(k_data.buffer, k_data.byteOffset).getInt32(
+          0,
+          true,
+        ),
+      };
+    }
+    if (k_len === 2 && k_data[0] < 32 && k_data[1] < 32) {
+      return { cellType: DataType.BLOB, cellVal: k_data };
+    }
+    return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
+  }
   if (k_len === 2) {
     return { cellType: DataType.BLOB, cellVal: k_data };
   }

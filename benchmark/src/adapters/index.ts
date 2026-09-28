@@ -1,4 +1,4 @@
-import { BenchmarkAdapter, EngineId, EngineInfo, ScenarioId, ScenarioInfo } from './types.js';
+import { BenchmarkAdapter, EngineId, EngineInfo, ScenarioInfo } from './types.js';
 import { RawArrayAdapter } from './array_adapter.js';
 import { WebDbAdapter } from './webdb_adapter.js';
 import { IndexedDbAdapter } from './indexeddb_adapter.js';

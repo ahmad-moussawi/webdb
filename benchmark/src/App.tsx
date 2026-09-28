@@ -4,7 +4,7 @@ import { BenchmarkControls } from './components/BenchmarkControls.js';
 import { ComparisonCharts } from './components/ComparisonCharts.js';
 import { ResultsTable } from './components/ResultsTable.js';
 import { ArchitectureNotes } from './components/ArchitectureNotes.js';
-import { AVAILABLE_ENGINES, AVAILABLE_SCENARIOS, EngineId, ScenarioId, ScenarioResult } from './adapters/index.js';
+import { EngineId, ScenarioId, ScenarioResult } from './adapters/index.js';
 import { ProgressUpdate, runBenchmarkSuite } from './engine/runner.js';
 import { Loader2 } from 'lucide-react';
 

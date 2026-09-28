@@ -17,8 +17,11 @@ export const Header: React.FC = () => {
 
     // Heap stats
     const updateHeap = () => {
-      if (typeof performance !== 'undefined' && (performance as any).memory) {
-        const bytes = (performance as any).memory.usedJSHeapSize;
+      const perfWithMemory = performance as unknown as {
+        memory?: { usedJSHeapSize: number };
+      };
+      if (typeof performance !== 'undefined' && perfWithMemory.memory) {
+        const bytes = perfWithMemory.memory.usedJSHeapSize;
         setHeapSize(`${(bytes / (1024 * 1024)).toFixed(1)} MB`);
       }
     };

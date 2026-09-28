@@ -132,6 +132,10 @@ export class WebDB implements IDatabaseQueryExecutor {
   private vmCtx: VmContext;
   private udfs: Map<string, { id: number; def: UdfDefinition }> = new Map();
   private nextUdfId = 1;
+  private tableMetaCache: Map<string, TableMeta> = new Map();
+  private tableTailPages: Map<string, number> = new Map();
+  private indexTailPages: Map<number, number> = new Map();
+  private isTransacting = false;
 
   private constructor(vfs: IVfsAdapter, io: Io, driver: BufferPoolDriver) {
     this.vfs = vfs;
@@ -242,10 +246,17 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // Flush modified pages
     await this.driver.flushAllDirty();
+    this.tableMetaCache.delete(name.toLowerCase());
     return table;
   }
 
   async getTable(tableName: string): Promise<TableMeta> {
+    const key = tableName.toLowerCase();
+    const cached = this.tableMetaCache.get(key);
+    if (cached) {
+      return cached;
+    }
+
     const page1View = this.pool.getSlotDataView(0);
     const slotIdx = catalog_find_table_slot(page1View, tableName);
 
@@ -273,7 +284,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         return new Uint8Array(PAGE_SIZE);
       },
     };
-    return catalog_load_table_meta(page1View, pager, tableName);
+    const meta = catalog_load_table_meta(page1View, pager, tableName);
+    this.tableMetaCache.set(key, meta);
+    return meta;
   }
 
   async listTables(): Promise<TableMeta[]> {
@@ -287,6 +300,9 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async dropTable(tableName: string): Promise<void> {
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    this.tableTailPages.delete(tableName);
+
     const page1View = this.pool.getSlotDataView(0);
     const slotIdx = catalog_find_table_slot(page1View, tableName);
     if (slotIdx === -1) {
@@ -462,6 +478,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    this.indexTailPages.delete(indexRootPageId);
     await this.driver.flushAllDirty();
   }
 
@@ -487,6 +505,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
+    this.tableMetaCache.clear();
+    this.indexTailPages.clear();
     await this.driver.flushAllDirty();
   }
 
@@ -535,14 +555,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     while (currIdxPageId !== 0) {
       const slot = await this.driver.acquirePage(currIdxPageId);
       const view = this.pool.getSlotDataView(slot);
-      const search = page_binary_search_index_leaf(
-        view,
-        0,
-        keyType,
-        keyVal,
-      );
-      if (search.found) {
-        return true;
+      const cellCount = page_get_cell_count(view, 0);
+      if (cellCount > 0) {
+        const search = page_binary_search_index_leaf(
+          view,
+          0,
+          keyType,
+          keyVal,
+        );
+        if (search.found) {
+          return true;
+        }
       }
       currIdxPageId = page_get_next_page_id(view, 0);
     }
@@ -555,7 +578,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     keyVal: any,
     rowid: bigint,
   ): Promise<void> {
-    let idxPageId = rootPageId;
+    let idxPageId = this.indexTailPages.get(rootPageId) ?? rootPageId;
     let idxSlot = await this.driver.acquirePage(idxPageId);
     let idxView = this.pool.getSlotDataView(idxSlot);
 
@@ -566,6 +589,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       idxSlot = await this.driver.acquirePage(idxPageId);
       idxView = this.pool.getSlotDataView(idxSlot);
     }
+    this.indexTailPages.set(rootPageId, idxPageId);
 
     let idxInsertRes = page_insert_index_leaf_cell(
       idxView,
@@ -601,6 +625,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             );
           }
           this.pool.markDirty(newIdxSlot);
+          this.indexTailPages.set(rootPageId, newIdxPageId);
         } finally {
           this.pool.unpinSlot(newIdxSlot);
         }
@@ -613,66 +638,24 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async insert(tableName: string, row: DbRow): Promise<void> {
+    await this.insertMany(tableName, [row]);
+  }
+
+  async insertMany(tableName: string, rows: DbRow[]): Promise<void> {
+    if (!rows || rows.length === 0) return;
     const table = await this.getTable(tableName);
     const page1View = this.pool.getSlotDataView(0);
-
-    // 1. Primary Key NOT NULL validation
-    for (const c of table.columns) {
-      if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
-        if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
-          if (row[c.name] === undefined || row[c.name] === null) {
-            throw new NotNullConstraintError(c.name, tableName);
-          }
-        }
-      }
-    }
-
-    // 2. Auto-Inc handling: if table has AUTO_INC column and row lacks it, assign next
-    const autoIncCol = table.columns.find(
-      (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
-    );
-    if (
-      autoIncCol &&
-      (row[autoIncCol.name] === undefined || row[autoIncCol.name] === null)
-    ) {
-      row[autoIncCol.name] = Number(table.autoIncNext);
-      // Increment autoIncNext on Page 1 TableDescriptor
-      const slotIdx = catalog_find_table_slot(page1View, tableName);
-      if (slotIdx !== -1) {
-        const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
-        desc.autoIncNext += 1n;
-        catalog_write_table_descriptor(page1View, slotIdx, desc);
-        this.pool.markDirty(0);
-      }
-    }
-
-    // 3. Uniqueness constraint probe across all unique & primary indexes
     const indexes = catalog_list_table_indexes(page1View, table.tableId);
     const uniqueIndexes = indexes.filter(
       (idx) => (idx.flags & (IndexFlag.UNIQUE | IndexFlag.PRIMARY)) !== 0,
     );
 
-    for (const idx of uniqueIndexes) {
-      const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
-      if (keyVal !== undefined && keyVal !== null) {
-        const duplicate = await this.probeIndexUnique(
-          idx.rootPageId,
-          keyType,
-          keyVal,
-        );
-        if (duplicate) {
-          throw new UniqueConstraintViolationError(
-            `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
-          );
-        }
-      }
-    }
+    const autoIncCol = table.columns.find(
+      (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
+    );
 
-    // 4. Data page insertion
-    const rowBytes = page_serialize_row(table.columns, row);
-
-    // Navigate to the tail data page for this table
-    let currentPageId = table.rootPageId;
+    // Fast resolution of tail data page
+    let currentPageId = this.tableTailPages.get(tableName) ?? table.rootPageId;
     let slot = await this.driver.acquirePage(currentPageId);
     let view = this.pool.getSlotDataView(slot);
 
@@ -683,71 +666,133 @@ export class WebDB implements IDatabaseQueryExecutor {
       slot = await this.driver.acquirePage(currentPageId);
       view = this.pool.getSlotDataView(slot);
     }
+    this.tableTailPages.set(tableName, currentPageId);
 
-    // Attempt insertion into current page
-    let targetPageId = currentPageId;
-    let insertSlot = page_insert_row(
-      view,
-      0,
-      rowBytes,
-      this.pool.pageScratchpadOffset,
-    );
+    // Batch duplicate tracking
+    const batchUniqueSets: Map<string, Set<any>> = new Map();
+    for (const idx of uniqueIndexes) {
+      batchUniqueSets.set(idx.name, new Set());
+    }
 
-    if (insertSlot === -1) {
-      // Pin current slot so allocatePage cannot evict it during page expansion
-      this.pool.pinSlot(slot);
-      try {
-        const newPageId = await this.driver.allocateAndPinPage();
-        const newSlot = this.pool.getResidentSlot(newPageId);
-        try {
-          // Link current page -> new page
-          page_set_next_page_id(view, 0, newPageId);
-          this.pool.markDirty(slot);
+    for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+      const row = rows[rIdx];
 
-          // Insert row into new page
-          const newView = this.pool.getSlotDataView(newSlot);
-          insertSlot = page_insert_row(
-            newView,
-            0,
-            rowBytes,
-            this.pool.pageScratchpadOffset,
-          );
-          if (insertSlot === -1) {
-            throw new Error("Unexpected error: row does not fit in empty page");
+      // 1. Primary Key NOT NULL validation
+      for (const c of table.columns) {
+        if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+          if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
+            if (row[c.name] === undefined || row[c.name] === null) {
+              throw new NotNullConstraintError(c.name, tableName);
+            }
           }
-          this.pool.markDirty(newSlot);
-          targetPageId = newPageId;
-        } finally {
-          this.pool.unpinSlot(newSlot);
         }
-      } finally {
-        this.pool.unpinSlot(slot);
       }
-    } else {
-      this.pool.markDirty(slot);
+
+      // 2. Auto-Inc
+      if (
+        autoIncCol &&
+        (row[autoIncCol.name] === undefined || row[autoIncCol.name] === null)
+      ) {
+        row[autoIncCol.name] = Number(table.autoIncNext);
+        table.autoIncNext += 1n;
+      }
+
+      // 3. Uniqueness constraint probe
+      for (const idx of uniqueIndexes) {
+        const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
+        if (keyVal !== undefined && keyVal !== null) {
+          const set = batchUniqueSets.get(idx.name)!;
+          if (set.has(keyVal)) {
+            throw new UniqueConstraintViolationError(
+              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+            );
+          }
+          set.add(keyVal);
+
+          const duplicate = await this.probeIndexUnique(
+            idx.rootPageId,
+            keyType,
+            keyVal,
+          );
+          if (duplicate) {
+            throw new UniqueConstraintViolationError(
+              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+            );
+          }
+        }
+      }
+
+      // 4. Data page insertion
+      const rowBytes = page_serialize_row(table.columns, row);
+      let targetPageId = currentPageId;
+      let insertSlot = page_insert_row(
+        view,
+        0,
+        rowBytes,
+        this.pool.pageScratchpadOffset,
+      );
+
+      if (insertSlot === -1) {
+        this.pool.pinSlot(slot);
+        try {
+          const newPageId = await this.driver.allocateAndPinPage();
+          const newSlot = this.pool.getResidentSlot(newPageId);
+          try {
+            page_set_next_page_id(view, 0, newPageId);
+            this.pool.markDirty(slot);
+
+            const newView = this.pool.getSlotDataView(newSlot);
+            insertSlot = page_insert_row(
+              newView,
+              0,
+              rowBytes,
+              this.pool.pageScratchpadOffset,
+            );
+            if (insertSlot === -1) {
+              throw new Error("Unexpected error: row does not fit in empty page");
+            }
+            this.pool.markDirty(newSlot);
+            currentPageId = newPageId;
+            targetPageId = newPageId;
+            slot = newSlot;
+            view = newView;
+            this.tableTailPages.set(tableName, newPageId);
+          } finally {
+            this.pool.unpinSlot(newSlot);
+          }
+        } finally {
+          this.pool.unpinSlot(slot);
+        }
+      } else {
+        this.pool.markDirty(slot);
+      }
+
+      // 5. Index insertion
+      const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
+      for (const idx of indexes) {
+        const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
+        if (keyVal !== undefined && keyVal !== null) {
+          await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
+        }
+      }
     }
 
-    // 5. Compute physical rowid and insert into all active indexes
-    const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
-
-    for (const idx of indexes) {
-      const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
-      if (keyVal !== undefined && keyVal !== null) {
-        await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
-      }
-    }
-
-    // 6. Update row count estimate
+    // 6. Update Page 1 table descriptor once for the batch
     const slotIdx = catalog_find_table_slot(page1View, tableName);
     if (slotIdx !== -1) {
       const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
-      desc.rowCountEstimate += 1;
+      desc.rowCountEstimate += rows.length;
+      if (autoIncCol) {
+        desc.autoIncNext = table.autoIncNext;
+      }
       catalog_write_table_descriptor(page1View, slotIdx, desc);
       this.pool.markDirty(0);
     }
 
-    // 7. Durably flush modified pages
-    await this.driver.flushAllDirty();
+    // 7. Flush once for the whole batch
+    if (!this.isTransacting) {
+      await this.driver.flushAllDirty();
+    }
   }
 
   async transaction<T>(callback: (tx: WebDB) => Promise<T>): Promise<T> {
@@ -769,11 +814,21 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
+    const prevTransacting = this.isTransacting;
+    this.isTransacting = true;
+
     try {
       const res = await callback(this);
-      await this.driver.flushAllDirty();
+      if (!prevTransacting) {
+        await this.driver.flushAllDirty();
+      }
       return res;
     } catch (err) {
+      // Clear caches so rollback doesn't leave stale cached table pointers
+      this.tableMetaCache.clear();
+      this.tableTailPages.clear();
+      this.indexTailPages.clear();
+
       // Rollback: restore all buffer pool slots and page data
       for (let slot = 0; slot < pool.slotCount; slot++) {
         const snap = slotSnapshots.get(slot);
@@ -795,6 +850,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
 
       throw err;
+    } finally {
+      this.isTransacting = prevTransacting;
     }
   }
 

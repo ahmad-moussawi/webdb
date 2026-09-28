@@ -86,4 +86,35 @@ describe('WebDB End-to-End & Storage Persistence', () => {
     expect(allTasks).toHaveLength(3);
     await db2.close();
   });
+
+  it('efficiently bulk inserts rows using insertMany and maintains indexes', async () => {
+    const db = await WebDB.open({ name: 'insert_many_test', storage: 'memory' });
+
+    await db.createTable('metrics', [
+      { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+      { name: 'tag', type: 'TEXT' },
+      { name: 'val', type: 'FLOAT64' },
+    ]);
+
+    await db.createIndex('metrics', 'tag', { name: 'idx_metrics_tag' });
+
+    const rows = Array.from({ length: 250 }, (_, i) => ({
+      id: i + 1,
+      tag: i % 2 === 0 ? 'even' : 'odd',
+      val: i * 1.5,
+    }));
+
+    await db.insertMany('metrics', rows);
+
+    const all = await db.from('metrics').toArray();
+    expect(all).toHaveLength(250);
+
+    // Verify index lookup works on batch-inserted data
+    const evens = await db.from('metrics').where('tag', '=', 'even').toArray();
+    expect(evens).toHaveLength(125);
+
+    const point = await db.from('metrics').where('id', '=', 100).toArray();
+    expect(point).toHaveLength(1);
+    expect(point[0]).toMatchObject({ id: 100, tag: 'odd', val: 148.5 });
+  });
 });

@@ -61,14 +61,9 @@ export class WebDbAdapter implements BenchmarkAdapter {
 
   async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
     if (!this.db) throw new Error('WebDB not initialized');
-    const db = this.db;
-    const len = records.length;
-    for (let i = 0; i < len; i++) {
-      await db.insert('benchmark', records[i]);
-    }
-    const orderLen = orders.length;
-    for (let i = 0; i < orderLen; i++) {
-      await db.insert('orders', orders[i]);
+    await this.db.insertMany('benchmark', records as any[]);
+    if (orders.length > 0) {
+      await this.db.insertMany('orders', orders as any[]);
     }
   }
 
