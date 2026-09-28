@@ -1560,11 +1560,21 @@ export function disassembleBytecode(
 
       case OpCode.OP_STR_LOWER:
       case OpCode.OP_STR_UPPER:
-      case OpCode.OP_STR_LENGTH: {
+      case OpCode.OP_STR_LENGTH:
+      case OpCode.OP_STR_TRIM:
+      case OpCode.OP_MATH_ABS:
+      case OpCode.OP_MATH_ROUND:
+      case OpCode.OP_MATH_FLOOR:
+      case OpCode.OP_MATH_CEIL: {
         const opNames: Record<number, string> = {
           [OpCode.OP_STR_LOWER]: "OP_STR_LOWER",
           [OpCode.OP_STR_UPPER]: "OP_STR_UPPER",
           [OpCode.OP_STR_LENGTH]: "OP_STR_LENGTH",
+          [OpCode.OP_STR_TRIM]: "OP_STR_TRIM",
+          [OpCode.OP_MATH_ABS]: "OP_MATH_ABS",
+          [OpCode.OP_MATH_ROUND]: "OP_MATH_ROUND",
+          [OpCode.OP_MATH_FLOOR]: "OP_MATH_FLOOR",
+          [OpCode.OP_MATH_CEIL]: "OP_MATH_CEIL",
         };
         const srcReg = bytecode[pc++];
         const destReg = bytecode[pc++];
@@ -1591,6 +1601,52 @@ export function disassembleBytecode(
           p2: `start=r[${startReg}], len=r[${lenReg}]`,
           p3: `r[${destReg}]`,
           comment: `Extract substring from r[${srcReg}] into r[${destReg}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_ADD:
+      case OpCode.OP_SUB:
+      case OpCode.OP_MUL:
+      case OpCode.OP_DIV:
+      case OpCode.OP_MOD: {
+        const opNames: Record<number, string> = {
+          [OpCode.OP_ADD]: "OP_ADD",
+          [OpCode.OP_SUB]: "OP_SUB",
+          [OpCode.OP_MUL]: "OP_MUL",
+          [OpCode.OP_DIV]: "OP_DIV",
+          [OpCode.OP_MOD]: "OP_MOD",
+        };
+        const regA = bytecode[pc++];
+        const regB = bytecode[pc++];
+        const destReg = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: opNames[op],
+          p1: `r[${regA}]`,
+          p2: `r[${regB}]`,
+          p3: `r[${destReg}]`,
+          comment: `${opNames[op]}: r[${destReg}] = r[${regA}] ${opNames[op].replace("OP_", "")} r[${regB}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_STR_CONCAT:
+      case OpCode.OP_COALESCE: {
+        const opNames: Record<number, string> = {
+          [OpCode.OP_STR_CONCAT]: "OP_STR_CONCAT",
+          [OpCode.OP_COALESCE]: "OP_COALESCE",
+        };
+        const startReg = bytecode[pc++];
+        const numRegs = bytecode[pc++];
+        const destReg = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: opNames[op],
+          p1: `r[${startReg}..${startReg + numRegs - 1}]`,
+          p2: `count=${numRegs}`,
+          p3: `r[${destReg}]`,
+          comment: `${opNames[op]}: r[${destReg}]`,
         });
         break;
       }

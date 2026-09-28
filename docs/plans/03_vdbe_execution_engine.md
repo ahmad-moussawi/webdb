@@ -939,6 +939,87 @@ Advances pc += 5 to next opcode
 
 ---
 
+### 7.4 Query-Level Dynamic Computed Expressions Across Clauses
+
+> [!NOTE]
+> **V1 Scope Clarification:**
+> **Schema-level generated columns** (`CREATE TABLE ... col AS (expr) STORED / VIRTUAL`) are **not supported in V1** and are documented in [`docs/plans/future_extensions_roadmap.md`](file:///Users/ahmad/h/webdb/docs/plans/future_extensions_roadmap.md#L467-L560) §10.
+> In V1, all computed columns are **query-level dynamic expressions** evaluated on the fly in the VDBE register pipeline.
+
+Query-level computed expressions allow queries to transform, combine, and project dynamic values (e.g., `score * 2 AS double_score`, `upper(name) AS upper_name`, `floor(price * 0.9) AS discounted_price`).
+
+#### A. Expression Construction & Unified AST (`ExprNode`)
+Expressions are authored in two equivalent, supported syntaxes (documented in [`docs/plans/query_builder_api_and_grammar.md`](file:///Users/ahmad/h/webdb/docs/plans/query_builder_api_and_grammar.md#L274-L364) §4.4):
+1. **Standalone Helper Functions (Drizzle style)**: `fn.floor(col('score').mul(2).add(10)).as('adjusted_score')`
+2. **SQL String Expressions**: `'floor(score * 2 + 10) as adjusted_score'` (parsed via Pratt micro-parser)
+
+Both syntaxes compile into the same unified internal AST node (`ExprNode`):
+```typescript
+export type ExprNode =
+  | { type: 'col'; name: string }
+  | { type: 'literal'; value: number | string | boolean | null }
+  | { type: 'binary'; op: '+' | '-' | '*' | '/' | '%'; left: ExprNode; right: ExprNode }
+  | { type: 'fn'; name: string; args: ExprNode[] };
+```
+
+#### B. Expression Tree Compilation & Register Life Cycle
+The VDBE compiler decomposes the `ExprNode` AST into a post-order sequence of binary and unary register opcodes:
+
+```
+Expression: floor(score * 2 + 10) AS adjusted_score
+                      [ OP_MATH_FLOOR ] -> r[5] (Output Result)
+                             │
+                         [ OP_ADD ] -> r[4]
+                        /        \
+              [ OP_MUL ] -> r[3]  [ OP_LOAD_INT 10 ] -> r[2]
+             /        \
+  [ OP_COLUMN score ]  [ OP_LOAD_INT 2 ] -> r[1]
+```
+
+Bytecode emitted:
+```
+OP_COLUMN_FLOAT  0  2  0    ; r[0] = score
+OP_LOAD_INT      1  2  0    ; r[1] = 2
+OP_MUL           0  1  3    ; r[3] = score * 2
+OP_LOAD_INT      2  10 0    ; r[2] = 10
+OP_ADD           3  2  4    ; r[4] = (score * 2) + 10
+OP_MATH_FLOOR    4  5  0    ; r[5] = floor((score * 2) + 10)  <- Final Result
+```
+
+#### B. Computed Expressions Across Different Clauses
+Because the VDBE evaluates expressions in registers, dynamic computations compose seamlessly across all query clauses:
+
+1. **In `SELECT` (Projections)**:
+   The computed result register `r[5]` is mapped into the contiguous range `[start_reg .. start_reg + num_cols - 1]` passed to `OP_RESULT_ROW`.
+2. **In `WHERE` (Filter Predicates)**:
+   The expression evaluates into a temporary register `r[temp]` and is immediately checked by comparison opcodes (`OP_EQ`, `OP_GT`, etc.):
+   ```sql
+   WHERE floor(score * 2) >= 100
+   ```
+   If false, jumps to `OP_NEXT_ROW` without executing the projection block.
+3. **In `ORDER BY` (Sorting on Expressions)**:
+   Dynamic expressions are evaluated during the table scan and stored as sort keys in `SorterEntry.keys` via `OP_SORTER_INSERT`:
+   ```sql
+   ORDER BY score * 2 DESC
+   ```
+   The sorted order is determined by the computed value, not the raw column.
+4. **In `GROUP BY` (Bucket Keys)**:
+   Expressions are evaluated per row and passed as group keys to `OP_AGG_STEP`:
+   ```sql
+   GROUP BY floor(score / 10) * 10  -- Group into deciles: 0, 10, 20...
+   ```
+5. **In Derived Subqueries (`FROM (SELECT ...)`)**:
+   When an inner query outputs a computed column `adjusted_score`, the outer query can reference it directly:
+   ```sql
+   SELECT adjusted_score * 1.05 FROM (
+     SELECT floor(score * 2) AS adjusted_score FROM students
+   ) WHERE adjusted_score > 50
+   ```
+   - If **flattened**, the expression is inlined: `(floor(score * 2)) * 1.05`.
+   - If **materialized**, the computed value is stored in the ephemeral B-Tree cell and read by the outer query as a regular column.
+
+---
+
 ## 8. Nested Queries, Ephemeral Materialization & Subquery Flattening
 
 When a query selects from a subquery (`FROM (SELECT ...)`), WebDB uses two architectural strategies: **Subquery Flattening** (zero-overhead query rewrites) and **Ephemeral Table Materialization** (isolated multi-frame execution).

@@ -332,10 +332,10 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       const rows = await db.from('users')
         .select([
           'id',
-          { fn: 'upper', col: 'name', as: 'upper_name' },
-          { fn: 'lower', col: 'role', as: 'lower_role' },
-          { fn: 'length', col: 'name', as: 'name_len' },
-          { fn: 'substr', col: 'name', as: 'short_name', args: [1, 5] },
+          'upper(name) as upper_name',
+          'lower(role) as lower_role',
+          'length(name) as name_len',
+          'substr(name, 1, 5) as short_name',
         ])
         .where('id', '=', 1)
         .toArray();
@@ -366,26 +366,49 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       ]);
     });
 
-    it('supports custom JS callback function in select specification', async () => {
+    it('executes end-to-end queries combining string (trim, substr, upper) and math (abs, round, floor, ceil) functions', async () => {
+      await db.insert('users', {
+        id: 4,
+        name: '   Dana Scully   ',
+        age: 31,
+        dept: '  Federal Bureau  ',
+        role: 'Special Agent',
+        salary: -84320.65,
+      });
+
       const rows = await db.from('users')
         .select([
           'id',
-          {
-            fn: (val, row) => `${row.name} earns $${row.salary}`,
-            as: 'summary',
-          },
+          'trim(name) as clean_name',
+          'trim(dept) as clean_dept',
+          'upper(role) as upper_role',
+          'substr(role, 1, 7) as short_role',
+          'abs(salary) as abs_salary',
+          'round(salary) as rounded_salary',
+          'floor(salary) as floor_salary',
+          'ceil(salary) as ceil_salary',
         ])
-        .where('id', '=', 1)
+        .where('id', '=', 4)
         .toArray();
 
       expect(rows).toEqual([
-        { id: 1, summary: 'Alice Chen earns $145000' },
+        {
+          id: 4,
+          clean_name: 'Dana Scully',
+          clean_dept: 'Federal Bureau',
+          upper_role: 'SPECIAL AGENT',
+          short_role: 'Special',
+          abs_salary: 84320.65,
+          rounded_salary: -84321,
+          floor_salary: -84321,
+          ceil_salary: -84320,
+        },
       ]);
     });
 
     it('supports aggregate functions inside select with groupBy', async () => {
       const rows = await db.from('users')
-        .select(['dept', { fn: 'count', col: '*', as: 'headcount' }, { fn: 'sum', col: 'salary', as: 'total_payroll' }])
+        .select(['dept', 'count(*) as headcount', 'sum(salary) as total_payroll'])
         .groupBy('dept')
         .orderBy('dept')
         .toArray();
@@ -403,13 +426,13 @@ describe('QueryBuilder Unit & Integration Tests', () => {
       });
     });
 
-    it('supports dictionary syntax with aggregate functions and groupBy', async () => {
+    it('supports SelectColumnSpec aliasing with aggregate expressions and groupBy', async () => {
       const rows = await db.from('users')
-        .select({
-          dept: 'department',
-          '*': { fn: 'count', as: 'count' },
-          salary: { fn: 'sum', as: 'total' },
-        })
+        .select([
+          { col: 'dept', as: 'department' },
+          'count(*) as count',
+          'sum(salary) as total',
+        ])
         .groupBy('dept')
         .orderBy('dept')
         .toArray();

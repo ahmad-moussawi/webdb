@@ -375,11 +375,206 @@ When a UDF is used as a filter predicate, the VM cannot make an emit/skip decisi
 
 ---
 
-## 9. Phased Implementation Roadmap
+## 9. Advanced Query Transformations: `SELECT EXCEPT` & Expression Pipelining
+
+### 9.1 Motivation & Prior Art
+
+In wide tables (e.g. 30–50 columns with large payloads, embeddings, or internal audit metadata), writing full column projection lists manually is verbose and error-prone. Conversely, executing `SELECT *` incurs unnecessary deserialization and I/O costs.
+
+Modern analytical engines (Google BigQuery `SELECT * EXCEPT(...)`, DuckDB and Snowflake `SELECT * EXCLUDE(...)`) provide wildcard column exclusion. WebDB extends this pattern to both base tables and dynamic subqueries:
+
+```typescript
+// Base table exclusion:
+db.from('users').selectExcept('age', 'image_url');
+
+// Dynamic derived table with computed columns on the fly:
+db.from(
+  db.from('users')
+    .select('*', 'concat(name, last_name) as fullname')
+)
+.selectExcept('name');
+```
+
+---
+
+### 9.2 Zero-Overhead Register Pipelining (Input vs. Output Registers)
+
+WebDB's 64-register file architecture naturally decouples **Input / Intermediate Evaluation Registers** from **Contiguous Output Result Registers**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                           64-Register File (Per Frame)                                 │
+├───────────────────────────────┬───────────────────────────┬─────────────────────────────┤
+│ Output Registers (Emitted)   │ Intermediate Inputs       │ Constants & Literals        │
+├───────────────────────────────┼───────────────────────────┼─────────────────────────────┤
+│ r[1] = id                     │ r[4] = name (excluded)    │ r[8] = 2                    │
+│ r[2] = score                  │ r[5] = temp_calc          │ r[9] = ' '                  │
+│ r[3] = last_name              │                           │                             │
+│ r[6] = fullname (computed)    │                           │                             │
+└───────────────────────────────┴───────────────────────────┴─────────────────────────────┘
+                                              │
+                      OP_RESULT_ROW start=1, count=4 (Emits r[1]..r[3], r[6])
+                      Notice r[4] (name) is NEVER copied or emitted!
+```
+
+1. **Dependency Resolution**: The query compiler tracks whether an excluded column is referenced by an active computed expression. If `name` is excluded from the final output but required by `concat(name, last_name)`, `name` is still read from the page slot into an intermediate evaluation register `r[4]`.
+2. **Intermediate Computation**: `OP_STR_CONCAT` reads `r[4] (name)` and `r[3] (last_name)` and writes the computed result into output register `r[6] (fullname)`.
+3. **Contiguous Result Packing**: The compiler assigns all unexcluded and computed output registers (`id`, `score`, `last_name`, `fullname`) into the contiguous range `r[start_reg .. start_reg + num_cols - 1]` required by `OP_RESULT_ROW`.
+4. **Zero Data Copies**: The intermediate register `r[4] (name)` is simply excluded from the `OP_RESULT_ROW` register slice. This requires **zero memory copies**, **zero row repacking**, and **zero temporary table allocations**, enabling `SELECT EXCEPT` and subquery flattening to execute with pure zero-overhead register streaming.
+
+---
+
+### 9.3 Subquery Flattening Optimization
+
+When an outer query selects from an inner subquery with `selectExcept`, the query planner inlines expressions and eliminates temporary ephemeral tables:
+
+#### Query:
+```sql
+SELECT EXCEPT name FROM (
+  SELECT *, concat(name, last_name) AS fullname FROM users
+)
+```
+
+#### Compilation & Inlining Pipeline:
+1. **Inner Output Schema**: Derives `[id, name, score, last_name, fullname]`.
+2. **Outer Filter**: `EXCEPT name` produces the projected set `[id, score, last_name, fullname]`.
+3. **Expression Inlining**: Flattens the query into a single-pass scan over `users`:
+   ```sql
+   SELECT id, score, last_name, concat(name, last_name) AS fullname FROM users
+   ```
+
+#### Resulting Bytecode (Single Pass, Zero Temp B-Trees):
+```
+addr  opcode           p1  p2   p3   comment
+0000  OP_OPEN_CURSOR   0   1    0    ; Open users table cursor
+0005  OP_REWIND        0   45   0    ; If empty, jump to HALT
+; --- Load needed columns into registers ---
+0008  OP_COLUMN_INT    0   0    1    ; r[1] = id
+0012  OP_COLUMN_FLOAT  0   2    2    ; r[2] = score
+0016  OP_COLUMN_TEXT   0   3    3    ; r[3] = last_name
+0020  OP_COLUMN_TEXT   0   1    4    ; r[4] = name (loaded strictly as input for concat!)
+; --- Compute fullname ---
+0024  OP_STR_CONCAT    4   3    5    ; r[5] = concat(r[4], r[3]) -> fullname
+; --- Emit final projected columns (id, score, last_name, fullname) ---
+0030  OP_RESULT_ROW    1   4    0    ; Emits [r[1] (id), r[2] (score), r[3] (last_name), r[5] (fullname)]
+0035  OP_NEXT_ROW      0   8    0    ; Loop scan
+0045  OP_HALT          0   0    0    ; Done
+```
+
+---
+
+## 10. Schema-Level Generated & Computed Columns (`VIRTUAL` vs `STORED`)
+
+### 10.1 Schema Definition & Concept
+
+In contrast to query-level dynamic expressions (which evaluate on the fly in `SELECT`), **Schema-Level Generated Columns** are defined permanently in the table catalog:
+
+```sql
+CREATE TABLE products (
+  id INT PRIMARY KEY,
+  price FLOAT,
+  tax_rate FLOAT,
+  -- VIRTUAL: Computed dynamically on read; 0 bytes on disk
+  tax_amount FLOAT GENERATED ALWAYS AS (price * tax_rate) VIRTUAL,
+  -- STORED: Computed once on INSERT/UPDATE; persisted in page cell
+  total_price FLOAT GENERATED ALWAYS AS (price * (1 + tax_rate)) STORED
+);
+```
+
+TypeScript Table Creation API:
+```typescript
+await db.createTable('products', [
+  { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+  { name: 'price', type: 'FLOAT64' },
+  { name: 'tax_rate', type: 'FLOAT64' },
+  {
+    name: 'tax_amount',
+    type: 'FLOAT64',
+    generated: {
+      expression: 'price * tax_rate',
+      mode: 'VIRTUAL',
+    },
+  },
+  {
+    name: 'total_price',
+    type: 'FLOAT64',
+    generated: {
+      expression: 'price * (1 + tax_rate)',
+      mode: 'STORED',
+    },
+  },
+]);
+```
+
+---
+
+### 10.2 Storage Representation & Catalog Format
+
+#### A. Catalog Page (`0x0C`) Metadata
+Generated column metadata is stored in the catalog page with dedicated column flags:
+- `ColumnFlag.GENERATED_VIRTUAL = 0x10`
+- `ColumnFlag.GENERATED_STORED = 0x20`
+- Followed by a 2-byte length-prefixed UTF-8 expression string encoded in the column descriptor.
+
+#### B. Slotted Page Row Layout (`page_type = 0x0D`)
+| Mode | Disk Size | Null-Bitmap Presence | Slotted Page Payload Presence |
+| :--- | :---: | :---: | :---: |
+| **`VIRTUAL`** | **0 bytes** | Omitted | **Omitted completely** from physical row storage |
+| **`STORED`** | $4\text{ B}$ (or var-len) | Bit included | Physically packed in binary row data |
+
+**Row Density Benefit:** Because `VIRTUAL` columns consume zero physical bytes on disk, wide tables with multiple computed views fit more rows per 4KB page, drastically reducing buffer pool cache misses and disk I/O.
+
+---
+
+### 10.3 Execution & Resolution Lifecycle
+
+#### A. Read Resolution (`VIRTUAL`)
+When a query selects a `VIRTUAL` column:
+1. The compiler identifies `ColumnFlag.GENERATED_VIRTUAL` from catalog metadata.
+2. Instead of emitting `OP_COLUMN_FLOAT`, the compiler inlines the generated expression opcodes:
+   ```
+   OP_COLUMN_FLOAT 0 1 1    ; r[1] = price
+   OP_COLUMN_FLOAT 0 2 2    ; r[2] = tax_rate
+   OP_MUL          1 2 3    ; r[3] = price * tax_rate (tax_amount)
+   ```
+3. The result resides in register `r[3]` for filtering, sorting, or projection.
+
+#### B. Write Resolution (`STORED`)
+During `OP_INSERT_ROW` and `OP_UPDATE_FIELD`:
+1. The VM loads input column registers (`price`, `tax_rate`).
+2. Evaluates the generated expression into a target register: `r[total_price] = price * (1 + tax_rate)`.
+3. Serializes the computed register into the physical binary row payload inserted into the B+Tree leaf.
+
+---
+
+### 10.4 Secondary Indexing on `VIRTUAL` Columns
+
+WebDB allows creating secondary B+Tree indexes (`0x0A`) on `VIRTUAL` generated columns without storing the column in the base table leaf:
+
+```typescript
+await db.createIndex('idx_products_tax', 'products', ['tax_amount']);
+```
+
+```
+Table Leaf Page (0x0D)                       Index Leaf Page (0x0A)
+┌─────────────────────────────────┐          ┌───────────────────────────────────┐
+│ id=1, price=100.0, tax_rate=0.2 │          │ tax_amount=20.0  ──► rowid=1      │
+│ (tax_amount consumes 0 bytes!)  │          │ tax_amount=40.0  ──► rowid=2      │
+└─────────────────────────────────┘          └───────────────────────────────────┘
+```
+
+- **On Insert / Update:** The VM evaluates the virtual expression in registers and writes `(computed_val, rowid)` into the index B+Tree leaf.
+- **On Query (`WHERE tax_amount > 15.0`):** The engine executes a B+Tree binary search directly on the index in $O(\log N)$ time with zero expression re-computation!
+
+---
+
+## 11. Phased Implementation Roadmap
 
 | Milestone       | Target Version | Focus Area                                | Key Architectural Deliverables                                                                                                                                                                                                                                                         |
 | :-------------- | :------------: | :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Milestone 1** |    **V1.1**    | **Semi-Structured, Vectors & Encryption** | • `EncryptedVfsAdapter` (AES-256-GCM via Web Crypto)<br>• `JSON` Text type + `jsonExtract()` VDBE scalar opcode<br>• `VECTOR<float32, D>` column ($D \le 384$ or quantized $D \le 1536$)<br>• Wasm SIMD `v128` Cosine/L2 distance kernel<br>• Flat KNN Top-$K$ Min-Heap in Query Arena |
+| **Milestone 1** |    **V1.1**    | **Semi-Structured, Vectors & Encryption** | • `EncryptedVfsAdapter` (AES-256-GCM via Web Crypto)<br>• `JSON` Text type + `jsonExtract()` VDBE scalar opcode<br>• `VECTOR<float32, D>` column ($D \le 384$ or quantized $D \le 1536$)<br>• Wasm SIMD `v128` Cosine/L2 distance kernel<br>• Flat KNN Top-$K$ Min-Heap in Query Arena<br>• `selectExcept()` + Register Pipelining & Subquery Flattening |
 | **Milestone 2** |    **V1.2**    | **Full-Text, Fuzzy & Vectorized UDFs**    | • Host `Intl.Segmenter` tokenizer pipeline<br>• B+Tree Inverted Index (`0x0A`) with term frequencies<br>• BM25 relevance scorer in Wasm<br>• Trigram index generation for accelerated `LIKE '%substr%'`<br>• Row Overflow Pages (`page_type = 0x0C`)<br>• Vectorized UDF batching (`STATUS_UDF_BATCH` + 64-bit selection bitmask) |
-| **Milestone 3** |    **V2.0**    | **Hybrid Platform & ANN Graphs**          | • Reciprocal Rank Fusion (RRF) engine<br>• Graph-based HNSW vector index pages (`page_type = 0x0B`)<br>• `JSONB` binary TLV storage<br>• Multi-column composite secondary indexes                                                                                                      |
+| **Milestone 3** |    **V2.0**    | **Hybrid Platform & ANN Graphs**          | • Reciprocal Rank Fusion (RRF) engine<br>• Graph-based HNSW vector index pages (`page_type = 0x0B`)<br>• `JSONB` binary TLV storage<br>• Multi-column composite secondary indexes<br>• Schema-Level Generated Columns (`VIRTUAL` & `STORED`) with secondary B+Tree indexing         |
+
+
 

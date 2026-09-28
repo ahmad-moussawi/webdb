@@ -22,14 +22,11 @@ export type SelectFunction =
   | 'round'
   | 'floor'
   | 'ceil'
-  | 'abs'
-  | ((val: any, row: DbRow) => any);
+  | 'abs';
 
 export interface SelectColumnSpec {
-  col?: string;
-  as?: string;
-  fn?: SelectFunction | string;
-  args?: any[];
+  col: string;
+  as: string;
 }
 
 export interface NormalizedSelectField {
@@ -42,7 +39,7 @@ export interface NormalizedSelectField {
 export type SelectItem =
   | string
   | SelectColumnSpec
-  | Record<string, string | SelectColumnSpec>;
+  | Record<string, string>;
 
 export function normalizeSelectItem(item: any): NormalizedSelectField[] {
   if (!item) return [];
@@ -74,14 +71,25 @@ export function normalizeSelectItem(item: any): NormalizedSelectField[] {
     if (fnMatch) {
       const funcName = fnMatch[1].toLowerCase();
       const rawArg = fnMatch[2].trim();
+      let sourceCol: string | undefined = rawArg === '*' ? undefined : rawArg;
+      let args: any[] | undefined = undefined;
+      if (rawArg.includes(',')) {
+        const parts = rawArg.split(',').map((p) => p.trim());
+        sourceCol = parts[0];
+        args = parts.slice(1).map((p) => {
+          const num = Number(p);
+          return isNaN(num) ? p.replace(/^['"]|['"]$/g, '') : num;
+        });
+      }
       if (!asMatch) {
-        alias = rawArg && rawArg !== '*' ? `${funcName}_${rawArg}` : funcName;
+        alias = sourceCol ? `${funcName}_${sourceCol}` : funcName;
       }
       return [
         {
-          sourceCol: rawArg === '*' ? undefined : rawArg,
+          sourceCol,
           alias,
           fn: funcName,
+          args,
         },
       ];
     }
@@ -90,29 +98,12 @@ export function normalizeSelectItem(item: any): NormalizedSelectField[] {
   }
 
   if (typeof item === 'object') {
-    const hasCol = item.col !== undefined;
-    const hasFn = item.fn !== undefined;
-    const hasAs = item.as !== undefined;
-
-    if (hasCol || hasFn || hasAs) {
-      const col = item.col;
-      const fn = item.fn;
-      let as = item.as;
-      if (!as) {
-        if (typeof fn === 'string') {
-          as = col && col !== '*' ? `${fn}_${col}` : fn;
-        } else if (col) {
-          as = col;
-        } else {
-          as = 'val';
-        }
-      }
+    // SelectColumnSpec: { col: string; as: string }
+    if ('col' in item && 'as' in item && typeof item.col === 'string' && typeof item.as === 'string') {
       return [
         {
-          sourceCol: col === '*' ? undefined : col,
-          alias: as,
-          fn,
-          args: item.args,
+          sourceCol: item.col === '*' ? undefined : item.col,
+          alias: item.as,
         },
       ];
     }
@@ -124,16 +115,6 @@ export function normalizeSelectItem(item: any): NormalizedSelectField[] {
         fields.push({
           sourceCol: col === '*' ? undefined : col,
           alias: val,
-        });
-      } else if (typeof val === 'object' && val !== null) {
-        const spec = val as SelectColumnSpec;
-        fields.push({
-          sourceCol: spec.col ?? (col === '*' ? undefined : col),
-          alias:
-            spec.as ??
-            (typeof spec.fn === 'string' ? `${spec.fn}_${col}` : col),
-          fn: spec.fn,
-          args: spec.args,
         });
       }
     }
@@ -410,16 +391,12 @@ export class QueryBuilder {
     return this;
   }
 
-  select(...columns: (string | SelectColumnSpec | Record<string, any>)[]): this;
-  select(columns: (string | SelectColumnSpec | Record<string, any>)[]): this;
-  select(columnsMap: Record<string, any>): this;
+  select(...columns: SelectItem[]): this;
+  select(columns: SelectItem[]): this;
+  select(columnsMap: Record<string, string>): this;
   select(
-    first?:
-      | string
-      | SelectColumnSpec
-      | (string | SelectColumnSpec | Record<string, any>)[]
-      | Record<string, any>,
-    ...rest: (string | SelectColumnSpec | Record<string, any>)[]
+    first?: SelectItem | SelectItem[],
+    ...rest: SelectItem[]
   ): this {
     if (first === undefined) return this;
 
@@ -470,56 +447,52 @@ export class QueryBuilder {
       }
 
       if (field.fn) {
-        if (typeof field.fn === 'function') {
-          val = field.fn(val, row);
-        } else {
-          const fn = field.fn.toLowerCase();
-          if (fn === 'upper') {
+        const fn = field.fn.toLowerCase();
+        if (fn === 'upper') {
+          val =
+            val !== null && val !== undefined
+              ? String(val).toUpperCase()
+              : null;
+        } else if (fn === 'lower') {
+          val =
+            val !== null && val !== undefined
+              ? String(val).toLowerCase()
+              : null;
+        } else if (fn === 'length') {
+          val =
+            val !== null && val !== undefined ? String(val).length : null;
+        } else if (fn === 'substr') {
+          if (val === null || val === undefined) {
+            val = null;
+          } else {
+            const start = (field.args?.[0] ?? 1) - 1;
+            const len = field.args?.[1];
             val =
-              val !== null && val !== undefined
-                ? String(val).toUpperCase()
-                : null;
-          } else if (fn === 'lower') {
-            val =
-              val !== null && val !== undefined
-                ? String(val).toLowerCase()
-                : null;
-          } else if (fn === 'length') {
-            val =
-              val !== null && val !== undefined ? String(val).length : null;
-          } else if (fn === 'substr') {
-            if (val === null || val === undefined) {
-              val = null;
-            } else {
-              const start = (field.args?.[0] ?? 1) - 1;
-              const len = field.args?.[1];
-              val =
-                len !== undefined
-                  ? String(val).substring(start, start + len)
-                  : String(val).substring(start);
-            }
-          } else if (fn === 'round') {
-            val =
-              val !== null && val !== undefined
-                ? Math.round(Number(val))
-                : null;
-          } else if (fn === 'floor') {
-            val =
-              val !== null && val !== undefined
-                ? Math.floor(Number(val))
-                : null;
-          } else if (fn === 'ceil') {
-            val =
-              val !== null && val !== undefined ? Math.ceil(Number(val)) : null;
-          } else if (fn === 'abs') {
-            val =
-              val !== null && val !== undefined ? Math.abs(Number(val)) : null;
-          } else if (fn === 'trim') {
-            val = val !== null && val !== undefined ? String(val).trim() : null;
-          } else if (['count', 'sum', 'avg', 'min', 'max'].includes(fn)) {
-            if (val === undefined && row[field.alias] !== undefined) {
-              val = row[field.alias];
-            }
+              len !== undefined
+                ? String(val).substring(start, start + len)
+                : String(val).substring(start);
+          }
+        } else if (fn === 'round') {
+          val =
+            val !== null && val !== undefined
+              ? Math.round(Number(val))
+              : null;
+        } else if (fn === 'floor') {
+          val =
+            val !== null && val !== undefined
+              ? Math.floor(Number(val))
+              : null;
+        } else if (fn === 'ceil') {
+          val =
+            val !== null && val !== undefined ? Math.ceil(Number(val)) : null;
+        } else if (fn === 'abs') {
+          val =
+            val !== null && val !== undefined ? Math.abs(Number(val)) : null;
+        } else if (fn === 'trim') {
+          val = val !== null && val !== undefined ? String(val).trim() : null;
+        } else if (['count', 'sum', 'avg', 'min', 'max'].includes(fn)) {
+          if (val === undefined && row[field.alias] !== undefined) {
+            val = row[field.alias];
           }
         }
       }

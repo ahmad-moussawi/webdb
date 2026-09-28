@@ -1067,6 +1067,51 @@ export function vm_step(
       }
 
       /**
+       * OP_STR_TRIM (0x2D)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Strips leading and trailing whitespace from string in r[src_reg] into r[dest_reg].
+       */
+      case OpCode.OP_STR_TRIM: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null && val !== undefined ? String(val).trim() : null;
+        break;
+      }
+
+      /**
+       * OP_MATH_ABS (0x2E)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Computes absolute numeric value |r[src_reg]| into r[dest_reg].
+       */
+      case OpCode.OP_MATH_ABS: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null && val !== undefined ? Math.abs(Number(val)) : null;
+        break;
+      }
+
+      /**
+       * OP_MATH_ROUND (0x2F)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Rounds float in r[src_reg] to nearest integer into r[dest_reg].
+       */
+      case OpCode.OP_MATH_ROUND: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null && val !== undefined ? Math.round(Number(val)) : null;
+        break;
+      }
+
+      /**
        * OP_RESULT_ROW (0x25)
        * Operands: [start_reg: uint8] [num_cols: uint8] (2 bytes)
        * Serializes num_cols registers (start_reg .. start_reg + num_cols - 1)
@@ -1240,6 +1285,208 @@ export function vm_step(
 
         sorter.readIdx++;
         ctx.pc = jump_target;
+        break;
+      }
+
+      /**
+       * OP_MATH_FLOOR (0x34)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Computes mathematical floor ⌊r[src_reg]⌋ into r[dest_reg].
+       */
+      case OpCode.OP_MATH_FLOOR: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null && val !== undefined ? Math.floor(Number(val)) : null;
+        break;
+      }
+
+      /**
+       * OP_MATH_CEIL (0x35)
+       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
+       * Computes mathematical ceiling ⌈r[src_reg]⌉ into r[dest_reg].
+       */
+      case OpCode.OP_MATH_CEIL: {
+        const src_reg = bytecode[ctx.pc];
+        const dest_reg = bytecode[ctx.pc + 1];
+        ctx.pc += 2;
+        const val = ctx.registers[src_reg];
+        ctx.registers[dest_reg] =
+          val !== null && val !== undefined ? Math.ceil(Number(val)) : null;
+        break;
+      }
+
+      /**
+       * OP_ADD (0x36)
+       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
+       * 3VL addition: r[dest_reg] = r[regA] + r[regB].
+       */
+      case OpCode.OP_ADD: {
+        const reg_a = bytecode[ctx.pc];
+        const reg_b = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        const val_a = ctx.registers[reg_a];
+        const val_b = ctx.registers[reg_b];
+        if (
+          val_a === null ||
+          val_a === undefined ||
+          val_b === null ||
+          val_b === undefined
+        ) {
+          ctx.registers[dest_reg] = null;
+        } else {
+          ctx.registers[dest_reg] = Number(val_a) + Number(val_b);
+        }
+        break;
+      }
+
+      /**
+       * OP_SUB (0x37)
+       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
+       * 3VL subtraction: r[dest_reg] = r[regA] - r[regB].
+       */
+      case OpCode.OP_SUB: {
+        const reg_a = bytecode[ctx.pc];
+        const reg_b = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        const val_a = ctx.registers[reg_a];
+        const val_b = ctx.registers[reg_b];
+        if (
+          val_a === null ||
+          val_a === undefined ||
+          val_b === null ||
+          val_b === undefined
+        ) {
+          ctx.registers[dest_reg] = null;
+        } else {
+          ctx.registers[dest_reg] = Number(val_a) - Number(val_b);
+        }
+        break;
+      }
+
+      /**
+       * OP_MUL (0x38)
+       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
+       * 3VL multiplication: r[dest_reg] = r[regA] * r[regB].
+       */
+      case OpCode.OP_MUL: {
+        const reg_a = bytecode[ctx.pc];
+        const reg_b = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        const val_a = ctx.registers[reg_a];
+        const val_b = ctx.registers[reg_b];
+        if (
+          val_a === null ||
+          val_a === undefined ||
+          val_b === null ||
+          val_b === undefined
+        ) {
+          ctx.registers[dest_reg] = null;
+        } else {
+          ctx.registers[dest_reg] = Number(val_a) * Number(val_b);
+        }
+        break;
+      }
+
+      /**
+       * OP_DIV (0x39)
+       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
+       * 3VL division: r[dest_reg] = r[regA] / r[regB] (null on divide by zero).
+       */
+      case OpCode.OP_DIV: {
+        const reg_a = bytecode[ctx.pc];
+        const reg_b = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        const val_a = ctx.registers[reg_a];
+        const val_b = ctx.registers[reg_b];
+        if (
+          val_a === null ||
+          val_a === undefined ||
+          val_b === null ||
+          val_b === undefined
+        ) {
+          ctx.registers[dest_reg] = null;
+        } else {
+          const denom = Number(val_b);
+          ctx.registers[dest_reg] = denom === 0 ? null : Number(val_a) / denom;
+        }
+        break;
+      }
+
+      /**
+       * OP_MOD (0x3A)
+       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
+       * 3VL modulo: r[dest_reg] = r[regA] % r[regB] (null on divide by zero).
+       */
+      case OpCode.OP_MOD: {
+        const reg_a = bytecode[ctx.pc];
+        const reg_b = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        const val_a = ctx.registers[reg_a];
+        const val_b = ctx.registers[reg_b];
+        if (
+          val_a === null ||
+          val_a === undefined ||
+          val_b === null ||
+          val_b === undefined
+        ) {
+          ctx.registers[dest_reg] = null;
+        } else {
+          const denom = Number(val_b);
+          ctx.registers[dest_reg] = denom === 0 ? null : Number(val_a) % denom;
+        }
+        break;
+      }
+
+      /**
+       * OP_STR_CONCAT (0x3D)
+       * Operands: [start_reg: uint8] [num_regs: uint8] [dest_reg: uint8] (3 bytes)
+       * Concatenates registers r[start_reg ... start_reg + num_regs - 1] into r[dest_reg].
+       */
+      case OpCode.OP_STR_CONCAT: {
+        const start_reg = bytecode[ctx.pc];
+        const num_regs = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        let res = '';
+        let has_val = false;
+        for (let i = 0; i < num_regs; i++) {
+          const v = ctx.registers[start_reg + i];
+          if (v !== null && v !== undefined) {
+            has_val = true;
+            res += String(v);
+          }
+        }
+        ctx.registers[dest_reg] = has_val ? res : null;
+        break;
+      }
+
+      /**
+       * OP_COALESCE (0x3E)
+       * Operands: [start_reg: uint8] [num_regs: uint8] [dest_reg: uint8] (3 bytes)
+       * Scans registers r[start_reg ... start_reg + num_regs - 1], stores first non-null into r[dest_reg].
+       */
+      case OpCode.OP_COALESCE: {
+        const start_reg = bytecode[ctx.pc];
+        const num_regs = bytecode[ctx.pc + 1];
+        const dest_reg = bytecode[ctx.pc + 2];
+        ctx.pc += 3;
+        let first_non_null: any = null;
+        for (let i = 0; i < num_regs; i++) {
+          const v = ctx.registers[start_reg + i];
+          if (v !== null && v !== undefined) {
+            first_non_null = v;
+            break;
+          }
+        }
+        ctx.registers[dest_reg] = first_non_null;
         break;
       }
 

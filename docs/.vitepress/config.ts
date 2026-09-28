@@ -70,13 +70,17 @@ gtag('config', 'G-SK750XLF2Y');`,
     sidebar: [
       {
         text: "Guide",
-        items: [{ text: "Getting Started", link: "/getting-started" }],
+        items: [
+          { text: "Getting Started", link: "/getting-started" },
+          { text: "Query Builder API & Grammar", link: "/plans/query_builder_api_and_grammar" },
+        ],
       },
       {
         text: "Architecture & Strategy",
         items: [
           { text: "Strategic Master Plan", link: "/plans/plan" },
           { text: 'Prototype ("Walking Skeleton")', link: "/plans/prototype" },
+          { text: "Query Builder API & Grammar", link: "/plans/query_builder_api_and_grammar" },
           { text: "System Limits & Invariants", link: "/plans/limitations" },
           {
             text: "Future Extensions & Search Roadmap",

@@ -663,6 +663,107 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       expect(ctx.registers[13]).toBe("Hello");
     });
 
+    it("executes OP_STR_TRIM, OP_MATH_ABS, OP_MATH_ROUND, OP_MATH_FLOOR, OP_MATH_CEIL", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+      const ctx = createVmContext();
+      resetVmContext(ctx);
+
+      ctx.registers[0] = "   spaced out   ";
+      ctx.registers[1] = -42.75;
+      ctx.registers[2] = 3.2;
+      ctx.registers[3] = 3.8;
+
+      const codeMath = new Uint8Array([
+        OpCode.OP_STR_TRIM, 0, 10,  // r[10] = trim("   spaced out   ") -> "spaced out"
+        OpCode.OP_MATH_ABS, 1, 11,   // r[11] = abs(-42.75) -> 42.75
+        OpCode.OP_MATH_ROUND, 1, 12, // r[12] = round(-42.75) -> -43
+        OpCode.OP_MATH_FLOOR, 3, 13, // r[13] = floor(3.8) -> 3
+        OpCode.OP_MATH_CEIL, 2, 14,  // r[14] = ceil(3.2) -> 4
+        OpCode.OP_HALT,
+      ]);
+
+      const status = vm_step(ctx, view, codeMath);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[10]).toBe("spaced out");
+      expect(ctx.registers[11]).toBe(42.75);
+      expect(ctx.registers[12]).toBe(-43);
+      expect(ctx.registers[13]).toBe(3);
+      expect(ctx.registers[14]).toBe(4);
+    });
+
+    it("executes 3VL binary arithmetic OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD with null and zero handling", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+      const ctx = createVmContext();
+      resetVmContext(ctx);
+
+      ctx.registers[0] = 20;
+      ctx.registers[1] = 6;
+      ctx.registers[2] = 0;
+      ctx.registers[3] = null;
+
+      const codeArith = new Uint8Array([
+        OpCode.OP_ADD, 0, 1, 10, // r[10] = 20 + 6 = 26
+        OpCode.OP_SUB, 0, 1, 11, // r[11] = 20 - 6 = 14
+        OpCode.OP_MUL, 0, 1, 12, // r[12] = 20 * 6 = 120
+        OpCode.OP_DIV, 0, 1, 13, // r[13] = 20 / 6 = 3.333...
+        OpCode.OP_MOD, 0, 1, 14, // r[14] = 20 % 6 = 2
+        // Division and modulo by zero -> null
+        OpCode.OP_DIV, 0, 2, 15, // r[15] = 20 / 0 = null
+        OpCode.OP_MOD, 0, 2, 16, // r[16] = 20 % 0 = null
+        // 3VL null propagation
+        OpCode.OP_ADD, 0, 3, 17, // r[17] = 20 + null = null
+        OpCode.OP_MUL, 0, 3, 18, // r[18] = 20 * null = null
+        OpCode.OP_HALT,
+      ]);
+
+      const status = vm_step(ctx, view, codeArith);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[10]).toBe(26);
+      expect(ctx.registers[11]).toBe(14);
+      expect(ctx.registers[12]).toBe(120);
+      expect(ctx.registers[13]).toBeCloseTo(3.33333, 4);
+      expect(ctx.registers[14]).toBe(2);
+      expect(ctx.registers[15]).toBeNull();
+      expect(ctx.registers[16]).toBeNull();
+      expect(ctx.registers[17]).toBeNull();
+      expect(ctx.registers[18]).toBeNull();
+    });
+
+    it("executes multi-argument OP_STR_CONCAT and OP_COALESCE", () => {
+      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const view = new DataView(buffer);
+      const ctx = createVmContext();
+      resetVmContext(ctx);
+
+      ctx.registers[0] = "Hello";
+      ctx.registers[1] = " ";
+      ctx.registers[2] = "World";
+      ctx.registers[3] = null;
+
+      ctx.registers[4] = null;
+      ctx.registers[5] = null;
+      ctx.registers[6] = "FirstNonNull";
+      ctx.registers[7] = "SecondNonNull";
+
+      const codeMulti = new Uint8Array([
+        // Concat r[0..3] -> "Hello World"
+        OpCode.OP_STR_CONCAT, 0, 4, 10,
+        // Coalesce r[4..7] -> "FirstNonNull"
+        OpCode.OP_COALESCE, 4, 4, 11,
+        // Coalesce all nulls -> null
+        OpCode.OP_COALESCE, 4, 2, 12,
+        OpCode.OP_HALT,
+      ]);
+
+      const status = vm_step(ctx, view, codeMulti);
+      expect(status).toBe(VmStatus.DONE);
+      expect(ctx.registers[10]).toBe("Hello World");
+      expect(ctx.registers[11]).toBe("FirstNonNull");
+      expect(ctx.registers[12]).toBeNull();
+    });
+
     it("filters end-to-end with WebDB using LIKE, NOT LIKE, STARTS_WITH, ENDS_WITH, CONTAINS", async () => {
       const db = await WebDB.open({
         name: "string_e2e_test",

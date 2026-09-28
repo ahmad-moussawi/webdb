@@ -75,12 +75,34 @@ export enum OpCode {
   OP_STR_UPPER = 0x2a,
   OP_STR_LENGTH = 0x2b,
   OP_STR_SUBSTR = 0x2c,
+  OP_STR_TRIM = 0x2d,
+  OP_MATH_ABS = 0x2e,
+  OP_MATH_ROUND = 0x2f,
 
   // Sorter (ORDER BY)
   OP_SORTER_OPEN = 0x30,
   OP_SORTER_INSERT = 0x31,
   OP_SORTER_SORT = 0x32,
   OP_SORTER_NEXT = 0x33,
+
+  // Math Functions
+  OP_MATH_FLOOR = 0x34,
+  OP_MATH_CEIL = 0x35,
+
+  // Binary Arithmetic (3VL)
+  OP_ADD = 0x36,
+  OP_SUB = 0x37,
+  OP_MUL = 0x38,
+  OP_DIV = 0x39,
+  OP_MOD = 0x3a,
+
+  // Subquery Framing
+  OP_ENTER_SUBQUERY = 0x3b,
+  OP_RETURN_SUBQUERY = 0x3c,
+
+  // Multi-Arg Functions
+  OP_STR_CONCAT = 0x3d,
+  OP_COALESCE = 0x3e,
 
   // Agg (GROUP BY)
   OP_AGG_INIT = 0x40,
