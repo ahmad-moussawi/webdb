@@ -1,5 +1,11 @@
-import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { BenchmarkAdapter, BenchmarkRecord, EngineId, StorageCategory } from './types.js';
+import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
+import {
+  BenchmarkAdapter,
+  BenchmarkRecord,
+  EngineId,
+  OrderRecord,
+  StorageCategory,
+} from "./types.js";
 
 let cachedSqlite3: any = null;
 
@@ -21,18 +27,18 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
   private db: any = null;
   private dbFilename: string;
 
-  constructor(id: 'sqlite_mem' | 'sqlite_opfs', isOpfs: boolean = false) {
+  constructor(id: "sqlite_mem" | "sqlite_opfs", isOpfs: boolean = false) {
     this.id = id;
     this.isOpfs = isOpfs;
-    this.storage = isOpfs ? 'persistent' : 'memory';
-    this.name = isOpfs ? 'SQLite WASM (OPFS)' : 'SQLite WASM (In-Memory)';
+    this.storage = isOpfs ? "persistent" : "memory";
+    this.name = isOpfs ? "SQLite WASM (OPFS)" : "SQLite WASM (In-Memory)";
     this.dbFilename = `/bench_sqlite_${Date.now()}.sqlite3`;
   }
 
   static async isOpfsSupported(): Promise<boolean> {
     try {
       const sqlite3 = await getSqlite3();
-      return !!(sqlite3.opfs && typeof FileSystemHandle !== 'undefined');
+      return !!(sqlite3.opfs && typeof FileSystemHandle !== "undefined");
     } catch {
       return false;
     }
@@ -47,11 +53,13 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
 
     if (this.isOpfs) {
       if (!sqlite3.opfs) {
-        throw new Error('OPFS is not supported in this browser context (requires Web Worker or Cross-Origin-Isolation).');
+        throw new Error(
+          "OPFS is not supported in this browser context (requires Web Worker or Cross-Origin-Isolation).",
+        );
       }
       this.db = new sqlite3.oo1.OpfsDb(this.dbFilename);
     } else {
-      this.db = new sqlite3.oo1.DB(':memory:');
+      this.db = new sqlite3.oo1.DB(":memory:");
     }
 
     // Configure PRAGMAs for optimal performance
@@ -83,16 +91,19 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
     `);
   }
 
-  async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
-    if (!this.db) throw new Error('SQLite not initialized');
+  async bulkInsert(
+    records: BenchmarkRecord[],
+    orders: OrderRecord[] = [],
+  ): Promise<void> {
+    if (!this.db) throw new Error("SQLite not initialized");
     const db = this.db;
 
-    db.exec('BEGIN TRANSACTION;');
+    db.exec("BEGIN TRANSACTION;");
     const stmt = db.prepare(
-      'INSERT INTO benchmark (id, name, age, score, city, active) VALUES (?, ?, ?, ?, ?, ?);'
+      "INSERT INTO benchmark (id, name, age, score, city, active) VALUES (?, ?, ?, ?, ?, ?);",
     );
     const orderStmt = db.prepare(
-      'INSERT INTO orders (id, user_id, amount) VALUES (?, ?, ?);'
+      "INSERT INTO orders (id, user_id, amount) VALUES (?, ?, ?);",
     );
 
     try {
@@ -108,9 +119,9 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
         orderStmt.step();
         orderStmt.reset();
       }
-      db.exec('COMMIT;');
+      db.exec("COMMIT;");
     } catch (err) {
-      db.exec('ROLLBACK;');
+      db.exec("ROLLBACK;");
       throw err;
     } finally {
       stmt.finalize();
@@ -119,19 +130,20 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
   }
 
   async pointLookup(ids: number[]): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('SQLite not initialized');
+    if (!this.db) throw new Error("SQLite not initialized");
+    if (ids.length === 0) return [];
     const db = this.db;
-    const stmt = db.prepare('SELECT id, name, age, score, city, active FROM benchmark WHERE id = ?;');
+    const placeholders = ids.map(() => "?").join(",");
+    const stmt = db.prepare(
+      `SELECT id, name, age, score, city, active FROM benchmark WHERE id IN (${placeholders});`,
+    );
     const results: BenchmarkRecord[] = [];
 
     try {
-      for (let i = 0; i < ids.length; i++) {
-        stmt.bind([ids[i]]);
-        if (stmt.step()) {
-          const row = stmt.get({});
-          results.push(row as BenchmarkRecord);
-        }
-        stmt.reset();
+      stmt.bind(ids);
+      while (stmt.step()) {
+        const row = stmt.get({});
+        results.push(row as BenchmarkRecord);
       }
     } finally {
       stmt.finalize();
@@ -141,10 +153,10 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
   }
 
   async rangeScan(minAge: number, maxAge: number): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('SQLite not initialized');
+    if (!this.db) throw new Error("SQLite not initialized");
     const db = this.db;
     const stmt = db.prepare(
-      'SELECT id, name, age, score, city, active FROM benchmark WHERE age >= ? AND age <= ?;'
+      "SELECT id, name, age, score, city, active FROM benchmark WHERE age >= ? AND age <= ?;",
     );
     const results: BenchmarkRecord[] = [];
 
@@ -161,10 +173,10 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
   }
 
   async sortLimit(limit: number): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('SQLite not initialized');
+    if (!this.db) throw new Error("SQLite not initialized");
     const db = this.db;
     const stmt = db.prepare(
-      'SELECT id, name, age, score, city, active FROM benchmark WHERE active = 1 ORDER BY score DESC LIMIT ?;'
+      "SELECT id, name, age, score, city, active FROM benchmark WHERE active = 1 ORDER BY score DESC LIMIT ?;",
     );
     const results: BenchmarkRecord[] = [];
 
@@ -180,11 +192,15 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
     return results;
   }
 
-  async aggregation(): Promise<{ count: number; sumScore: number; avgAge: number }> {
-    if (!this.db) throw new Error('SQLite not initialized');
+  async aggregation(): Promise<{
+    count: number;
+    sumScore: number;
+    avgAge: number;
+  }> {
+    if (!this.db) throw new Error("SQLite not initialized");
     const db = this.db;
     const rows = db.selectObjects(
-      'SELECT COUNT(*) as count, SUM(score) as sumScore, AVG(age) as avgAge FROM benchmark WHERE active = 1;'
+      "SELECT COUNT(*) as count, SUM(score) as sumScore, AVG(age) as avgAge FROM benchmark WHERE active = 1;",
     );
 
     if (rows && rows.length > 0) {
@@ -200,7 +216,7 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
   }
 
   async joinQuery(): Promise<any[]> {
-    if (!this.db) throw new Error('SQLite not initialized');
+    if (!this.db) throw new Error("SQLite not initialized");
     return this.db.selectObjects(`
       SELECT orders.id as order_id, benchmark.name as user_name, orders.amount
       FROM orders

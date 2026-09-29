@@ -1,18 +1,68 @@
-import { BenchmarkRecord } from '../adapters/types.js';
+import { BenchmarkRecord, OrderRecord } from "../adapters/types.js";
 
 const FIRST_NAMES = [
-  'Alex', 'Jordan', 'Taylor', 'Morgan', 'Sam', 'Chris', 'Pat', 'Casey', 'Riley', 'Avery',
-  'Logan', 'Dakota', 'Reese', 'Quinn', 'Rowan', 'Cameron', 'Hayden', 'Finley', 'Skyler', 'Jesse'
+  "Alex",
+  "Jordan",
+  "Taylor",
+  "Morgan",
+  "Sam",
+  "Chris",
+  "Pat",
+  "Casey",
+  "Riley",
+  "Avery",
+  "Logan",
+  "Dakota",
+  "Reese",
+  "Quinn",
+  "Rowan",
+  "Cameron",
+  "Hayden",
+  "Finley",
+  "Skyler",
+  "Jesse",
 ];
 
 const LAST_NAMES = [
-  'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez',
-  'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin'
+  "Smith",
+  "Johnson",
+  "Williams",
+  "Brown",
+  "Jones",
+  "Garcia",
+  "Miller",
+  "Davis",
+  "Rodriguez",
+  "Martinez",
+  "Hernandez",
+  "Lopez",
+  "Gonzalez",
+  "Wilson",
+  "Anderson",
+  "Thomas",
+  "Taylor",
+  "Moore",
+  "Jackson",
+  "Martin",
 ];
 
 const CITIES = [
-  'San Francisco', 'New York', 'London', 'Tokyo', 'Berlin', 'Paris', 'Singapore', 'Toronto',
-  'Sydney', 'Amsterdam', 'Austin', 'Seattle', 'Dublin', 'Zurich', 'Stockholm', 'Seoul'
+  "San Francisco",
+  "New York",
+  "London",
+  "Tokyo",
+  "Berlin",
+  "Paris",
+  "Singapore",
+  "Toronto",
+  "Sydney",
+  "Amsterdam",
+  "Austin",
+  "Seattle",
+  "Dublin",
+  "Zurich",
+  "Stockholm",
+  "Seoul",
 ];
 
 /**
@@ -32,7 +82,10 @@ function createPrng(seed: number) {
 /**
  * Generate N deterministic benchmark records
  */
-export function generateBenchmarkDataset(count: number, seed: number = 42): BenchmarkRecord[] {
+export function generateBenchmarkDataset(
+  count: number,
+  seed: number = 42,
+): BenchmarkRecord[] {
   const rand = createPrng(seed);
   const records: BenchmarkRecord[] = new Array(count);
 
@@ -40,7 +93,7 @@ export function generateBenchmarkDataset(count: number, seed: number = 42): Benc
     const fnIndex = Math.floor(rand() * FIRST_NAMES.length);
     const lnIndex = Math.floor(rand() * LAST_NAMES.length);
     const cityIndex = Math.floor(rand() * CITIES.length);
-    
+
     // Ages between 18 and 80
     const age = 18 + Math.floor(rand() * 63);
     // Score between 0.00 and 100.00 with 2 decimals
@@ -64,7 +117,11 @@ export function generateBenchmarkDataset(count: number, seed: number = 42): Benc
 /**
  * Select M deterministic random IDs from 1..count for point lookups
  */
-export function generateLookupIds(datasetSize: number, count: number = 100, seed: number = 999): number[] {
+export function generateLookupIds(
+  datasetSize: number,
+  count: number = 100,
+  seed: number = 999,
+): number[] {
   const rand = createPrng(seed);
   const ids: number[] = new Array(count);
   for (let i = 0; i < count; i++) {
@@ -76,10 +133,13 @@ export function generateLookupIds(datasetSize: number, count: number = 100, seed
 /**
  * Generate deterministic orders dataset referencing user_ids 1..datasetSize
  */
-export function generateOrdersDataset(datasetSize: number, seed: number = 777): import('../adapters/types.js').OrderRecord[] {
+export function generateOrdersDataset(
+  datasetSize: number,
+  seed: number = 777,
+): OrderRecord[] {
   const rand = createPrng(seed);
   const count = Math.min(1000, Math.max(100, Math.floor(datasetSize / 2)));
-  const orders: import('../adapters/types.js').OrderRecord[] = new Array(count);
+  const orders: OrderRecord[] = new Array(count);
   for (let i = 0; i < count; i++) {
     orders[i] = {
       id: 100000 + i + 1,

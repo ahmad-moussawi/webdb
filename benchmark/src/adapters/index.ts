@@ -77,10 +77,10 @@ export const AVAILABLE_SCENARIOS: ScenarioInfo[] = [
   },
   {
     id: 'point_lookup',
-    name: '2. Point Lookups (PK)',
+    name: '2. Batch Point Lookups (IN)',
     category: 'read',
-    description: 'Execute 100 individual primary-key lookups by random IDs. Measures index lookup latency.',
-    queryHint: 'SELECT * FROM table WHERE id = ? (x100)',
+    description: 'Execute batch primary-key lookups for 100 random IDs (WHERE id IN (...)). Measures multi-key index seek and retrieval throughput.',
+    queryHint: 'SELECT * FROM table WHERE id IN (? ... 100 IDs)',
   },
   {
     id: 'range_scan',

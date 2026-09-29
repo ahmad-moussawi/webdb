@@ -1,20 +1,27 @@
-import { WebDB } from '@webdb/core';
-import { BenchmarkAdapter, BenchmarkRecord, EngineId, StorageCategory } from './types.js';
+import { WebDB } from "@webdb/core";
+import {
+  BenchmarkAdapter,
+  BenchmarkRecord,
+  EngineId,
+  OrderRecord,
+  StorageCategory,
+} from "./types.js";
 
 export class WebDbAdapter implements BenchmarkAdapter {
   readonly id: EngineId;
   readonly name: string;
   readonly storage: StorageCategory;
 
-  private dbName: string = '';
+  private dbName: string = "";
   private db: WebDB | null = null;
-  private storageMode: 'memory' | 'idb' | 'opfs';
+  private storageMode: "memory" | "idb" | "opfs";
 
-  constructor(id: 'webdb_mem' | 'webdb_idb', storageMode: 'memory' | 'idb') {
+  constructor(id: "webdb_mem" | "webdb_idb", storageMode: "memory" | "idb") {
     this.id = id;
     this.storageMode = storageMode;
-    this.storage = storageMode === 'memory' ? 'memory' : 'persistent';
-    this.name = storageMode === 'memory' ? 'WebDB (In-Memory)' : 'WebDB (IndexedDB VFS)';
+    this.storage = storageMode === "memory" ? "memory" : "persistent";
+    this.name =
+      storageMode === "memory" ? "WebDB (In-Memory)" : "WebDB (IndexedDB VFS)";
   }
 
   async init(): Promise<void> {
@@ -33,81 +40,94 @@ export class WebDbAdapter implements BenchmarkAdapter {
     // Safeguard: drop tables if they exist
     try {
       const tables = await this.db.listTables();
-      if (tables.some((t) => t.name === 'orders')) {
-        await this.db.dropTable('orders');
+      if (tables.some((t) => t.name === "orders")) {
+        await this.db.dropTable("orders");
       }
-      if (tables.some((t) => t.name === 'benchmark')) {
-        await this.db.dropTable('benchmark');
+      if (tables.some((t) => t.name === "benchmark")) {
+        await this.db.dropTable("benchmark");
       }
     } catch {
       // ignore
     }
 
-    await this.db.createTable('benchmark', [
-      { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
-      { name: 'name', type: 'TEXT', flags: { notNull: true } },
-      { name: 'age', type: 'INT32' },
-      { name: 'score', type: 'FLOAT64' },
-      { name: 'city', type: 'TEXT' },
-      { name: 'active', type: 'INT32' },
+    await this.db.createTable("benchmark", [
+      { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+      { name: "name", type: "TEXT", flags: { notNull: true } },
+      { name: "age", type: "INT32" },
+      { name: "score", type: "FLOAT64" },
+      { name: "city", type: "TEXT" },
+      { name: "active", type: "INT32" },
     ]);
 
-    await this.db.createTable('orders', [
-      { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
-      { name: 'user_id', type: 'INT32', flags: { notNull: true } },
-      { name: 'amount', type: 'FLOAT64' },
+    await this.db.createIndex("benchmark", ["age"], { unique: false });
+    await this.db.createIndex("benchmark", ["score"], { unique: false });
+    await this.db.createIndex("benchmark", ["active"], { unique: false });
+
+    await this.db.createTable("orders", [
+      { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
+      { name: "user_id", type: "INT32", flags: { notNull: true } },
+      { name: "amount", type: "FLOAT64" },
     ]);
+
+    await this.db.createIndex("orders", ["user_id"], { unique: false });
   }
 
-  async bulkInsert(records: BenchmarkRecord[], orders: import('./types.js').OrderRecord[] = []): Promise<void> {
-    if (!this.db) throw new Error('WebDB not initialized');
-    await this.db.insertMany('benchmark', records as any[]);
+  async bulkInsert(
+    records: BenchmarkRecord[],
+    orders: OrderRecord[] = [],
+  ): Promise<void> {
+    if (!this.db) throw new Error("WebDB not initialized");
+    await this.db.insertMany("benchmark", records as any[]);
     if (orders.length > 0) {
-      await this.db.insertMany('orders', orders as any[]);
+      await this.db.insertMany("orders", orders as any[]);
     }
   }
 
   async pointLookup(ids: number[]): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('WebDB not initialized');
+    if (!this.db) throw new Error("WebDB not initialized");
     const db = this.db;
-    const results: BenchmarkRecord[] = [];
-    const len = ids.length;
-    for (let i = 0; i < len; i++) {
-      const res = await db.from('benchmark').where('id', '=', ids[i]).toArray();
-      if (res.length > 0) {
-        results.push(res[0] as unknown as BenchmarkRecord);
-      }
-    }
+    const results: BenchmarkRecord[] = (await db
+      .from("benchmark")
+      .whereIn("id", ids)
+      .toArray()) as any;
     return results;
   }
 
   async rangeScan(minAge: number, maxAge: number): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('WebDB not initialized');
+    if (!this.db) throw new Error("WebDB not initialized");
     const rows = await this.db
-      .from('benchmark')
-      .where('age', '>=', minAge)
-      .where('age', '<=', maxAge)
+      .from("benchmark")
+      .where("age", ">=", minAge)
+      .where("age", "<=", maxAge)
       .toArray();
     return rows as unknown as BenchmarkRecord[];
   }
 
   async sortLimit(limit: number): Promise<BenchmarkRecord[]> {
-    if (!this.db) throw new Error('WebDB not initialized');
+    if (!this.db) throw new Error("WebDB not initialized");
     const rows = await this.db
-      .from('benchmark')
-      .where('active', '=', 1)
-      .orderBy('score', 'desc')
+      .from("benchmark")
+      .where("active", "=", 1)
+      .orderBy("score", "desc")
       .limit(limit)
       .toArray();
     return rows as unknown as BenchmarkRecord[];
   }
 
-  async aggregation(): Promise<{ count: number; sumScore: number; avgAge: number }> {
-    if (!this.db) throw new Error('WebDB not initialized');
+  async aggregation(): Promise<{
+    count: number;
+    sumScore: number;
+    avgAge: number;
+  }> {
+    if (!this.db) throw new Error("WebDB not initialized");
     const rows = await this.db
-      .from('benchmark')
-      .where('active', '=', 1)
-      .select(['count(*) as cnt', 'sum(score) as sum_score', 'avg(age) as avg_age'])
+      .from("benchmark")
+      .where("active", "=", 1)
+      .select([
+        "count(*) as cnt",
+        "sum(score) as sum_score",
+        "avg(age) as avg_age",
+      ])
       .toArray();
 
     if (rows.length > 0) {
@@ -122,11 +142,15 @@ export class WebDbAdapter implements BenchmarkAdapter {
   }
 
   async joinQuery(): Promise<any[]> {
-    if (!this.db) throw new Error('WebDB not initialized');
+    if (!this.db) throw new Error("WebDB not initialized");
     return await this.db
-      .from('orders')
-      .join('benchmark', 'orders.user_id', '=', 'benchmark.id')
-      .select(['orders.id as order_id', 'benchmark.name as user_name', 'orders.amount'])
+      .from("orders")
+      .join("benchmark", "orders.user_id", "=", "benchmark.id")
+      .select([
+        "orders.id as order_id",
+        "benchmark.name as user_name",
+        "orders.amount",
+      ])
       .toArray();
   }
 
@@ -134,11 +158,11 @@ export class WebDbAdapter implements BenchmarkAdapter {
     if (this.db) {
       try {
         const tables = await this.db.listTables();
-        if (tables.some((t) => t.name === 'orders')) {
-          await this.db.dropTable('orders');
+        if (tables.some((t) => t.name === "orders")) {
+          await this.db.dropTable("orders");
         }
-        if (tables.some((t) => t.name === 'benchmark')) {
-          await this.db.dropTable('benchmark');
+        if (tables.some((t) => t.name === "benchmark")) {
+          await this.db.dropTable("benchmark");
         }
       } catch {
         // ignore
@@ -151,7 +175,11 @@ export class WebDbAdapter implements BenchmarkAdapter {
       this.db = null;
     }
 
-    if (this.storageMode === 'idb' && this.dbName && typeof indexedDB !== 'undefined') {
+    if (
+      this.storageMode === "idb" &&
+      this.dbName &&
+      typeof indexedDB !== "undefined"
+    ) {
       const actualIdbName = `webdb_${this.dbName}`;
       await new Promise<void>((resolve) => {
         const req = indexedDB.deleteDatabase(actualIdbName);
