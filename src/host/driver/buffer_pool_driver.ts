@@ -351,6 +351,21 @@ export class BufferPoolDriver {
     }
   }
 
+  forceUnpinSlot(slotIdx: number): void {
+    this.validate_slot_idx(slotIdx);
+    if (slotIdx === 0) return;
+    this.pin_counts[slotIdx] = 0;
+  }
+
+  forceUnpinPage(pageId: number): void {
+    this.validate_page_id(pageId);
+    if (pageId <= 1) return;
+    const slot = this.getResidentSlot(pageId);
+    if (slot !== -1) {
+      this.forceUnpinSlot(slot);
+    }
+  }
+
   isSlotPinned(slotIdx: number): boolean {
     this.validate_slot_idx(slotIdx);
     return buf_pool_is_pinned(this.pin_counts, slotIdx);
@@ -574,7 +589,7 @@ export class BufferPoolDriver {
     return this.allocatePage(true);
   }
 
-  async freePage(page_id: number): Promise<void> {
+  async freePage(page_id: number, force: boolean = false): Promise<void> {
     this.validate_page_id(page_id);
 
     if (page_id <= 1) {
@@ -591,8 +606,12 @@ export class BufferPoolDriver {
       }
 
       const existing_slot = this.getResidentSlot(page_id);
-      if (existing_slot !== -1 && this.isSlotPinned(existing_slot)) {
-        throw new Error(`Cannot free pinned/active database page ${page_id}`);
+      if (existing_slot !== -1) {
+        if (force) {
+          this.forceUnpinSlot(existing_slot);
+        } else if (this.isSlotPinned(existing_slot)) {
+          throw new Error(`Cannot free pinned/active database page ${page_id}`);
+        }
       }
 
       const slot = await this.acquirePage(page_id, true);
@@ -601,11 +620,14 @@ export class BufferPoolDriver {
         const page_type = page_get_type(view, 0);
         if (page_type === PAGE_TYPE_FREE) {
           this.unassignSlot(slot);
+          if (force) {
+            return;
+          }
           throw new Error(
             `Double-free detected: page ${page_id} is already marked free`,
           );
         }
-        if (page_type === PAGE_TYPE_CATALOG_PAGE) {
+        if (!force && page_type === PAGE_TYPE_CATALOG_PAGE) {
           throw new Error(`Cannot free system catalog page ${page_id}`);
         }
 

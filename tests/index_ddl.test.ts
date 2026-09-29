@@ -448,4 +448,95 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
       db.createIndex("invoices", "invoice_number", { name: "pk_orders" }),
     ).rejects.toThrow(IndexAlreadyExistsError);
   });
+
+  it("frees and unpins all data, index, and column catalog pages to the free-page list on dropTable", async () => {
+    const db = await WebDB.open({
+      name: "test_drop_unpin_and_free_all",
+      storage: "memory",
+    });
+
+    const table = await db.createTable("products", [
+      { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
+      { name: "sku", type: "TEXT" },
+      { name: "category", type: "TEXT" },
+      { name: "price", type: "FLOAT64" },
+    ]);
+
+    // Create 2 secondary indexes
+    await db.createIndex("products", "sku", { unique: true });
+    await db.createIndex("products", ["category", "price"]);
+
+    // Insert records
+    for (let i = 1; i <= 20; i++) {
+      await db.insert("products", {
+        sku: `SKU-${i}`,
+        category: i % 2 === 0 ? "Electronics" : "Books",
+        price: i * 10.5,
+      });
+    }
+
+    // Verify 3 indexes exist (PK + 2 secondary)
+    const indexesBefore = await db.listIndexes("products");
+    expect(indexesBefore).toHaveLength(3);
+
+    // Verify that column catalog page was pinned in buffer pool
+    const catSlot = (db as any).pool.getResidentSlot(table.colCatalogPageId);
+    expect(catSlot).toBeGreaterThan(0);
+    expect((db as any).pool.isSlotPinned(catSlot)).toBe(true);
+
+    // Drop table
+    await db.dropTable("products");
+
+    // 1. All indexes for the table and globally must be deleted
+    await expect(db.listIndexes("products")).rejects.toThrow();
+    const allIndexes = await db.listIndexes();
+    expect(allIndexes).toHaveLength(0);
+
+    // 2. The column catalog page slot must no longer be pinned
+    expect((db as any).pool.isSlotPinned(catSlot)).toBe(false);
+
+    // 3. Database Free Page List must have recycled all the freed pages
+    const page1View = (db as any).pool.getSlotDataView(0);
+    const freeHead = page1View.getUint32(16, true); // HEADER_OFFSET_FREE_PAGE_HEAD
+    expect(freeHead).toBeGreaterThan(1);
+
+    // 4. Recreating the table should succeed smoothly without conflict
+    await expect(
+      db.createTable("products", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "title", type: "TEXT" },
+      ]),
+    ).resolves.not.toThrow();
+
+    await db.insert("products", { id: 1, title: "New Product" });
+    const rows = await db.from("products").toArray();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 1, title: "New Product" });
+
+    // 5. Dropping the recreated table again must not cause Double-free detected
+    await expect(db.dropTable("products")).resolves.not.toThrow();
+  });
+
+  it("handles dropping indexes manually before dropping the parent table without double-free", async () => {
+    const db = await WebDB.open({
+      name: "test_manual_idx_drop_then_table_drop",
+      storage: "memory",
+    });
+
+    await db.createTable("items", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "sku", type: "TEXT" },
+      { name: "tag", type: "TEXT" },
+    ]);
+
+    await db.createIndex("items", "sku", { unique: true });
+    await db.createIndex("items", "tag");
+
+    // Drop one secondary index manually first
+    await db.dropIndex("idx_items_sku");
+
+    // Dropping table should cascade cleanly without double-freeing the manual drop
+    await expect(db.dropTable("items")).resolves.not.toThrow();
+  });
 });
+

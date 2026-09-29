@@ -4,6 +4,11 @@ import {
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_INDEXES_PAGE1,
+  PAGE_TYPE_FREE,
+  PAGE_TYPE_INDEX_INTERIOR,
+  PAGE_TYPE_TABLE_INTERIOR,
+  PAGE_TYPE_INDEX_LEAF,
+  PAGE_TYPE_LEAF_DATA,
 } from "../../constants.ts";
 import {
   ColumnDefinition,
@@ -57,6 +62,7 @@ import {
   catalog_increment_schema_version,
   catalog_increment_change_counter,
   catalog_update_page1_checksum,
+  page_get_type,
   page_get_cell_count,
   page_get_cell_offset,
   page_insert_row,
@@ -299,6 +305,65 @@ export class WebDB implements IDatabaseQueryExecutor {
     return tables;
   }
 
+  private async freeTableTreePages(rootPageId: number): Promise<void> {
+    if (rootPageId <= 1) return;
+
+    const toFree: number[] = [];
+    const visited = new Set<number>();
+    const queue = [rootPageId];
+
+    while (queue.length > 0) {
+      const pId = queue.shift()!;
+      if (pId <= 1 || visited.has(pId)) continue;
+      visited.add(pId);
+
+      const slot = await this.driver.acquirePage(pId);
+      const view = this.pool.getSlotDataView(slot);
+      const pType = page_get_type(view, 0);
+
+      // If page is already free, unpin resident slot if any and do not traverse or re-free
+      if (pType === PAGE_TYPE_FREE) {
+        this.driver.forceUnpinPage(pId);
+        continue;
+      }
+
+      toFree.push(pId);
+
+      if (
+        pType === PAGE_TYPE_TABLE_INTERIOR ||
+        pType === PAGE_TYPE_INDEX_INTERIOR
+      ) {
+        const cellCount = page_get_cell_count(view, 0);
+        for (let i = 0; i < cellCount; i++) {
+          const off = page_get_cell_offset(view, 0, i);
+          if (off > 0 && off + 4 <= PAGE_SIZE) {
+            const childId = view.getUint32(off, true);
+            if (childId > 1 && !visited.has(childId)) {
+              queue.push(childId);
+            }
+          }
+        }
+        const rightChildId = page_get_next_page_id(view, 0);
+        if (rightChildId > 1 && !visited.has(rightChildId)) {
+          queue.push(rightChildId);
+        }
+      } else if (
+        pType === PAGE_TYPE_LEAF_DATA ||
+        pType === PAGE_TYPE_INDEX_LEAF
+      ) {
+        const nextId = page_get_next_page_id(view, 0);
+        if (nextId > 1 && !visited.has(nextId)) {
+          queue.push(nextId);
+        }
+      }
+    }
+
+    for (const pId of toFree) {
+      this.driver.forceUnpinPage(pId);
+      await this.driver.freePage(pId, true);
+    }
+  }
+
   async dropTable(tableName: string): Promise<void> {
     this.tableMetaCache.delete(tableName.toLowerCase());
     this.tableTailPages.delete(tableName);
@@ -314,36 +379,53 @@ export class WebDB implements IDatabaseQueryExecutor {
     // 1. Cascade drop all indexes belonging to this table
     for (let slot = 0; slot < MAX_INDEXES_PAGE1; slot++) {
       const idx = catalog_read_index_descriptor(page1View, slot);
-      if (idx && idx.tableId === desc.tableId) {
-        let curIdxPageId = idx.rootPageId;
-        while (curIdxPageId !== 0) {
-          const s = await this.driver.acquirePage(curIdxPageId);
-          const v = this.pool.getSlotDataView(s);
-          const nextId = page_get_next_page_id(v, 0);
-          await this.driver.freePage(curIdxPageId);
-          curIdxPageId = nextId;
+      if (
+        idx &&
+        (idx.tableId === desc.tableId ||
+          idx.name.toLowerCase().startsWith(`idx_${tableName.toLowerCase()}_`) ||
+          idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)
+      ) {
+        if (idx.rootPageId > 1) {
+          await this.freeTableTreePages(idx.rootPageId);
+          this.indexTailPages.delete(idx.rootPageId);
         }
         catalog_delete_index_descriptor(page1View, slot);
       }
     }
 
     // 2. Free all data pages belonging to this table
-    let curDataPageId = desc.rootPageId;
-    while (curDataPageId !== 0) {
-      const slot = await this.driver.acquirePage(curDataPageId);
-      const view = this.pool.getSlotDataView(slot);
-      const nextId = page_get_next_page_id(view, 0);
-      await this.driver.freePage(curDataPageId);
-      curDataPageId = nextId;
+    if (desc.rootPageId > 1) {
+      await this.freeTableTreePages(desc.rootPageId);
     }
 
-    // 3. Clear table descriptor in Page 1
+    // 3. Free all column catalog pages belonging to this table
+    let curCatPageId = desc.colCatalogPageId;
+    while (curCatPageId > 1) {
+      const slot = await this.driver.acquirePage(curCatPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const pType = page_get_type(view, 0);
+      if (pType === PAGE_TYPE_FREE) {
+        this.driver.forceUnpinPage(curCatPageId);
+        break;
+      }
+      const header = catalog_read_page_header(view, 0);
+      const nextId = header.nextColCatalogPageId;
+      this.driver.forceUnpinPage(curCatPageId);
+      await this.driver.freePage(curCatPageId, true);
+      curCatPageId = nextId;
+    }
+
+    // 4. Clear table descriptor in Page 1
     catalog_delete_table_descriptor(page1View, slotIdx);
     catalog_increment_schema_version(page1View);
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
     await this.driver.flushAllDirty();
+
+    if (this.vmCtx.table?.name.toLowerCase() === tableName.toLowerCase()) {
+      this.vmCtx.table = null;
+    }
   }
 
   async createIndex(
@@ -490,14 +572,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       throw new IndexNotFoundError(indexName);
     }
 
-    // Free all pages in the index leaf chain
-    let curPageId = found.desc.rootPageId;
-    while (curPageId !== 0) {
-      const slot = await this.driver.acquirePage(curPageId);
-      const view = this.pool.getSlotDataView(slot);
-      const nextId = page_get_next_page_id(view, 0);
-      await this.driver.freePage(curPageId);
-      curPageId = nextId;
+    // Free all pages in the index tree
+    if (found.desc.rootPageId > 1) {
+      await this.freeTableTreePages(found.desc.rootPageId);
+      this.indexTailPages.delete(found.desc.rootPageId);
     }
 
     catalog_delete_index_descriptor(page1View, found.slotIdx);
