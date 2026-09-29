@@ -84,6 +84,7 @@ export interface VmContext {
   tables?: TableMeta[];
   outputColumns?: ColumnMeta[];
   udfs?: Record<number, (...args: any[]) => any>;
+  inSets?: Set<any>[];
 }
 
 export function createVmContext(): VmContext {
@@ -106,6 +107,7 @@ export function createVmContext(): VmContext {
     table: null,
     tables: undefined,
     outputColumns: undefined,
+    inSets: [],
   };
 }
 
@@ -140,4 +142,5 @@ export function resetVmContext(
   ctx.table = table ?? null;
   ctx.tables = tables;
   ctx.outputColumns = undefined;
+  ctx.inSets = [];
 }

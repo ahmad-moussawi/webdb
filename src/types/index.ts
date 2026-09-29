@@ -65,6 +65,7 @@ export enum OpCode {
   OP_STR_STARTS_WITH = 0x1c,
   OP_STR_ENDS_WITH = 0x1d,
   OP_LOAD_BLOB = 0x1e,
+  OP_IN = 0x1f,
 
   // Data / Output
   OP_LOAD_INT = 0x20,

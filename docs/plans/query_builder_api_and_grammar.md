@@ -61,15 +61,22 @@ WhereClause        ::= "where(" WhereArgList ")"
                      | "orWhere(" WhereArgList ")"
                      | "whereNot(" NestedConditionClosure ")"
                      | "whereNull(" ColumnIdentifier ")"
-                     | "whereNotNull(" ColumnIdentifier ")" ;
+                     | "whereNotNull(" ColumnIdentifier ")"
+                     | "whereIn(" ColumnIdentifier "," ValueList ")"
+                     | "orWhereIn(" ColumnIdentifier "," ValueList ")"
+                     | "whereNotIn(" ColumnIdentifier "," ValueList ")"
+                     | "orWhereNotIn(" ColumnIdentifier "," ValueList ")" ;
+
+ValueList          ::= "[" Literal ( "," Literal )* "]" | "[]" ;
 
 WhereArgList       ::= BinaryPredicate
                      | PredicateDictionary
                      | NestedConditionClosure ;
 
-BinaryPredicate    ::= ColumnIdentifier "," ComparisonOperator "," ( Literal | ColumnIdentifier ) ;
+BinaryPredicate    ::= ColumnIdentifier "," ComparisonOperator "," ( Literal | ColumnIdentifier | ValueList ) ;
 ComparisonOperator ::= "=" | "!=" | "<" | "<=" | ">" | ">="
-                     | "like" | "not like" | "contains" | "startsWith" | "endsWith" ;
+                     | "like" | "not like" | "contains" | "startsWith" | "endsWith"
+                     | "in" | "not in" ;
 
 PredicateDictionary::= "{" ( ColumnIdentifier ":" Literal ( "," ColumnIdentifier ":" Literal )* ) "}" ;
 NestedConditionClosure ::= "(" "sub" "=>" "{" ( SubWhereMethod )* "}" ")" ;
@@ -497,6 +504,72 @@ db.from('users')
   .whereNull('deleted_at')
   .whereNotNull('verified_at');
 ```
+
+### 5.5 IN & NOT IN Predicates (`whereIn`, `whereNotIn`, `orWhereIn`, `orWhereNotIn`)
+
+WebDB provides high-performance set membership filtering matching standard SQL `IN` and `NOT IN` semantics.
+
+#### A. Basic Usage & Operator Overloads
+```typescript
+// Dedicated helper methods:
+db.from('users').whereIn('dept', ['Engineering', 'Design', 'Product']);
+db.from('users').whereNotIn('status', ['banned', 'suspended']);
+
+// Boolean combinations:
+db.from('users')
+  .where('role', '=', 'staff')
+  .orWhereIn('id', [10, 20, 30]);
+
+// Standard binary comparison operator overload:
+db.from('users').where('id', 'in', [1, 2, 3]);
+db.from('users').where('dept', 'not in', ['Sales', 'HR']);
+```
+
+#### B. Edge Cases & Semantics
+
+1. **Empty Array (`col IN ()`)**:
+   - In SQL standards, membership in an empty set is always `FALSE` (`x IN ()` $\equiv$ `FALSE`).
+   - `whereIn(col, [])`: Evaluates to `FALSE`. If part of the top-level query filter (`AND`), the query planner short-circuits immediately by emitting `OP_HALT` without executing any table scan or index scan (0 pages accessed, instant `[]` return). Inside an `OR` branch, it evaluates to false and jumps to the next condition.
+   - `whereNotIn(col, [])`: Evaluates to `TRUE` (`NOT FALSE`). It acts as a neutral pass-through condition and retains all eligible rows.
+
+2. **Deduplication of Values**:
+   - Input arrays are deduplicated in $O(K)$ time before bytecode compilation. Redundant checks are eliminated. In index point-seek scans, deduplication prevents duplicate B+tree probe traversals and ensures each row is visited at most once.
+
+3. **Null Values & SQL Three-Valued Logic (3VL)**:
+   - Rows where the column value is `NULL` evaluate to `UNKNOWN` in SQL 3VL, which is treated as `FALSE` in `WHERE` filtering. A `NULL` row never matches `whereIn(col, ...)`.
+   - If `values` contains `null` (e.g. `[1, 2, null]`), rows with `col IS NULL` still do not match (`NULL = NULL` is UNKNOWN in SQL).
+   - In `whereNotIn(col, [1, 2])`, rows with `col IS NULL` evaluate to `UNKNOWN` and are excluded from the result set.
+
+4. **Maximum Length & Large Array Limits**:
+   - WebDB enforces a deterministic size limit: `MAX_IN_LIST_SIZE = 10000` items per `whereIn` clause.
+   - Arrays exceeding `MAX_IN_LIST_SIZE` immediately throw a `RangeError`:
+     `"WebDB: whereIn list exceeds maximum limit of 10000 elements"`.
+   - This prevents out-of-memory errors and excessive bytecode generation.
+
+5. **Register Allocation & VDBE Set Storage (`OP_IN`)**:
+   - Because VDBE bytecode frames are capped at 64 registers (`0..63`), array values are **not** loaded into individual registers.
+   - Instead, the compiler builds a persistent `Set<any>` constant stored on the query context (`ctx.inSets[setIdx]`).
+   - The engine executes a single 5-byte opcode `OP_IN (0x1f)`:
+     `OP_IN [reg_val: uint8] [set_idx: uint16] [jump_target: uint16]`
+   - Each scanned row performs an $O(1)$ set membership test in host memory.
+
+6. **Index Acceleration (`multi_point` Index Probing)**:
+   - When `col` is covered by a **Primary Key** or **Unique Secondary Index**, the query compiler avoids a full table scan (`OP_REWIND` / $O(N)$) and activates `CandidateIndexScan` with `scanType: 'multi_point'`.
+   - The engine opens the index B+tree cursor (`OP_OPEN_INDEX`) and iterates through each distinct value in the array, issuing an exact point seek (`OP_INDEX_SEEK_EQ`) in $O(K \log N)$ time:
+     ```
+     For each value k in inValues:
+       OP_LOAD_INT/TEXT/FLOAT  r[seekKey], k
+       OP_INDEX_SEEK_EQ        idxCursor, dataCursor, r[seekKey], keyType, notFoundPatch
+       [Emit row or execute remaining predicates]
+     notFoundPatch:
+     ```
+   - Calling `await qb.explain()` verifies index utilization:
+     ```typescript
+     const explain = await db.from('users').whereIn('id', [101, 202, 303]).explain();
+     expect(explain.plan.scanType).toBe('IndexScan');
+     expect(explain.plan.indexName).toBe('pk_users');
+     ```
+   - If the column is not indexed, `explain.plan.scanType` falls back to `'TableScan'`.
 
 ---
 

@@ -1168,6 +1168,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     const bytecode = compileQuery(plan);
 
     resetVmContext(this.vmCtx, table, [table, ...joinedTablesMeta]);
+    if ((bytecode as any).inSets) {
+      this.vmCtx.inSets = (bytecode as any).inSets;
+    }
     if (plan.keyInfos) {
       this.vmCtx.keyInfos = plan.keyInfos;
     }

@@ -27,3 +27,4 @@ export const WAL_FRAME_SIZE = 4128; // 32B frame header + 4096B page
 
 // Sorter & Query Optimization Limits
 export const MAX_TOPK_HEAP_LIMIT = 4096;
+export const MAX_IN_LIST_SIZE = 10000;

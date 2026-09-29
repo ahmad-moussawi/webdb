@@ -15,6 +15,7 @@ import {
 } from "../../types/index.js";
 import { serialize_composite_key } from "../../core/index.js";
 import { VmKeyInfo } from "../../shared/vm_context.js";
+import { MAX_IN_LIST_SIZE } from "../../constants.js";
 import {
   ExprNode,
   ParsedSelectExpr,
@@ -34,13 +35,17 @@ export type ComparisonOp =
   | "CONTAINS"
   | "STARTS_WITH"
   | "ENDS_WITH"
+  | "IN"
+  | "NOT IN"
   | "like"
   | "not like"
   | "contains"
   | "starts_with"
   | "ends_with"
   | "startswith"
-  | "endswith";
+  | "endswith"
+  | "in"
+  | "not in";
 
 export function getCmpOpcode(op: string | undefined): OpCode {
   if (!op) return OpCode.OP_EQ;
@@ -59,7 +64,7 @@ export function getCmpOpcode(op: string | undefined): OpCode {
   return OpCode.OP_EQ;
 }
 
-export type QueryFilterType = "null" | "cmp" | "expr" | "and" | "or" | "not";
+export type QueryFilterType = "null" | "cmp" | "expr" | "and" | "or" | "not" | "in";
 
 export interface QueryFilter {
   type: QueryFilterType;
@@ -67,6 +72,8 @@ export interface QueryFilter {
   isNull?: boolean; // true for isNull, false for isNotNull
   op?: ComparisonOp;
   value?: any;
+  values?: any[];
+  notIn?: boolean;
   expr?: ExprNode;
   children?: QueryFilter[]; // for 'and', 'or'
   child?: QueryFilter;      // for 'not'
@@ -231,6 +238,40 @@ function emitReadColumn(
 }
 
 export function normalizeFilter(filter: QueryFilter): QueryFilter {
+  if (filter.type === "in") {
+    if (filter.values && filter.values.length > MAX_IN_LIST_SIZE) {
+      throw new RangeError(
+        `WebDB: whereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+      );
+    }
+    return {
+      type: "in",
+      colName: filter.colName,
+      expr: filter.expr,
+      values: filter.values ? Array.from(new Set(filter.values)) : [],
+      notIn: !!filter.notIn,
+    };
+  }
+
+  if (filter.type === "cmp") {
+    const opNorm = filter.op ? String(filter.op).trim().toLowerCase() : "";
+    if (opNorm === "in" || opNorm === "not in") {
+      const arr = Array.isArray(filter.value) ? filter.value : [filter.value];
+      if (arr.length > MAX_IN_LIST_SIZE) {
+        throw new RangeError(
+          `WebDB: whereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+        );
+      }
+      return {
+        type: "in",
+        colName: filter.colName,
+        expr: filter.expr,
+        values: Array.from(new Set(arr)),
+        notIn: opNorm === "not in",
+      };
+    }
+  }
+
   if (filter.type === "and") {
     return {
       type: "and",
@@ -252,6 +293,18 @@ export function normalizeFilter(filter: QueryFilter): QueryFilter {
     // Double negation: NOT (NOT x) => x
     if (child.type === "not" && child.child) {
       return normalizeFilter(child.child);
+    }
+
+    // NOT (x IN (A)) => x NOT IN (A)
+    // NOT (x NOT IN (A)) => x IN (A)
+    if (child.type === "in") {
+      return {
+        type: "in",
+        colName: child.colName,
+        expr: child.expr,
+        values: child.values,
+        notIn: !child.notIn,
+      };
     }
 
     // De Morgan: NOT (A AND B) => (NOT A) OR (NOT B)
@@ -286,6 +339,17 @@ export function normalizeFilter(filter: QueryFilter): QueryFilter {
 
     // NOT (cmp)
     if (child.type === "cmp") {
+      const opNorm = child.op ? String(child.op).trim().toLowerCase() : "";
+      if (opNorm === "in" || opNorm === "not in") {
+        return normalizeFilter({
+          type: "in",
+          colName: child.colName,
+          expr: child.expr,
+          values: Array.isArray(child.value) ? child.value : [child.value],
+          notIn: opNorm === "in", // inverted
+        });
+      }
+
       const inverseOps: Record<string, ComparisonOp> = {
         "=": "!=",
         "!=": "=",
@@ -332,7 +396,7 @@ export function collectLeafFilters(filter: QueryFilter): QueryFilter[] {
   const leaves: QueryFilter[] = [];
   const seen = new Set<QueryFilter>();
   function traverse(f: QueryFilter) {
-    if (f.type === "null" || f.type === "cmp" || f.type === "expr") {
+    if (f.type === "null" || f.type === "cmp" || f.type === "expr" || f.type === "in") {
       if (!seen.has(f)) {
         seen.add(f);
         leaves.push(f);
@@ -351,6 +415,22 @@ export function collectLeafFilters(filter: QueryFilter): QueryFilter[] {
   }
   traverse(filter);
   return leaves;
+}
+
+export function getTopLevelConjunctionFilters(rootFilter: QueryFilter | null): QueryFilter[] {
+  if (!rootFilter) return [];
+  const conjunctions: QueryFilter[] = [];
+  function gather(f: QueryFilter) {
+    if (f.type === "and" && f.children) {
+      for (const child of f.children) {
+        gather(child);
+      }
+    } else if (f.type === "cmp" || f.type === "in" || f.type === "null") {
+      conjunctions.push(f);
+    }
+  }
+  gather(rootFilter);
+  return conjunctions;
 }
 
 export interface ResolvedColumn {
@@ -413,6 +493,7 @@ function emitLeafJumpOnTrue(
   truePatches: number[],
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
+  filterSetMap?: Map<QueryFilter, number>,
 ): void {
   const all = tables ?? [table];
   if (filter.type === "expr") {
@@ -453,6 +534,80 @@ function emitLeafJumpOnTrue(
     emitter.emitUint8(resolved.cursor);
     emitter.emitUint8(resolved.colIdx);
     truePatches.push(emitter.emitUint16(0));
+    return;
+  }
+
+  if (filter.type === "in") {
+    if (!filter.values || filter.values.length === 0) {
+      if (filter.notIn) {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        truePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    const regCol = leafIdx * 2;
+    if (filter.expr) {
+      let tempReg = 50;
+      const allocReg = () => {
+        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+        return tempReg++;
+      };
+      emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
+    } else {
+      if (!filter.colName) {
+        throw new Error(`Filter IN leaf node missing colName`);
+      }
+      const resolved = resolveColumnAcrossTables(filter.colName, all);
+      if (resolved) {
+        emitReadColumn(emitter, resolved.cursor, resolved.colIdx, regCol, resolved.col.type);
+      } else {
+        try {
+          const parsed = parseExpression(filter.colName);
+          let tempReg = 50;
+          const allocReg = () => {
+            if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+            return tempReg++;
+          };
+          emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
+        } catch {
+          throw new Error(`Column "${filter.colName}" not found in tables`);
+        }
+      }
+    }
+
+    const setIdx = filterSetMap?.get(filter) ?? 0;
+    if (!filter.notIn) {
+      emitter.emitUint8(OpCode.OP_IN);
+      emitter.emitUint8(regCol);
+      emitter.emitUint16(setIdx);
+      truePatches.push(emitter.emitUint16(0));
+    } else {
+      let nullSkipPatch = -1;
+      if (filter.colName) {
+        const resolved = resolveColumnAcrossTables(filter.colName, all);
+        if (resolved) {
+          emitter.emitUint8(OpCode.OP_IS_NULL);
+          emitter.emitUint8(resolved.cursor);
+          emitter.emitUint8(resolved.colIdx);
+          nullSkipPatch = emitter.emitUint16(0);
+        }
+      }
+
+      emitter.emitUint8(OpCode.OP_IN);
+      emitter.emitUint8(regCol);
+      emitter.emitUint16(setIdx);
+      const inSkipPatch = emitter.emitUint16(0);
+
+      emitter.emitUint8(OpCode.OP_JUMP);
+      truePatches.push(emitter.emitUint16(0));
+
+      const notInTruePos = emitter.currentOffset();
+      if (nullSkipPatch !== -1) {
+        emitter.patchUint16(nullSkipPatch, notInTruePos);
+      }
+      emitter.patchUint16(inSkipPatch, notInTruePos);
+    }
     return;
   }
 
@@ -506,6 +661,7 @@ function emitLeafJumpOnFalse(
   falsePatches: number[],
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
+  filterSetMap?: Map<QueryFilter, number>,
 ): void {
   const all = tables ?? [table];
   if (filter.type === "expr") {
@@ -551,6 +707,86 @@ function emitLeafJumpOnFalse(
     emitter.emitUint8(resolved.cursor);
     emitter.emitUint8(resolved.colIdx);
     falsePatches.push(emitter.emitUint16(0));
+    return;
+  }
+
+  if (filter.type === "in") {
+    if (!filter.values || filter.values.length === 0) {
+      if (!filter.notIn) {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        falsePatches.push(emitter.emitUint16(0));
+      }
+      return;
+    }
+
+    const regCol = leafIdx * 2;
+    if (filter.expr) {
+      let tempReg = 50;
+      const allocReg = () => {
+        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+        return tempReg++;
+      };
+      emitExpression(filter.expr, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
+    } else {
+      if (!filter.colName) {
+        throw new Error(`Filter IN leaf node missing colName`);
+      }
+      const resolved = resolveColumnAcrossTables(filter.colName, all);
+      if (resolved) {
+        emitReadColumn(emitter, resolved.cursor, resolved.colIdx, regCol, resolved.col.type);
+      } else {
+        try {
+          const parsed = parseExpression(filter.colName);
+          let tempReg = 50;
+          const allocReg = () => {
+            if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+            return tempReg++;
+          };
+          emitExpression(parsed, table, emitter, 0, regCol, allocReg, udfNameMap, undefined, all);
+        } catch {
+          throw new Error(`Column "${filter.colName}" not found in tables`);
+        }
+      }
+    }
+
+    const setIdx = filterSetMap?.get(filter) ?? 0;
+    if (!filter.notIn) {
+      if (filter.colName) {
+        const resolved = resolveColumnAcrossTables(filter.colName, all);
+        if (resolved) {
+          emitter.emitUint8(OpCode.OP_IS_NULL);
+          emitter.emitUint8(resolved.cursor);
+          emitter.emitUint8(resolved.colIdx);
+          falsePatches.push(emitter.emitUint16(0));
+        }
+      }
+
+      emitter.emitUint8(OpCode.OP_IN);
+      emitter.emitUint8(regCol);
+      emitter.emitUint16(setIdx);
+      const matchPatch = emitter.emitUint16(0);
+
+      emitter.emitUint8(OpCode.OP_JUMP);
+      falsePatches.push(emitter.emitUint16(0));
+
+      const passPos = emitter.currentOffset();
+      emitter.patchUint16(matchPatch, passPos);
+    } else {
+      if (filter.colName) {
+        const resolved = resolveColumnAcrossTables(filter.colName, all);
+        if (resolved) {
+          emitter.emitUint8(OpCode.OP_IS_NULL);
+          emitter.emitUint8(resolved.cursor);
+          emitter.emitUint8(resolved.colIdx);
+          falsePatches.push(emitter.emitUint16(0));
+        }
+      }
+
+      emitter.emitUint8(OpCode.OP_IN);
+      emitter.emitUint8(regCol);
+      emitter.emitUint16(setIdx);
+      falsePatches.push(emitter.emitUint16(0));
+    }
     return;
   }
 
@@ -611,13 +847,14 @@ function emitLeafCondition(
   fallthrough: "true" | "false" | "none",
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
+  filterSetMap?: Map<QueryFilter, number>,
 ): void {
   if (fallthrough === "true") {
-    emitLeafJumpOnFalse(filter, leafIdx, table, emitter, falsePatches, udfNameMap, tables);
+    emitLeafJumpOnFalse(filter, leafIdx, table, emitter, falsePatches, udfNameMap, tables, filterSetMap);
   } else if (fallthrough === "false") {
-    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables);
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables, filterSetMap);
   } else {
-    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables);
+    emitLeafJumpOnTrue(filter, leafIdx, table, emitter, truePatches, udfNameMap, tables, filterSetMap);
     emitter.emitUint8(OpCode.OP_JUMP);
     falsePatches.push(emitter.emitUint16(0));
   }
@@ -633,8 +870,9 @@ function compileFilterNode(
   fallthrough: "true" | "false" | "none",
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
+  filterSetMap?: Map<QueryFilter, number>,
 ): void {
-  if (node.type === "cmp" || node.type === "null" || node.type === "expr") {
+  if (node.type === "cmp" || node.type === "null" || node.type === "expr" || node.type === "in") {
     const leafIdx = leafRegMap.get(node) ?? 0;
     emitLeafCondition(
       node,
@@ -646,6 +884,7 @@ function compileFilterNode(
       fallthrough,
       udfNameMap,
       tables,
+      filterSetMap,
     );
     return;
   }
@@ -657,11 +896,11 @@ function compileFilterNode(
     const leaf = node.child;
     const leafIdx = leafRegMap.get(leaf) ?? 0;
     if (fallthrough === "true") {
-      emitLeafJumpOnTrue(leaf, leafIdx, table, emitter, falsePatches, udfNameMap, tables);
+      emitLeafJumpOnTrue(leaf, leafIdx, table, emitter, falsePatches, udfNameMap, tables, filterSetMap);
     } else if (fallthrough === "false") {
-      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables);
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables, filterSetMap);
     } else {
-      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables);
+      emitLeafJumpOnFalse(leaf, leafIdx, table, emitter, truePatches, udfNameMap, tables, filterSetMap);
       emitter.emitUint8(OpCode.OP_JUMP);
       falsePatches.push(emitter.emitUint16(0));
     }
@@ -693,6 +932,7 @@ function compileFilterNode(
           "true",
           udfNameMap,
           tables,
+          filterSetMap,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subTruePatches) {
@@ -709,6 +949,7 @@ function compileFilterNode(
           fallthrough,
           udfNameMap,
           tables,
+          filterSetMap,
         );
       }
     }
@@ -740,6 +981,7 @@ function compileFilterNode(
           "false",
           udfNameMap,
           tables,
+          filterSetMap,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subFalsePatches) {
@@ -756,6 +998,7 @@ function compileFilterNode(
           fallthrough,
           udfNameMap,
           tables,
+          filterSetMap,
         );
       }
     }
@@ -1189,6 +1432,7 @@ function emitFilterTree(
   nextRowPatches: number[],
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
+  filterSetMap?: Map<QueryFilter, number>,
 ): void {
   if (!root) return;
   const truePatches: number[] = [];
@@ -1202,6 +1446,7 @@ function emitFilterTree(
     "true",
     udfNameMap,
     tables,
+    filterSetMap,
   );
   const rowStartPos = emitter.currentOffset();
   for (const patch of truePatches) {
@@ -1500,27 +1745,64 @@ export function emitExpression(
   }
 }
 
+function emitLoadConstant(
+  emitter: BytecodeEmitter,
+  reg: number,
+  val: any,
+  colType?: DataType,
+): void {
+  if (val === null || val === undefined) {
+    emitter.emitUint8(OpCode.OP_LOAD_NULL);
+    emitter.emitUint8(reg);
+  } else if (typeof val === "number") {
+    if (colType === DataType.FLOAT64 || !Number.isInteger(val)) {
+      emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
+      emitter.emitUint8(reg);
+      emitter.emitFloat64(val);
+    } else {
+      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(reg);
+      emitter.emitInt32(Math.floor(val));
+    }
+  } else if (typeof val === "bigint") {
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(reg);
+    emitter.emitInt32(Number(val));
+  } else if (typeof val === "string") {
+    emitter.emitUint8(OpCode.OP_LOAD_TEXT);
+    emitter.emitUint8(reg);
+    emitter.emitString(val);
+  } else if (typeof val === "boolean") {
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(reg);
+    emitter.emitInt32(val ? 1 : 0);
+  }
+}
+
 export interface CandidateIndexScan {
   index: IndexDescriptor;
-  scanType: 'point' | 'range';
+  scanType: 'point' | 'range' | 'multi_point';
   seekFilter: QueryFilter;
   filterIndex: number; // index into leafFilters
   keyType: DataType;
   compositeValue?: Uint8Array;
+  inValues?: any[];
 }
 
 export function chooseIndexScan(
   table: TableMeta,
-  leafFilters: QueryFilter[],
+  candidateFilters: QueryFilter[],
+  leafFilters?: QueryFilter[],
 ): CandidateIndexScan | null {
   if (!table.indexes || table.indexes.length === 0) return null;
+  const allLeaves = leafFilters ?? candidateFilters;
 
-  // 1. Single-column equality match on PRIMARY KEY (highest priority)
+  // 1. Single-column equality match or IN match on PRIMARY KEY (highest priority)
   for (const idx of table.indexes) {
     if ((idx.flags & IndexFlag.PRIMARY) !== 0 && idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
-      for (let i = 0; i < leafFilters.length; i++) {
-        const f = leafFilters[i];
+      for (let i = 0; i < candidateFilters.length; i++) {
+        const f = candidateFilters[i];
         if (
           f.type === 'cmp' &&
           (f.op === '=' || f.op === undefined) &&
@@ -1532,20 +1814,39 @@ export function chooseIndexScan(
             index: idx,
             scanType: 'point',
             seekFilter: f,
-            filterIndex: i,
+            filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
+          };
+        }
+        if (
+          f.type === 'in' &&
+          !f.notIn &&
+          f.colName === colMeta.name &&
+          Array.isArray(f.values) &&
+          f.values.length > 0
+        ) {
+          const uniqueValues = Array.from(
+            new Set(f.values.filter((v) => v !== null && v !== undefined)),
+          );
+          return {
+            index: idx,
+            scanType: 'multi_point',
+            seekFilter: f,
+            filterIndex: allLeaves.indexOf(f),
+            keyType: colMeta.type,
+            inValues: uniqueValues,
           };
         }
       }
     }
   }
 
-  // 2. Single-column equality match on UNIQUE secondary index
+  // 2. Single-column equality match or IN match on UNIQUE secondary index
   for (const idx of table.indexes) {
     if ((idx.flags & IndexFlag.UNIQUE) !== 0 && idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
-      for (let i = 0; i < leafFilters.length; i++) {
-        const f = leafFilters[i];
+      for (let i = 0; i < candidateFilters.length; i++) {
+        const f = candidateFilters[i];
         if (
           f.type === 'cmp' &&
           (f.op === '=' || f.op === undefined) &&
@@ -1557,8 +1858,27 @@ export function chooseIndexScan(
             index: idx,
             scanType: 'point',
             seekFilter: f,
-            filterIndex: i,
+            filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
+          };
+        }
+        if (
+          f.type === 'in' &&
+          !f.notIn &&
+          f.colName === colMeta.name &&
+          Array.isArray(f.values) &&
+          f.values.length > 0
+        ) {
+          const uniqueValues = Array.from(
+            new Set(f.values.filter((v) => v !== null && v !== undefined)),
+          );
+          return {
+            index: idx,
+            scanType: 'multi_point',
+            seekFilter: f,
+            filterIndex: allLeaves.indexOf(f),
+            keyType: colMeta.type,
+            inValues: uniqueValues,
           };
         }
       }
@@ -1573,7 +1893,7 @@ export function chooseIndexScan(
 
       for (let c = 0; c < idx.columnCount; c++) {
         const colMeta = table.columns[idx.columnIndices[c]];
-        const f = leafFilters.find(
+        const f = candidateFilters.find(
           (lf) =>
             lf.type === 'cmp' &&
             (lf.op === '=' || lf.op === undefined) &&
@@ -1605,7 +1925,7 @@ export function chooseIndexScan(
           index: idx,
           scanType: 'point',
           seekFilter: matchedFilters[0],
-          filterIndex: leafFilters.indexOf(matchedFilters[0]),
+          filterIndex: allLeaves.indexOf(matchedFilters[0]),
           keyType: DataType.BLOB,
           compositeValue: compositeKeyBytes,
         };
@@ -1617,8 +1937,8 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if (idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
-      for (let i = 0; i < leafFilters.length; i++) {
-        const f = leafFilters[i];
+      for (let i = 0; i < candidateFilters.length; i++) {
+        const f = candidateFilters[i];
         if (
           f.type === 'cmp' &&
           (f.op === '=' || f.op === undefined) &&
@@ -1630,7 +1950,7 @@ export function chooseIndexScan(
             index: idx,
             scanType: 'range',
             seekFilter: f,
-            filterIndex: i,
+            filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
           };
         }
@@ -1642,8 +1962,8 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if (idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
-      for (let i = 0; i < leafFilters.length; i++) {
-        const f = leafFilters[i];
+      for (let i = 0; i < candidateFilters.length; i++) {
+        const f = candidateFilters[i];
         if (
           f.type === 'cmp' &&
           (f.op === '>=' || f.op === '>') &&
@@ -1655,7 +1975,7 @@ export function chooseIndexScan(
             index: idx,
             scanType: 'range',
             seekFilter: f,
-            filterIndex: i,
+            filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
           };
         }
@@ -1758,6 +2078,42 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
   const rootFilter = buildRootFilter(plan.filters);
   const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
+  const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
+
+  // Short-circuit: top-level conjunction IN () can never match any row
+  for (const f of topConjunctions) {
+    if (f.type === 'in' && !f.notIn && (!f.values || f.values.length === 0)) {
+      const emptyEmitter = new BytecodeEmitter();
+      emptyEmitter.emitUint8(OpCode.OP_HALT);
+      const res = emptyEmitter.toByteArray();
+      if (plan.outputColumns) (res as any).outputColumns = plan.outputColumns;
+      return res;
+    }
+  }
+
+  const inSets: Set<any>[] = [];
+  const filterSetMap = new Map<QueryFilter, number>();
+  for (const f of leafFilters) {
+    if (f.type === 'in') {
+      const setIdx = inSets.length;
+      filterSetMap.set(f, setIdx);
+      const s = new Set<any>();
+      if (f.values) {
+        for (const v of f.values) {
+          if (v !== null && v !== undefined) {
+            s.add(v);
+            if (typeof v === 'bigint') {
+              s.add(Number(v));
+            } else if (typeof v === 'number' && Number.isSafeInteger(v)) {
+              s.add(BigInt(v));
+            }
+          }
+        }
+      }
+      inSets.push(s);
+    }
+  }
+
   const leafRegMap = new Map<QueryFilter, number>();
   for (let i = 0; i < leafFilters.length; i++) {
     leafRegMap.set(leafFilters[i], i);
@@ -1942,7 +2298,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     const loopStartPos = emitter.currentOffset();
     const nextRowPatches: number[] = [];
 
-    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
 
     // Extract group keys into registers
     if (plan.groupBy) {
@@ -2293,6 +2649,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     const result = emitter.toByteArray();
     (result as any).outputColumns = outputColumns;
+    (result as any).inSets = inSets;
     (plan as any).outputColumns = outputColumns;
     return result;
   }
@@ -2343,7 +2700,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
     const loopStartPos = emitter.currentOffset();
     const nextRowPatches: number[] = [];
 
-    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+    emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
 
     // Extract sort keys into registers
     for (let k = 0; k < K; k++) {
@@ -2426,6 +2783,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     const result = emitter.toByteArray();
     (result as any).keyInfos = plan.keyInfos;
+    (result as any).inSets = inSets;
     return result;
   }
 
@@ -2692,6 +3050,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       nextRowPatchesPerTable[N - 1],
       plan.udfNameMap,
       allTables,
+      filterSetMap,
     );
 
     let offsetSkipPatch = -1;
@@ -2877,11 +3236,12 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       };
     });
     (result as any).joinedTableScans = joinedTableScans;
+    (result as any).inSets = inSets;
     return result;
   }
 
   // Check if an active index covers the query filters
-  const indexScan = !isJoinQuery ? chooseIndexScan(table, leafFilters) : null;
+  const indexScan = !isJoinQuery ? chooseIndexScan(table, topConjunctions, leafFilters) : null;
 
   if (indexScan) {
     let regKey: number;
@@ -2891,6 +3251,9 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       emitter.emitUint8(OpCode.OP_LOAD_BLOB);
       emitter.emitUint8(regKey);
       emitter.emitBytes(indexScan.compositeValue);
+    } else if (indexScan.scanType === 'multi_point') {
+      regKey = nextReg++;
+      if (regKey >= 64) throw new TooManyRegistersError(regKey);
     } else {
       regKey = indexScan.filterIndex * 2 + 1;
     }
@@ -2916,7 +3279,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
       // 4. Run remaining filter predicates on the row (if any)
       const nextRowPatches: number[] = [];
-      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
 
       let offsetSkipPatch = -1;
       if (hasOffset) {
@@ -2970,6 +3333,121 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
       const result = emitter.toByteArray();
       (result as any).indexScan = indexScan;
+      (result as any).inSets = inSets;
+      if (plan.outputColumns) {
+        (result as any).outputColumns = plan.outputColumns;
+      }
+      return result;
+    } else if (indexScan.scanType === 'multi_point') {
+      const numValues = indexScan.inValues ? indexScan.inValues.length : 0;
+      if (numValues === 0) {
+        emitter.emitUint8(OpCode.OP_HALT);
+        const result = emitter.toByteArray();
+        (result as any).indexScan = indexScan;
+        (result as any).inSets = inSets;
+        if (plan.outputColumns) {
+          (result as any).outputColumns = plan.outputColumns;
+        }
+        return result;
+      }
+
+      // 1. Open data cursor 0 on table
+      emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
+      emitter.emitUint8(0);
+      emitter.emitUint32(table.rootPageId);
+
+      // 2. Open index cursor 1 on index rootPageId
+      emitter.emitUint8(OpCode.OP_OPEN_INDEX);
+      emitter.emitUint8(1);
+      emitter.emitUint32(indexScan.index.rootPageId);
+
+      const limitHaltPatches: number[] = [];
+
+      for (let vIdx = 0; vIdx < numValues; vIdx++) {
+        const val = indexScan.inValues![vIdx];
+        emitLoadConstant(emitter, regKey, val, indexScan.keyType);
+
+        // 3. Exact point seek in index for this value
+        emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
+        emitter.emitUint8(1); // index cursor
+        emitter.emitUint8(0); // data cursor
+        emitter.emitUint8(regKey);
+        emitter.emitUint8(indexScan.keyType);
+        const seekNotFoundPatch = emitter.emitUint16(0);
+
+        // 4. Run remaining filter predicates on the row (if any)
+        const nextRowPatches: number[] = [];
+        emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
+
+        let offsetSkipPatch = -1;
+        if (hasOffset) {
+          emitter.emitUint8(OpCode.OP_OFFSET);
+          emitter.emitUint8(regOffset);
+          offsetSkipPatch = emitter.emitUint16(0);
+        }
+
+        // 5. Emit matching row
+        if (hasSelectExprs) {
+          let exprTempReg = nextReg;
+          const allocExprReg = () => {
+            if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
+            return exprTempReg++;
+          };
+          for (let i = 0; i < plan.selectExprs!.length; i++) {
+            emitExpression(
+              plan.selectExprs![i].expr,
+              table,
+              emitter,
+              0,
+              outStartReg + i,
+              allocExprReg,
+              plan.udfNameMap,
+            );
+          }
+          emitter.emitUint8(OpCode.OP_RESULT_ROW);
+          emitter.emitUint8(outStartReg);
+          emitter.emitUint8(plan.selectExprs!.length);
+        } else {
+          emitter.emitUint8(OpCode.OP_EMIT_ROW);
+          emitter.emitUint8(0);
+        }
+
+        if (hasLimit) {
+          emitter.emitUint8(OpCode.OP_LIMIT);
+          emitter.emitUint8(regLimit);
+          limitHaltPatches.push(emitter.emitUint16(0));
+        }
+
+        const isLastVal = vIdx === numValues - 1;
+        let jumpNextValPatch = -1;
+        if (!isLastVal) {
+          emitter.emitUint8(OpCode.OP_JUMP);
+          jumpNextValPatch = emitter.emitUint16(0);
+        }
+
+        const nextValPos = emitter.currentOffset();
+        emitter.patchUint16(seekNotFoundPatch, nextValPos);
+        for (const patch of nextRowPatches) {
+          emitter.patchUint16(patch, nextValPos);
+        }
+        if (offsetSkipPatch !== -1) {
+          emitter.patchUint16(offsetSkipPatch, nextValPos);
+        }
+        if (jumpNextValPatch !== -1) {
+          emitter.patchUint16(jumpNextValPatch, nextValPos);
+        }
+      }
+
+      // EOF Label
+      const eofPos = emitter.currentOffset();
+      for (const patch of limitHaltPatches) {
+        emitter.patchUint16(patch, eofPos);
+      }
+      emitter.emitUint8(OpCode.OP_HALT);
+
+      const result = emitter.toByteArray();
+      (result as any).indexScan = indexScan;
+      (result as any).inSets = inSets;
       if (plan.outputColumns) {
         (result as any).outputColumns = plan.outputColumns;
       }
@@ -2994,7 +3472,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       const loopStartPos = emitter.currentOffset();
       const nextRowPatches: number[] = [];
 
-      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+      emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
 
       let offsetSkipPatch = -1;
       if (hasOffset) {
@@ -3062,6 +3540,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
       const result = emitter.toByteArray();
       (result as any).indexScan = indexScan;
+      (result as any).inSets = inSets;
       if (plan.outputColumns) {
         (result as any).outputColumns = plan.outputColumns;
       }
@@ -3083,7 +3562,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   const loopStartPos = emitter.currentOffset();
   const nextRowPatches: number[] = [];
 
-  emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap);
+  emitFilterTree(rootFilter, table, emitter, leafRegMap, nextRowPatches, plan.udfNameMap, undefined, filterSetMap);
 
   let offsetSkipPatch = -1;
   if (hasOffset) {
@@ -3154,6 +3633,7 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   emitter.emitUint8(OpCode.OP_HALT);
 
   const result = emitter.toByteArray();
+  (result as any).inSets = inSets;
   if (plan.outputColumns) {
     (result as any).outputColumns = plan.outputColumns;
   }
@@ -3555,6 +4035,23 @@ export function disassembleBytecode(
           p2: `r[${regB}]`,
           p3: fmtAddr(jumpTarget),
           comment: `If r[${regA}] ${descriptions[op]} r[${regB}] -> jump to ${fmtAddr(jumpTarget)}`,
+        });
+        break;
+      }
+
+      case OpCode.OP_IN: {
+        const regVal = bytecode[pc++];
+        const setIdx = view.getUint16(pc, true);
+        pc += 2;
+        const jumpTarget = view.getUint16(pc, true);
+        pc += 2;
+        instructions.push({
+          addr,
+          opcode: "OP_IN",
+          p1: `r[${regVal}]`,
+          p2: `set[${setIdx}]`,
+          p3: fmtAddr(jumpTarget),
+          comment: `If r[${regVal}] IN set[${setIdx}] -> jump to ${fmtAddr(jumpTarget)}`,
         });
         break;
       }

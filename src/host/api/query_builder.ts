@@ -3,6 +3,7 @@ import {
   AggregateNotAllowedInWhereError,
   JoinType,
 } from '../../types/index.js';
+import { MAX_IN_LIST_SIZE } from '../../constants.js';
 import {
   ComparisonOp,
   QueryFilter,
@@ -468,6 +469,12 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      if (typeof op === 'string' && op.trim().toLowerCase() === 'in') {
+        return this.whereIn(colOrCbOrExpr as string, value);
+      }
+      if (typeof op === 'string' && op.trim().toLowerCase() === 'not in') {
+        return this.whereNotIn(colOrCbOrExpr as string, value);
+      }
       const target = parseFilterTarget(colOrCbOrExpr);
       this.filters.push({
         type: 'cmp',
@@ -531,6 +538,12 @@ export class QueryBuilder {
     } else {
       assertNotAggregateInWhere(colOrCbOrExpr);
       assertNotAggregateInWhere(value);
+      if (typeof op === 'string' && op.trim().toLowerCase() === 'in') {
+        return this.orWhereIn(colOrCbOrExpr as string, value);
+      }
+      if (typeof op === 'string' && op.trim().toLowerCase() === 'not in') {
+        return this.orWhereNotIn(colOrCbOrExpr as string, value);
+      }
       const target = parseFilterTarget(colOrCbOrExpr);
       this.addOrFilter({
         type: 'cmp',
@@ -751,6 +764,90 @@ export class QueryBuilder {
 
   orWhereContains(colName: string, substring: string): this {
     return this.orWhere(colName, 'CONTAINS', substring);
+  }
+
+  whereIn(colName: string, values: any[]): this {
+    assertNotAggregateInWhere(colName);
+    if (!Array.isArray(values)) {
+      throw new TypeError(`WebDB: whereIn requires an array of values`);
+    }
+    if (values.length > MAX_IN_LIST_SIZE) {
+      throw new RangeError(
+        `WebDB: whereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+      );
+    }
+    const target = parseFilterTarget(colName);
+    this.filters.push({
+      type: 'in',
+      colName: target.colName,
+      expr: target.expr,
+      values,
+      notIn: false,
+    });
+    return this;
+  }
+
+  whereNotIn(colName: string, values: any[]): this {
+    assertNotAggregateInWhere(colName);
+    if (!Array.isArray(values)) {
+      throw new TypeError(`WebDB: whereNotIn requires an array of values`);
+    }
+    if (values.length > MAX_IN_LIST_SIZE) {
+      throw new RangeError(
+        `WebDB: whereNotIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+      );
+    }
+    const target = parseFilterTarget(colName);
+    this.filters.push({
+      type: 'in',
+      colName: target.colName,
+      expr: target.expr,
+      values,
+      notIn: true,
+    });
+    return this;
+  }
+
+  orWhereIn(colName: string, values: any[]): this {
+    assertNotAggregateInWhere(colName);
+    if (!Array.isArray(values)) {
+      throw new TypeError(`WebDB: orWhereIn requires an array of values`);
+    }
+    if (values.length > MAX_IN_LIST_SIZE) {
+      throw new RangeError(
+        `WebDB: orWhereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+      );
+    }
+    const target = parseFilterTarget(colName);
+    this.addOrFilter({
+      type: 'in',
+      colName: target.colName,
+      expr: target.expr,
+      values,
+      notIn: false,
+    });
+    return this;
+  }
+
+  orWhereNotIn(colName: string, values: any[]): this {
+    assertNotAggregateInWhere(colName);
+    if (!Array.isArray(values)) {
+      throw new TypeError(`WebDB: orWhereNotIn requires an array of values`);
+    }
+    if (values.length > MAX_IN_LIST_SIZE) {
+      throw new RangeError(
+        `WebDB: orWhereNotIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
+      );
+    }
+    const target = parseFilterTarget(colName);
+    this.addOrFilter({
+      type: 'in',
+      colName: target.colName,
+      expr: target.expr,
+      values,
+      notIn: true,
+    });
+    return this;
   }
 
   getFilters(): QueryFilter[] {

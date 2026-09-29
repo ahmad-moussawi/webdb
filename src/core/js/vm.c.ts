@@ -1177,6 +1177,42 @@ export function vm_step(
       }
 
       /**
+       * OP_IN (0x1f)
+       * Operands: [reg_val: uint8] [set_idx: uint16] [jump_target: uint16] (5 bytes)
+       * Checks whether r[reg_val] exists in ctx.inSets[set_idx].
+       * If r[reg_val] is null or undefined, does not jump (3VL FALSE/UNKNOWN).
+       * If matched, jumps to jump_target.
+       */
+      case OpCode.OP_IN: {
+        const reg_val = bytecode[ctx.pc];
+        const set_idx = code_view.getUint16(ctx.pc + 1, true);
+        const jump_target = code_view.getUint16(ctx.pc + 3, true);
+        ctx.pc += 5;
+
+        if (jump_target > code_len) {
+          ctx.status = VmStatus.INVALID_BYTECODE;
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const val = ctx.registers[reg_val];
+        if (val === null || val === undefined) {
+          break;
+        }
+
+        const set = ctx.inSets?.[set_idx];
+        if (set) {
+          if (
+            set.has(val) ||
+            (typeof val === 'number' && Number.isSafeInteger(val) && set.has(BigInt(val))) ||
+            (typeof val === 'bigint' && set.has(Number(val)))
+          ) {
+            ctx.pc = jump_target;
+          }
+        }
+        break;
+      }
+
+      /**
        * OP_LOAD_INT (0x20)
        * Operands: [reg_idx: uint8] [val: int32] (5 bytes)
        * Loads a literal signed 32-bit integer constant into register r[reg_idx].
