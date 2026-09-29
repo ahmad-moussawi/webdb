@@ -39,6 +39,7 @@ import {
   create_agg_buckets,
   sort_sorter_entries,
   sorter_insert_row,
+  compare_registers_to_sorter_keys,
   serialize_result_registers,
   emit_to_result_buffer,
   row_is_null,
@@ -1561,11 +1562,21 @@ export function vm_step(
           nullOrders: [0],
         };
 
+        const requested_k =
+          key_info.limit !== undefined && key_info.limit > 0
+            ? (key_info.offset ?? 0) + key_info.limit
+            : 0;
+        const max_k =
+          requested_k > 0 && requested_k <= MAX_TOPK_HEAP_LIMIT
+            ? requested_k
+            : 0;
+
         ctx.sorters[sorter_id] = {
           keyInfo: key_info,
           entries: [],
           readIdx: 0,
           isSorted: false,
+          maxK: max_k,
         };
         break;
       }
@@ -1589,22 +1600,51 @@ export function vm_step(
           return VmStatus.INVALID_BYTECODE;
         }
 
+        const max_k = sorter.maxK ?? 0;
+
+        // Fast-path Top-K heap rejection:
+        // When heap is full (sorter.entries.length >= max_k), candidate rows worse than
+        // the worst element (heap root) are discarded immediately with 0 allocations.
+        if (max_k > 0 && sorter.entries.length >= max_k) {
+          if (num_keys === 1) {
+            const cand = ctx.registers[start_reg];
+            const root = sorter.entries[0].keys[0];
+            const dir = sorter.keyInfo.directions[0] ?? 0;
+            if (typeof cand === "number" && typeof root === "number") {
+              if (dir === 0 ? cand >= root : cand <= root) {
+                break;
+              }
+            } else if (typeof cand === "string" && typeof root === "string") {
+              if (dir === 0 ? cand >= root : cand <= root) {
+                break;
+              }
+            } else {
+              const cmp = compare_registers_to_sorter_keys(
+                ctx.registers,
+                start_reg,
+                sorter.entries[0].keys,
+                sorter.keyInfo,
+              );
+              if (cmp >= 0) break;
+            }
+          } else {
+            const cmp = compare_registers_to_sorter_keys(
+              ctx.registers,
+              start_reg,
+              sorter.entries[0].keys,
+              sorter.keyInfo,
+            );
+            if (cmp >= 0) break;
+          }
+        }
+
         const cursor = get_cursor(ctx, cursor_idx);
         const row_len = view.getUint16(cursor.rowOffset + 1, true);
 
-        const keys: any[] = [];
+        const keys: any[] = new Array(num_keys);
         for (let k = 0; k < num_keys; k++) {
-          keys.push(ctx.registers[start_reg + k]);
+          keys[k] = ctx.registers[start_reg + k];
         }
-
-        const requested_k =
-          sorter.keyInfo.limit !== undefined && sorter.keyInfo.limit > 0
-            ? (sorter.keyInfo.offset ?? 0) + sorter.keyInfo.limit
-            : 0;
-        const max_k =
-          requested_k > 0 && requested_k <= MAX_TOPK_HEAP_LIMIT
-            ? requested_k
-            : 0;
 
         const insert_status = sorter_insert_row(
           ctx,

@@ -220,6 +220,62 @@ export function compare_sorter_keys(
 }
 
 /**
+ * Compares sort keys stored in contiguous registers against a target entry's keys.
+ * Avoids allocating an intermediate array for rejected Top-K candidates.
+ */
+export function compare_registers_to_sorter_keys(
+  registers: any[],
+  start_reg: number,
+  keys_b: any[],
+  key_info: VmKeyInfo,
+): number {
+  const num_keys = key_info.numKeys;
+  for (let k = 0; k < num_keys; k++) {
+    const a = registers[start_reg + k];
+    const b = keys_b[k];
+    const direction = key_info.directions[k] ?? 0;
+    const null_order = key_info.nullOrders[k] ?? (direction === 1 ? 1 : 0);
+
+    const a_is_null = a === null || a === undefined;
+    const b_is_null = b === null || b === undefined;
+
+    if (a_is_null && b_is_null) continue;
+    if (a_is_null || b_is_null) {
+      return null_order === 0 ? (a_is_null ? -1 : 1) : a_is_null ? 1 : -1;
+    }
+
+    let cmp = 0;
+    if (typeof a === "number" && typeof b === "number") {
+      cmp = a < b ? -1 : a > b ? 1 : 0;
+    } else if (typeof a === "string" && typeof b === "string") {
+      cmp = a < b ? -1 : a > b ? 1 : 0;
+    } else if (typeof a === "bigint" || typeof b === "bigint") {
+      const ba = BigInt(a);
+      const bb = BigInt(b);
+      cmp = ba < bb ? -1 : ba > bb ? 1 : 0;
+    } else if (a instanceof Uint8Array && b instanceof Uint8Array) {
+      const min_len = Math.min(a.byteLength, b.byteLength);
+      for (let i = 0; i < min_len; i++) {
+        if (a[i] !== b[i]) {
+          cmp = a[i] < b[i] ? -1 : 1;
+          break;
+        }
+      }
+      if (cmp === 0) {
+        cmp = a.byteLength < b.byteLength ? -1 : a.byteLength > b.byteLength ? 1 : 0;
+      }
+    } else {
+      cmp = (a as any) < (b as any) ? -1 : (a as any) > (b as any) ? 1 : 0;
+    }
+
+    if (cmp !== 0) {
+      return direction === 1 ? -cmp : cmp;
+    }
+  }
+  return 0;
+}
+
+/**
  * 32-bit FNV-1a hash over grouping key values.
  * Returns non-zero uint32 (reserving 0 as empty bucket marker).
  */
@@ -408,12 +464,10 @@ export function sorter_insert_row(
     ctx.arenaOffset += diff;
 
     const row_data = copy_row_bytes(view, cursor_row_offset, row_len);
-    sorter.entries[0] = {
-      keys,
-      rowOffset: cursor_row_offset,
-      rowLen: row_len,
-      rowData: row_data,
-    };
+    old_entry.keys = keys;
+    old_entry.rowOffset = cursor_row_offset;
+    old_entry.rowLen = row_len;
+    old_entry.rowData = row_data;
     heap_sift_down(sorter.entries, 0, max_k, sorter.keyInfo);
     return VmStatus.RUNNING;
   }

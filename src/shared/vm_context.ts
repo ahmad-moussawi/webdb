@@ -43,6 +43,7 @@ export interface VmSorter {
   entries: VmSorterEntry[];
   readIdx: number;
   isSorted: boolean;
+  maxK?: number;
 }
 
 export interface VmAggBucket {
