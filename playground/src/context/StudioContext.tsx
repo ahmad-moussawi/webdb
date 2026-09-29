@@ -286,7 +286,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setToastMessage(msg);
     toastTimerRef.current = setTimeout(() => {
       setToastMessage(null);
-    }, 2200);
+    }, 3500);
   }, []);
 
   // Save tabs debounce
@@ -456,23 +456,28 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     openDb(activeDbName, activeStorage);
   }, []);
 
-  // Create Database
   const createDb = useCallback(async (name: string, storage: VfsType, templateKey: string) => {
-    addRegisteredDb(storage, name);
-    await openDb(name, storage);
+    try {
+      addRegisteredDb(storage, name);
+      await openDb(name, storage);
 
-    if (templateKey !== 'empty') {
-      // openDb sets db asynchronously, so let's open explicitly
-      const newInst = await WebDB.open({ name, storage });
-      (window as any).db = newInst;
-      setDb(newInst);
-      await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
-        setSeedingProgress(p);
-      });
-      const meta = await newInst.listTables();
-      setTables(meta);
-    } else {
-      showToast(`Created empty database: ${name}`);
+      if (templateKey !== 'empty') {
+        // openDb sets db asynchronously, so let's open explicitly
+        const newInst = await WebDB.open({ name, storage });
+        (window as any).db = newInst;
+        setDb(newInst);
+        await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
+          setSeedingProgress(p);
+        });
+        const meta = await newInst.listTables();
+        setTables(meta);
+        showToast(`Database "${name}" created with ${meta.length} tables (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`);
+      } else {
+        showToast(`Created empty database "${name}" (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`);
+      }
+    } catch (err: any) {
+      console.error('Error creating database:', err);
+      showToast(`Error creating database: ${err?.message || err}`);
     }
   }, [openDb, showToast]);
 
