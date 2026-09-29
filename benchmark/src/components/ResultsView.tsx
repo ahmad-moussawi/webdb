@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { AVAILABLE_ENGINES, AVAILABLE_SCENARIOS, EngineId, ScenarioId, ScenarioResult } from '../adapters/index.js';
-import { Download, LayoutGrid, BarChart2, Table as TableIcon, Zap, Clock, Trophy, AlertCircle, BookOpen, Cpu, Binary, Layers, Database } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { AVAILABLE_ENGINES, AVAILABLE_SCENARIOS, EngineId, ScenarioId, ScenarioInfo, ScenarioResult } from '../adapters/index.js';
+import { Download, LayoutGrid, BarChart2, Table as TableIcon, Zap, Clock, Medal, AlertCircle, BookOpen, Cpu, Binary, Layers, Database, Info, X, Copy, Check } from 'lucide-react';
 
 interface Props {
   results: ScenarioResult[];
@@ -10,6 +10,19 @@ interface Props {
 export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
   const [activeTab, setActiveTab] = useState<'matrix' | 'charts' | 'table' | 'notes'>('matrix');
   const [chartMetric, setChartMetric] = useState<'ops' | 'latency'>('ops');
+  const [modalScenario, setModalScenario] = useState<ScenarioInfo | null>(null);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [selectedBaseline, setSelectedBaseline] = useState<EngineId | null>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setModalScenario(null);
+    };
+    if (modalScenario) {
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }
+  }, [modalScenario]);
 
   if (results.length === 0) {
     return (
@@ -32,11 +45,44 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
   const presentEngineIds = Array.from(new Set(results.map((r) => r.engineId)));
   const presentScenarioIds = Array.from(new Set(results.map((r) => r.scenarioId)));
 
+  const defaultBaseline: EngineId = presentEngineIds.includes('indexeddb')
+    ? 'indexeddb'
+    : presentEngineIds.includes('raw_array')
+      ? 'raw_array'
+      : (presentEngineIds[0] ?? 'webdb_idb');
+
+  const baselineEngineId: EngineId =
+    selectedBaseline && presentEngineIds.includes(selectedBaseline)
+      ? selectedBaseline
+      : defaultBaseline;
+
   // Lookup map: `${engineId}:${scenarioId}` -> ScenarioResult
   const resultMap = new Map<string, ScenarioResult>();
   for (const r of results) {
     resultMap.set(`${r.engineId}:${r.scenarioId}`, r);
   }
+
+  // Calculate speedup relative to active baseline
+  const getSpeedupInfo = (res: ScenarioResult, scenId: ScenarioId) => {
+    if (res.engineId === baselineEngineId) {
+      return { isBaseline: true, text: 'Baseline', shortText: 'Baseline', factor: 1 };
+    }
+    const baseRes = resultMap.get(`${baselineEngineId}:${scenId}`);
+    if (!baseRes || baseRes.error || res.error || baseRes.opsPerSec <= 0 || res.opsPerSec <= 0) {
+      return null;
+    }
+    const ratio = res.opsPerSec / baseRes.opsPerSec;
+    if (ratio >= 1.05) {
+      const text = `${ratio >= 10 ? Math.round(ratio) : ratio.toFixed(1)}x faster`;
+      return { isFaster: true, text, shortText: text, factor: ratio };
+    } else if (ratio <= 0.95) {
+      const slowerRatio = 1 / ratio;
+      const text = `${slowerRatio >= 10 ? Math.round(slowerRatio) : slowerRatio.toFixed(1)}x slower`;
+      return { isSlower: true, text, shortText: text, factor: ratio };
+    } else {
+      return { isParity: true, text: '~1.0x', shortText: '~1.0x', factor: 1 };
+    }
+  };
 
   // Find winner per scenario (highest ops/sec)
   const winners = new Map<ScenarioId, EngineId>();
@@ -57,6 +103,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
     const payload = {
       timestamp: new Date().toISOString(),
       datasetSize,
+      baseline: baselineEngineId,
       results,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -78,6 +125,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
       'MinMs',
       'MaxMs',
       'P95Ms',
+      'VsBaseline',
       'Samples',
       'MemoryDeltaMB',
       'Error',
@@ -86,6 +134,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
       const eng = engineMap.get(r.engineId);
       const scen = scenarioMap.get(r.scenarioId);
       const memMb = r.memoryDeltaBytes ? (r.memoryDeltaBytes / (1024 * 1024)).toFixed(2) : '';
+      const speedup = getSpeedupInfo(r, r.scenarioId);
       return [
         eng?.name ?? r.engineId,
         eng?.storage ?? 'unknown',
@@ -95,6 +144,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
         r.minMs,
         r.maxMs,
         r.p95Ms,
+        speedup?.text ?? '',
         r.samples,
         memMb,
         r.error ? `"${r.error.replace(/"/g, '""')}"` : '',
@@ -147,6 +197,21 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
         </div>
 
         <div className="toolbar-actions">
+          <div className="baseline-selector-box">
+            <span className="baseline-label">Baseline:</span>
+            <select
+              className="baseline-select"
+              value={baselineEngineId}
+              onChange={(e) => setSelectedBaseline(e.target.value as EngineId)}
+              title="Reference baseline engine for speedup comparison"
+            >
+              {presentEngineIds.map((id) => (
+                <option key={id} value={id}>
+                  {engineMap.get(id)?.name ?? id}
+                </option>
+              ))}
+            </select>
+          </div>
           <span className="scale-indicator">Dataset: {datasetSize.toLocaleString()} rows</span>
           <button onClick={exportCsv} className="action-pill-btn" title="Export CSV">
             <Download size={13} />
@@ -189,8 +254,21 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                 return (
                   <tr key={scenId}>
                     <td className="td-scenario-info">
-                      <div className="matrix-scen-title">{scen?.name ?? scenId}</div>
-                      <div className="matrix-scen-hint">{scen?.queryHint}</div>
+                      <div className="matrix-scen-header">
+                        <span className="matrix-scen-title">{scen?.name ?? scenId}</span>
+                        {scen && (
+                          <button
+                            className="btn-info-icon"
+                            onClick={() => setModalScenario(scen)}
+                            title="View full query & scenario details"
+                          >
+                            <Info size={12} />
+                          </button>
+                        )}
+                      </div>
+                      <div className="matrix-scen-hint" title={scen?.queryHint}>
+                        {scen?.queryHint}
+                      </div>
                     </td>
 
                     {presentEngineIds.map((engId) => {
@@ -214,6 +292,8 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                         );
                       }
 
+                      const speedup = getSpeedupInfo(res, scenId);
+
                       return (
                         <td
                           key={engId}
@@ -227,11 +307,35 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                                   : res.opsPerSec.toFixed(0)}{' '}
                                 <small>ops/s</small>
                               </span>
-                              {isWinner && (
-                                <span className="winner-badge" title="Fastest implementation">
-                                  <Trophy size={11} /> Fastest
-                                </span>
-                              )}
+                              <div className="cell-badges">
+                                {isWinner && (
+                                  <span className="winner-medal-wrap" title="Fastest implementation">
+                                    <Medal size={15} className="winner-medal" />
+                                  </span>
+                                )}
+                                {speedup && (
+                                  <span
+                                    className={`speedup-badge ${
+                                      isWinner
+                                        ? 'badge-winner'
+                                        : speedup.isFaster
+                                        ? 'badge-faster'
+                                        : speedup.isBaseline
+                                        ? 'badge-baseline'
+                                        : speedup.isSlower
+                                        ? 'badge-slower'
+                                        : 'badge-parity'
+                                    }`}
+                                    title={
+                                      isWinner
+                                        ? `Fastest implementation — ${speedup.isBaseline ? '1.0x baseline' : speedup.text} vs ${engineMap.get(baselineEngineId)?.name ?? baselineEngineId}`
+                                        : `Speed relative to ${engineMap.get(baselineEngineId)?.name ?? baselineEngineId}`
+                                    }
+                                  >
+                                    {speedup.text}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                             <div className="cell-secondary">
                               <span className="cell-latency">{res.meanMs.toFixed(2)} ms</span>
@@ -296,6 +400,8 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                       const eng = engineMap.get(res.engineId);
                       const isWinner = winnerEngId === res.engineId;
                       const hasError = !!res.error;
+                      const speedup = getSpeedupInfo(res, scenId);
+                      const speedupText = speedup ? (speedup.isBaseline ? ' (Baseline)' : ` (${speedup.text})`) : '';
 
                       let pct = 0;
                       let label = '';
@@ -323,7 +429,9 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                             />
                           </div>
                           <span className={`bar-val-text ${isWinner ? 'winner' : ''}`}>
+                            {isWinner && <Medal size={13} className="winner-medal-inline" />}
                             {label}
+                            {speedupText && <small className="bar-speedup-hint">{speedupText}</small>}
                           </span>
                         </div>
                       );
@@ -346,6 +454,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                 <th>Storage</th>
                 <th>Scenario</th>
                 <th className="num">Throughput</th>
+                <th className="num">vs Baseline</th>
                 <th className="num">Mean</th>
                 <th className="num">Min</th>
                 <th className="num">p95</th>
@@ -360,6 +469,8 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                 const memMb = r.memoryDeltaBytes
                   ? `${(r.memoryDeltaBytes / (1024 * 1024)).toFixed(1)} MB`
                   : '—';
+                const speedup = getSpeedupInfo(r, r.scenarioId);
+                const isWinner = winners.get(r.scenarioId) === r.engineId;
 
                 if (r.error) {
                   return (
@@ -367,7 +478,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                       <td className="bold">{eng?.name ?? r.engineId}</td>
                       <td>{eng?.storage}</td>
                       <td>{scen?.name ?? r.scenarioId}</td>
-                      <td colSpan={6} className="text-danger">{r.error}</td>
+                      <td colSpan={7} className="text-danger">{r.error}</td>
                     </tr>
                   );
                 }
@@ -382,6 +493,30 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                     </td>
                     <td>{scen?.name ?? r.scenarioId}</td>
                     <td className="num bold font-mono">{r.opsPerSec.toLocaleString()} ops/s</td>
+                    <td className="num font-mono">
+                      <div className="table-speedup-cell">
+                        {isWinner && <Medal size={13} className="winner-medal" title="Fastest implementation" />}
+                        {speedup ? (
+                          <span
+                            className={`speedup-badge ${
+                              isWinner
+                                ? 'badge-winner'
+                                : speedup.isFaster
+                                ? 'badge-faster'
+                                : speedup.isBaseline
+                                ? 'badge-baseline'
+                                : speedup.isSlower
+                                ? 'badge-slower'
+                                : 'badge-parity'
+                            }`}
+                          >
+                            {speedup.text}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </div>
+                    </td>
                     <td className="num font-mono">{r.meanMs.toFixed(2)} ms</td>
                     <td className="num font-mono text-muted">{r.minMs.toFixed(2)} ms</td>
                     <td className="num font-mono">{r.p95Ms.toFixed(2)} ms</td>
@@ -438,6 +573,65 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
               <p className="note-body">
                 The full SQLite3 C codebase compiled to WebAssembly. Features mature B-Tree paging and query planning. With OPFS, achieves near-native I/O throughput via synchronous file handles, with slight JS-to-WASM bridge translation cost on point operations.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full Query Details Modal */}
+      {modalScenario && (
+        <div className="modal-backdrop" onClick={() => setModalScenario(null)}>
+          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-wrap">
+                <Info size={15} className="text-primary" />
+                <h3 className="modal-title">{modalScenario.name}</h3>
+              </div>
+              <button
+                className="btn-close-modal"
+                onClick={() => setModalScenario(null)}
+                title="Close"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div className="modal-section">
+                <label className="modal-label">Description</label>
+                <p className="modal-desc">{modalScenario.description}</p>
+              </div>
+
+              <div className="modal-section">
+                <div className="modal-label-row">
+                  <label className="modal-label">Full Query / Target Operation</label>
+                  <button
+                    className="btn-copy-code"
+                    onClick={() => {
+                      navigator.clipboard.writeText(modalScenario.queryHint);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1800);
+                    }}
+                  >
+                    {copied ? <Check size={11} /> : <Copy size={11} />}
+                    <span>{copied ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+                <pre className="modal-code-block">
+                  <code>{modalScenario.queryHint}</code>
+                </pre>
+              </div>
+
+              <div className="modal-section">
+                <label className="modal-label">Category</label>
+                <span className="modal-category-badge">{modalScenario.category.toUpperCase()}</span>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn-modal-close" onClick={() => setModalScenario(null)}>
+                Close
+              </button>
             </div>
           </div>
         </div>

@@ -35,9 +35,7 @@ export const BenchmarkControls: React.FC<Props> = ({
   const toggleEngine = (id: EngineId) => {
     if (isRunning) return;
     if (selectedEngines.includes(id)) {
-      if (selectedEngines.length > 1) {
-        setSelectedEngines(selectedEngines.filter((e) => e !== id));
-      }
+      setSelectedEngines(selectedEngines.filter((e) => e !== id));
     } else {
       setSelectedEngines([...selectedEngines, id]);
     }
@@ -46,22 +44,49 @@ export const BenchmarkControls: React.FC<Props> = ({
   const toggleScenario = (id: ScenarioId) => {
     if (isRunning) return;
     if (selectedScenarios.includes(id)) {
-      if (selectedScenarios.length > 1) {
-        setSelectedScenarios(selectedScenarios.filter((s) => s !== id));
-      }
+      setSelectedScenarios(selectedScenarios.filter((s) => s !== id));
     } else {
       setSelectedScenarios([...selectedScenarios, id]);
     }
   };
 
-  const selectFilter = (type: 'all' | 'memory' | 'persistent') => {
+  const toggleAllEngines = () => {
+    if (isRunning) return;
+    if (selectedEngines.length === AVAILABLE_ENGINES.length) {
+      setSelectedEngines([]);
+    } else {
+      setSelectedEngines(AVAILABLE_ENGINES.map((e) => e.id));
+    }
+  };
+
+  const toggleAllScenarios = () => {
+    if (isRunning) return;
+    if (selectedScenarios.length === AVAILABLE_SCENARIOS.length) {
+      setSelectedScenarios([]);
+    } else {
+      setSelectedScenarios(AVAILABLE_SCENARIOS.map((s) => s.id));
+    }
+  };
+
+  const selectFilter = (type: 'all' | 'none' | 'memory' | 'persistent') => {
     if (isRunning) return;
     if (type === 'all') {
       setSelectedEngines(AVAILABLE_ENGINES.map((e) => e.id));
+    } else if (type === 'none') {
+      setSelectedEngines([]);
     } else if (type === 'memory') {
       setSelectedEngines(AVAILABLE_ENGINES.filter((e) => e.storage === 'memory').map((e) => e.id));
     } else {
       setSelectedEngines(AVAILABLE_ENGINES.filter((e) => e.storage === 'persistent').map((e) => e.id));
+    }
+  };
+
+  const selectScenarioFilter = (type: 'all' | 'none') => {
+    if (isRunning) return;
+    if (type === 'all') {
+      setSelectedScenarios(AVAILABLE_SCENARIOS.map((s) => s.id));
+    } else {
+      setSelectedScenarios([]);
     }
   };
 
@@ -74,7 +99,16 @@ export const BenchmarkControls: React.FC<Props> = ({
       {/* Primary Action Button */}
       <div className="action-box">
         {!isRunning ? (
-          <button className="btn-run" onClick={onRun}>
+          <button
+            className="btn-run"
+            onClick={onRun}
+            disabled={selectedEngines.length === 0 || selectedScenarios.length === 0}
+            title={
+              selectedEngines.length === 0 || selectedScenarios.length === 0
+                ? 'Select at least 1 engine and 1 scenario'
+                : 'Run Benchmark'
+            }
+          >
             <Play size={15} fill="currentColor" />
             <span>Run Benchmark</span>
           </button>
@@ -142,9 +176,21 @@ export const BenchmarkControls: React.FC<Props> = ({
         <div className="section-header-row">
           <span className="section-label">Database Engines ({selectedEngines.length})</span>
           <div className="mini-presets">
-            <button onClick={() => selectFilter('all')} disabled={isRunning}>All</button>
-            <button onClick={() => selectFilter('memory')} disabled={isRunning}>RAM</button>
-            <button onClick={() => selectFilter('persistent')} disabled={isRunning}>Disk</button>
+            <button onClick={toggleAllEngines} disabled={isRunning} title="Toggle all/none">
+              Toggle
+            </button>
+            <button onClick={() => selectFilter('all')} disabled={isRunning}>
+              All
+            </button>
+            <button onClick={() => selectFilter('none')} disabled={isRunning}>
+              None
+            </button>
+            <button onClick={() => selectFilter('memory')} disabled={isRunning}>
+              RAM
+            </button>
+            <button onClick={() => selectFilter('persistent')} disabled={isRunning}>
+              Disk
+            </button>
           </div>
         </div>
 
@@ -176,6 +222,17 @@ export const BenchmarkControls: React.FC<Props> = ({
       <div className="control-section">
         <div className="section-header-row">
           <span className="section-label">Test Scenarios ({selectedScenarios.length})</span>
+          <div className="mini-presets">
+            <button onClick={toggleAllScenarios} disabled={isRunning} title="Toggle all/none">
+              Toggle
+            </button>
+            <button onClick={() => selectScenarioFilter('all')} disabled={isRunning}>
+              All
+            </button>
+            <button onClick={() => selectScenarioFilter('none')} disabled={isRunning}>
+              None
+            </button>
+          </div>
         </div>
 
         <div className="items-list">

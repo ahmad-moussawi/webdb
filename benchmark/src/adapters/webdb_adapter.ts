@@ -108,7 +108,7 @@ export class WebDbAdapter implements BenchmarkAdapter {
     const rows = await this.db
       .from("benchmark")
       .where("active", "=", 1)
-      .orderBy("score", "desc")
+      .orderBy("score", "asc")
       .limit(limit)
       .toArray();
     return rows as unknown as BenchmarkRecord[];
