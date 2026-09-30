@@ -29,7 +29,20 @@ export default defineConfig({
     "Ultra-lean browser-native relational database engine with 4KB slotted pages and VDBE execution",
   base: "/webdb/",
   lastUpdated: true,
-  ...(siteHostname ? { sitemap: { hostname: siteHostname } } : {}),
+  ...(siteHostname
+    ? {
+        sitemap: {
+          hostname: siteHostname,
+          transformItems(items) {
+            items.push(
+              { url: "playground/", changefreq: "weekly", priority: 0.9 },
+              { url: "benchmark/", changefreq: "weekly", priority: 0.8 },
+            );
+            return items;
+          },
+        },
+      }
+    : {}),
 
   markdown: {
     math: true,
