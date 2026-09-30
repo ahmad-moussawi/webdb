@@ -60,8 +60,10 @@ export class WebDbAdapter implements BenchmarkAdapter {
     ]);
 
     await this.db.createIndex("benchmark", ["age"], { unique: false });
-    await this.db.createIndex("benchmark", ["score"], { unique: false });
-    await this.db.createIndex("benchmark", ["active"], { unique: false });
+    // await this.db.createIndex("benchmark", ["score"], { unique: false });
+    await this.db.createIndex("benchmark", ["active", "score"], {
+      unique: false,
+    });
 
     await this.db.createTable("orders", [
       { name: "id", type: "INT32", flags: { primaryKey: true, notNull: true } },
@@ -108,7 +110,7 @@ export class WebDbAdapter implements BenchmarkAdapter {
     const rows = await this.db
       .from("benchmark")
       .where("active", "=", 1)
-      .orderBy("score", "asc")
+      // .orderBy("score", "desc")
       .limit(limit)
       .toArray();
     return rows as unknown as BenchmarkRecord[];
