@@ -1,10 +1,35 @@
-import { defineConfig } from "vitepress";
+import { defineConfig, type HeadConfig } from "vitepress";
+
+const siteHostname = process.env.SITE_HOSTNAME;
+const isCI = Boolean(process.env.CI || process.env.SITE_HOSTNAME);
+
+const googleAnalyticsHead: HeadConfig[] = isCI
+  ? [
+      [
+        "script",
+        {
+          async: "",
+          src: "https://www.googletagmanager.com/gtag/js?id=G-SK750XLF2Y",
+        },
+      ],
+      [
+        "script",
+        {},
+        `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-SK750XLF2Y');`,
+      ],
+    ]
+  : [];
 
 export default defineConfig({
   title: "WebDB",
   description:
     "Ultra-lean browser-native relational database engine with 4KB slotted pages and VDBE execution",
   base: "/webdb/",
+  lastUpdated: true,
+  ...(siteHostname ? { sitemap: { hostname: siteHostname } } : {}),
 
   markdown: {
     math: true,
@@ -24,21 +49,7 @@ export default defineConfig({
         href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap",
       },
     ],
-    [
-      "script",
-      {
-        async: "",
-        src: "https://www.googletagmanager.com/gtag/js?id=G-SK750XLF2Y",
-      },
-    ],
-    [
-      "script",
-      {},
-      `window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-SK750XLF2Y');`,
-    ],
+    ...googleAnalyticsHead,
   ],
 
   themeConfig: {
@@ -74,7 +85,10 @@ gtag('config', 'G-SK750XLF2Y');`,
         text: "Guide",
         items: [
           { text: "Getting Started", link: "/getting-started" },
-          { text: "Query Builder API & Grammar", link: "/plans/query_builder_api_and_grammar" },
+          {
+            text: "Query Builder API & Grammar",
+            link: "/plans/query_builder_api_and_grammar",
+          },
         ],
       },
       {
@@ -82,7 +96,10 @@ gtag('config', 'G-SK750XLF2Y');`,
         items: [
           { text: "Strategic Master Plan", link: "/plans/plan" },
           { text: 'Prototype ("Walking Skeleton")', link: "/plans/prototype" },
-          { text: "Query Builder API & Grammar", link: "/plans/query_builder_api_and_grammar" },
+          {
+            text: "Query Builder API & Grammar",
+            link: "/plans/query_builder_api_and_grammar",
+          },
           { text: "System Limits & Invariants", link: "/plans/limitations" },
           {
             text: "Future Extensions & Search Roadmap",
