@@ -652,35 +652,56 @@ export const PageInspector: React.FC = () => {
 
           {/* Heatmap & Utilization Legend Ribbon */}
           <div className="heatmap-legend-ribbon">
-            <div className="legend-group">
-              <span className="legend-group-title">PAGE TYPE (COLOR):</span>
-              <span className="legend-chip" style={{ background: 'rgba(139, 92, 246, 0.15)', borderColor: '#8b5cf6', color: '#c4b5fd' }}>
+            <div className="heatmap-legend-group">
+              <span className="heatmap-legend-group-title">PAGE TYPE:</span>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(139, 92, 246, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#8b5cf6' }} />
                 System
               </span>
-              <span className="legend-chip" style={{ background: 'rgba(16, 185, 129, 0.15)', borderColor: '#10b981', color: '#6ee7b7' }}>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(16, 185, 129, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#10b981' }} />
                 Table Leaf Data
               </span>
-              <span className="legend-chip" style={{ background: 'rgba(59, 130, 246, 0.15)', borderColor: '#3b82f6', color: '#93c5fd' }}>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(59, 130, 246, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#3b82f6' }} />
                 Table Interior
               </span>
-              <span className="legend-chip" style={{ background: 'rgba(6, 182, 212, 0.15)', borderColor: '#06b6d4', color: '#67e8f9' }}>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(6, 182, 212, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#06b6d4' }} />
                 Column Catalog
               </span>
-              <span className="legend-chip" style={{ background: 'rgba(245, 158, 11, 0.15)', borderColor: '#f59e0b', color: '#fcd34d' }}>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(245, 158, 11, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#f59e0b' }} />
                 Index Node
               </span>
-              <span className="legend-chip" style={{ background: 'rgba(100, 116, 139, 0.15)', borderColor: '#64748b', color: '#cbd5e1' }}>
+              <span className="heatmap-type-chip" style={{ borderColor: 'rgba(100, 116, 139, 0.4)' }}>
+                <span className="heatmap-type-dot" style={{ background: '#64748b' }} />
                 Free Page
               </span>
             </div>
 
-            <div className="legend-group">
-              <span className="legend-group-title">UTILIZATION (OPACITY):</span>
-              <span className="legend-heat-box" style={{ background: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.3)' }}>15%</span>
-              <span className="legend-heat-box" style={{ background: 'rgba(16, 185, 129, 0.35)', borderColor: 'rgba(16, 185, 129, 0.5)' }}>35%</span>
-              <span className="legend-heat-box" style={{ background: 'rgba(16, 185, 129, 0.60)', borderColor: 'rgba(16, 185, 129, 0.75)' }}>60%</span>
-              <span className="legend-heat-box" style={{ background: 'rgba(16, 185, 129, 0.85)', borderColor: 'rgba(16, 185, 129, 0.95)' }}>85%</span>
-              <span className="legend-heat-box" style={{ background: 'rgba(16, 185, 129, 1.0)', color: '#ffffff', borderColor: '#10b981' }}>100%</span>
+            <div className="heatmap-legend-group">
+              <span className="heatmap-legend-group-title">UTILIZATION:</span>
+              <span className="heatmap-util-pill" style={{ borderColor: 'rgba(16, 185, 129, 0.3)' }}>
+                <span className="heatmap-util-swatch" style={{ background: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.4)' }} />
+                15%
+              </span>
+              <span className="heatmap-util-pill" style={{ borderColor: 'rgba(16, 185, 129, 0.4)' }}>
+                <span className="heatmap-util-swatch" style={{ background: 'rgba(16, 185, 129, 0.35)', borderColor: 'rgba(16, 185, 129, 0.6)' }} />
+                35%
+              </span>
+              <span className="heatmap-util-pill" style={{ borderColor: 'rgba(16, 185, 129, 0.5)' }}>
+                <span className="heatmap-util-swatch" style={{ background: 'rgba(16, 185, 129, 0.60)', borderColor: 'rgba(16, 185, 129, 0.8)' }} />
+                60%
+              </span>
+              <span className="heatmap-util-pill" style={{ borderColor: 'rgba(16, 185, 129, 0.6)' }}>
+                <span className="heatmap-util-swatch" style={{ background: 'rgba(16, 185, 129, 0.85)', borderColor: '#10b981' }} />
+                85%
+              </span>
+              <span className="heatmap-util-pill" style={{ borderColor: 'rgba(16, 185, 129, 0.7)' }}>
+                <span className="heatmap-util-swatch" style={{ background: '#10b981', borderColor: '#059669' }} />
+                100%
+              </span>
             </div>
           </div>
 

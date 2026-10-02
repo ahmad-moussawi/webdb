@@ -232,9 +232,41 @@ const copyCode = () => {
       </p>
 
       <div class="hero-actions">
-        <a :href="withBase('/plans/plan')" class="btn btn-primary">
-          <span>View Specs</span>
+        <a :href="withBase('/playground/')" target="_self" class="btn btn-primary">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          <span>Launch Studio IDE</span>
           <span class="btn-arrow">→</span>
+        </a>
+        <a :href="withBase('/benchmark/')" target="_self" class="btn btn-secondary">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+          <span>Benchmarks</span>
+        </a>
+        <a :href="withBase('/plans/plan')" class="btn btn-secondary">
+          <span>View Specs</span>
         </a>
         <a
           href="https://github.com/ahmad-moussawi/webdb"
@@ -1415,21 +1447,155 @@ const copyCode = () => {
       </div>
     </section>
 
+    <!-- SECTION: INTERACTIVE SUITE (STUDIO IDE & BENCHMARKS) -->
+    <section class="section-box tools-section">
+      <h2 class="section-heading">Try WebDB in Your Browser</h2>
+      <p class="section-sub">
+        Explore WebDB with our interactive developer tools running 100% inside your browser—zero installation or server setup required.
+      </p>
+
+      <div class="tools-grid">
+        <!-- TOOL 1: STUDIO IDE / PLAYGROUND (PRIMARY) -->
+        <div class="tool-card tool-card-featured">
+          <div class="tool-card-content">
+            <div class="tool-header">
+              <div class="tool-badge-wrap">
+                <span class="tool-badge tool-badge-primary">Interactive IDE</span>
+                <span class="tool-tag">Primary Playground</span>
+              </div>
+              <div class="tool-icon-box tool-icon-primary">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+              </div>
+            </div>
+
+            <h3 class="tool-title">WebDB Studio Playground</h3>
+            <p class="tool-desc">
+              A full-featured database studio. Write and run queries in Monaco Editor, inspect binary 4KB slotted pages, visualize B+Tree node structures, and inspect buffer pool cache frames live.
+            </p>
+
+            <ul class="tool-feature-list">
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Monaco Query Editor with type-safe execution</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Low-level 4KB Slotted Page &amp; Row Inspector</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Buffer Pool &amp; Frame utilization visualizer</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Real-time VDBE bytecode disassembler</span>
+              </li>
+            </ul>
+
+            <div class="tool-action-wrap">
+              <a :href="withBase('/playground/')" target="_self" class="btn btn-primary tool-btn">
+                <span>Launch Studio IDE</span>
+                <span class="btn-arrow">→</span>
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- TOOL 2: IN-BROWSER BENCHMARKS -->
+        <div class="tool-card">
+          <div class="tool-card-content">
+            <div class="tool-header">
+              <div class="tool-badge-wrap">
+                <span class="tool-badge tool-badge-emerald">Performance Suite</span>
+                <span class="tool-tag">Real-Time</span>
+              </div>
+              <div class="tool-icon-box tool-icon-emerald">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>
+              </div>
+            </div>
+
+            <h3 class="tool-title">In-Browser Benchmark Suite</h3>
+            <p class="tool-desc">
+              Compare WebDB on your device hardware against raw JS arrays, native browser IndexedDB, and official SQLite WASM across sequential inserts, lookups, and aggregations.
+            </p>
+
+            <ul class="tool-feature-list">
+              <li>
+                <span class="check-icon">✓</span>
+                <span>WebDB (RAM &amp; IDB) vs. SQLite WASM vs. Raw Arrays</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Live throughput (ops/sec) and latency measurements</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Memory footprint and allocation tracking</span>
+              </li>
+              <li>
+                <span class="check-icon">✓</span>
+                <span>Interactive charts and differential analysis</span>
+              </li>
+            </ul>
+
+            <div class="tool-action-wrap">
+              <a :href="withBase('/benchmark/')" target="_self" class="btn btn-secondary tool-btn">
+                <span>Run Benchmarks</span>
+                <span class="btn-arrow">→</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- SECTION 8: SUPPORT / CTA BANNER -->
     <section class="support-banner">
       <div class="support-content">
         <h2 class="banner-title">Help Build the Future of Browser Databases</h2>
         <p class="banner-desc">
           WebDB is an open initiative to give web developers the fast,
-          lightweight database they deserve. Star the repo, review our
-          architecture blueprints, and join the discussion!
+          lightweight database they deserve. Try the studio, run benchmarks,
+          star the repo, and join the discussion!
         </p>
         <div class="banner-actions">
+          <a :href="withBase('/playground/')" target="_self" class="btn btn-primary">
+            <span>LAUNCH STUDIO IDE</span>
+            <span class="btn-arrow">→</span>
+          </a>
+          <a :href="withBase('/benchmark/')" target="_self" class="btn btn-secondary">
+            <span>RUN BENCHMARKS</span>
+          </a>
           <a
             href="https://github.com/ahmad-moussawi/webdb"
             target="_blank"
             rel="noopener"
-            class="btn btn-primary"
+            class="btn btn-secondary"
           >
             <span>STAR ON GITHUB</span>
             <svg
@@ -1450,7 +1616,7 @@ const copyCode = () => {
             </svg>
           </a>
           <a :href="withBase('/plans/plan')" class="btn btn-secondary">
-            <span>READ THE SPECIFICATIONS</span>
+            <span>READ SPECS</span>
           </a>
         </div>
       </div>
@@ -3285,6 +3451,156 @@ code {
   font-weight: 600;
 }
 
+/* INTERACTIVE TOOLS SECTION (STUDIO & BENCHMARKS) */
+.tools-section {
+  margin-bottom: 5.5rem;
+}
+
+.tools-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.5rem;
+  margin-top: 2.25rem;
+}
+
+.tool-card {
+  position: relative;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  padding: 2.5rem 2.25rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.2s ease;
+}
+
+.tool-card:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.05);
+}
+
+.tool-card-featured {
+  border-color: rgba(99, 102, 241, 0.4);
+  background: linear-gradient(
+    180deg,
+    rgba(99, 102, 241, 0.06) 0%,
+    var(--vp-c-bg-soft) 100%
+  );
+}
+
+.tool-card-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.tool-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.5rem;
+}
+
+.tool-badge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.tool-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 0.25rem 0.65rem;
+  font-family: var(--vp-font-family-mono);
+}
+
+.tool-badge-primary {
+  background: var(--vp-c-brand-1);
+  color: #fff;
+}
+
+.tool-badge-emerald {
+  background: #10b981;
+  color: #fff;
+}
+
+.tool-tag {
+  font-size: 0.72rem;
+  color: var(--vp-c-text-2);
+  font-family: var(--vp-font-family-mono);
+}
+
+.tool-icon-box {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+}
+
+.tool-icon-primary {
+  color: var(--vp-c-brand-1);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.tool-icon-emerald {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.tool-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  margin: 0 0 0.75rem;
+  color: var(--vp-c-text-1);
+}
+
+.tool-desc {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+  margin-bottom: 1.5rem;
+}
+
+.tool-feature-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  font-size: 0.88rem;
+  color: var(--vp-c-text-1);
+}
+
+.tool-feature-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.check-icon {
+  color: #10b981;
+  font-weight: 800;
+  font-size: 0.95rem;
+}
+
+.tool-action-wrap {
+  margin-top: auto;
+}
+
+.tool-btn {
+  width: 100%;
+  justify-content: center;
+}
+
 /* SUPPORT BANNER */
 .support-banner {
   border: 1px solid var(--vp-c-divider);
@@ -3319,6 +3635,9 @@ code {
 
 /* RESPONSIVE BREAKPOINTS */
 @media (max-width: 900px) {
+  .tools-grid {
+    grid-template-columns: 1fr;
+  }
   .shortcut-narrative {
     grid-template-columns: 1fr;
     gap: 2rem;

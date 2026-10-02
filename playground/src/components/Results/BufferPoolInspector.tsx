@@ -393,27 +393,27 @@ export const BufferPoolInspector: React.FC = () => {
               <div className="pool-squares-legend">
                 <div className="legend-items">
                   <div className="legend-item">
-                    <span className="legend-chip status-clean" />
+                    <span className="pool-chip status-clean" />
                     <span>Clean (Resident)</span>
                   </div>
                   <div className="legend-item">
-                    <span className="legend-chip status-dirty" />
+                    <span className="pool-chip status-dirty" />
                     <span>Dirty (Unflushed)</span>
                   </div>
                   <div className="legend-item">
-                    <span className="legend-chip status-pinned" />
+                    <span className="pool-chip status-pinned" />
                     <span>Pinned</span>
                   </div>
                   <div className="legend-item">
-                    <span className="legend-chip status-dirty-pinned" />
+                    <span className="pool-chip status-dirty-pinned" />
                     <span>Dirty + Pinned</span>
                   </div>
                   <div className="legend-item">
-                    <span className="legend-chip status-free" />
+                    <span className="pool-chip status-free" />
                     <span>Free Slot</span>
                   </div>
                   <div className="legend-item">
-                    <span className="legend-chip clock-hand-chip">
+                    <span className="pool-chip clock-hand-chip">
                       <span className="mini-clock-dot" />
                     </span>
                     <span>CLOCK Hand (#{(poolData.stats.clockHand ?? 0)})</span>

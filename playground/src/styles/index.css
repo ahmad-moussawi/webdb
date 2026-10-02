@@ -750,6 +750,15 @@
         border-bottom: 2px solid var(--accent);
       }
 
+      .results-tab-separator {
+        width: 1px;
+        height: 16px;
+        background: var(--card-border);
+        margin: 0 4px;
+        align-self: center;
+        flex-shrink: 0;
+      }
+
       .results-meta {
         display: flex;
         align-items: center;
@@ -2192,53 +2201,77 @@
 
       .heatmap-legend-ribbon {
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        justify-content: flex-start;
         padding: 8px 16px;
         background: var(--bg-surface);
         border-bottom: 1px solid var(--card-border);
         font-size: 0.68rem;
-        gap: 12px;
+        gap: 20px;
+        row-gap: 8px;
         flex-wrap: wrap;
         flex-shrink: 0;
+        min-height: 38px;
+        box-sizing: border-box;
+        overflow-x: auto;
       }
 
-      .legend-group {
+      .heatmap-legend-group {
         display: flex;
         align-items: center;
         gap: 6px;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        white-space: nowrap;
+        flex-shrink: 0;
       }
 
-      .legend-group-title {
+      .heatmap-legend-group-title {
         font-weight: 700;
         color: var(--text-secondary);
         margin-right: 4px;
-        font-size: 0.62rem;
+        font-size: 0.64rem;
         letter-spacing: 0.5px;
+        white-space: nowrap;
+        text-transform: uppercase;
+        user-select: none;
+        flex-shrink: 0;
       }
 
-      .legend-chip {
-        border: 2px solid;
-        padding: 1px 6px;
-        border-radius: 3px;
-        font-size: 0.62rem;
+      .heatmap-type-chip,
+      .heatmap-util-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.66rem;
         font-weight: 600;
-        color: var(--text);
+        white-space: nowrap;
+        line-height: 1.2;
         background: var(--bg-panel);
-      }
-      .legend-chip.dashed {
-        border-style: dashed;
-      }
-
-      .legend-heat-box {
-        padding: 1px 6px;
-        border-radius: 2px;
-        font-size: 0.62rem;
-        font-family: var(--font-mono);
-        font-weight: 600;
         color: var(--text);
         border: 1px solid var(--card-border);
+        user-select: none;
+        flex-shrink: 0;
+        box-sizing: border-box;
+      }
+
+      .heatmap-type-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        display: inline-block;
+      }
+
+      .heatmap-util-swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        border: 1px solid;
+        flex-shrink: 0;
+        display: inline-block;
+        box-sizing: border-box;
       }
 
       .heatmap-main-content {
@@ -3520,7 +3553,7 @@
         gap: 6px;
       }
 
-      .legend-chip {
+      .pool-chip {
         width: 13px;
         height: 13px;
         border-radius: 3px;
@@ -3528,24 +3561,24 @@
         flex-shrink: 0;
       }
 
-      .legend-chip.status-clean {
+      .pool-chip.status-clean {
         background-color: #10b981;
       }
-      .legend-chip.status-dirty {
+      .pool-chip.status-dirty {
         background-color: #f59e0b;
       }
-      .legend-chip.status-pinned {
+      .pool-chip.status-pinned {
         background-color: #8b5cf6;
       }
-      .legend-chip.status-dirty-pinned {
+      .pool-chip.status-dirty-pinned {
         background: linear-gradient(135deg, #f59e0b 50%, #8b5cf6 50%);
       }
-      .legend-chip.status-free {
+      .pool-chip.status-free {
         background-color: rgba(148, 163, 184, 0.15);
         border: 1px dashed rgba(148, 163, 184, 0.35);
       }
 
-      .legend-chip.clock-hand-chip {
+      .pool-chip.clock-hand-chip {
         background-color: var(--bg-main);
         border: 1px solid var(--card-border);
         display: flex;

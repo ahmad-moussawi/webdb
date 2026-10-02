@@ -44,28 +44,6 @@ export const ResultsHeader: React.FC = () => {
         )}
 
         <button
-          id="tabPagesBtn"
-          className={`result-tab-btn ${resultTab === 'pages' ? 'active' : ''}`}
-          onClick={() => {
-            if (!isResultsOpen) toggleResults();
-            setResultTab('pages');
-          }}
-        >
-          PAGES
-        </button>
-
-        <button
-          id="tabPoolBtn"
-          className={`result-tab-btn ${resultTab === 'pool' ? 'active' : ''}`}
-          onClick={() => {
-            if (!isResultsOpen) toggleResults();
-            setResultTab('pool');
-          }}
-        >
-          POOL
-        </button>
-
-        <button
           id="tabBytecodeBtn"
           className={`result-tab-btn ${resultTab === 'bytecode' ? 'active' : ''}`}
           onClick={() => {
@@ -90,6 +68,30 @@ export const ResultsHeader: React.FC = () => {
               {logs.length}
             </span>
           )}
+        </button>
+
+        <div className="results-tab-separator" />
+
+        <button
+          id="tabPagesBtn"
+          className={`result-tab-btn ${resultTab === 'pages' ? 'active' : ''}`}
+          onClick={() => {
+            if (!isResultsOpen) toggleResults();
+            setResultTab('pages');
+          }}
+        >
+          PAGES
+        </button>
+
+        <button
+          id="tabPoolBtn"
+          className={`result-tab-btn ${resultTab === 'pool' ? 'active' : ''}`}
+          onClick={() => {
+            if (!isResultsOpen) toggleResults();
+            setResultTab('pool');
+          }}
+        >
+          POOL
         </button>
       </div>
 

@@ -11,10 +11,19 @@
 <p align="center">
   <a href="https://github.com/ahmad-moussawi/webdb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/wasm%20size-%3C50%20KB-success.svg?logo=webassembly&logoColor=white" alt="Wasm Size: <50KB" />
+  <a href="https://ahmad-moussawi.github.io/webdb/playground/"><img src="https://img.shields.io/badge/Studio%20IDE-live%20playground-7c3aed?logo=visualstudiocode&logoColor=white" alt="Studio IDE" /></a>
+  <a href="https://ahmad-moussawi.github.io/webdb/benchmark/"><img src="https://img.shields.io/badge/benchmarks-live%20suite-059669?logo=speedtest&logoColor=white" alt="Live Benchmarks" /></a>
   <a href="https://github.com/ahmad-moussawi/webdb"><img src="https://img.shields.io/badge/status-early%20prototype-orange.svg" alt="Status: Prototype" /></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.7-blue?logo=typescript&logoColor=white" alt="TypeScript" /></a>
   <a href="https://vitest.dev/"><img src="https://img.shields.io/badge/tests-15%2F15%20passing-brightgreen?logo=vitest&logoColor=white" alt="Tests" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/"><img src="https://img.shields.io/badge/docs-online-646cff?logo=vite&logoColor=white" alt="Docs" /></a>
+</p>
+
+<p align="center">
+  <a href="https://ahmad-moussawi.github.io/webdb/playground/"><strong>🚀 Launch Studio Playground</strong></a> &nbsp;•&nbsp;
+  <a href="https://ahmad-moussawi.github.io/webdb/benchmark/"><strong>⚡ Run Live Benchmarks</strong></a> &nbsp;•&nbsp;
+  <a href="https://ahmad-moussawi.github.io/webdb/"><strong>📖 Documentation</strong></a> &nbsp;•&nbsp;
+  <a href="https://ahmad-moussawi.github.io/webdb/plans/plan.html"><strong>📐 Specifications</strong></a>
 </p>
 
 **WebDB** is an ultra-lightweight, relational database built from scratch specifically for the web. Think of it as **SQLite reimagined for modern browsers**—bringing true SQL capabilities, ACID transactions, and persistent storage to offline-first apps without multi-megabyte bundles or complex server headers.
@@ -25,6 +34,17 @@
 - 🌐 **Embraces the Web Platform:** Uses the browser instead of fighting it—delegating to native `crypto.subtle`, `Intl`, `RegExp`, `Date`, and Web Locks rather than packing redundant C libraries into Wasm.
 - 💾 **Reliable Offline Persistence:** First-class storage with high-speed **OPFS** (desktop & workers) and **IndexedDB** (Safari, mobile WebViews, private browsing).
 - 🔌 **Zero Configuration:** Works everywhere out of the box with zero `COOP`/`COEP` header headaches.
+
+---
+
+## 🎮 Try WebDB Live in Your Browser
+
+Experience WebDB directly on your device with zero installation or setup:
+
+| Tool | Highlights | Link |
+| :--- | :--- | :--- |
+| **WebDB Studio Playground** | Full in-browser database IDE with Monaco editor, live table explorer, low-level binary 4KB slotted page inspector, buffer pool visualizer, and real-time bytecode disassembler. | [**Launch Studio IDE →**](https://ahmad-moussawi.github.io/webdb/playground/) |
+| **In-Browser Benchmark Suite** | Live comparative benchmarking engine measuring throughput (ops/sec), latency, and memory allocations against Raw JS Arrays, Native IndexedDB, and official SQLite WASM on your hardware. | [**Run Benchmarks →**](https://ahmad-moussawi.github.io/webdb/benchmark/) |
 
 ---
 
@@ -65,6 +85,7 @@ WebDB is currently in an **early prototype ("walking skeleton") stage**:
 - **V1 (C-Style JS Engine):** The initial release is built in **strict C-style TypeScript/JavaScript** (direct `ArrayBuffer` pointer arithmetic, flat structs, and zero heap allocations). Writing V1 in JS accelerates the development cycle, simplifies debugging, and creates an instant feedback loop with the web community.
 - **V2 (Drop-In C / Wasm Port):** Once the binary formats, VDBE opcodes, and APIs are battle-tested, the core engine will be ported 1:1 to C and compiled to an ultra-lean Wasm binary (&lt;50 KB)—with zero changes required to the host JS orchestration layer.
 - **Current Milestone:** Slotted-page layouts, basic VDBE opcode execution, in-memory/IndexedDB adapters, and query planning are implemented and verified with automated test suites. Full V1 engine development is actively underway.
+- **Interactive Tools Live:** You can test queries in the [WebDB Studio Playground](https://ahmad-moussawi.github.io/webdb/playground/) or evaluate performance in the [In-Browser Benchmark Suite](https://ahmad-moussawi.github.io/webdb/benchmark/).
 
 Read our complete specifications:
 
@@ -172,6 +193,7 @@ console.log(explain.assembly);
 WebDB is an ambitious open-source initiative to build a modern, featherweight relational database engine purpose-built for the web platform. If you believe in this vision, here is how you can support the development:
 
 - ⭐ **Star this Repository:** If you find this project interesting or valuable, please give it a **Star on GitHub**. It takes two seconds, boosts project visibility, and helps attract more contributors!
+- 🎮 **Explore the Playground & Benchmarks:** Experiment with live queries in the [WebDB Studio Playground](https://ahmad-moussawi.github.io/webdb/playground/) and test throughput with the [In-Browser Benchmarks](https://ahmad-moussawi.github.io/webdb/benchmark/).
 - 📢 **Spread the Word:** Share WebDB on X (Twitter), Bluesky, LinkedIn, Reddit, or with developer friends building offline-first or local-first apps.
 - 💬 **Join the Discussion:** Review our [Architectural Blueprints](https://ahmad-moussawi.github.io/webdb/plans/plan.html), open an issue with suggestions, or share your offline data use cases.
 - 🛠️ **Contribute:** PRs, benchmarks, and feedback on our prototype and specifications are warmly welcome.
