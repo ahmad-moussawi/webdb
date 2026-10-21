@@ -7,7 +7,6 @@ export default tseslint.config(
       'node_modules/**',
       'docs/.vitepress/**',
       'docs/public/dist/**',
-      'prototype/**',
       'scripts/**',
     ],
   },
