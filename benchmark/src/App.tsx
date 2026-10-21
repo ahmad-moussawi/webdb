@@ -12,7 +12,7 @@ const STORAGE_KEYS = {
   ITERATIONS: 'webdb_benchmark_iterations_v2',
 };
 
-const DEFAULT_ENGINES: EngineId[] = ['webdb_idb', 'indexeddb'];
+const DEFAULT_ENGINES: EngineId[] = ['webdb_wasm_mem', 'webdb_mem', 'webdb_idb', 'indexeddb'];
 const DEFAULT_SCENARIOS: ScenarioId[] = [
   'bulk_insert',
   'point_lookup',

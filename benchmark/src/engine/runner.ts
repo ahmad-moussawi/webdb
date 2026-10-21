@@ -28,6 +28,14 @@ function getMemoryUsage(): number | undefined {
   return undefined;
 }
 
+function tryGc(): void {
+  try {
+    if (typeof (globalThis as any).gc === 'function') {
+      (globalThis as any).gc();
+    }
+  } catch {}
+}
+
 export async function runBenchmarkSuite(
   config: BenchmarkRunConfig,
   onProgress?: (update: ProgressUpdate) => void,
@@ -107,6 +115,7 @@ export async function runBenchmarkSuite(
       // Brief delay to let UI render and event loop breathe
       await new Promise((r) => setTimeout(r, 40));
 
+      tryGc();
       const initialMem = getMemoryUsage();
       const samples: number[] = [];
       let iterations = config.iterations;
@@ -117,6 +126,8 @@ export async function runBenchmarkSuite(
       }
 
       let errorMsg: string | undefined = undefined;
+      let bulkInsertMemBefore: number | undefined;
+      let bulkInsertMemAfter: number | undefined;
 
       try {
         // Pre-run setup: ensure dataset is loaded if bulk_insert hasn't already loaded it
@@ -140,10 +151,19 @@ export async function runBenchmarkSuite(
             await adapter.init();
           }
 
+          if (scenarioId === 'bulk_insert' && iter === iterations - 1) {
+            tryGc();
+            bulkInsertMemBefore = getMemoryUsage();
+          }
+
           const start = performance.now();
           await executeScenario(adapter, scenarioId, dataset, lookupIds, orders);
           const end = performance.now();
           samples.push(end - start);
+
+          if (scenarioId === 'bulk_insert' && iter === iterations - 1) {
+            bulkInsertMemAfter = getMemoryUsage();
+          }
         }
 
         if (scenarioId === 'bulk_insert') {
@@ -155,7 +175,26 @@ export async function runBenchmarkSuite(
       }
 
       const finalMem = getMemoryUsage();
-      const memDelta = initialMem && finalMem ? Math.max(0, finalMem - initialMem) : undefined;
+
+      let memDelta: number | undefined;
+      if (scenarioId === 'bulk_insert' && bulkInsertMemBefore !== undefined && bulkInsertMemAfter !== undefined) {
+        memDelta = Math.max(0, bulkInsertMemAfter - bulkInsertMemBefore);
+      } else if (initialMem !== undefined && finalMem !== undefined) {
+        memDelta = Math.max(0, finalMem - initialMem);
+      }
+
+      let engineMem: number | undefined;
+      try {
+        if (typeof adapter.getMemoryBytes === 'function') {
+          engineMem = await adapter.getMemoryBytes();
+        }
+      } catch {}
+
+      const memoryBytes = (engineMem !== undefined && engineMem > 0)
+        ? engineMem
+        : (memDelta !== undefined && memDelta > 0)
+        ? memDelta
+        : undefined;
 
       let result: ScenarioResult;
 
@@ -170,6 +209,7 @@ export async function runBenchmarkSuite(
           p95Ms: 0,
           samples: 0,
           memoryDeltaBytes: memDelta,
+          memoryBytes,
           error: errorMsg || 'Unknown error occurred',
         };
       } else {
@@ -201,6 +241,7 @@ export async function runBenchmarkSuite(
           p95Ms: Math.round(p95 * 100) / 100,
           samples: samples.length,
           memoryDeltaBytes: memDelta,
+          memoryBytes,
         };
       }
 

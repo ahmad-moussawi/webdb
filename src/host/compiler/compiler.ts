@@ -22,6 +22,12 @@ import {
   parseExpression,
   deriveDefaultAlias,
 } from "./expr_parser.js";
+import {
+  optimizeJoinPlan,
+  PlanCostMetrics,
+  QueryPlanner,
+  QueryPlannerClass,
+} from "./planner.js";
 
 export type ComparisonOp =
   | "="
@@ -123,6 +129,7 @@ export interface QueryPlan {
   outputColumns?: ColumnMeta[];
   limit?: number;
   offset?: number;
+  planner?: QueryPlanner | QueryPlannerClass;
 }
 
 export class BytecodeEmitter {
@@ -2052,9 +2059,25 @@ export function chooseJoinIndex(
 /**
  * Compiles a QueryPlan into an executable bytecode array.
  */
-export function compileQuery(plan: QueryPlan): Uint8Array {
+export function compileQuery(
+  plan: QueryPlan,
+  options?: { planner?: QueryPlanner | QueryPlannerClass },
+): Uint8Array {
   const isJoinQuery = plan.joinedTables !== undefined && plan.joinedTables.length > 0;
-  const allTables: TableMeta[] = [plan.table, ...(plan.joinedTables?.map((j) => j.table) ?? [])];
+  const originalTables: TableMeta[] = [plan.table, ...(plan.joinedTables?.map((j) => j.table) ?? [])];
+  let activePlan = plan;
+  let allTables: TableMeta[] = originalTables;
+  let planMetrics: PlanCostMetrics | null = null;
+
+  if (isJoinQuery) {
+    const planner = options?.planner ?? plan.planner;
+    const opt = optimizeJoinPlan(plan, planner);
+    activePlan = opt.plan;
+    allTables = opt.orderedTables;
+    planMetrics = opt.metrics;
+  }
+
+  plan = activePlan;
 
   const joinIndices: (JoinIndexCandidate | null)[] = new Array(allTables.length).fill(null);
   let nextCursor = allTables.length;
@@ -2079,6 +2102,33 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
   const rootFilter = buildRootFilter(plan.filters);
   const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
   const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
+
+  // Partition filters for early pushdown per join loop level
+  const pushedFilters: QueryFilter[][] = Array.from({ length: allTables.length }, () => []);
+  const pushedFilterSet = new Set<QueryFilter>();
+
+  if (isJoinQuery && planMetrics) {
+    for (let i = 0; i < allTables.length; i++) {
+      const origIdx = originalTables.indexOf(allTables[i]);
+      if (origIdx !== -1) {
+        const filters = planMetrics.singleTableFilters.get(origIdx) ?? [];
+        if (i === 0 || (plan.joinedTables && plan.joinedTables[i - 1]?.type === 'inner')) {
+          pushedFilters[i] = filters;
+          for (const f of filters) {
+            pushedFilterSet.add(f);
+          }
+        }
+      }
+    }
+  }
+
+  const remainingFilters: QueryFilter[] = [];
+  for (const f of topConjunctions) {
+    if (!pushedFilterSet.has(f)) {
+      remainingFilters.push(f);
+    }
+  }
+  const rootRemainingFilter = buildRootFilter(remainingFilters);
 
   // Short-circuit: top-level conjunction IN () can never match any row
   for (const f of topConjunctions) {
@@ -2886,6 +2936,21 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
     loopStartPositions[0] = emitter.currentOffset();
 
+    // Early filter pushdown for Table 0
+    if (pushedFilters[0] && pushedFilters[0].length > 0) {
+      const root0 = buildRootFilter(pushedFilters[0]);
+      emitFilterTree(
+        root0,
+        allTables[0],
+        emitter,
+        leafRegMap,
+        nextRowPatchesPerTable[0],
+        plan.udfNameMap,
+        allTables,
+        filterSetMap,
+      );
+    }
+
     // Nested Joined Tables (1..N-1)
     for (let i = 1; i < N; i++) {
       const joinPlan = plan.joinedTables![i - 1];
@@ -2915,6 +2980,20 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         rewindJumpPatches[i] = emitter.emitUint16(0); // If not found, jumps to eofPos of table i
 
         loopStartPositions[i] = emitter.currentOffset();
+
+        if (joinPlan.type === 'inner' && pushedFilters[i] && pushedFilters[i].length > 0) {
+          const rootI = buildRootFilter(pushedFilters[i]);
+          emitFilterTree(
+            rootI,
+            allTables[i],
+            emitter,
+            leafRegMap,
+            nextRowPatchesPerTable[i],
+            plan.udfNameMap,
+            allTables,
+            filterSetMap,
+          );
+        }
 
         if (joinPlan.type === 'left') {
           emitter.emitUint8(OpCode.OP_LOAD_INT);
@@ -2959,6 +3038,20 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
 
         // Match
         emitter.patchUint16(condMatchPatch, emitter.currentOffset());
+
+        if (joinPlan.type === 'inner' && pushedFilters[i] && pushedFilters[i].length > 0) {
+          const rootI = buildRootFilter(pushedFilters[i]);
+          emitFilterTree(
+            rootI,
+            allTables[i],
+            emitter,
+            leafRegMap,
+            nextRowPatchesPerTable[i],
+            plan.udfNameMap,
+            allTables,
+            filterSetMap,
+          );
+        }
 
         if (joinPlan.type === 'left') {
           emitter.emitUint8(OpCode.OP_LOAD_INT);
@@ -3033,6 +3126,20 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
         // Match
         emitter.patchUint16(condMatchPatch, emitter.currentOffset());
 
+        if (joinPlan.type === 'inner' && pushedFilters[i] && pushedFilters[i].length > 0) {
+          const rootI = buildRootFilter(pushedFilters[i]);
+          emitFilterTree(
+            rootI,
+            allTables[i],
+            emitter,
+            leafRegMap,
+            nextRowPatchesPerTable[i],
+            plan.udfNameMap,
+            allTables,
+            filterSetMap,
+          );
+        }
+
         if (joinPlan.type === 'left') {
           emitter.emitUint8(OpCode.OP_LOAD_INT);
           emitter.emitUint8(regMatched[i]);
@@ -3041,9 +3148,9 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       }
     }
 
-    // Innermost: WHERE filters
+    // Innermost: remaining WHERE filters
     emitFilterTree(
-      rootFilter,
+      rootRemainingFilter,
       table,
       emitter,
       leafRegMap,
@@ -3236,7 +3343,14 @@ export function compileQuery(plan: QueryPlan): Uint8Array {
       };
     });
     (result as any).joinedTableScans = joinedTableScans;
+    (result as any).allTables = allTables;
     (result as any).inSets = inSets;
+    if (planMetrics) {
+      (result as any).planMetrics = planMetrics;
+      (result as any).estimatedCost = planMetrics.totalCost;
+      (result as any).estimatedRows = planMetrics.estimatedRows;
+      (result as any).joinOrder = planMetrics.joinOrder;
+    }
     return result;
   }
 

@@ -14,6 +14,10 @@ import {
   DisassembledInstruction,
 } from '../compiler/compiler.js';
 import {
+  QueryPlanner,
+  QueryPlannerClass,
+} from '../compiler/planner/index.js';
+import {
   ExprNode,
   ParsedSelectExpr,
   parseSelectExpr,
@@ -232,6 +236,9 @@ export interface ExplainOutput {
     joins?: JoinClause[];
     limit?: number;
     offset?: number;
+    estimatedCost?: number;
+    estimatedRows?: number;
+    joinOrder?: string[];
   };
   bytecodeSize: number;
   instructions: DisassembledInstruction[];
@@ -260,6 +267,7 @@ export interface QueryExecutionOptions {
   select?: NormalizedSelectField[];
   selectExprs?: ParsedSelectExpr[];
   joins?: JoinClause[];
+  planner?: QueryPlanner | QueryPlannerClass;
 }
 
 export interface IDatabaseQueryExecutor {
@@ -276,6 +284,7 @@ export interface IDatabaseQueryExecutor {
       joins?: JoinClause[];
       limit?: number;
       offset?: number;
+      planner?: QueryPlanner | QueryPlannerClass;
     },
   ): Promise<ExplainOutput>;
   executeQuery(
@@ -330,6 +339,12 @@ export class QueryBuilder {
   private aggExprs: AggExpr[] = [];
   private havingFilters: QueryFilter[] = [];
   private joins: JoinClause[] = [];
+  private planner?: QueryPlanner | QueryPlannerClass;
+
+  withPlanner(planner: QueryPlanner | QueryPlannerClass): this {
+    this.planner = planner;
+    return this;
+  }
 
   constructor(db: IDatabaseQueryExecutor, tableName: string) {
     this.db = db;
@@ -1582,6 +1597,7 @@ export class QueryBuilder {
       selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
       limit: this.limitCount !== null ? this.limitCount : undefined,
       offset: this.offsetCount !== null ? this.offsetCount : undefined,
+      planner: this.planner,
     });
   }
 
@@ -1692,6 +1708,7 @@ export class QueryBuilder {
       having: this.havingFilters.length > 0 ? this.havingFilters : undefined,
       select: this.selectFields.length > 0 ? this.selectFields : undefined,
       selectExprs: selectExprs.length > 0 ? selectExprs : undefined,
+      planner: this.planner,
     });
 
     let rows = rawRows;

@@ -131,3 +131,17 @@ export {
   catalog_load_table_meta,
   catalog_load_all_tables,
 } from "./js/catalog.c.js";
+
+// ============================================================================
+// WebAssembly Core Engine Exports (@export_wasm)
+// ============================================================================
+export {
+  createWasmCore,
+  type WasmCoreExports,
+} from "./wasm/wasm_core.js";
+
+export {
+  getWebDbCoreWasmBytes,
+  WEBDB_CORE_WASM_BASE64,
+} from "./wasm/embedded_wasm.js";
+

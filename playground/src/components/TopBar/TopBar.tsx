@@ -7,6 +7,8 @@ export const TopBar: React.FC = () => {
   const {
     db,
     activeDbName,
+    coreMode,
+    setCoreMode,
     showToast,
     clearActiveTabCode,
     executeCode,
@@ -70,6 +72,25 @@ export const TopBar: React.FC = () => {
         </svg>
         <span className="brand-title">WebDB Studio</span>
         <span className="brand-badge">IDE</span>
+
+        <div className="topbar-core-toggle" title={`Core Engine: ${coreMode === 'wasm' ? 'Compiled C (WebAssembly)' : 'JavaScript (Pure JS)'}`}>
+          <button
+            type="button"
+            className={`topbar-core-btn ${coreMode === 'js' ? 'active' : ''}`}
+            onClick={() => setCoreMode('js')}
+            title="Use Pure JavaScript Core Engine"
+          >
+            JS
+          </button>
+          <button
+            type="button"
+            className={`topbar-core-btn ${coreMode === 'wasm' ? 'active' : ''}`}
+            onClick={() => setCoreMode('wasm')}
+            title="Use Compiled C WebAssembly Core Engine"
+          >
+            WASM
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

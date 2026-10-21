@@ -17,7 +17,9 @@ export type StorageCategory = 'memory' | 'persistent';
 
 export type EngineId =
   | 'raw_array'
+  | 'webdb_wasm_mem'
   | 'webdb_mem'
+  | 'webdb_wasm_idb'
   | 'webdb_idb'
   | 'indexeddb'
   | 'sqlite_mem'
@@ -78,6 +80,9 @@ export interface BenchmarkAdapter {
   
   /** Clean up resources and drop table/database */
   teardown(): Promise<void>;
+
+  /** Optional: get approximate engine/retained memory footprint in bytes */
+  getMemoryBytes?(): Promise<number | undefined> | number | undefined;
 }
 
 export interface ScenarioResult {
@@ -90,6 +95,7 @@ export interface ScenarioResult {
   p95Ms: number;
   samples: number;
   memoryDeltaBytes?: number;
+  memoryBytes?: number;
   error?: string;
 }
 

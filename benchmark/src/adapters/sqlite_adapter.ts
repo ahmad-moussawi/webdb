@@ -237,4 +237,19 @@ export class SqliteWasmAdapter implements BenchmarkAdapter {
       }
     }
   }
+
+  getMemoryBytes(): number | undefined {
+    let bytes = 0;
+    if (cachedSqlite3?.capi?.sqlite3_memory_used) {
+      try {
+        bytes += Number(cachedSqlite3.capi.sqlite3_memory_used());
+      } catch {}
+    }
+    if (cachedSqlite3?.wasm?.memory?.buffer?.byteLength) {
+      try {
+        bytes += cachedSqlite3.wasm.memory.buffer.byteLength;
+      } catch {}
+    }
+    return bytes > 0 ? bytes : undefined;
+  }
 }

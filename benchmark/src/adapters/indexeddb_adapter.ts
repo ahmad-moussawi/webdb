@@ -261,4 +261,16 @@ export class IndexedDbAdapter implements BenchmarkAdapter {
       req.onblocked = () => resolve();
     });
   }
+
+  async getMemoryBytes(): Promise<number | undefined> {
+    if (typeof navigator !== "undefined" && navigator.storage?.estimate) {
+      try {
+        const est = await navigator.storage.estimate();
+        if (est.usage && est.usage > 0) {
+          return est.usage;
+        }
+      } catch {}
+    }
+    return undefined;
+  }
 }

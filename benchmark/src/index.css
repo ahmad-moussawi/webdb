@@ -720,6 +720,24 @@ body {
   color: var(--text-subtle);
 }
 
+.cell-tertiary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.cell-mem-badge {
+  font-size: 0.625rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-light);
+}
+
 .cell-winner {
   background: #f0fdf4 !important;
 }

@@ -1,6 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { AVAILABLE_ENGINES, AVAILABLE_SCENARIOS, EngineId, ScenarioId, ScenarioInfo, ScenarioResult } from '../adapters/index.js';
-import { Download, LayoutGrid, BarChart2, Table as TableIcon, Zap, Clock, Medal, AlertCircle, BookOpen, Cpu, Binary, Layers, Database, Info, X, Copy, Check } from 'lucide-react';
+import { Download, LayoutGrid, BarChart2, Table as TableIcon, Zap, Clock, HardDrive, Medal, AlertCircle, BookOpen, Cpu, Binary, Layers, Database, Info, X, Copy, Check } from 'lucide-react';
+
+export function formatBytes(bytes?: number): string {
+  if (bytes === undefined || bytes === null || isNaN(bytes) || bytes <= 0) {
+    return '—';
+  }
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 interface Props {
   results: ScenarioResult[];
@@ -9,7 +18,7 @@ interface Props {
 
 export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
   const [activeTab, setActiveTab] = useState<'matrix' | 'charts' | 'table' | 'notes'>('matrix');
-  const [chartMetric, setChartMetric] = useState<'ops' | 'latency'>('ops');
+  const [chartMetric, setChartMetric] = useState<'ops' | 'latency' | 'memory'>('ops');
   const [modalScenario, setModalScenario] = useState<ScenarioInfo | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [selectedBaseline, setSelectedBaseline] = useState<EngineId | null>(null);
@@ -127,13 +136,15 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
       'P95Ms',
       'VsBaseline',
       'Samples',
-      'MemoryDeltaMB',
+      'MemoryMB',
+      'HeapDeltaMB',
       'Error',
     ];
     const rows = results.map((r) => {
       const eng = engineMap.get(r.engineId);
       const scen = scenarioMap.get(r.scenarioId);
-      const memMb = r.memoryDeltaBytes ? (r.memoryDeltaBytes / (1024 * 1024)).toFixed(2) : '';
+      const memMb = r.memoryBytes ? (r.memoryBytes / (1024 * 1024)).toFixed(2) : '';
+      const heapDeltaMb = r.memoryDeltaBytes ? (r.memoryDeltaBytes / (1024 * 1024)).toFixed(2) : '';
       const speedup = getSpeedupInfo(r, r.scenarioId);
       return [
         eng?.name ?? r.engineId,
@@ -147,6 +158,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
         speedup?.text ?? '',
         r.samples,
         memMb,
+        heapDeltaMb,
         r.error ? `"${r.error.replace(/"/g, '""')}"` : '',
       ].join(',');
     });
@@ -341,6 +353,16 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                               <span className="cell-latency">{res.meanMs.toFixed(2)} ms</span>
                               <span className="cell-p95">p95: {res.p95Ms.toFixed(2)}ms</span>
                             </div>
+                            {(res.memoryBytes || res.memoryDeltaBytes) && (
+                              <div className="cell-tertiary">
+                                <span
+                                  className="cell-mem-badge"
+                                  title={`Memory footprint: ${formatBytes(res.memoryBytes ?? res.memoryDeltaBytes)}${res.memoryDeltaBytes ? ` (Heap delta: ${formatBytes(res.memoryDeltaBytes)})` : ''}`}
+                                >
+                                  RAM: {formatBytes(res.memoryBytes ?? res.memoryDeltaBytes)}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </td>
                       );
@@ -371,6 +393,13 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
               <Clock size={13} />
               <span>Latency (Lower is better)</span>
             </button>
+            <button
+              onClick={() => setChartMetric('memory')}
+              className={`metric-choice ${chartMetric === 'memory' ? 'active' : ''}`}
+            >
+              <HardDrive size={13} />
+              <span>Memory Footprint (Lower is better)</span>
+            </button>
           </div>
 
           <div className="charts-grid">
@@ -382,7 +411,24 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
 
               const maxOps = Math.max(...scenarioResults.map((r) => r.opsPerSec || 0), 1);
               const maxLat = Math.max(...scenarioResults.map((r) => r.meanMs || 0), 0.1);
-              const winnerEngId = winners.get(scenId);
+              const memValues = scenarioResults
+                .filter((r) => !r.error && (r.memoryBytes || r.memoryDeltaBytes))
+                .map((r) => (r.memoryBytes ?? r.memoryDeltaBytes)!);
+              const maxMem = memValues.length > 0 ? Math.max(...memValues, 1024) : 1024;
+              const minMem = memValues.length > 0 ? Math.min(...memValues) : Infinity;
+
+              const memWinnerEngId =
+                memValues.length > 0
+                  ? scenarioResults.find(
+                      (r) => !r.error && (r.memoryBytes ?? r.memoryDeltaBytes) === minMem
+                    )?.engineId
+                  : null;
+
+              const winnerEngId = chartMetric === 'memory' ? memWinnerEngId : winners.get(scenId);
+              const winnerLabel =
+                chartMetric === 'memory'
+                  ? `Least RAM: ${engineMap.get(winnerEngId ?? ('' as any))?.name}`
+                  : `Fastest: ${engineMap.get(winnerEngId ?? ('' as any))?.name}`;
 
               return (
                 <div key={scenId} className="chart-card">
@@ -390,7 +436,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                     <span className="chart-scen-name">{scen?.name ?? scenId}</span>
                     {winnerEngId && (
                       <span className="chart-winner-pill">
-                        Fastest: {engineMap.get(winnerEngId)?.name}
+                        {winnerLabel}
                       </span>
                     )}
                   </div>
@@ -400,11 +446,10 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                       const eng = engineMap.get(res.engineId);
                       const isWinner = winnerEngId === res.engineId;
                       const hasError = !!res.error;
-                      const speedup = getSpeedupInfo(res, scenId);
-                      const speedupText = speedup ? (speedup.isBaseline ? ' (Baseline)' : ` (${speedup.text})`) : '';
 
                       let pct = 0;
                       let label = '';
+                      let speedupText = '';
 
                       if (hasError) {
                         pct = 0;
@@ -412,9 +457,32 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                       } else if (chartMetric === 'ops') {
                         pct = Math.max((res.opsPerSec / maxOps) * 100, 3);
                         label = `${res.opsPerSec.toLocaleString()} ops/s`;
-                      } else {
+                        const speedup = getSpeedupInfo(res, scenId);
+                        speedupText = speedup ? (speedup.isBaseline ? ' (Baseline)' : ` (${speedup.text})`) : '';
+                      } else if (chartMetric === 'latency') {
                         pct = Math.max((res.meanMs / maxLat) * 100, 3);
                         label = `${res.meanMs.toFixed(2)} ms`;
+                        const speedup = getSpeedupInfo(res, scenId);
+                        speedupText = speedup ? (speedup.isBaseline ? ' (Baseline)' : ` (${speedup.text})`) : '';
+                      } else {
+                        const m = res.memoryBytes ?? res.memoryDeltaBytes;
+                        pct = m ? Math.max((m / maxMem) * 100, 3) : 0;
+                        label = formatBytes(m);
+
+                        const baseRes = resultMap.get(`${baselineEngineId}:${scenId}`);
+                        const baseMem = baseRes?.memoryBytes ?? baseRes?.memoryDeltaBytes;
+                        if (res.engineId === baselineEngineId) {
+                          speedupText = ' (Baseline)';
+                        } else if (baseMem && m && baseMem > 0 && m > 0) {
+                          const ratio = m / baseMem;
+                          if (ratio <= 0.95) {
+                            speedupText = ` (${(1 / ratio).toFixed(1)}x less RAM)`;
+                          } else if (ratio >= 1.05) {
+                            speedupText = ` (${ratio.toFixed(1)}x more RAM)`;
+                          } else {
+                            speedupText = ' (~1.0x RAM)';
+                          }
+                        }
                       }
 
                       return (
@@ -459,6 +527,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                 <th className="num">Min</th>
                 <th className="num">p95</th>
                 <th className="num">Max</th>
+                <th className="num">Memory Footprint</th>
                 <th className="num">Heap Delta</th>
               </tr>
             </thead>
@@ -466,9 +535,6 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
               {results.map((r, i) => {
                 const eng = engineMap.get(r.engineId);
                 const scen = scenarioMap.get(r.scenarioId);
-                const memMb = r.memoryDeltaBytes
-                  ? `${(r.memoryDeltaBytes / (1024 * 1024)).toFixed(1)} MB`
-                  : '—';
                 const speedup = getSpeedupInfo(r, r.scenarioId);
                 const isWinner = winners.get(r.scenarioId) === r.engineId;
 
@@ -478,7 +544,7 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                       <td className="bold">{eng?.name ?? r.engineId}</td>
                       <td>{eng?.storage}</td>
                       <td>{scen?.name ?? r.scenarioId}</td>
-                      <td colSpan={7} className="text-danger">{r.error}</td>
+                      <td colSpan={8} className="text-danger">{r.error}</td>
                     </tr>
                   );
                 }
@@ -521,7 +587,8 @@ export const ResultsView: React.FC<Props> = ({ results, datasetSize }) => {
                     <td className="num font-mono text-muted">{r.minMs.toFixed(2)} ms</td>
                     <td className="num font-mono">{r.p95Ms.toFixed(2)} ms</td>
                     <td className="num font-mono text-muted">{r.maxMs.toFixed(2)} ms</td>
-                    <td className="num font-mono text-muted">{memMb}</td>
+                    <td className="num font-mono bold">{formatBytes(r.memoryBytes)}</td>
+                    <td className="num font-mono text-muted">{formatBytes(r.memoryDeltaBytes)}</td>
                   </tr>
                 );
               })}

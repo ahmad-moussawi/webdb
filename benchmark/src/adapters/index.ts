@@ -21,12 +21,21 @@ export const AVAILABLE_ENGINES: EngineInfo[] = [
     available: true,
   },
   {
-    id: 'webdb_mem',
-    name: 'WebDB (Memory)',
-    subtitle: 'WASM Relational Engine (RAM)',
+    id: 'webdb_wasm_mem',
+    name: 'WebDB (C / WASM Memory)',
+    subtitle: 'Compiled C Core (<20KB) in Memory',
     storage: 'memory',
-    description: 'Relational engine with slotted-page buffer pool, columnar catalogs, and VDBE bytecode VM in memory.',
+    description: 'Relational engine with slotted pages and VDBE bytecode VM powered by compiled C WebAssembly.',
     badgeColor: '#6366f1',
+    available: true,
+  },
+  {
+    id: 'webdb_mem',
+    name: 'WebDB (JS Memory)',
+    subtitle: 'Pure TypeScript/JS Core (RAM)',
+    storage: 'memory',
+    description: 'Relational engine with slotted-page buffer pool, columnar catalogs, and VDBE bytecode VM in pure JS.',
+    badgeColor: '#818cf8',
     available: true,
   },
   {
@@ -39,12 +48,21 @@ export const AVAILABLE_ENGINES: EngineInfo[] = [
     available: true,
   },
   {
-    id: 'webdb_idb',
-    name: 'WebDB (IndexedDB VFS)',
-    subtitle: 'Relational Engine on IDB Pages',
+    id: 'webdb_wasm_idb',
+    name: 'WebDB (C / WASM IndexedDB)',
+    subtitle: 'C Core WASM on IDB Slotted Pages',
     storage: 'persistent',
-    description: 'WebDB persisting 4KB slotted pages to browser IndexedDB storage with LRU buffer caching.',
+    description: 'WebDB running compiled C WebAssembly core persisting 4KB slotted pages to IndexedDB storage.',
     badgeColor: '#8b5cf6',
+    available: true,
+  },
+  {
+    id: 'webdb_idb',
+    name: 'WebDB (JS IndexedDB)',
+    subtitle: 'Pure JS Engine on IDB Pages',
+    storage: 'persistent',
+    description: 'WebDB persisting 4KB slotted pages to browser IndexedDB storage with LRU buffer caching in pure JS.',
+    badgeColor: '#a78bfa',
     available: true,
   },
   {
@@ -116,10 +134,14 @@ export function createAdapter(engineId: EngineId): BenchmarkAdapter {
   switch (engineId) {
     case 'raw_array':
       return new RawArrayAdapter();
+    case 'webdb_wasm_mem':
+      return new WebDbAdapter('webdb_wasm_mem', 'memory', 'wasm');
     case 'webdb_mem':
-      return new WebDbAdapter('webdb_mem', 'memory');
+      return new WebDbAdapter('webdb_mem', 'memory', 'js');
+    case 'webdb_wasm_idb':
+      return new WebDbAdapter('webdb_wasm_idb', 'idb', 'wasm');
     case 'webdb_idb':
-      return new WebDbAdapter('webdb_idb', 'idb');
+      return new WebDbAdapter('webdb_idb', 'idb', 'js');
     case 'indexeddb':
       return new IndexedDbAdapter();
     case 'sqlite_mem':

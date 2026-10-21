@@ -15,13 +15,22 @@ export class WebDbAdapter implements BenchmarkAdapter {
   private dbName: string = "";
   private db: WebDB | null = null;
   private storageMode: "memory" | "idb" | "opfs";
+  private coreMode: "js" | "wasm";
 
-  constructor(id: "webdb_mem" | "webdb_idb", storageMode: "memory" | "idb") {
+  constructor(
+    id: "webdb_mem" | "webdb_wasm_mem" | "webdb_idb" | "webdb_wasm_idb",
+    storageMode: "memory" | "idb",
+    coreMode: "js" | "wasm" = "js"
+  ) {
     this.id = id;
     this.storageMode = storageMode;
+    this.coreMode = coreMode;
     this.storage = storageMode === "memory" ? "memory" : "persistent";
+    const coreLabel = coreMode === "wasm" ? "WASM" : "JS";
     this.name =
-      storageMode === "memory" ? "WebDB (In-Memory)" : "WebDB (IndexedDB VFS)";
+      storageMode === "memory"
+        ? `WebDB (${coreLabel} Memory)`
+        : `WebDB (${coreLabel} IndexedDB)`;
   }
 
   async init(): Promise<void> {
@@ -30,11 +39,12 @@ export class WebDbAdapter implements BenchmarkAdapter {
     }
 
     // Always generate a unique database name per lifecycle to guarantee clean state
-    this.dbName = `bench_wdb_${this.storageMode}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.dbName = `bench_wdb_${this.coreMode}_${this.storageMode}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     this.db = await WebDB.open({
       name: this.dbName,
       storage: this.storageMode,
+      core: this.coreMode,
     });
 
     // Safeguard: drop tables if they exist
@@ -190,5 +200,26 @@ export class WebDbAdapter implements BenchmarkAdapter {
         req.onblocked = () => resolve();
       });
     }
+  }
+
+  async getMemoryBytes(): Promise<number | undefined> {
+    if (!this.db) return undefined;
+    let bytes = 0;
+    // Buffer pool & WASM linear memory
+    if (this.db.driver?.wasmMemory) {
+      bytes += this.db.driver.wasmMemory.buffer.byteLength;
+    }
+    // In-memory VFS storage pages (4KB slotted pages)
+    if (
+      this.db.vfs &&
+      'snapshot' in this.db.vfs &&
+      typeof (this.db.vfs as any).snapshot === 'function'
+    ) {
+      try {
+        const snap = (this.db.vfs as any).snapshot();
+        bytes += snap.size * 4096;
+      } catch {}
+    }
+    return bytes > 0 ? bytes : undefined;
   }
 }

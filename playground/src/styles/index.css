@@ -89,6 +89,41 @@
         gap: 10px;
       }
 
+      .topbar-core-toggle {
+        display: inline-flex;
+        align-items: center;
+        background: var(--bg-hover);
+        border: 1px solid var(--card-border);
+        border-radius: 9999px;
+        padding: 2px;
+        margin-left: 6px;
+        gap: 2px;
+      }
+
+      .topbar-core-btn {
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        padding: 2px 7px;
+        border-radius: 9999px;
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        line-height: 1.2;
+      }
+
+      .topbar-core-btn:hover {
+        color: var(--text);
+      }
+
+      .topbar-core-btn.active {
+        background: var(--accent);
+        color: #ffffff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+      }
+
       .logo-img {
         width: 26px;
         height: 26px;

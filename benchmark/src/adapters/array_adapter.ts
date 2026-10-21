@@ -97,4 +97,11 @@ export class RawArrayAdapter implements BenchmarkAdapter {
     this.idIndex.clear();
     this.orders = [];
   }
+
+  getMemoryBytes(): number | undefined {
+    const recordBytes = this.data.length * 192;
+    const orderBytes = this.orders.length * 64;
+    const total = recordBytes + orderBytes;
+    return total > 0 ? total : undefined;
+  }
 }

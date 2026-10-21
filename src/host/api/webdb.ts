@@ -95,6 +95,10 @@ import {
 } from "../compiler/compiler.ts";
 import { ParsedSelectExpr, deriveDefaultAlias } from "../compiler/expr_parser.ts";
 import {
+  QueryPlanner,
+  QueryPlannerClass,
+} from "../compiler/planner/index.ts";
+import {
   QueryBuilder,
   type ExplainOutput,
   type IDatabaseQueryExecutor,
@@ -115,18 +119,29 @@ export {
   type QueryExecutionOptions,
 };
 
+import {
+  createWasmCore,
+  type WasmCoreExports,
+} from "../../core/index.ts";
+
 export interface WebDbOptions {
   name: string;
   storage?: "memory" | "idb" | "opfs";
   vfs?: IVfsAdapter;
   slotCount?: number;
   maxQueryMemory?: number;
+  core?: "js" | "wasm";
+  wasmBinary?: ArrayBuffer | Uint8Array;
+  planner?: QueryPlanner | QueryPlannerClass;
 }
 
 export class WebDB implements IDatabaseQueryExecutor {
   readonly vfs: IVfsAdapter;
   readonly io: Io;
   readonly driver: BufferPoolDriver;
+  readonly coreMode: "js" | "wasm";
+  readonly wasmCore?: WasmCoreExports;
+  private planner?: QueryPlanner | QueryPlannerClass;
 
   /**
    * Alias to driver for callers/tests that inspect the buffer pool.
@@ -143,10 +158,20 @@ export class WebDB implements IDatabaseQueryExecutor {
   private indexTailPages: Map<number, number> = new Map();
   private isTransacting = false;
 
-  private constructor(vfs: IVfsAdapter, io: Io, driver: BufferPoolDriver) {
+  private constructor(
+    vfs: IVfsAdapter,
+    io: Io,
+    driver: BufferPoolDriver,
+    coreMode: "js" | "wasm" = "js",
+    wasmCore?: WasmCoreExports,
+    planner?: QueryPlanner | QueryPlannerClass,
+  ) {
     this.vfs = vfs;
     this.io = io;
     this.driver = driver;
+    this.coreMode = coreMode;
+    this.wasmCore = wasmCore;
+    this.planner = planner;
     this.vmCtx = createVmContext();
   }
 
@@ -203,7 +228,25 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    return new WebDB(vfs, io, driver);
+    const coreMode = options.core ?? "js";
+    let wasmCore: WasmCoreExports | undefined;
+    if (coreMode === "wasm") {
+      wasmCore = createWasmCore(
+        memory,
+        options.wasmBinary ? new Uint8Array(options.wasmBinary) : undefined,
+      );
+    }
+
+    return new WebDB(vfs, io, driver, coreMode, wasmCore, options.planner);
+  }
+
+  getPlanner(): QueryPlanner | QueryPlannerClass | undefined {
+    return this.planner;
+  }
+
+  setPlanner(planner?: QueryPlanner | QueryPlannerClass): this {
+    this.planner = planner;
+    return this;
   }
 
   async createTable(
@@ -1014,6 +1057,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       joins?: JoinClause[];
       limit?: number;
       offset?: number;
+      planner?: QueryPlanner | QueryPlannerClass;
     },
   ): Promise<ExplainOutput> {
     const table = await this.getTable(tableName);
@@ -1050,8 +1094,12 @@ export class WebDB implements IDatabaseQueryExecutor {
       udfDefs: this.getUdfDefs(),
       limit: options?.limit,
       offset: options?.offset,
+      planner: options?.planner ?? this.planner,
     });
-    const instructions = disassembleBytecode(bytecode, table);
+    const executionTables: TableMeta[] =
+      (bytecode as any).allTables ?? (joinPlans.length > 0 ? [table, ...joinPlans.map((j) => j.table)] : [table]);
+    const drivingTable = executionTables[0];
+    const instructions = disassembleBytecode(bytecode, drivingTable);
     const assembly = formatDisassembly(instructions);
     const indexScan = (bytecode as any).indexScan;
     const scanType = indexScan ? "IndexScan" : "TableScan";
@@ -1065,8 +1113,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         }[]
       | undefined;
 
-    const decoratedJoins = options?.joins?.map((j, idx) => {
-      const scanInfo = joinedTableScans?.[idx];
+    const decoratedJoins = options?.joins?.map((j) => {
+      const scanInfo = joinedTableScans?.find(
+        (s) => s.tableName.toLowerCase() === j.table.toLowerCase(),
+      );
       if (scanInfo && scanInfo.scanType === "IndexScan") {
         return {
           ...j,
@@ -1079,8 +1129,8 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     return {
       plan: {
-        table: table.name,
-        rootPageId: table.rootPageId,
+        table: drivingTable.name,
+        rootPageId: drivingTable.rootPageId,
         scanType,
         indexName,
         filters,
@@ -1092,6 +1142,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         joins: decoratedJoins,
         limit: options?.limit,
         offset: options?.offset,
+        estimatedCost: (bytecode as any).estimatedCost,
+        estimatedRows: (bytecode as any).estimatedRows,
+        joinOrder: (bytecode as any).joinOrder,
       },
       bytecodeSize: bytecode.byteLength,
       instructions,
@@ -1163,11 +1216,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       udfDefs: this.getUdfDefs(),
       limit: options.limit !== null ? options.limit : undefined,
       offset: options.offset !== null ? options.offset : undefined,
+      planner: options.planner ?? this.planner,
     };
 
     const bytecode = compileQuery(plan);
 
-    resetVmContext(this.vmCtx, table, [table, ...joinedTablesMeta]);
+    const executionTables: TableMeta[] =
+      (bytecode as any).allTables ?? [table, ...joinedTablesMeta];
+
+    resetVmContext(this.vmCtx, executionTables[0], executionTables);
     if ((bytecode as any).inSets) {
       this.vmCtx.inSets = (bytecode as any).inSets;
     }

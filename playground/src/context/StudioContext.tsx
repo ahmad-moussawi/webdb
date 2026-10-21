@@ -6,6 +6,7 @@ import type {
   ExplainOutput,
   ThemeMode,
   VfsType,
+  CoreEngineMode,
   ResultTabType,
   RowInspectorMode,
   SeedingProgress,
@@ -27,6 +28,8 @@ interface StudioContextValue {
   db: any;
   activeDbName: string;
   activeStorage: VfsType;
+  coreMode: CoreEngineMode;
+  setCoreMode: (mode: CoreEngineMode) => Promise<void>;
   tables: TableMeta[];
   tabs: EditorTab[];
   activeTabId: string;
@@ -90,6 +93,21 @@ interface StudioContextValue {
 
 const StudioContext = createContext<StudioContextValue | null>(null);
 
+function getInitialCoreMode(): CoreEngineMode {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const param = params.get('core')?.toLowerCase();
+    if (param === 'wasm' || param === 'js') {
+      return param;
+    }
+    try {
+      const stored = localStorage.getItem('webdb_active_core');
+      if (stored === 'wasm' || stored === 'js') return stored;
+    } catch {}
+  }
+  return 'js';
+}
+
 export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [db, setDb] = useState<any>(null);
   const [activeDbName, setActiveDbName] = useState<string>(() => {
@@ -106,6 +124,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return 'memory';
     }
   });
+  const [coreMode, setCoreModeState] = useState<CoreEngineMode>(() => getInitialCoreMode());
 
   const [tables, setTables] = useState<TableMeta[]>([]);
   const [tabs, setTabs] = useState<EditorTab[]>([]);
@@ -391,8 +410,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [db]);
 
   // Open Database with fallback
-  const openDb = useCallback(async (name: string, storage: VfsType) => {
-    setStatusText('OPENING DB...');
+  const openDb = useCallback(async (name: string, storage: VfsType, coreModeOverride?: CoreEngineMode) => {
+    const activeCore = coreModeOverride ?? coreMode;
+    setStatusText(`OPENING DB (${activeCore.toUpperCase()})...`);
     setStatusColor('#f59e0b');
 
     let currentInstance = db;
@@ -403,7 +423,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     try {
-      const instance = await WebDB.open({ name, storage });
+      const instance = await WebDB.open({ name, storage, core: activeCore });
       (window as any).db = instance;
       setDb(instance);
       setActiveDbName(name);
@@ -412,11 +432,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       try {
         localStorage.setItem('webdb_active_storage', storage);
         localStorage.setItem('webdb_active_db', name);
+        localStorage.setItem('webdb_active_core', activeCore);
       } catch {}
 
       const meta = await instance.listTables();
       setTables(meta);
-      setStatusText('READY');
+      setStatusText(`READY (${activeCore.toUpperCase()})`);
       setStatusColor('var(--emerald)');
 
       // If standard ecommerce db is completely empty, seed standard template
@@ -428,12 +449,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setTables(reloaded);
       }
     } catch (err) {
-      console.warn(`Could not open DB ${name} on ${storage}, falling back to memory/ecommerce_db:`, err);
-      showToast(`Fallback: Opened ecommerce_db on Memory`);
+      console.warn(`Could not open DB ${name} on ${storage} (${activeCore}), falling back to memory/ecommerce_db:`, err);
+      showToast(`Fallback: Opened ecommerce_db on Memory (${activeCore})`);
       setActiveStorage('memory');
       setActiveDbName('ecommerce_db');
 
-      const fallbackInstance = await WebDB.open({ name: 'ecommerce_db', storage: 'memory' });
+      const fallbackInstance = await WebDB.open({ name: 'ecommerce_db', storage: 'memory', core: activeCore });
       (window as any).db = fallbackInstance;
       setDb(fallbackInstance);
       const meta = await fallbackInstance.listTables();
@@ -446,14 +467,36 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const reloaded = await fallbackInstance.listTables();
         setTables(reloaded);
       }
-      setStatusText('READY');
+      setStatusText(`READY (${activeCore.toUpperCase()})`);
       setStatusColor('var(--emerald)');
     }
-  }, [db, showToast]);
+  }, [coreMode, db, showToast]);
+
+  const setCoreMode = useCallback(async (mode: CoreEngineMode) => {
+    setCoreModeState(mode);
+    try {
+      localStorage.setItem('webdb_active_core', mode);
+    } catch {}
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('core', mode);
+      window.history.replaceState({}, '', url.toString());
+    }
+    showToast(`Switched engine core to ${mode === 'wasm' ? 'WebAssembly (C)' : 'JavaScript'}`);
+    await openDb(activeDbName, activeStorage, mode);
+  }, [activeDbName, activeStorage, openDb, showToast]);
 
   // Initialize DB on mount
   useEffect(() => {
-    openDb(activeDbName, activeStorage);
+    const initialCore = getInitialCoreMode();
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has('core')) {
+        url.searchParams.set('core', initialCore);
+        window.history.replaceState({}, '', url.toString());
+      }
+    }
+    openDb(activeDbName, activeStorage, initialCore);
   }, []);
 
   const createDb = useCallback(async (name: string, storage: VfsType, templateKey: string) => {
@@ -463,7 +506,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       if (templateKey !== 'empty') {
         // openDb sets db asynchronously, so let's open explicitly
-        const newInst = await WebDB.open({ name, storage });
+        const newInst = await WebDB.open({ name, storage, core: coreMode });
         (window as any).db = newInst;
         setDb(newInst);
         await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
@@ -479,13 +522,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       console.error('Error creating database:', err);
       showToast(`Error creating database: ${err?.message || err}`);
     }
-  }, [openDb, showToast]);
+  }, [coreMode, openDb, showToast]);
 
   // Execute User Code
   const executeCode = useCallback(async (codeOverride?: string) => {
     let currentDb = db;
     if (!currentDb) {
-      currentDb = await WebDB.open({ name: activeDbName, storage: activeStorage });
+      currentDb = await WebDB.open({ name: activeDbName, storage: activeStorage, core: coreMode });
       setDb(currentDb);
       (window as any).db = currentDb;
     }
@@ -676,6 +719,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         db,
         activeDbName,
         activeStorage,
+        coreMode,
+        setCoreMode,
         tables,
         tabs,
         activeTabId,

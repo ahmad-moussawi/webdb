@@ -477,11 +477,123 @@ export function computeBufferPoolOffsets(
   console.log("✓ Generated src/layouts/pool_format.ts");
 }
 
+function generateCHeaders() {
+  const cLayoutsDir = path.join(rootDir, "src", "core", "c", "layouts");
+  fs.mkdirSync(cLayoutsDir, { recursive: true });
+
+  // 1. page_format.h
+  {
+    const schema = JSON.parse(fs.readFileSync(path.join(schemasDir, "page_format.json"), "utf-8"));
+    let out = `/**\n * AUTO-GENERATED FROM src/layouts/schemas/page_format.json\n * DO NOT EDIT MANUALLY. Run 'npm run generate:layouts' to rebuild.\n */\n\n`;
+    out += `#ifndef WEBDB_PAGE_FORMAT_H\n#define WEBDB_PAGE_FORMAT_H\n\n#include <stdint.h>\n\n`;
+
+    for (const c of schema.constants) {
+      out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+      out += `#define ${c.name} ${c.value}\n\n`;
+    }
+
+    for (const layout of schema.layouts) {
+      let currentOffset = layout.baseOffset;
+      out += `// ${layout.id}\n`;
+      for (const f of layout.fields) {
+        const offsetConstName = `${layout.offsetPrefix}${f.name}`;
+        out += `#define ${offsetConstName} ${currentOffset}\n`;
+        currentOffset += f.size;
+      }
+      out += `#define ${layout.sizeName} ${currentOffset - layout.baseOffset}\n\n`;
+    }
+
+    if (schema.postConstants) {
+      for (const c of schema.postConstants) {
+        out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+        out += `#define ${c.name} ${c.value}\n\n`;
+      }
+    }
+
+    out += `#endif /* WEBDB_PAGE_FORMAT_H */\n`;
+    fs.writeFileSync(path.join(cLayoutsDir, "page_format.h"), out);
+    console.log("✓ Generated src/core/c/layouts/page_format.h");
+  }
+
+  // 2. syspage_format.h
+  {
+    const schema = JSON.parse(fs.readFileSync(path.join(schemasDir, "syspage_format.json"), "utf-8"));
+    let out = `/**\n * AUTO-GENERATED FROM src/layouts/schemas/syspage_format.json\n * DO NOT EDIT MANUALLY. Run 'npm run generate:layouts' to rebuild.\n */\n\n`;
+    out += `#ifndef WEBDB_SYSPAGE_FORMAT_H\n#define WEBDB_SYSPAGE_FORMAT_H\n\n#include <stdint.h>\n\n`;
+
+    for (const c of schema.constants) {
+      out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+      out += `#define ${c.name} ${c.value}\n\n`;
+    }
+
+    for (let i = 0; i < schema.layouts.length; i++) {
+      const layout = schema.layouts[i];
+      let currentOffset = layout.baseOffset;
+      out += `// ${layout.id}\n`;
+      if (layout.offsetPrefix) {
+        for (const f of layout.fields) {
+          const offsetConstName = `${layout.offsetPrefix}${f.name}`;
+          out += `#define ${offsetConstName} ${currentOffset}\n`;
+          currentOffset += f.size;
+        }
+      } else {
+        currentOffset += layout.fields.reduce((acc, f) => acc + f.size, 0);
+      }
+      out += `#define ${layout.sizeName} ${currentOffset - layout.baseOffset}\n\n`;
+
+      if (i === 0 && schema.partitionConstants) {
+        out += `// Page 1 Partition Constants\n`;
+        for (const c of schema.partitionConstants) {
+          out += `#define ${c.name} ${c.value}\n`;
+        }
+        out += `\n`;
+      }
+    }
+
+    out += `#endif /* WEBDB_SYSPAGE_FORMAT_H */\n`;
+    fs.writeFileSync(path.join(cLayoutsDir, "syspage_format.h"), out);
+    console.log("✓ Generated src/core/c/layouts/syspage_format.h");
+  }
+
+  // 3. pool_format.h
+  {
+    const schema = JSON.parse(fs.readFileSync(path.join(schemasDir, "pool_format.json"), "utf-8"));
+    let out = `/**\n * AUTO-GENERATED FROM src/layouts/schemas/pool_format.json\n * DO NOT EDIT MANUALLY. Run 'npm run generate:layouts' to rebuild.\n */\n\n`;
+    out += `#ifndef WEBDB_POOL_FORMAT_H\n#define WEBDB_POOL_FORMAT_H\n\n#include <stdint.h>\n#include "page_format.h"\n\n`;
+
+    for (const c of schema.constants) {
+      out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+      out += `#define ${c.name} ${c.value}\n\n`;
+    }
+
+    const bp = schema.bufferPool;
+    let currentOffset = bp.baseOffset;
+    out += `// Buffer Pool Region Offsets\n`;
+    for (const r of bp.regions) {
+      out += `#define ${r.offsetName} ${currentOffset}\n`;
+      currentOffset += r.size;
+    }
+    out += `#define ${bp.endOffsetName} ${currentOffset}\n\n`;
+
+    if (schema.postConstants) {
+      for (const c of schema.postConstants) {
+        out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+        out += `#define ${c.name} ${c.value}\n\n`;
+      }
+    }
+
+    out += `#endif /* WEBDB_POOL_FORMAT_H */\n`;
+    fs.writeFileSync(path.join(cLayoutsDir, "pool_format.h"), out);
+    console.log("✓ Generated src/core/c/layouts/pool_format.h");
+  }
+}
+
 function main() {
   console.log("Generating layout constant modules from JSON schemas...");
   generatePageFormat();
   generateSyspageFormat();
   generatePoolFormat();
+  generateCHeaders();
   console.log("✓ All layout files successfully generated at build time.");
 }
 
