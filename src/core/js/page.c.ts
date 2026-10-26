@@ -24,6 +24,8 @@ import {
   TooManyColumnsError,
 } from "../../types/index.ts";
 import { UuidCodec, UlidCodec } from "./codecs.c.ts";
+import type { u8, u16, u32, i32, i64 } from "../types.ts";
+import { memcpy } from "../../shared/c_runtime.ts";
 
 const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();
@@ -51,9 +53,9 @@ const text_decoder = new TextDecoder();
  */
 export function page_init(
   view: DataView,
-  page_offset: number,
-  page_type: number = PAGE_TYPE_LEAF_DATA,
-  next_page_id: number = 0,
+  page_offset: u32,
+  page_type: u8 = PAGE_TYPE_LEAF_DATA,
+  next_page_id: u32 = 0,
 ): void {
   view.setUint8(page_offset + 0, page_type);
   view.setUint8(page_offset + 1, 0);
@@ -70,8 +72,8 @@ export function page_init(
  */
 export function page_init_free(
   view: DataView,
-  page_offset: number,
-  next_free_page_id: number = 0,
+  page_offset: u32,
+  next_free_page_id: u32 = 0,
 ): void {
   view.setUint8(page_offset + 0, PAGE_TYPE_FREE);
   view.setUint8(page_offset + 1, 0);
@@ -86,7 +88,7 @@ export function page_init_free(
  * @export_c
  * Returns the page type byte from a page header.
  */
-export function page_get_type(view: DataView, page_offset: number): number {
+export function page_get_type(view: DataView, page_offset: u32): u8 {
   return view.getUint8(page_offset + 0);
 }
 
@@ -96,8 +98,8 @@ export function page_get_type(view: DataView, page_offset: number): number {
  */
 export function page_set_type(
   view: DataView,
-  page_offset: number,
-  type: number,
+  page_offset: u32,
+  type: u8,
 ): void {
   view.setUint8(page_offset + 0, type);
 }
@@ -108,8 +110,8 @@ export function page_set_type(
  */
 export function page_get_cell_count(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u16 {
   return view.getUint16(page_offset + 2, true);
 }
 
@@ -119,8 +121,8 @@ export function page_get_cell_count(
  */
 export function page_set_cell_count(
   view: DataView,
-  page_offset: number,
-  count: number,
+  page_offset: u32,
+  count: u16,
 ): void {
   view.setUint16(page_offset + 2, count, true);
 }
@@ -131,8 +133,8 @@ export function page_set_cell_count(
  */
 export function page_get_cell_content_offset(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u16 {
   return view.getUint16(page_offset + 4, true);
 }
 
@@ -142,8 +144,8 @@ export function page_get_cell_content_offset(
  */
 export function page_set_cell_content_offset(
   view: DataView,
-  page_offset: number,
-  offset: number,
+  page_offset: u32,
+  offset: u16,
 ): void {
   view.setUint16(page_offset + 4, offset, true);
 }
@@ -154,8 +156,8 @@ export function page_set_cell_content_offset(
  */
 export function page_get_next_page_id(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u32 {
   return view.getUint32(page_offset + 6, true);
 }
 
@@ -165,8 +167,8 @@ export function page_get_next_page_id(
  */
 export function page_set_next_page_id(
   view: DataView,
-  page_offset: number,
-  next_page_id: number,
+  page_offset: u32,
+  next_page_id: u32,
 ): void {
   view.setUint32(page_offset + 6, next_page_id, true);
 }
@@ -177,8 +179,8 @@ export function page_set_next_page_id(
  */
 export function page_get_free_bytes(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u16 {
   return view.getUint16(page_offset + 10, true);
 }
 
@@ -188,8 +190,8 @@ export function page_get_free_bytes(
  */
 export function page_set_free_bytes(
   view: DataView,
-  page_offset: number,
-  free_bytes: number,
+  page_offset: u32,
+  free_bytes: u16,
 ): void {
   view.setUint16(page_offset + 10, free_bytes, true);
 }
@@ -198,7 +200,7 @@ export function page_set_free_bytes(
  * @export_c
  * Returns the checksum stored at bytes 12..15 in the page header.
  */
-export function page_get_checksum(view: DataView, page_offset: number): number {
+export function page_get_checksum(view: DataView, page_offset: u32): u32 {
   return view.getUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, true);
 }
 
@@ -208,8 +210,8 @@ export function page_get_checksum(view: DataView, page_offset: number): number {
  */
 export function page_set_checksum(
   view: DataView,
-  page_offset: number,
-  checksum: number,
+  page_offset: u32,
+  checksum: u32,
 ): void {
   view.setUint32(page_offset + PAGE_HEADER_OFFSET_CHECKSUM, checksum, true);
 }
@@ -220,9 +222,9 @@ export function page_set_checksum(
  */
 export function page_get_cell_offset(
   view: DataView,
-  page_offset: number,
-  slot_idx: number,
-): number {
+  page_offset: u32,
+  slot_idx: u16,
+): u16 {
   const slot_dir_offset = page_offset + PAGE_HEADER_SIZE + slot_idx * 2;
   return view.getUint16(slot_dir_offset, true);
 }
@@ -233,9 +235,9 @@ export function page_get_cell_offset(
  */
 export function page_set_cell_offset(
   view: DataView,
-  page_offset: number,
-  slot_idx: number,
-  cell_offset: number,
+  page_offset: u32,
+  slot_idx: u16,
+  cell_offset: u16,
 ): void {
   const slot_dir_offset = page_offset + PAGE_HEADER_SIZE + slot_idx * 2;
   view.setUint16(slot_dir_offset, cell_offset, true);
@@ -247,12 +249,12 @@ export function page_set_cell_offset(
  */
 export function page_get_contiguous_free_space(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u16 {
   const cell_count = page_get_cell_count(view, page_offset);
   const cell_content_offset = page_get_cell_content_offset(view, page_offset);
   const slot_dir_end = PAGE_HEADER_SIZE + cell_count * 2;
-  return cell_content_offset - slot_dir_end;
+  return (cell_content_offset - slot_dir_end) as u16;
 }
 
 /**
@@ -261,34 +263,29 @@ export function page_get_contiguous_free_space(
  */
 export function page_get_total_free_space(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u16 {
   return (
     page_get_contiguous_free_space(view, page_offset) +
     page_get_free_bytes(view, page_offset)
-  );
+  ) as u16;
 }
 
 // ============================================================================
 // 2. In-Place Page Compaction / Defragmentation (Zero-Allocation via Scratchpad)
 // ============================================================================
 
-export interface ReplacementCell {
-  cell_idx: number;
-  row_bytes: Uint8Array;
-}
-
 /**
  * @export_c
  * Defragments a slotted data page using a 4KB staging scratchpad.
  * Collapses fragmented holes to the bottom, rewrites slot directory entries,
- * and sets free_bytes to 0. Optionally replaces a cell in-place during compaction.
+ * and sets free_bytes to 0.
  */
 export function page_compact(
   view: DataView,
-  page_offset: number,
-  scratchpad_offset?: number,
-  replacement?: ReplacementCell,
+  page_offset: u32,
+  scratchpad_offset: u32 = 0,
+  replacement?: { cell_idx: number; row_bytes: Uint8Array },
 ): void {
   const cell_count = page_get_cell_count(view, page_offset);
   if (cell_count === 0) {
@@ -297,111 +294,51 @@ export function page_compact(
     return;
   }
 
-  const abs_page_start = view.byteOffset + page_offset;
-  const uint8 = new Uint8Array(view.buffer);
+  // If no external scratchpad provided or buffer too small, use local 4KB scratchpad
+  let scratch_view: DataView = view;
+  let scratch: u32 = scratchpad_offset;
 
-  // Read all active cell offsets and their lengths
-  interface CellInfo {
-    slot_idx: number;
-    offset: number;
-    length: number;
-    replacement_bytes?: Uint8Array;
+  if (scratchpad_offset === 0 || scratchpad_offset === page_offset || scratchpad_offset + PAGE_SIZE > view.byteLength) {
+    const local_buf = new Uint8Array(PAGE_SIZE);
+    scratch_view = new DataView(local_buf.buffer);
+    scratch = 0;
   }
 
-  const cells: CellInfo[] = [];
+  // 1. Copy page header to scratchpad
+  memcpy(scratch_view, scratch, view, page_offset, PAGE_HEADER_SIZE);
+
+  // 2. Repack cells from end of page (PAGE_SIZE) downwards
+  let current_offset: u16 = PAGE_SIZE;
+
   for (let i = 0; i < cell_count; i++) {
+    let len: u16 = 0;
+    let src_view: DataView | Uint8Array = view;
+    let src_bytes: u32 = 0;
+
     if (replacement && i === replacement.cell_idx) {
-      cells.push({
-        slot_idx: i,
-        offset: -1,
-        length: replacement.row_bytes.byteLength,
-        replacement_bytes: replacement.row_bytes,
-      });
+      len = replacement.row_bytes.byteLength as u16;
+      src_view = replacement.row_bytes;
+      src_bytes = 0;
     } else {
-      const offset = page_get_cell_offset(view, page_offset, i);
-      const len = page_get_row_length(view, page_offset + offset);
-      cells.push({ slot_idx: i, offset, length: len });
-    }
-  }
-
-  // Create staging scratchpad (either at designated scratchpad offset in ArrayBuffer or locally)
-  let scratch_offset: number;
-  let use_local_search = false;
-  let local_scratch: Uint8Array | null = null;
-
-  if (scratchpad_offset !== undefined) {
-    scratch_offset = scratchpad_offset;
-  } else {
-    // If not provided in standalone tests, use a local 4KB buffer
-    use_local_search = true;
-    local_scratch = new Uint8Array(PAGE_SIZE);
-    scratch_offset = 0;
-  }
-
-  const scratch_view = use_local_search
-    ? new DataView(local_scratch!.buffer)
-    : new DataView(view.buffer, scratch_offset, PAGE_SIZE);
-
-  // Copy header (first 16 bytes)
-  const header_bytes = new Uint8Array(
-    view.buffer,
-    abs_page_start,
-    PAGE_HEADER_SIZE,
-  );
-  if (use_local_search) {
-    local_scratch!.set(header_bytes, 0);
-  } else {
-    uint8.set(header_bytes, scratch_offset);
-  }
-
-  // Pack active cells contiguously from byte 4096 upwards
-  let current_offset = PAGE_SIZE;
-  for (let i = 0; i < cell_count; i++) {
-    const cell = cells[i];
-    current_offset -= cell.length;
-
-    // Copy cell payload into scratchpad
-    if (cell.replacement_bytes) {
-      if (use_local_search) {
-        local_scratch!.set(cell.replacement_bytes, current_offset);
-      } else {
-        uint8.set(cell.replacement_bytes, scratch_offset + current_offset);
-      }
-    } else {
-      const cell_bytes = new Uint8Array(
-        view.buffer,
-        abs_page_start + cell.offset,
-        cell.length,
-      );
-      if (use_local_search) {
-        local_scratch!.set(cell_bytes, current_offset);
-      } else {
-        uint8.set(cell_bytes, scratch_offset + current_offset);
-      }
+      const old_offset = page_get_cell_offset(view, page_offset, i as u16);
+      len = page_get_row_length(view, page_offset + old_offset);
+      src_view = view;
+      src_bytes = page_offset + old_offset;
     }
 
-    // Write new slot directory offset in scratchpad
-    scratch_view.setUint16(
-      PAGE_HEADER_SIZE + cell.slot_idx * 2,
-      current_offset,
-      true,
-    );
+    current_offset = (current_offset - len) as u16;
+    memcpy(scratch_view, scratch + current_offset, src_view, src_bytes, len);
+
+    // Update slot directory in scratchpad
+    page_set_cell_offset(scratch_view, scratch, i as u16, current_offset);
   }
 
-  // Update scratchpad header fields
-  scratch_view.setUint16(4, current_offset, true); // cell_content_offset
-  scratch_view.setUint16(10, 0, true); // free_bytes = 0
+  // 3. Update scratchpad header fields
+  page_set_cell_content_offset(scratch_view, scratch, current_offset);
+  page_set_free_bytes(scratch_view, scratch, 0);
 
-  // Copy compacted scratchpad back into target page slot
-  if (use_local_search) {
-    uint8.set(local_scratch!, abs_page_start);
-  } else {
-    uint8.copyWithin(
-      abs_page_start,
-      scratch_offset,
-      scratch_offset + PAGE_SIZE,
-    );
-  }
+  // 4. Copy back to page
+  memcpy(view, page_offset, scratch_view, scratch, PAGE_SIZE);
 }
 
 /**
@@ -410,9 +347,9 @@ export function page_compact(
  */
 export function page_get_row_length(
   view: DataView,
-  row_offset: number,
-): number {
-  return view.getUint16(row_offset + 1, true);
+  row_abs_offset: u32,
+): u16 {
+  return view.getUint16(row_abs_offset + 1, true);
 }
 
 // ============================================================================
@@ -420,7 +357,6 @@ export function page_get_row_length(
 // ============================================================================
 
 /**
- * @export_c
  * Inserts a serialized row record into a slotted data page.
  * Returns the slot index (0-indexed) or -1 if the row cannot fit in this page.
  */
@@ -483,29 +419,25 @@ export function page_insert_row(
  */
 export function page_delete_row(
   view: DataView,
-  page_offset: number,
-  cell_idx: number,
+  page_offset: u32,
+  cell_idx: u16,
 ): void {
   const cell_count = page_get_cell_count(view, page_offset);
-  if (cell_idx < 0 || cell_idx >= cell_count) {
-    throw new Error(
-      `Invalid cell index ${cell_idx} for deletion (cell_count=${cell_count})`,
-    );
+  if (cell_idx >= cell_count) {
+    return;
   }
 
   const offset = page_get_cell_offset(view, page_offset, cell_idx);
   const row_len = page_get_row_length(view, page_offset + offset);
 
   // Shift slot directory entries left by 2 bytes
-  const uint8 = new Uint8Array(view.buffer);
-  const abs_page_start = view.byteOffset + page_offset;
-  const slot_dir_start = abs_page_start + PAGE_HEADER_SIZE;
+  const slot_dir_start = page_offset + PAGE_HEADER_SIZE;
   const src = slot_dir_start + (cell_idx + 1) * 2;
   const dst = slot_dir_start + cell_idx * 2;
   const shift_length = (cell_count - 1 - cell_idx) * 2;
 
   if (shift_length > 0) {
-    uint8.copyWithin(dst, src, src + shift_length);
+    memcpy(view, dst, view, src, shift_length);
   }
 
   // Update header
@@ -518,7 +450,6 @@ export function page_delete_row(
 }
 
 /**
- * @export_c
  * Updates an existing row in a slotted data page following the 3 scenarios in §4.5.
  * Returns true if update succeeded on this page, or false if it exceeded page capacity (Scenario C).
  */
@@ -559,8 +490,6 @@ export function page_update_row(
   if (total_free >= needed_extra) {
     const contiguous_free = page_get_contiguous_free_space(view, page_offset);
     if (contiguous_free < new_len) {
-      // Compacting directly replaces the old record with the new record,
-      // avoiding dead ghost copies and slot directory boundary overflows
       page_compact(view, page_offset, scratchpad_offset, {
         cell_idx,
         row_bytes: new_row_bytes,
@@ -597,7 +526,6 @@ export function page_update_row(
 // ============================================================================
 
 /**
- * @export_c
  * Calculates null-bitmap bytes, fixed slice size, and variable column count for row layout.
  */
 export function page_get_table_layout(
@@ -623,7 +551,6 @@ export function page_get_table_layout(
 }
 
 /**
- * @export_c
  * Serializes a user row into WebDB Phase 1 binary format:
  *
  * [0]: Flags (1B: 0x01 = Active)
@@ -802,7 +729,6 @@ export function page_serialize_row(
 }
 
 /**
- * @export_c
  * Deserializes a row record from a DataView into a user-facing DbRow object.
  */
 export function page_deserialize_row(
@@ -949,8 +875,8 @@ export function page_deserialize_row(
  */
 export function page_init_interior(
   view: DataView,
-  page_offset: number,
-  right_child_page_id: number = 0,
+  page_offset: u32,
+  right_child_page_id: u32 = 0,
 ): void {
   page_init(view, page_offset, PAGE_TYPE_TABLE_INTERIOR, right_child_page_id);
 }
@@ -961,8 +887,8 @@ export function page_init_interior(
  */
 export function page_get_right_child_page_id(
   view: DataView,
-  page_offset: number,
-): number {
+  page_offset: u32,
+): u32 {
   return view.getUint32(page_offset + 6, true);
 }
 
@@ -972,8 +898,8 @@ export function page_get_right_child_page_id(
  */
 export function page_set_right_child_page_id(
   view: DataView,
-  page_offset: number,
-  right_child_page_id: number,
+  page_offset: u32,
+  right_child_page_id: u32,
 ): void {
   view.setUint32(page_offset + 6, right_child_page_id, true);
 }
@@ -985,10 +911,10 @@ export function page_set_right_child_page_id(
  */
 export function page_insert_interior_cell(
   view: DataView,
-  page_offset: number,
-  child_page_id: number,
-  rowid: bigint,
-): number {
+  page_offset: u32,
+  child_page_id: u32,
+  rowid: i64,
+): i32 {
   const cell_count = page_get_cell_count(view, page_offset);
   if (cell_count >= MAX_TABLE_INTERIOR_CELLS) {
     return -1; // Interior page full
@@ -1018,9 +944,9 @@ export function page_insert_interior_cell(
  */
 export function page_binary_search_interior(
   view: DataView,
-  page_offset: number,
-  target_row_id: bigint,
-): number {
+  page_offset: u32,
+  target_row_id: i64,
+): u32 {
   const cell_count = page_get_cell_count(view, page_offset);
   if (cell_count === 0) {
     return page_get_right_child_page_id(view, page_offset);
@@ -1052,7 +978,6 @@ export function page_binary_search_interior(
 }
 
 /**
- * @export_c
  * Splits a Table Interior Page at median entry (index 145), promoting the median key.
  */
 export function page_split_interior(
@@ -1119,14 +1044,13 @@ export function page_split_interior(
  */
 export function page_init_index_leaf(
   view: DataView,
-  page_offset: number,
-  next_page_id: number = 0,
+  page_offset: u32,
+  next_page_id: u32 = 0,
 ): void {
   page_init(view, page_offset, PAGE_TYPE_INDEX_LEAF, next_page_id);
 }
 
 /**
- * @export_c
  * Compares two index keys according to SQLite 3VL collation order:
  * NULL < -Infinity < Numbers < TEXT (UTF-8) < BLOB
  */
@@ -1259,7 +1183,6 @@ function page_decode_index_cell(
 }
 
 /**
- * @export_c
  * Inserts a key and rowid into a Secondary Index Leaf Page, maintaining sorted slot directory.
  */
 export function page_insert_index_leaf_cell(
@@ -1383,7 +1306,6 @@ export function page_insert_index_leaf_cell(
 }
 
 /**
- * @export_c
  * Binary searches an Index Leaf Page for target key and optional rowid.
  */
 export function page_binary_search_index_leaf(
@@ -1461,7 +1383,6 @@ export function page_binary_search_index_leaf(
 }
 
 /**
- * @export_c
  * Encodes a single column value to a byte array based on its DataType.
  */
 export function serialize_single_key(type: DataType, val: any): Uint8Array {
@@ -1500,7 +1421,6 @@ export function serialize_single_key(type: DataType, val: any): Uint8Array {
 }
 
 /**
- * @export_c
  * Serializes a composite key tuple into a deterministic, comparable binary buffer.
  */
 export function serialize_composite_key(

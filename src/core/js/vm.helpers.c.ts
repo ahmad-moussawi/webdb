@@ -12,6 +12,7 @@ import {
   ColumnMeta,
   ColumnFlag,
 } from "../../types/index.ts";
+import { u32, i32, i64, f64 } from "../types.ts";
 import { page_serialize_row } from "./page.c.ts";
 import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
 import {
@@ -116,41 +117,127 @@ export function compare_3vl(
 }
 
 /**
- * Standard SQL LIKE pattern matcher supporting '%' (any sequence) and '_' (any single character).
- * Case-insensitive for ASCII matching according to SQLite semantics.
+ * @export_c
  */
-export function sql_like_match(str: string, pattern: string): boolean {
-  let s = 0;
-  let p = 0;
-  let star_p = -1;
-  let star_s = -1;
+function to_lower_char(c: i32): i32 {
+  if (c >= 65 && c <= 90) return c + 32;
+  return c;
+}
 
-  const s_len = str.length;
-  const p_len = pattern.length;
+/**
+ * @export_c
+ */
+export function fnv1a_32_bytes(data: Uint8Array, len: u32): u32 {
+  let hash: u32 = 0x811c9dc5;
+  for (let i: u32 = 0; i < len; i++) {
+    hash ^= data[i];
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash !== 0 ? (hash >>> 0) : 1;
+}
 
-  while (s < s_len) {
-    if (
-      p < p_len &&
-      (pattern[p] === "_" || pattern[p].toLowerCase() === str[s].toLowerCase())
-    ) {
+/**
+ * @export_c
+ */
+export function sql_like_match_raw(
+  str: string,
+  str_len: u32,
+  pattern: string,
+  pat_len: u32,
+): i32 {
+  let s: u32 = 0;
+  let p: u32 = 0;
+  let star_p: i32 = -1;
+  let star_s: i32 = -1;
+
+  while (s < str_len) {
+    const p_c = p < pat_len ? pattern.charCodeAt(p) : 0;
+    const s_c = str.charCodeAt(s);
+    if (p < pat_len && (p_c === 95 || to_lower_char(p_c) === to_lower_char(s_c))) {
       s++;
       p++;
-    } else if (p < p_len && pattern[p] === "%") {
+    } else if (p < pat_len && p_c === 37) {
       star_p = p++;
       star_s = s;
     } else if (star_p !== -1) {
       p = star_p + 1;
       s = ++star_s;
     } else {
-      return false;
+      return 0;
     }
   }
 
-  while (p < p_len && pattern[p] === "%") {
+  while (p < pat_len && pattern.charCodeAt(p) === 37) {
     p++;
   }
 
-  return p === p_len;
+  return p === pat_len ? 1 : 0;
+}
+
+export interface Compare3VLResult {
+  result: i32;
+  is_unknown: i32;
+}
+
+/**
+ * @export_c
+ */
+export function compare_3vl_int64(
+  a: i64,
+  a_null: i32,
+  b: i64,
+  b_null: i32,
+): Compare3VLResult {
+  if (a_null !== 0 || b_null !== 0) {
+    return { result: 0, is_unknown: 1 };
+  }
+  return { result: a < b ? -1 : a > b ? 1 : 0, is_unknown: 0 };
+}
+
+/**
+ * @export_c
+ */
+export function compare_3vl_float64(
+  a: f64,
+  a_null: i32,
+  b: f64,
+  b_null: i32,
+): Compare3VLResult {
+  if (a_null !== 0 || b_null !== 0) {
+    return { result: 0, is_unknown: 1 };
+  }
+  return { result: a < b ? -1 : a > b ? 1 : 0, is_unknown: 0 };
+}
+
+/**
+ * @export_c
+ */
+export function compare_3vl_bytes(
+  a: Uint8Array,
+  a_len: u32,
+  a_null: i32,
+  b: Uint8Array,
+  b_len: u32,
+  b_null: i32,
+): Compare3VLResult {
+  if (a_null !== 0 || b_null !== 0) {
+    return { result: 0, is_unknown: 1 };
+  }
+  const min_len = a_len < b_len ? a_len : b_len;
+  for (let i: u32 = 0; i < min_len; i++) {
+    if (a[i] !== b[i]) {
+      return { result: a[i] < b[i] ? -1 : 1, is_unknown: 0 };
+    }
+  }
+  return { result: a_len < b_len ? -1 : a_len > b_len ? 1 : 0, is_unknown: 0 };
+}
+
+/**
+ * Standard SQL LIKE pattern matcher supporting '%' (any sequence) and '_' (any single character).
+ * Case-insensitive for ASCII matching according to SQLite semantics.
+ */
+export function sql_like_match(str: string, pattern: string): boolean {
+  return sql_like_match_raw(str, str.length, pattern, pattern.length) === 1;
 }
 
 /**

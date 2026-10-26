@@ -15,13 +15,15 @@
  * Copies n bytes from memory area src to memory area dest.
  */
 export function memcpy(
-  dest: Uint8Array,
+  dest: Uint8Array | DataView,
   dest_offset: number,
-  src: Uint8Array,
+  src: Uint8Array | DataView,
   src_offset: number,
   n: number,
 ): void {
-  dest.set(src.subarray(src_offset, src_offset + n), dest_offset);
+  const d = dest instanceof Uint8Array ? dest : new Uint8Array(dest.buffer, dest.byteOffset, dest.byteLength);
+  const s = src instanceof Uint8Array ? src : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+  d.set(s.subarray(src_offset, src_offset + n), dest_offset);
 }
 
 /**
@@ -29,12 +31,13 @@ export function memcpy(
  * Fills the first n bytes of the memory area pointed to by s with the constant byte c.
  */
 export function memset(
-  dest: Uint8Array,
+  dest: Uint8Array | DataView,
   dest_offset: number,
   c: number,
   n: number,
 ): void {
-  dest.fill(c & 0xff, dest_offset, dest_offset + n);
+  const d = dest instanceof Uint8Array ? dest : new Uint8Array(dest.buffer, dest.byteOffset, dest.byteLength);
+  d.fill(c & 0xff, dest_offset, dest_offset + n);
 }
 
 /**
@@ -43,17 +46,27 @@ export function memset(
  * Returns <0, 0, or >0.
  */
 export function memcmp(
-  s1: Uint8Array,
+  s1: Uint8Array | DataView,
   s1_offset: number,
-  s2: Uint8Array,
+  s2: Uint8Array | DataView,
   s2_offset: number,
   n: number,
 ): number {
+  const b1 = s1 instanceof Uint8Array ? s1 : new Uint8Array(s1.buffer, s1.byteOffset, s1.byteLength);
+  const b2 = s2 instanceof Uint8Array ? s2 : new Uint8Array(s2.buffer, s2.byteOffset, s2.byteLength);
   for (let i = 0; i < n; i++) {
-    const diff = s1[s1_offset + i] - s2[s2_offset + i];
+    const diff = b1[s1_offset + i] - b2[s2_offset + i];
     if (diff !== 0) return diff;
   }
   return 0;
+}
+
+/**
+ * C: size_t strlen(const char *s);
+ * Returns length of null-terminated string or JS string length.
+ */
+export function strlen(s: string): number {
+  return s.length;
 }
 
 // ============================================================================
@@ -129,16 +142,27 @@ export function write_i64(view: DataView, offset: number, val: bigint): void {
 // Bitwise Bitmask Manipulation (C macros: GET_BIT, SET_BIT, CLEAR_BIT)
 // ============================================================================
 
-export function get_bit(mask: Uint8Array, bit_idx: number): number {
-  return (mask[bit_idx >> 3] & (1 << (bit_idx & 7))) !== 0 ? 1 : 0;
+export function get_bit(mask: Uint8Array, offset_or_bit: number, bit_idx?: number): number {
+  if (bit_idx !== undefined) {
+    return (mask[offset_or_bit + (bit_idx >> 3)] & (1 << (bit_idx & 7))) !== 0 ? 1 : 0;
+  }
+  return (mask[offset_or_bit >> 3] & (1 << (offset_or_bit & 7))) !== 0 ? 1 : 0;
 }
 
-export function set_bit(mask: Uint8Array, bit_idx: number): void {
-  mask[bit_idx >> 3] |= (1 << (bit_idx & 7));
+export function set_bit(mask: Uint8Array, offset_or_bit: number, bit_idx?: number): void {
+  if (bit_idx !== undefined) {
+    mask[offset_or_bit + (bit_idx >> 3)] |= (1 << (bit_idx & 7));
+  } else {
+    mask[offset_or_bit >> 3] |= (1 << (offset_or_bit & 7));
+  }
 }
 
-export function clear_bit(mask: Uint8Array, bit_idx: number): void {
-  mask[bit_idx >> 3] &= ~(1 << (bit_idx & 7));
+export function clear_bit(mask: Uint8Array, offset_or_bit: number, bit_idx?: number): void {
+  if (bit_idx !== undefined) {
+    mask[offset_or_bit + (bit_idx >> 3)] &= ~(1 << (bit_idx & 7));
+  } else {
+    mask[offset_or_bit >> 3] &= ~(1 << (offset_or_bit & 7));
+  }
 }
 
 // ============================================================================

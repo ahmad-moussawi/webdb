@@ -13,6 +13,7 @@ import {
   page_table_set,
   page_table_delete,
 } from "./page_table.c.ts";
+import { u32, i32 } from "../types.ts";
 import { QueryArenaExhaustedError } from "../../types/index.ts";
 import {
   memcpy,
@@ -41,7 +42,7 @@ import {
  * @export_c
  * Returns the byte offset for a given slot in linear memory.
  */
-export function buf_pool_get_slot_offset(slot_idx: number): number {
+export function buf_pool_get_slot_offset(slot_idx: u32): u32 {
   return slot_idx * PAGE_SIZE;
 }
 
@@ -51,9 +52,9 @@ export function buf_pool_get_slot_offset(slot_idx: number): number {
  */
 export function buf_pool_read_slot_to_page(
   view: DataView,
-  slot_to_page_offset: number,
-  slot_idx: number,
-): number {
+  slot_to_page_offset: u32,
+  slot_idx: u32,
+): u32 {
   return read_u32(view, slot_to_page_offset + slot_idx * 4);
 }
 
@@ -63,9 +64,9 @@ export function buf_pool_read_slot_to_page(
  */
 export function buf_pool_write_slot_to_page(
   view: DataView,
-  slot_to_page_offset: number,
-  slot_idx: number,
-  page_id: number,
+  slot_to_page_offset: u32,
+  slot_idx: u32,
+  page_id: u32,
 ): void {
   write_u32(view, slot_to_page_offset + slot_idx * 4, page_id);
 }
@@ -77,10 +78,10 @@ export function buf_pool_write_slot_to_page(
  */
 export function buf_pool_get_resident_slot(
   view: DataView,
-  page_to_slot_offset: number,
-  page_to_slot_buckets: number,
-  page_id: number,
-): number {
+  page_to_slot_offset: u32,
+  page_to_slot_buckets: u32,
+  page_id: u32,
+): i32 {
   return page_table_get(
     view,
     page_to_slot_offset,
@@ -95,12 +96,12 @@ export function buf_pool_get_resident_slot(
  */
 export function buf_pool_assign_slot(
   view: DataView,
-  slot_to_page_offset: number,
-  page_to_slot_offset: number,
-  page_to_slot_buckets: number,
-  slot_idx: number,
-  page_id: number,
-): void {
+  slot_to_page_offset: u32,
+  page_to_slot_offset: u32,
+  page_to_slot_buckets: u32,
+  slot_idx: u32,
+  page_id: u32,
+): i32 {
   c_assert(page_id > 0, "page_id must be > 0");
   const old_page = buf_pool_read_slot_to_page(
     view,
@@ -123,6 +124,7 @@ export function buf_pool_assign_slot(
     page_id,
     slot_idx,
   );
+  return 0;
 }
 
 /**
@@ -131,11 +133,11 @@ export function buf_pool_assign_slot(
  */
 export function buf_pool_unassign_slot(
   view: DataView,
-  slot_to_page_offset: number,
-  page_to_slot_offset: number,
-  page_to_slot_buckets: number,
-  slot_idx: number,
-): void {
+  slot_to_page_offset: u32,
+  page_to_slot_offset: u32,
+  page_to_slot_buckets: u32,
+  slot_idx: u32,
+): i32 {
   const old_page = buf_pool_read_slot_to_page(
     view,
     slot_to_page_offset,
@@ -148,8 +150,10 @@ export function buf_pool_unassign_slot(
       page_to_slot_buckets,
       old_page,
     );
+    buf_pool_write_slot_to_page(view, slot_to_page_offset, slot_idx, 0);
+    return 1;
   }
-  buf_pool_write_slot_to_page(view, slot_to_page_offset, slot_idx, 0);
+  return 0;
 }
 
 /**
@@ -158,10 +162,10 @@ export function buf_pool_unassign_slot(
  */
 export function buf_pool_mark_dirty(
   dirty_mask: Uint8Array,
-  dirty_mask_offset: number,
-  slot_idx: number,
+  dirty_mask_offset: u32,
+  slot_idx: u32,
 ): void {
-  set_bit(dirty_mask, (dirty_mask_offset << 3) + slot_idx);
+  set_bit(dirty_mask, dirty_mask_offset, slot_idx);
 }
 
 /**
@@ -170,10 +174,10 @@ export function buf_pool_mark_dirty(
  */
 export function buf_pool_clear_dirty(
   dirty_mask: Uint8Array,
-  dirty_mask_offset: number,
-  slot_idx: number,
+  dirty_mask_offset: u32,
+  slot_idx: u32,
 ): void {
-  clear_bit(dirty_mask, (dirty_mask_offset << 3) + slot_idx);
+  clear_bit(dirty_mask, dirty_mask_offset, slot_idx);
 }
 
 /**
@@ -182,14 +186,13 @@ export function buf_pool_clear_dirty(
  */
 export function buf_pool_is_dirty(
   dirty_mask: Uint8Array,
-  dirty_mask_offset: number,
-  slot_idx: number,
+  dirty_mask_offset: u32,
+  slot_idx: u32,
 ): boolean {
-  return get_bit(dirty_mask, (dirty_mask_offset << 3) + slot_idx) === 1;
+  return get_bit(dirty_mask, dirty_mask_offset, slot_idx) === 1;
 }
 
 /**
- * @export_c
  * Increments pin count for slot_idx. Throws on uint32 overflow.
  */
 export function buf_pool_pin_slot(
@@ -203,7 +206,6 @@ export function buf_pool_pin_slot(
 }
 
 /**
- * @export_c
  * Decrements pin count for slot_idx. Slot 0 is permanently pinned.
  */
 export function buf_pool_unpin_slot(
@@ -217,7 +219,6 @@ export function buf_pool_unpin_slot(
 }
 
 /**
- * @export_c
  * Returns true if slot_idx is pinned (pin_count > 0 or slot 0).
  */
 export function buf_pool_is_pinned(
@@ -228,7 +229,6 @@ export function buf_pool_is_pinned(
 }
 
 /**
- * @export_c
  * Finds an eviction candidate slot using Clock sweep with second-chance bit check.
  */
 export function buf_pool_find_victim(
@@ -278,7 +278,6 @@ export function buf_pool_find_victim(
 }
 
 /**
- * @export_c
  * Selects an eviction candidate slot for a requested page using the Core Clock sweep.
  * Examines candidate slot to determine if it holds a dirty page that must be flushed.
  */

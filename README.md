@@ -188,6 +188,167 @@ console.log(explain.assembly);
 
 ---
 
+## ⚙️ Core Architecture: TypeScript ➔ C Transpiler
+
+WebDB uses an automated **TypeScript-to-C Transpiler** (`scripts/transpiler/`) to maintain a single canonical source of truth for its core storage and execution engine (`src/core/js/*.c.ts`). 
+
+TypeScript code is written in a strict, zero-allocation, C-compatible style. The transpiler translates this code into freestanding C99 (`src/core/c/`), which is then compiled via Clang (`wasm32-unknown-unknown -nostdlib -O3`) and optimized with `wasm-opt` into an **ultra-lean ~13 KB WASM binary**.
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │         Canonical TypeScript Core (src/core/js/*.c.ts)      │
+  │    (Runs in Node/Vitest tests & Host JS Fallback Mode)      │
+  └──────────────────────────────┬──────────────────────────────┘
+                                 │
+                 npm run transpile:c / build:wasm
+                                 │
+                                 ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │             Freestanding C99 Core (src/core/c/)              │
+  │         Zero-libc, slotted-page pointer arithmetic          │
+  └──────────────────────────────┬──────────────────────────────┘
+                                 │
+                   clang -nostdlib -O3 + wasm-opt
+                                 │
+                                 ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │             WebAssembly Binary (~13 KB WASM)                │
+  │     Embedded directly into npm package with zero bloat      │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### CLI Commands
+
+```bash
+# Transpile all TypeScript core modules to C source (.c) and headers (.h)
+npm run transpile:c
+
+# Transpile a single file for inspection
+npx vite-node scripts/transpiler/index.ts src/core/js/codecs.c.ts
+
+# Complete build pipeline: layouts ➔ transpiler ➔ clang wasm32 ➔ wasm-opt -O3
+npm run build:wasm
+
+# Run the 275+ automated test suite across both JS and WASM cores
+npm test
+```
+
+### Type System Mapping (`src/core/types.ts`)
+
+Primitive type aliases in TypeScript map directly to C native fixed-width types:
+
+| TypeScript Alias | C Native Type | Description |
+| :--- | :--- | :--- |
+| `u8`, `u16`, `u32` | `uint8_t`, `uint16_t`, `uint32_t` | Unsigned 8, 16, 32-bit integers |
+| `i8`, `i16`, `i32` | `int8_t`, `int16_t`, `int32_t` | Signed 8, 16, 32-bit integers |
+| `u64`, `i64` | `uint64_t`, `int64_t` | 64-bit integers (`bigint` in JS) |
+| `f64` | `double` | 64-bit IEEE 754 floating point |
+| `byte_ptr` | `uint32_t` | Linear memory byte offset |
+| `const_u8_ptr` | `const uint8_t *` | Immutable byte buffer pointer |
+| `u8_ptr` | `uint8_t *` | Mutable byte buffer pointer |
+| `const_char_ptr` | `const char *` | Null-terminated C string pointer |
+| `char_ptr` | `char *` | Mutable character buffer pointer |
+
+### Transpiler Annotations Reference
+
+The transpiler supports annotations to customize code generation and enable dual implementations:
+
+#### 1. `@export_c` (Exported Function)
+Exports the function in both the C source and the `.h` header with `WEBDB_EXPORT`.
+```typescript
+/**
+ * @export_c
+ */
+export function page_get_cell_count(page_offset: u32): u16 {
+  return load_u16(page_offset + PAGE_HEADER_OFFSET_CELL_COUNT);
+}
+```
+
+#### 2. `@internal_c` (Module-Private Static Helper)
+Generates a `static` C function internal to the translation unit, omitted from the `.h` header.
+```typescript
+/**
+ * @internal_c
+ */
+function init_crc_table(): void {
+  // Generated as static void init_crc_table(void)
+}
+```
+
+#### 3. `@manual_c` / `@native_c` (Dual Implementation Shortcut)
+Instructs the transpiler that a function is manually implemented in C:
+- **In TypeScript / Vitest**: Executes the TypeScript body normally.
+- **In C Header (`.h`)**: Still registers `WEBDB_EXPORT` so callers have the prototype.
+- **In C Source (`.c`)**: **Skips** generating the body in `.c`. The implementation is resolved from existing C files, companion files, or headers.
+
+```typescript
+/**
+ * @export_c
+ * @manual_c
+ */
+export function btree_split_leaf(page_offset: u32, new_key: u32): i32 {
+  // High-level TS implementation runs in JS mode & Vitest tests
+  return 0;
+}
+```
+
+#### 4. Inline C Blocks (` ```c ... ``` `)
+Embed hand-crafted C code directly inside the TypeScript JSDoc comment. The transpiler emits the C code block verbatim:
+
+```typescript
+/**
+ * @export_c
+ * @manual_c
+ * ```c
+ * WEBDB_EXPORT uint32_t fast_crc32(uint32_t crc, const uint8_t *buf, uint32_t len) {
+ *   // Hand-optimized C routine
+ *   return crc ^ len;
+ * }
+ * ```
+ */
+export function fast_crc32(crc: u32, buf: Uint8Array, len: u32): u32 {
+  return (crc ^ len) >>> 0;
+}
+```
+
+#### 5. `@use_c: target_c_name` (Symbol & Call Rewriting)
+Maps the TypeScript function to a differently named existing C function. The transpiler automatically rewrites all call sites across transpiled code to call `target_c_name(...)`:
+
+```typescript
+/**
+ * @export_c
+ * @use_c: c_fast_checksum
+ */
+export function checksum(ptr: u32): u32 {
+  return 123;
+}
+```
+
+#### 6. Companion Files (`<module>.manual.c`)
+For large or performance-critical manual C functions:
+- Create `src/core/c/<module>.manual.c` (e.g. `src/core/c/catalog.manual.c`).
+- The transpiler automatically detects it and appends `#include "<module>.manual.c"` at the end of the generated `.c` file.
+- The companion file is completely safe from transpiler overwrites.
+
+#### 7. `c_inline(cCode, jsFallback)` (Compile-Time Intrinsic)
+Embeds C-specific intrinsics without breaking TypeScript execution:
+
+```typescript
+import { c_inline, u32 } from "../types.ts";
+
+export function compute_leading_zeros(val: u32): u32 {
+  // In JS: returns Math.clz32(val)
+  // In C:  emits __builtin_clz(val)
+  return c_inline("__builtin_clz(val)", Math.clz32(val));
+}
+```
+
+#### 8. `@c_include` & `@c_raw` Directives
+- `/** @c_include "custom_header.h" */`: Adds `#include "custom_header.h"` at the top of the generated C file.
+- `/** @c_raw ```c ... ``` */`: Injects top-level C macros or typedefs directly into the generated C file.
+
+---
+
 ## Support the Project ⭐
 
 WebDB is an ambitious open-source initiative to build a modern, featherweight relational database engine purpose-built for the web platform. If you believe in this vision, here is how you can support the development:

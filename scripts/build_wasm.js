@@ -60,6 +60,10 @@ if (wasmOpt) {
 console.log("Generating layouts and C headers...");
 execSync(`node "${path.join(__dirname, "generate_layouts.js")}"`, { stdio: "inherit" });
 
+// 2. Transpile TypeScript core modules to C
+console.log("Transpiling TypeScript core modules to freestanding C...");
+execSync(`npx vite-node "${path.join(__dirname, "transpiler", "index.ts")}" --all --write`, { stdio: "inherit" });
+
 const cSource = path.join(rootDir, "src", "core", "c", "webdb_core.c");
 const distDir = path.join(rootDir, "dist");
 const wasmDir = path.join(rootDir, "src", "core", "wasm");

@@ -49,16 +49,77 @@ import {
 } from "../../types/index.ts";
 import { IPageProvider } from "../../shared/index.ts";
 import { page_init_index_leaf } from "./page.c.ts";
+import type { u16, u32, i32, const_u8_ptr } from "../types.ts";
+import { memset, strlen } from "../../shared/c_runtime.ts";
 
 import {
-  computePage1Checksum,
   computePageChecksum,
 } from "../../host/storage/crc32.ts";
 
-const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();
 
 export const MAGIC_BYTES = new Uint8Array([0x57, 0x45, 0x42, 0x44, 0x42, 0x00]); // "WEBDB\0"
+
+// ============================================================================
+// 0. CRC32 IEEE 802.3 Checksum Primitives
+// ============================================================================
+
+const CRC_TABLE = new Uint32Array(256);
+let crc_table_initialized = 0;
+
+/**
+ * @internal_c
+ */
+function init_crc_table(): void {
+  if (crc_table_initialized) return;
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    CRC_TABLE[i] = c >>> 0;
+  }
+  crc_table_initialized = 1;
+}
+
+/**
+ * @export_c
+ */
+export function compute_crc32(data: const_u8_ptr, length: u32): u32 {
+  init_crc_table();
+  let crc = 0xffffffff;
+  const bytes = data as Uint8Array;
+  for (let i = 0; i < length; i++) {
+    crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * @export_c
+ */
+export function compute_page_checksum(view: DataView, page_offset: u32 = 0): u32 {
+  init_crc_table();
+  let crc = 0xffffffff;
+  for (let i = 0; i < PAGE_SIZE; i++) {
+    const byte = (i >= 12 && i <= 15) ? 0 : view.getUint8(page_offset + i);
+    crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * @export_c
+ */
+export function compute_page1_checksum(view: DataView, page1_offset: u32 = 0): u32 {
+  init_crc_table();
+  let crc = 0xffffffff;
+  for (let i = 0; i < PAGE_SIZE; i++) {
+    const byte = (i >= 28 && i <= 31) ? 0 : view.getUint8(page1_offset + i);
+    crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 // ============================================================================
 // 1. Page 1 File Header Operations
@@ -68,67 +129,63 @@ export const MAGIC_BYTES = new Uint8Array([0x57, 0x45, 0x42, 0x44, 0x42, 0x00]);
  * @export_c
  * Initializes the Page 1 database file header and clears the catalog area.
  */
-export function catalog_init_page1(view: DataView): void {
-  // 1. Magic bytes (one-shot copy via Uint8Array.set / memcpy)
-  new Uint8Array(
-    view.buffer,
-    view.byteOffset + HEADER_OFFSET_MAGIC,
-    MAGIC_BYTES.byteLength,
-  ).set(MAGIC_BYTES);
+export function catalog_init_page1(
+  view: DataView,
+  page1_offset: u32 = 0,
+): void {
+  // Clear Page 1
+  memset(view, page1_offset, 0, PAGE_SIZE);
+
+  // Magic bytes: "WEBDB\0"
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 0, 0x57);
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 1, 0x45);
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 2, 0x42);
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 3, 0x44);
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 4, 0x42);
+  view.setUint8(page1_offset + HEADER_OFFSET_MAGIC + 5, 0x00);
 
   // 2. Page size (4096)
-  view.setUint16(HEADER_OFFSET_PAGE_SIZE, PAGE_SIZE, true);
+  view.setUint16(page1_offset + HEADER_OFFSET_PAGE_SIZE, PAGE_SIZE, true);
 
   // 3. File format version
   view.setUint16(
-    HEADER_OFFSET_FILE_FORMAT_VERSION,
+    page1_offset + HEADER_OFFSET_FILE_FORMAT_VERSION,
     CURRENT_ENGINE_VERSION,
     true,
   );
 
   // 4. Min read version
   view.setUint16(
-    HEADER_OFFSET_MIN_READ_VERSION,
+    page1_offset + HEADER_OFFSET_MIN_READ_VERSION,
     CURRENT_MIN_READ_VERSION,
     true,
   );
 
   // 5. Total pages (Page 1 is allocated)
-  view.setUint32(HEADER_OFFSET_TOTAL_PAGES, 1, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_TOTAL_PAGES, 1, true);
 
   // 6. Free page head pointer (0 = empty list)
-  view.setUint32(HEADER_OFFSET_FREE_PAGE_HEAD, 0, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_FREE_PAGE_HEAD, 0, true);
 
   // 7. Schema version (1)
-  view.setUint32(HEADER_OFFSET_SCHEMA_VERSION, 1, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_SCHEMA_VERSION, 1, true);
 
   // 8. Change counter (0)
-  view.setUint32(HEADER_OFFSET_CHANGE_COUNTER, 0, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_CHANGE_COUNTER, 0, true);
 
   // 9. Page checksum (calculated on flush)
-  view.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, 0, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_PAGE_CHECKSUM, 0, true);
 
-  // 10. Chained catalog pointers (always 0 in v1; reserved for overflow catalog pages in future versions)
-  view.setUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, 0, true);
-  view.setUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, 0, true);
-
-  // Clear reserved header bytes (40..99)
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
-  uint8.fill(0, HEADER_OFFSET_RESERVED, FILE_HEADER_SIZE);
-
-  // Clear Catalog area (bytes 100..4095)
-  uint8.fill(0, MASTER_TABLE_OFFSET, PAGE_SIZE);
+  // 10. Chained catalog pointers
+  view.setUint32(page1_offset + HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, 0, true);
+  view.setUint32(page1_offset + HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, 0, true);
 
   // Set initial valid checksum for Page 1
-  const chk = computePage1Checksum(
-    new Uint8Array(view.buffer, view.byteOffset, PAGE_SIZE),
-  );
-
-  view.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
+  const chk = compute_page1_checksum(view, page1_offset);
+  view.setUint32(page1_offset + HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
 }
 
 /**
- * @export_c
  * Reads and validates the Page 1 database file header.
  */
 export function catalog_read_page1_header(
@@ -165,8 +222,7 @@ export function catalog_read_page1_header(
 
   // 3. Optional checksum verification on load
   if (verify_checksum && stored_checksum !== 0) {
-    const page_bytes = new Uint8Array(view.buffer, view.byteOffset, PAGE_SIZE);
-    const computed = computePage1Checksum(page_bytes);
+    const computed = compute_page1_checksum(view, 0);
     if (computed !== stored_checksum) {
       throw new CorruptPageError(1, stored_checksum, computed);
     }
@@ -187,22 +243,36 @@ export function catalog_read_page1_header(
 /**
  * @export_c
  */
-export function catalog_get_total_pages(view: DataView): number {
-  return view.getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+export function catalog_get_total_pages(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  return view.getUint32(page1_offset + HEADER_OFFSET_TOTAL_PAGES, true);
 }
 
 /**
  * @export_c
  */
-export function catalog_set_total_pages(view: DataView, count: number): void {
-  view.setUint32(HEADER_OFFSET_TOTAL_PAGES, count, true);
+export function catalog_set_total_pages(
+  view: DataView,
+  page1_offset: u32,
+  count?: u32,
+): void {
+  if (count === undefined) {
+    count = page1_offset;
+    page1_offset = 0;
+  }
+  view.setUint32(page1_offset + HEADER_OFFSET_TOTAL_PAGES, count, true);
 }
 
 /**
  * @export_c
  */
-export function catalog_get_free_page_head(view: DataView): number {
-  return view.getUint32(HEADER_OFFSET_FREE_PAGE_HEAD, true);
+export function catalog_get_free_page_head(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  return view.getUint32(page1_offset + HEADER_OFFSET_FREE_PAGE_HEAD, true);
 }
 
 /**
@@ -210,51 +280,70 @@ export function catalog_get_free_page_head(view: DataView): number {
  */
 export function catalog_set_free_page_head(
   view: DataView,
-  page_id: number,
+  page1_offset: u32,
+  page_id?: u32,
 ): void {
-  view.setUint32(HEADER_OFFSET_FREE_PAGE_HEAD, page_id, true);
+  if (page_id === undefined) {
+    page_id = page1_offset;
+    page1_offset = 0;
+  }
+  view.setUint32(page1_offset + HEADER_OFFSET_FREE_PAGE_HEAD, page_id, true);
 }
 
 /**
  * @export_c
  */
-export function catalog_get_schema_version(view: DataView): number {
-  return view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+export function catalog_get_schema_version(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  return view.getUint32(page1_offset + HEADER_OFFSET_SCHEMA_VERSION, true);
 }
 
 /**
  * @export_c
  */
-export function catalog_increment_schema_version(view: DataView): number {
-  const v = catalog_get_schema_version(view) + 1;
-  view.setUint32(HEADER_OFFSET_SCHEMA_VERSION, v, true);
+export function catalog_increment_schema_version(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  const v = catalog_get_schema_version(view, page1_offset) + 1;
+  view.setUint32(page1_offset + HEADER_OFFSET_SCHEMA_VERSION, v, true);
   return v;
 }
 
 /**
  * @export_c
  */
-export function catalog_get_change_counter(view: DataView): number {
-  return view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
+export function catalog_get_change_counter(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  return view.getUint32(page1_offset + HEADER_OFFSET_CHANGE_COUNTER, true);
 }
 
 /**
  * @export_c
  */
-export function catalog_increment_change_counter(view: DataView): number {
-  const c = catalog_get_change_counter(view) + 1;
-  view.setUint32(HEADER_OFFSET_CHANGE_COUNTER, c, true);
+export function catalog_increment_change_counter(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  const c = catalog_get_change_counter(view, page1_offset) + 1;
+  view.setUint32(page1_offset + HEADER_OFFSET_CHANGE_COUNTER, c, true);
   return c;
 }
 
 /**
  * @export_c
  */
-export function catalog_update_page1_checksum(view: DataView): number {
-  const chk = computePage1Checksum(
-    new Uint8Array(view.buffer, view.byteOffset, PAGE_SIZE),
-  );
-  view.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
+export function catalog_update_page1_checksum(
+  view: DataView,
+  page1_offset: u32 = 0,
+): u32 {
+  view.setUint32(page1_offset + HEADER_OFFSET_PAGE_CHECKSUM, 0, true);
+  const chk = compute_page1_checksum(view, page1_offset);
+  view.setUint32(page1_offset + HEADER_OFFSET_PAGE_CHECKSUM, chk, true);
   return chk;
 }
 
@@ -267,18 +356,21 @@ export function catalog_update_page1_checksum(view: DataView): number {
  */
 export function catalog_write_fixed_string(
   view: DataView,
-  offset: number,
+  offset: u32,
   str: string,
-  max_len: number,
+  max_len: u32,
 ): void {
-  const bytes = text_encoder.encode(str);
-  for (let i = 0; i < max_len; i++) {
-    view.setUint8(offset + i, i < bytes.length ? bytes[i] : 0);
+  let i = 0;
+  for (; i < max_len && i < strlen(str); i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+  for (; i < max_len; i++) {
+    view.setUint8(offset + i, 0);
   }
 }
 
 /**
- * @export_c
+ * Reads a fixed-length string from the catalog.
  */
 export function catalog_read_fixed_string(
   view: DataView,
@@ -295,7 +387,7 @@ export function catalog_read_fixed_string(
 }
 
 /**
- * @export_c
+ * Parses SQL type string to DataType enum.
  */
 export function catalog_parse_data_type(type_str: string): DataType {
   switch (type_str.toUpperCase()) {
@@ -323,7 +415,6 @@ export function catalog_parse_data_type(type_str: string): DataType {
 // ============================================================================
 
 /**
- * @export_c
  * Reads a TableDescriptor from Page 1 by slot index (0..15).
  */
 export function catalog_read_table_descriptor(
@@ -355,7 +446,6 @@ export function catalog_read_table_descriptor(
 }
 
 /**
- * @export_c
  * Writes a TableDescriptor into Page 1 at the specified slot index (0..15).
  */
 export function catalog_write_table_descriptor(
@@ -378,7 +468,7 @@ export function catalog_write_table_descriptor(
 }
 
 /**
- * @export_c
+ * Finds a TableDescriptor by name in Page 1, or null if not found.
  */
 export function catalog_find_table_by_name(
   view: DataView,
@@ -389,7 +479,6 @@ export function catalog_find_table_by_name(
 }
 
 /**
- * @export_c
  * Finds the slot index of an existing table by name, or -1 if not found.
  */
 export function catalog_find_table_slot(
@@ -413,10 +502,14 @@ export function catalog_find_table_slot(
  * @export_c
  * Finds the first free slot index in Page 1's TableDescriptor array.
  */
-export function catalog_find_free_table_slot(view: DataView): number {
+export function catalog_find_free_table_slot(
+  view: DataView,
+  page1_offset: u32 = 0,
+): i32 {
   for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = catalog_read_table_descriptor(view, i);
-    if (!desc || (desc.flags & TableFlag.ACTIVE) === 0) {
+    const offset = page1_offset + MASTER_TABLE_OFFSET + i * TABLE_DESCRIPTOR_SIZE;
+    const table_id = view.getUint16(offset, true);
+    if (table_id === 0) {
       return i;
     }
   }
@@ -424,7 +517,6 @@ export function catalog_find_free_table_slot(view: DataView): number {
 }
 
 /**
- * @export_c
  * Lists all active tables defined on Page 1.
  */
 export function catalog_list_table_descriptors(
@@ -445,7 +537,7 @@ export function catalog_list_table_descriptors(
 // ============================================================================
 
 /**
- * @export_c
+ * Reads an IndexDescriptor from Page 1 by slot index.
  */
 export function catalog_read_index_descriptor(
   view: DataView,
@@ -488,7 +580,7 @@ export function catalog_read_index_descriptor(
 }
 
 /**
- * @export_c
+ * Writes an IndexDescriptor into Page 1 at the specified slot index.
  */
 export function catalog_write_index_descriptor(
   view: DataView,
@@ -522,9 +614,12 @@ export const MAX_INDEXES_PAGE1 = 8;
 /**
  * @export_c
  */
-export function catalog_find_free_index_slot(view: DataView): number {
+export function catalog_find_free_index_slot(
+  view: DataView,
+  page1_offset: u32 = 0,
+): i32 {
   for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
-    const offset = INDEX_CATALOG_OFFSET + i * INDEX_DESCRIPTOR_SIZE;
+    const offset = page1_offset + INDEX_CATALOG_OFFSET + i * INDEX_DESCRIPTOR_SIZE;
     const index_id = view.getUint16(offset + 0, true);
     if (index_id === 0) return i;
   }
@@ -532,7 +627,7 @@ export function catalog_find_free_index_slot(view: DataView): number {
 }
 
 /**
- * @export_c
+ * Finds an IndexDescriptor by name in Page 1.
  */
 export function catalog_find_index_by_name(
   view: DataView,
@@ -549,7 +644,7 @@ export function catalog_find_index_by_name(
 }
 
 /**
- * @export_c
+ * Lists all index descriptors for a table.
  */
 export function catalog_list_table_indexes(
   view: DataView,
@@ -570,11 +665,17 @@ export function catalog_list_table_indexes(
  */
 export function catalog_delete_index_descriptor(
   view: DataView,
-  slot_idx: number,
-): void {
-  const offset = INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
-  uint8.fill(0, offset, offset + INDEX_DESCRIPTOR_SIZE);
+  page1_offset: u32,
+  slot_idx?: u32,
+): i32 {
+  if (slot_idx === undefined) {
+    slot_idx = page1_offset;
+    page1_offset = 0;
+  }
+  if (slot_idx >= MAX_INDEXES_PAGE1) return -1;
+  const offset = page1_offset + INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
+  memset(view, offset, 0, INDEX_DESCRIPTOR_SIZE);
+  return 0;
 }
 
 /**
@@ -582,11 +683,17 @@ export function catalog_delete_index_descriptor(
  */
 export function catalog_delete_table_descriptor(
   view: DataView,
-  slot_idx: number,
-): void {
-  const offset = MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
-  uint8.fill(0, offset, offset + TABLE_DESCRIPTOR_SIZE);
+  page1_offset: u32,
+  slot_idx?: u32,
+): i32 {
+  if (slot_idx === undefined) {
+    slot_idx = page1_offset;
+    page1_offset = 0;
+  }
+  if (slot_idx >= MAX_TABLES_PAGE1) return -1;
+  const offset = page1_offset + MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
+  memset(view, offset, 0, TABLE_DESCRIPTOR_SIZE);
+  return 0;
 }
 
 // ============================================================================
@@ -599,11 +706,12 @@ export function catalog_delete_table_descriptor(
  */
 export function catalog_init_page(
   view: DataView,
-  page_offset: number,
-  table_id: number,
-  start_col_index: number,
-  next_col_catalog_page_id: number = 0,
+  page_offset: u32,
+  table_id: u16,
+  start_col_index: u16,
+  next_col_catalog_page_id: u32 = 0,
 ): void {
+  memset(view, page_offset, 0, PAGE_SIZE);
   view.setUint8(page_offset + 0, PAGE_TYPE_CATALOG_PAGE);
   view.setUint8(page_offset + 1, 0); // flags
   view.setUint16(page_offset + 2, 0, true); // col_count_in_page = 0
@@ -611,18 +719,10 @@ export function catalog_init_page(
   view.setUint16(page_offset + 6, start_col_index, true);
   view.setUint32(page_offset + 8, next_col_catalog_page_id, true);
   view.setUint32(page_offset + 12, 0, true); // checksum
-
-  // Zero payload area (16..4095)
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
-  uint8.fill(
-    0,
-    page_offset + CATALOG_PAGE_HEADER_SIZE,
-    page_offset + PAGE_SIZE,
-  );
 }
 
 /**
- * @export_c
+ * Reads the catalog page header.
  */
 export function catalog_read_page_header(
   view: DataView,
@@ -644,20 +744,21 @@ export function catalog_read_page_header(
  */
 export function catalog_write_page_header(
   view: DataView,
-  page_offset: number,
-  header: CatalogPageHeader,
+  page_offset: u32,
+  col_count_in_page: u16,
+  table_id: u16,
+  start_col_index: u16,
+  next_col_catalog_page_id: u32,
 ): void {
-  view.setUint8(page_offset + 0, header.pageType);
-  view.setUint8(page_offset + 1, header.flags);
-  view.setUint16(page_offset + 2, header.colCountInPage, true);
-  view.setUint16(page_offset + 4, header.tableId, true);
-  view.setUint16(page_offset + 6, header.startColIndex, true);
-  view.setUint32(page_offset + 8, header.nextColCatalogPageId, true);
-  view.setUint32(page_offset + 12, header.pageChecksum, true);
+  view.setUint8(page_offset + 0, PAGE_TYPE_CATALOG_PAGE);
+  view.setUint8(page_offset + 1, 0);
+  view.setUint16(page_offset + 2, col_count_in_page, true);
+  view.setUint16(page_offset + 4, table_id, true);
+  view.setUint16(page_offset + 6, start_col_index, true);
+  view.setUint32(page_offset + 8, next_col_catalog_page_id, true);
 }
 
 /**
- * @export_c
  * Writes a ColumnMeta entry (72 bytes) into a catalog page at inPageSlot (0..55).
  */
 export function catalog_write_column_meta(
@@ -681,7 +782,6 @@ export function catalog_write_column_meta(
 }
 
 /**
- * @export_c
  * Reads a ColumnMeta entry (72 bytes) from a catalog page at inPageSlot (0..55).
  */
 export function catalog_read_column_meta(
@@ -700,7 +800,6 @@ export function catalog_read_column_meta(
 }
 
 /**
- * @export_c
  * Calculates cross-page column mapping:
  * page_chain_idx = floor(col_idx / 56)
  * col_idx_in_page = col_idx % 56
@@ -720,7 +819,6 @@ export function catalog_map_column_location(col_idx: number): {
 // ============================================================================
 
 /**
- * @export_c
  * Creates a new table, allocating a root data page and dedicated column catalog page(s).
  */
 export function catalog_create_table(
@@ -931,7 +1029,6 @@ export function catalog_create_table(
 }
 
 /**
- * @export_c
  * Loads the complete TableMeta (including all columns from chained catalog pages) for a table.
  */
 export function catalog_load_table_meta(
@@ -983,7 +1080,6 @@ export function catalog_load_table_meta(
 }
 
 /**
- * @export_c
  * Loads all active tables and their full schemas from Page 1.
  */
 export function catalog_load_all_tables(

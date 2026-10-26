@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "generate:layouts": "node scripts/generate_layouts.js",
+    "transpile:c": "vite-node scripts/transpiler/index.ts --all --write",
     "build:wasm": "node scripts/build_wasm.js",
     "prebuild": "node scripts/generate_layouts.js",
     "build": "vite build",

@@ -61,7 +61,6 @@ export type {
 const text_decoder = new TextDecoder();
 
 /**
- * @export_c
  * Synchronous Bytecode VM execution step loop.
  * Runs instructions until STATUS_DONE, STATUS_BUFFER_FULL, or an error.
  */
