@@ -1,13 +1,13 @@
-import { TableMeta } from '../../../types/index.js';
+import { TableMeta } from "../../../types/index.js";
 import {
   QueryPlan,
   QueryFilter,
   buildRootFilter,
   getTopLevelConjunctionFilters,
-} from '../compiler.js';
+} from "../compiler.js";
 import {
   QueryPlanner,
-  OptimizedJoinPlanResult,
+  OptimizedPlanResult,
   JoinEdge,
   getFilterReferencedTables,
   getSingleTableBaseCost,
@@ -19,7 +19,11 @@ import {
   COST_INDEX_SEEK,
   COST_INDEX_NEXT,
   COST_ROW_EVAL,
-} from './types.js';
+} from "./types.js";
+import {
+  optimizeWherePredicates,
+  inferTransitivePredicates,
+} from "./where_optimizer.js";
 
 export interface CostBasedPlannerOptions {
   indexSeekCost?: number;
@@ -28,11 +32,13 @@ export interface CostBasedPlannerOptions {
 }
 
 /**
- * CostBasedPlanner uses Dynamic Programming (Selinger/System-R style) to evaluate
- * join permutations and select the optimal plan based on cardinality and cost estimates.
+ * CostBasedPlanner unifies WHERE filter optimization and JOIN planning:
+ * - Detects contradictions and prunes redundant/subsumed WHERE conditions.
+ * - Infers transitive filters across join boundaries.
+ * - Evaluates join permutations with Dynamic Programming to minimize total cost.
  */
 export class CostBasedPlanner implements QueryPlanner {
-  readonly name = 'cost';
+  readonly name = "cost";
   private indexSeekCost: number;
   private indexNextCost: number;
   private rowEvalCost: number;
@@ -43,14 +49,83 @@ export class CostBasedPlanner implements QueryPlanner {
     this.rowEvalCost = options?.rowEvalCost ?? COST_ROW_EVAL;
   }
 
-  optimize(plan: QueryPlan): OptimizedJoinPlanResult {
+  optimize(plan: QueryPlan): OptimizedPlanResult {
     const originalTables: TableMeta[] = [
       plan.table,
       ...(plan.joinedTables?.map((j) => j.table) ?? []),
     ];
     const N = originalTables.length;
 
-    const rootFilter = buildRootFilter(plan.filters);
+    // 1. Optimize WHERE filters (contradiction checking, redundancy pruning, cost reordering)
+    const whereRes = optimizeWherePredicates(plan.filters, originalTables);
+    if (whereRes.isAlwaysFalse) {
+      return {
+        plan: { ...plan, filters: [] },
+        orderedTables: originalTables,
+        metrics: null,
+        isAlwaysFalse: true,
+        whereMetrics: whereRes.metrics,
+      };
+    }
+
+    let workingFilters = whereRes.filters;
+    let whereMetrics = whereRes.metrics;
+
+    // 2. Transitive predicate inference across join boundaries
+    if (plan.joinedTables && plan.joinedTables.length > 0) {
+      const withTransitive = inferTransitivePredicates(
+        workingFilters,
+        plan.joinedTables,
+      );
+      if (withTransitive.length > workingFilters.length) {
+        const transRes = optimizeWherePredicates(
+          withTransitive,
+          originalTables,
+        );
+        if (transRes.isAlwaysFalse) {
+          return {
+            plan: { ...plan, filters: [] },
+            orderedTables: originalTables,
+            metrics: null,
+            isAlwaysFalse: true,
+            whereMetrics: transRes.metrics,
+          };
+        }
+        workingFilters = transRes.filters;
+        whereMetrics = transRes.metrics;
+      }
+    }
+
+    // 3. Handle single table queries
+    if (N <= 1 || !plan.joinedTables || plan.joinedTables.length === 0) {
+      const singleFilters = new Map<number, QueryFilter[]>();
+      singleFilters.set(0, workingFilters);
+
+      const baseCost = getSingleTableBaseCost(plan.table, workingFilters);
+
+      return {
+        plan: {
+          ...plan,
+          filters: workingFilters,
+        },
+        orderedTables: [plan.table],
+        metrics: {
+          totalCost: baseCost.cost,
+          estimatedRows: baseCost.rows,
+          joinOrder: [plan.table.name],
+          singleTableFilters: singleFilters,
+          crossFilters: [],
+          tableScanTypes: [baseCost.scanType],
+          tableIndexNames: [baseCost.indexName],
+        },
+        isAlwaysFalse: false,
+        isAlwaysTrue: whereMetrics.isAlwaysTrue,
+        whereMetrics,
+      };
+    }
+
+    // 4. Multi-table join planning
+    const rootFilter = buildRootFilter(workingFilters);
     const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
 
     // Partition filters: single-table filters per table, and cross-table filters
@@ -100,7 +175,7 @@ export class CostBasedPlanner implements QueryPlanner {
       order: number[];
       cost: number;
       rows: number;
-      scanTypes: ('TableScan' | 'IndexScan')[];
+      scanTypes: ("TableScan" | "IndexScan")[];
       indexNames: (string | undefined)[];
       edgesUsed: JoinEdge[];
     }
@@ -165,10 +240,10 @@ export class CostBasedPlanner implements QueryPlanner {
             isBetter = true;
           } else {
             const candidateIndexScans =
-              prevState.scanTypes.filter((t) => t === 'IndexScan').length +
-              (evalRes.scanType === 'IndexScan' ? 1 : 0);
+              prevState.scanTypes.filter((t) => t === "IndexScan").length +
+              (evalRes.scanType === "IndexScan" ? 1 : 0);
             const existingIndexScans = existing.scanTypes.filter(
-              (t) => t === 'IndexScan',
+              (t) => t === "IndexScan",
             ).length;
 
             if (
@@ -225,7 +300,7 @@ export class CostBasedPlanner implements QueryPlanner {
     let winningOrder: number[];
     let winningCost: number;
     let winningRows: number;
-    let winningScanTypes: ('TableScan' | 'IndexScan')[];
+    let winningScanTypes: ("TableScan" | "IndexScan")[];
     let winningIndexNames: (string | undefined)[];
 
     if (bestState) {
@@ -238,7 +313,7 @@ export class CostBasedPlanner implements QueryPlanner {
       winningOrder = Array.from({ length: N }, (_, i) => i);
       winningCost = 999999;
       winningRows = 100;
-      winningScanTypes = Array.from({ length: N }, () => 'TableScan');
+      winningScanTypes = Array.from({ length: N }, () => "TableScan");
       winningIndexNames = Array.from({ length: N }, () => undefined);
     }
 
@@ -249,7 +324,10 @@ export class CostBasedPlanner implements QueryPlanner {
       edges,
       plan.joinedTables,
     );
-    const effectiveSelectExprs = materializeOutputSelectExprs(plan, originalTables);
+    const effectiveSelectExprs = materializeOutputSelectExprs(
+      plan,
+      originalTables,
+    );
 
     return {
       plan: {
@@ -257,6 +335,7 @@ export class CostBasedPlanner implements QueryPlanner {
         table: orderedTables[0],
         joinedTables: newJoinedPlans,
         selectExprs: effectiveSelectExprs,
+        filters: workingFilters,
       },
       orderedTables,
       metrics: {
@@ -268,6 +347,9 @@ export class CostBasedPlanner implements QueryPlanner {
         tableScanTypes: winningScanTypes,
         tableIndexNames: winningIndexNames,
       },
+      isAlwaysFalse: false,
+      isAlwaysTrue: whereMetrics.isAlwaysTrue,
+      whereMetrics,
     };
   }
 
@@ -281,7 +363,7 @@ export class CostBasedPlanner implements QueryPlanner {
   ): {
     stepCost: number;
     newRows: number;
-    scanType: 'TableScan' | 'IndexScan';
+    scanType: "TableScan" | "IndexScan";
     indexName?: string;
     matchedEdge: JoinEdge;
   } {
@@ -330,16 +412,16 @@ export class CostBasedPlanner implements QueryPlanner {
       const fallbackEdge: JoinEdge = {
         tableA: plannedTableIndices[0],
         tableB: nextTableIdx,
-        colA: '',
-        colB: '',
-        op: '=',
-        type: 'inner',
+        colA: "",
+        colB: "",
+        op: "=",
+        type: "inner",
         declaredRightTable: nextTableIdx,
       };
       return {
         stepCost,
         newRows,
-        scanType: 'TableScan',
+        scanType: "TableScan",
         matchedEdge: fallbackEdge,
       };
     }
@@ -358,7 +440,7 @@ export class CostBasedPlanner implements QueryPlanner {
       return {
         stepCost,
         newRows,
-        scanType: 'IndexScan',
+        scanType: "IndexScan",
         indexName: bestCand.idxMatch.index.name,
         matchedEdge: bestCand.edge,
       };
@@ -372,7 +454,7 @@ export class CostBasedPlanner implements QueryPlanner {
       return {
         stepCost,
         newRows,
-        scanType: 'IndexScan',
+        scanType: "IndexScan",
         indexName: bestCand.idxMatch.index.name,
         matchedEdge: bestCand.edge,
       };
@@ -381,12 +463,14 @@ export class CostBasedPlanner implements QueryPlanner {
     const stepCost = outerRows * (2.0 + rowCount * 0.1);
     const newRows = Math.max(
       1,
-      Math.round(outerRows * Math.max(1, Math.round(rowCount * 0.1)) * filterSel),
+      Math.round(
+        outerRows * Math.max(1, Math.round(rowCount * 0.1)) * filterSel,
+      ),
     );
     return {
       stepCost,
       newRows,
-      scanType: 'TableScan',
+      scanType: "TableScan",
       matchedEdge: bestCand.edge,
     };
   }

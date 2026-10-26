@@ -8,7 +8,7 @@ import {
 } from '../compiler.js';
 import {
   QueryPlanner,
-  OptimizedJoinPlanResult,
+  OptimizedPlanResult,
   getFilterReferencedTables,
   getSingleTableBaseCost,
   buildJoinEdges,
@@ -31,7 +31,7 @@ export class CustomOrderPlanner implements QueryPlanner {
     this.orderSpec = orderSpec;
   }
 
-  optimize(plan: QueryPlan): OptimizedJoinPlanResult {
+  optimize(plan: QueryPlan): OptimizedPlanResult {
     const originalTables: TableMeta[] = [
       plan.table,
       ...(plan.joinedTables?.map((j) => j.table) ?? []),

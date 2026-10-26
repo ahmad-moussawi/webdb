@@ -96,7 +96,6 @@ import {
 import { ParsedSelectExpr, deriveDefaultAlias } from "../compiler/expr_parser.ts";
 import {
   QueryPlanner,
-  QueryPlannerClass,
 } from "../compiler/planner/index.ts";
 import {
   QueryBuilder,
@@ -132,7 +131,7 @@ export interface WebDbOptions {
   maxQueryMemory?: number;
   core?: "js" | "wasm";
   wasmBinary?: ArrayBuffer | Uint8Array;
-  planner?: QueryPlanner | QueryPlannerClass;
+  planner?: QueryPlanner;
 }
 
 export class WebDB implements IDatabaseQueryExecutor {
@@ -141,7 +140,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   readonly driver: BufferPoolDriver;
   readonly coreMode: "js" | "wasm";
   readonly wasmCore?: WasmCoreExports;
-  private planner?: QueryPlanner | QueryPlannerClass;
+  private planner?: QueryPlanner;
 
   /**
    * Alias to driver for callers/tests that inspect the buffer pool.
@@ -164,7 +163,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     driver: BufferPoolDriver,
     coreMode: "js" | "wasm" = "js",
     wasmCore?: WasmCoreExports,
-    planner?: QueryPlanner | QueryPlannerClass,
+    planner?: QueryPlanner,
   ) {
     this.vfs = vfs;
     this.io = io;
@@ -237,14 +236,21 @@ export class WebDB implements IDatabaseQueryExecutor {
       );
     }
 
-    return new WebDB(vfs, io, driver, coreMode, wasmCore, options.planner);
+    return new WebDB(
+      vfs,
+      io,
+      driver,
+      coreMode,
+      wasmCore,
+      options.planner,
+    );
   }
 
-  getPlanner(): QueryPlanner | QueryPlannerClass | undefined {
+  getPlanner(): QueryPlanner | undefined {
     return this.planner;
   }
 
-  setPlanner(planner?: QueryPlanner | QueryPlannerClass): this {
+  setPlanner(planner?: QueryPlanner): this {
     this.planner = planner;
     return this;
   }
@@ -1057,7 +1063,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       joins?: JoinClause[];
       limit?: number;
       offset?: number;
-      planner?: QueryPlanner | QueryPlannerClass;
+      planner?: QueryPlanner;
     },
   ): Promise<ExplainOutput> {
     const table = await this.getTable(tableName);
@@ -1228,8 +1234,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     if ((bytecode as any).inSets) {
       this.vmCtx.inSets = (bytecode as any).inSets;
     }
-    if (plan.keyInfos) {
-      this.vmCtx.keyInfos = plan.keyInfos;
+    const keyInfos = (bytecode as any).keyInfos ?? plan.keyInfos;
+    if (keyInfos) {
+      this.vmCtx.keyInfos = keyInfos;
     }
 
     const udfsRecord: Record<number, (...args: any[]) => any> = {};

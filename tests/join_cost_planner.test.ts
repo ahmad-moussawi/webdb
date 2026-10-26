@@ -311,14 +311,14 @@ describe('Join Cost Planner & Optimization', () => {
       await db.insert('badges', { id: 2, user_id: 12, title: 'Silver' });
     });
 
-    it('allows passing planner class to WebDB.open()', async () => {
+    it('allows passing planner instance to WebDB.open()', async () => {
       const heuristicDb = await WebDB.open({
         name: 'heuristic_db',
         storage: 'memory',
-        planner: HeuristicPlanner,
+        planner: new HeuristicPlanner(),
       });
 
-      expect(heuristicDb.getPlanner()).toBe(HeuristicPlanner);
+      expect(heuristicDb.getPlanner()).toBeInstanceOf(HeuristicPlanner);
     });
 
     it('NoOpPlanner preserves original table order without reordering', async () => {
@@ -335,7 +335,7 @@ describe('Join Cost Planner & Optimization', () => {
         .from('users')
         .join('badges', 'users.id', '=', 'badges.user_id')
         .select(['users.name', 'badges.title'])
-        .withPlanner(NoOpPlanner)
+        .withPlanner(new NoOpPlanner())
         .explain();
 
       expect(noOpExplain.plan.joinOrder).toEqual(['users', 'badges']);
@@ -346,7 +346,7 @@ describe('Join Cost Planner & Optimization', () => {
         .from('users')
         .join('badges', 'users.id', '=', 'badges.user_id')
         .select(['users.name', 'badges.title'])
-        .withPlanner(NoOpPlanner)
+        .withPlanner(new NoOpPlanner())
         .toArray();
 
       expect(rows).toHaveLength(2);
@@ -359,8 +359,8 @@ describe('Join Cost Planner & Optimization', () => {
     });
 
     it('allows changing planner dynamically via db.setPlanner()', async () => {
-      db.setPlanner(NoOpPlanner);
-      expect(db.getPlanner()).toBe(NoOpPlanner);
+      db.setPlanner(new NoOpPlanner());
+      expect(db.getPlanner()).toBeInstanceOf(NoOpPlanner);
 
       const explainNoOp = await db
         .from('users')
@@ -370,7 +370,7 @@ describe('Join Cost Planner & Optimization', () => {
       expect(explainNoOp.plan.joinOrder).toEqual(['users', 'badges']);
 
       // Switch back to CostBasedPlanner
-      db.setPlanner(CostBasedPlanner);
+      db.setPlanner(new CostBasedPlanner());
       const explainCost = await db
         .from('users')
         .join('badges', 'users.id', '=', 'badges.user_id')
@@ -380,14 +380,14 @@ describe('Join Cost Planner & Optimization', () => {
     });
 
     it('supports query-level planner override with .withPlanner()', async () => {
-      db.setPlanner(NoOpPlanner);
+      db.setPlanner(new NoOpPlanner());
 
       // Query overrides db-level NoOpPlanner with CostBasedPlanner
       const explain = await db
         .from('users')
         .join('badges', 'users.id', '=', 'badges.user_id')
         .select(['users.name', 'badges.title'])
-        .withPlanner(CostBasedPlanner)
+        .withPlanner(new CostBasedPlanner())
         .explain();
 
       expect(explain.plan.joinOrder).toEqual(['badges', 'users']);

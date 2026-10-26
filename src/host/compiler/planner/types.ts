@@ -14,6 +14,16 @@ import {
 } from '../compiler.js';
 import { ParsedSelectExpr } from '../expr_parser.js';
 
+export interface WhereMetrics {
+  originalCount: number;
+  optimizedCount: number;
+  isAlwaysFalse: boolean;
+  isAlwaysTrue: boolean;
+  contradictionReason?: string;
+  eliminatedFiltersCount: number;
+  reordered: boolean;
+}
+
 export interface PlanCostMetrics {
   totalCost: number;
   estimatedRows: number;
@@ -24,18 +34,19 @@ export interface PlanCostMetrics {
   tableIndexNames: (string | undefined)[];
 }
 
-export interface OptimizedJoinPlanResult {
+export interface OptimizedPlanResult {
   plan: QueryPlan;
   orderedTables: TableMeta[];
   metrics: PlanCostMetrics | null;
+  isAlwaysFalse?: boolean;
+  isAlwaysTrue?: boolean;
+  whereMetrics?: WhereMetrics;
 }
 
 export interface QueryPlanner {
   readonly name: string;
-  optimize(plan: QueryPlan): OptimizedJoinPlanResult;
+  optimize(plan: QueryPlan): OptimizedPlanResult;
 }
-
-export type QueryPlannerClass = new () => QueryPlanner;
 
 export interface JoinEdge {
   tableA: number;

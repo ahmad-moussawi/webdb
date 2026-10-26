@@ -15,7 +15,6 @@ import {
 } from '../compiler/compiler.js';
 import {
   QueryPlanner,
-  QueryPlannerClass,
 } from '../compiler/planner/index.js';
 import {
   ExprNode,
@@ -267,7 +266,7 @@ export interface QueryExecutionOptions {
   select?: NormalizedSelectField[];
   selectExprs?: ParsedSelectExpr[];
   joins?: JoinClause[];
-  planner?: QueryPlanner | QueryPlannerClass;
+  planner?: QueryPlanner;
 }
 
 export interface IDatabaseQueryExecutor {
@@ -284,7 +283,7 @@ export interface IDatabaseQueryExecutor {
       joins?: JoinClause[];
       limit?: number;
       offset?: number;
-      planner?: QueryPlanner | QueryPlannerClass;
+      planner?: QueryPlanner;
     },
   ): Promise<ExplainOutput>;
   executeQuery(
@@ -339,9 +338,9 @@ export class QueryBuilder {
   private aggExprs: AggExpr[] = [];
   private havingFilters: QueryFilter[] = [];
   private joins: JoinClause[] = [];
-  private planner?: QueryPlanner | QueryPlannerClass;
+  private planner?: QueryPlanner;
 
-  withPlanner(planner: QueryPlanner | QueryPlannerClass): this {
+  withPlanner(planner: QueryPlanner): this {
     this.planner = planner;
     return this;
   }

@@ -500,7 +500,7 @@ describe("Bytecode Compiler & Emitter Unit Tests", () => {
       // Construct a query plan with many filters to overflow registers >= 64
       const filters = Array.from({ length: 35 }, (_, i) => ({
         type: "cmp" as const,
-        colName: "age",
+        colName: `extra_${i % 30}`,
         op: ">" as const,
         value: i,
       }));

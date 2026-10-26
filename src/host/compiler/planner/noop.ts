@@ -8,7 +8,7 @@ import {
 } from '../compiler.js';
 import {
   QueryPlanner,
-  OptimizedJoinPlanResult,
+  OptimizedPlanResult,
   getFilterReferencedTables,
   getSingleTableBaseCost,
   materializeOutputSelectExprs,
@@ -21,7 +21,7 @@ import {
 export class NoOpPlanner implements QueryPlanner {
   readonly name = 'noop';
 
-  optimize(plan: QueryPlan): OptimizedJoinPlanResult {
+  optimize(plan: QueryPlan): OptimizedPlanResult {
     const originalTables: TableMeta[] = [
       plan.table,
       ...(plan.joinedTables?.map((j) => j.table) ?? []),

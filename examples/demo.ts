@@ -4,7 +4,7 @@ async function main() {
   const db = await WebDB.open({
     name: "demo_db",
     storage: "memory",
-    planner: CostBasedPlanner,
+    planner: new CostBasedPlanner(),
   });
 
   await db.createTable("countries", [
