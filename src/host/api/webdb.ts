@@ -1107,7 +1107,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     const drivingTable = executionTables[0];
     const instructions = disassembleBytecode(bytecode, drivingTable);
     const assembly = formatDisassembly(instructions);
-    const indexScan = (bytecode as any).indexScan;
+    const indexScan =
+      (bytecode as any).indexScan ?? (bytecode as any).table0Scan;
     const scanType = indexScan ? "IndexScan" : "TableScan";
     const indexName = indexScan ? indexScan.index.name : undefined;
     const joinedTableScans = (bytecode as any).joinedTableScans as
@@ -1151,6 +1152,13 @@ export class WebDB implements IDatabaseQueryExecutor {
         estimatedCost: (bytecode as any).estimatedCost,
         estimatedRows: (bytecode as any).estimatedRows,
         joinOrder: (bytecode as any).joinOrder,
+        isOrderSatisfied:
+          (bytecode as any).isOrderSatisfied ??
+          (bytecode as any).planMetrics?.isOrderSatisfied ??
+          false,
+        sortCostAvoided:
+          (bytecode as any).planMetrics?.sortCostAvoided ??
+          undefined,
       },
       bytecodeSize: bytecode.byteLength,
       instructions,
@@ -1334,6 +1342,13 @@ export class WebDB implements IDatabaseQueryExecutor {
         throw new Error(`VM execution error: status=${status}`);
       }
     }
+
+    Object.defineProperty(rows, "isOrderSatisfied", {
+      value: (bytecode as any).isOrderSatisfied ?? false,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
 
     return rows;
   }

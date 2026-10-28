@@ -238,6 +238,8 @@ export interface ExplainOutput {
     estimatedCost?: number;
     estimatedRows?: number;
     joinOrder?: string[];
+    isOrderSatisfied?: boolean;
+    sortCostAvoided?: number;
   };
   bytecodeSize: number;
   instructions: DisassembledInstruction[];
@@ -1691,11 +1693,18 @@ export class QueryBuilder {
     }
 
     const rawRows = await this.db.executeQuery(this.tableName, this.filters, {
-      limit: hasJoins && hasOrderBy ? null : this.limitCount,
-      offset: hasJoins && hasOrderBy ? null : this.offsetCount,
+      limit:
+        hasJoins && hasOrderBy && hasAggsOrGrouping ? null : this.limitCount,
+      offset:
+        hasJoins && hasOrderBy && hasAggsOrGrouping ? null : this.offsetCount,
       sortCol: hasJoins ? null : this.sortCol,
       sortDir: this.sortDir,
-      orderBy: hasJoins ? undefined : (hasOrderBy ? this.orderKeys : undefined),
+      orderBy:
+        hasJoins && hasAggsOrGrouping
+          ? undefined
+          : hasOrderBy
+            ? this.orderKeys
+            : undefined,
       joins: hasJoins ? this.joins : undefined,
       groupBy:
         this.groupKeys.length > 0
@@ -1711,7 +1720,8 @@ export class QueryBuilder {
     });
 
     let rows = rawRows;
-    if ((hasAggsOrGrouping || hasJoins) && hasOrderBy) {
+    const isOrderSatisfied = (rawRows as any).isOrderSatisfied === true;
+    if ((hasAggsOrGrouping || hasJoins) && hasOrderBy && !isOrderSatisfied) {
       rows = this.sortAggregatedRows(rows);
       if (hasJoins) {
         if (this.offsetCount !== null && this.offsetCount > 0) {

@@ -102,6 +102,10 @@ export default defineConfig({
             text: "Query Builder API & Grammar",
             link: "/plans/query_builder_api_and_grammar",
           },
+          {
+            text: "Query Planner & Optimization",
+            link: "/query-planner",
+          },
         ],
       },
       {
@@ -112,6 +116,10 @@ export default defineConfig({
           {
             text: "Query Builder API & Grammar",
             link: "/plans/query_builder_api_and_grammar",
+          },
+          {
+            text: "Query Planner Architecture",
+            link: "/query-planner",
           },
           { text: "System Limits & Invariants", link: "/plans/limitations" },
           {

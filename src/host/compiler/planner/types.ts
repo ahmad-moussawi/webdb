@@ -9,8 +9,10 @@ import {
   JoinPlan,
   QueryFilter,
   ComparisonOp,
+  SortKey,
   resolveColumnAcrossTables,
   chooseIndexScan,
+  isIndexAlignedWithOrderBy,
 } from '../compiler.js';
 import { ParsedSelectExpr } from '../expr_parser.js';
 
@@ -32,6 +34,8 @@ export interface PlanCostMetrics {
   crossFilters: QueryFilter[];
   tableScanTypes: ('TableScan' | 'IndexScan')[];
   tableIndexNames: (string | undefined)[];
+  isOrderSatisfied?: boolean;
+  sortCostAvoided?: number;
 }
 
 export interface OptimizedPlanResult {
@@ -41,6 +45,8 @@ export interface OptimizedPlanResult {
   isAlwaysFalse?: boolean;
   isAlwaysTrue?: boolean;
   whereMetrics?: WhereMetrics;
+  isOrderSatisfied?: boolean;
+  sortCostAvoided?: number;
 }
 
 export interface QueryPlanner {
@@ -186,11 +192,15 @@ export function estimateFilterSelectivity(
 export function getSingleTableBaseCost(
   table: TableMeta,
   filters: QueryFilter[],
+  orderBy?: SortKey[],
+  limit?: number,
 ): {
   cost: number;
   rows: number;
   scanType: 'TableScan' | 'IndexScan';
   indexName?: string;
+  isOrderSatisfied?: boolean;
+  sortCostAvoided?: number;
 } {
   const rowCount = Math.max(1, table.rowCountEstimate || 10);
   let selectivity = 1.0;
@@ -200,11 +210,23 @@ export function getSingleTableBaseCost(
   }
 
   const estimatedRows = Math.max(1, Math.round(rowCount * selectivity));
-  const cand = chooseIndexScan(table, filters, filters);
+  const hasOrderBy = orderBy !== undefined && orderBy.length > 0;
+  const explicitSortCost =
+    hasOrderBy && estimatedRows > 1
+      ? estimatedRows * Math.log2(estimatedRows) * COST_ROW_EVAL
+      : 0;
+
+  const cand = chooseIndexScan(table, filters, filters, orderBy);
 
   if (cand) {
     const isPoint = cand.scanType === 'point';
     const isMultiPoint = cand.scanType === 'multi_point';
+    const satisfiesOrder = cand.satisfiesOrderBy === true;
+    const effectiveRows =
+      satisfiesOrder && limit !== undefined && limit > 0
+        ? Math.min(limit, estimatedRows)
+        : estimatedRows;
+
     let cost = COST_INDEX_SEEK;
     if (isPoint) {
       cost += 1 * COST_ROW_EVAL;
@@ -213,31 +235,51 @@ export function getSingleTableBaseCost(
         rows: 1,
         scanType: 'IndexScan',
         indexName: cand.index.name,
+        isOrderSatisfied: true,
+        sortCostAvoided: hasOrderBy ? explicitSortCost : undefined,
       };
     }
     if (isMultiPoint) {
       const numVals = cand.inValues?.length || 1;
-      cost = numVals * COST_INDEX_SEEK + estimatedRows * COST_ROW_EVAL;
+      cost = numVals * COST_INDEX_SEEK + effectiveRows * COST_ROW_EVAL;
+      if (!satisfiesOrder && hasOrderBy) {
+        cost += explicitSortCost;
+      }
       return {
         cost,
-        rows: estimatedRows,
+        rows: effectiveRows,
         scanType: 'IndexScan',
         indexName: cand.index.name,
+        isOrderSatisfied: satisfiesOrder,
+        sortCostAvoided: satisfiesOrder ? explicitSortCost : undefined,
       };
     }
     // Range
-    cost += estimatedRows * COST_INDEX_NEXT;
+    cost += effectiveRows * COST_INDEX_NEXT + effectiveRows * COST_ROW_EVAL;
+    if (!satisfiesOrder && hasOrderBy) {
+      cost += explicitSortCost;
+    }
     return {
       cost,
-      rows: estimatedRows,
+      rows: effectiveRows,
       scanType: 'IndexScan',
       indexName: cand.index.name,
+      isOrderSatisfied: satisfiesOrder,
+      sortCostAvoided: satisfiesOrder ? explicitSortCost : undefined,
     };
   }
 
   // Full table scan
-  const cost = rowCount * COST_ROW_EVAL;
-  return { cost, rows: estimatedRows, scanType: 'TableScan' };
+  let cost = rowCount * COST_ROW_EVAL;
+  if (hasOrderBy) {
+    cost += explicitSortCost;
+  }
+  return {
+    cost,
+    rows: estimatedRows,
+    scanType: 'TableScan',
+    isOrderSatisfied: false,
+  };
 }
 
 /**
@@ -416,4 +458,34 @@ export function reconstructJoinPlans(
   }
 
   return newJoinedPlans;
+}
+
+/**
+ * Checks whether all ORDER BY keys belong to candidateTable and are ASC,
+ * which enables nested-loop join order preservation if candidateTable is the driving table.
+ */
+export function doesTableSatisfyJoinOrderKeys(
+  candidateTable: TableMeta,
+  candidateTableIdx: number,
+  allTables: TableMeta[],
+  orderBy?: SortKey[],
+  selectExprs?: ParsedSelectExpr[],
+): boolean {
+  if (!orderBy || orderBy.length === 0) return false;
+  for (const k of orderBy) {
+    if (k.direction === 'desc') return false;
+    const colName = k.colName;
+    if (!colName) return false;
+    let resolved = resolveColumnAcrossTables(colName, allTables);
+    if (!resolved && selectExprs) {
+      const se = selectExprs.find((s) => s.alias === colName);
+      if (se && se.expr.type === 'col') {
+        resolved = resolveColumnAcrossTables(se.expr.name, allTables);
+      }
+    }
+    if (!resolved || resolved.tableIdx !== candidateTableIdx) {
+      return false;
+    }
+  }
+  return true;
 }

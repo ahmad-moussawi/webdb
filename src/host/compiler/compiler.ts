@@ -134,6 +134,8 @@ export interface QueryPlan {
   limit?: number;
   offset?: number;
   planner?: QueryPlanner;
+  isOrderSatisfied?: boolean;
+  sortCostAvoided?: number;
 }
 
 export class BytecodeEmitter {
@@ -2253,20 +2255,161 @@ function emitLoadConstant(
 export interface CandidateIndexScan {
   index: IndexDescriptor;
   scanType: "point" | "range" | "multi_point";
-  seekFilter: QueryFilter;
-  filterIndex: number; // index into leafFilters
+  seekFilter?: QueryFilter;
+  filterIndex: number; // index into leafFilters, -1 if synthetic for orderBy
   keyType: DataType;
   compositeValue?: Uint8Array;
   inValues?: any[];
+  satisfiesOrderBy?: boolean;
+}
+
+/**
+ * Returns minimum scalar key value for DataType when seeking the start of an index.
+ */
+export function getMinKeyValueForType(type: DataType): any {
+  switch (type) {
+    case DataType.INT32:
+      return -2147483648;
+    case DataType.INT64:
+      return -9223372036854775808n;
+    case DataType.FLOAT64:
+      return -Infinity;
+    case DataType.TEXT:
+    case DataType.UUID:
+    case DataType.ULID:
+      return "";
+    case DataType.BLOB:
+      return new Uint8Array(0);
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Tests whether a secondary index satisfies the query's ORDER BY keys directly.
+ * Forward B-Tree scans naturally stream in ASC order.
+ */
+export function isIndexAlignedWithOrderBy(
+  index: IndexDescriptor,
+  table: TableMeta,
+  orderBy?: SortKey[],
+  equalityColumns?: Set<string>,
+): boolean {
+  if (!orderBy || orderBy.length === 0) return false;
+  // All orderBy keys must be ascending (or default asc)
+  for (const k of orderBy) {
+    if (k.direction === "desc") return false;
+  }
+
+  const indexColNames = index.columnIndices.map((i) =>
+    table.columns[i].name.toLowerCase(),
+  );
+
+  // Skip leading index columns that are fixed by equality filters
+  let idxPos = 0;
+  if (equalityColumns && equalityColumns.size > 0) {
+    while (
+      idxPos < indexColNames.length &&
+      equalityColumns.has(indexColNames[idxPos])
+    ) {
+      idxPos++;
+    }
+  }
+
+  // Check if subsequent index columns match the orderBy columns in order
+  let orderPos = 0;
+  while (idxPos < indexColNames.length && orderPos < orderBy.length) {
+    const orderCol = orderBy[orderPos].colName?.toLowerCase();
+    if (!orderCol || orderCol !== indexColNames[idxPos]) {
+      return false;
+    }
+    idxPos++;
+    orderPos++;
+  }
+
+  return orderPos === orderBy.length;
+}
+
+/**
+ * Tests whether a join plan preserves the requested ORDER BY.
+ * In a nested loop join, if all ORDER BY keys belong to the driving table (Table 0)
+ * and are sorted in ASC order, the outer loop determines the output order.
+ */
+export function canJoinPreserveOrder(
+  drivingTable: TableMeta,
+  joinedTables: JoinPlan[],
+  orderBy?: SortKey[],
+  allTables?: TableMeta[],
+  selectExprs?: ParsedSelectExpr[],
+): boolean {
+  if (!orderBy || orderBy.length === 0) return false;
+  for (const k of orderBy) {
+    if (k.direction === "desc") return false;
+    const colName = k.colName;
+    if (!colName) return false;
+
+    if (allTables && allTables.length > 0) {
+      let resolved = resolveColumnAcrossTables(colName, allTables);
+      if (!resolved && selectExprs) {
+        const se = selectExprs.find((s) => s.alias === colName);
+        if (se && se.expr.type === "col") {
+          resolved = resolveColumnAcrossTables(se.expr.name, allTables);
+        }
+      }
+      if (!resolved || resolved.tableIdx !== 0) {
+        return false;
+      }
+    } else {
+      const shortCol = colName.includes(".")
+        ? colName.slice(colName.lastIndexOf(".") + 1)
+        : colName;
+      const isDrivingCol = drivingTable.columns.some(
+        (c) => c.name.toLowerCase() === shortCol.toLowerCase(),
+      );
+      if (!isDrivingCol) return false;
+    }
+  }
+
+  return true;
 }
 
 export function chooseIndexScan(
   table: TableMeta,
   candidateFilters: QueryFilter[],
   leafFilters?: QueryFilter[],
+  orderBy?: SortKey[],
 ): CandidateIndexScan | null {
   if (!table.indexes || table.indexes.length === 0) return null;
   const allLeaves = leafFilters ?? candidateFilters;
+
+  const equalityCols = new Set<string>();
+  for (const f of candidateFilters) {
+    if (
+      f.type === "cmp" &&
+      (f.op === "=" || f.op === undefined) &&
+      f.colName &&
+      f.value !== undefined &&
+      f.value !== null
+    ) {
+      equalityCols.add(f.colName.toLowerCase());
+    }
+  }
+
+  const tagCandidate = (cand: CandidateIndexScan): CandidateIndexScan => {
+    if (orderBy && orderBy.length > 0) {
+      if (
+        cand.scanType === "point" &&
+        (cand.index.flags & (IndexFlag.PRIMARY | IndexFlag.UNIQUE)) !== 0
+      ) {
+        cand.satisfiesOrderBy = true;
+      } else if (
+        isIndexAlignedWithOrderBy(cand.index, table, orderBy, equalityCols)
+      ) {
+        cand.satisfiesOrderBy = true;
+      }
+    }
+    return cand;
+  };
 
   // 1. Single-column equality match or IN match on PRIMARY KEY (highest priority)
   for (const idx of table.indexes) {
@@ -2281,13 +2424,13 @@ export function chooseIndexScan(
           f.value !== undefined &&
           f.value !== null
         ) {
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "point",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
-          };
+          });
         }
         if (
           f.type === "in" &&
@@ -2299,14 +2442,14 @@ export function chooseIndexScan(
           const uniqueValues = Array.from(
             new Set(f.values.filter((v) => v !== null && v !== undefined)),
           );
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "multi_point",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
             inValues: uniqueValues,
-          };
+          });
         }
       }
     }
@@ -2325,13 +2468,13 @@ export function chooseIndexScan(
           f.value !== undefined &&
           f.value !== null
         ) {
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "point",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
-          };
+          });
         }
         if (
           f.type === "in" &&
@@ -2343,14 +2486,14 @@ export function chooseIndexScan(
           const uniqueValues = Array.from(
             new Set(f.values.filter((v) => v !== null && v !== undefined)),
           );
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "multi_point",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
             inValues: uniqueValues,
-          };
+          });
         }
       }
     }
@@ -2392,14 +2535,14 @@ export function chooseIndexScan(
           dummyRow,
         );
 
-        return {
+        return tagCandidate({
           index: idx,
           scanType: "point",
           seekFilter: matchedFilters[0],
           filterIndex: allLeaves.indexOf(matchedFilters[0]),
           keyType: DataType.BLOB,
           compositeValue: compositeKeyBytes,
-        };
+        });
       }
     }
   }
@@ -2417,13 +2560,13 @@ export function chooseIndexScan(
           f.value !== undefined &&
           f.value !== null
         ) {
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "range",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
-          };
+          });
         }
       }
     }
@@ -2442,12 +2585,65 @@ export function chooseIndexScan(
           f.value !== undefined &&
           f.value !== null
         ) {
-          return {
+          return tagCandidate({
             index: idx,
             scanType: "range",
             seekFilter: f,
             filterIndex: allLeaves.indexOf(f),
             keyType: colMeta.type,
+          });
+        }
+      }
+    }
+  }
+
+  // 6. Interesting Order scan: match index to satisfy ORDER BY directly
+  if (orderBy && orderBy.length > 0) {
+    for (const idx of table.indexes) {
+      if (isIndexAlignedWithOrderBy(idx, table, orderBy, equalityCols)) {
+        if (idx.columnCount === 1) {
+          const colMeta = table.columns[idx.columnIndices[0]];
+          return {
+            index: idx,
+            scanType: "range",
+            seekFilter: undefined as any,
+            filterIndex: -1,
+            keyType: colMeta.type,
+            satisfiesOrderBy: true,
+          };
+        } else {
+          // Composite index: prefix with equality filter values if present, rest with min values
+          const dummyRow: Record<string, any> = {};
+          for (let c = 0; c < idx.columnCount; c++) {
+            const col = table.columns[idx.columnIndices[c]];
+            const eqFilter = candidateFilters.find(
+              (f) =>
+                f.type === "cmp" &&
+                (f.op === "=" || f.op === undefined) &&
+                f.colName === col.name &&
+                f.value !== undefined &&
+                f.value !== null,
+            );
+            if (eqFilter) {
+              dummyRow[col.name] = eqFilter.value;
+            } else {
+              dummyRow[col.name] = getMinKeyValueForType(col.type);
+            }
+          }
+          const compositeKeyBytes = serialize_composite_key(
+            table.columns,
+            idx.columnIndices,
+            idx.columnCount,
+            dummyRow,
+          );
+          return {
+            index: idx,
+            scanType: "range",
+            seekFilter: undefined as any,
+            filterIndex: -1,
+            keyType: DataType.BLOB,
+            compositeValue: compositeKeyBytes,
+            satisfiesOrderBy: true,
           };
         }
       }
@@ -2571,34 +2767,6 @@ export function compileQuery(
   const isJoinQuery =
     plan.joinedTables !== undefined && plan.joinedTables.length > 0;
 
-  const joinIndices: (JoinIndexCandidate | null)[] = new Array(
-    allTables.length,
-  ).fill(null);
-  let nextCursor = allTables.length;
-  if (isJoinQuery && plan.joinedTables) {
-    for (let i = 1; i < allTables.length; i++) {
-      const jPlan = plan.joinedTables[i - 1];
-      if (nextCursor < 16) {
-        const cand = chooseJoinIndex(
-          jPlan,
-          allTables[i],
-          i,
-          allTables,
-          nextCursor,
-        );
-        if (cand) {
-          joinIndices[i] = cand;
-          nextCursor++;
-        }
-      }
-    }
-  }
-
-  const totalCursors = nextCursor;
-  if (totalCursors > 16) {
-    throw new TooManyCursorsError(totalCursors, 16);
-  }
-
   const rootFilter = buildRootFilter(plan.filters);
   const leafFilters = rootFilter ? collectLeafFilters(rootFilter) : [];
   const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
@@ -2635,6 +2803,71 @@ export function compileQuery(
     }
   }
   const rootRemainingFilter = buildRootFilter(remainingFilters);
+
+  // Join Order Preservation check for Table 0 (outer driving table)
+  const canPreserve =
+    isJoinQuery &&
+    canJoinPreserveOrder(
+      allTables[0],
+      plan.joinedTables!,
+      plan.orderBy,
+      allTables,
+      plan.selectExprs,
+    );
+
+  const orderKeysForTable0 = canPreserve
+    ? plan.orderBy!.map((k) => {
+        const col = k.colName ?? "";
+        const shortCol = col.includes(".")
+          ? col.slice(col.lastIndexOf(".") + 1)
+          : col;
+        return { ...k, colName: shortCol };
+      })
+    : undefined;
+
+  const table0Scan = isJoinQuery
+    ? chooseIndexScan(
+        allTables[0],
+        pushedFilters[0],
+        leafFilters,
+        orderKeysForTable0,
+      )
+    : null;
+
+  const isJoinOrderPreserved = canPreserve && !!table0Scan?.satisfiesOrderBy;
+
+  let nextCursor = allTables.length;
+  let indexCursor0 = -1;
+  if (table0Scan && nextCursor < 16) {
+    indexCursor0 = nextCursor++;
+  }
+
+  const joinIndices: (JoinIndexCandidate | null)[] = new Array(
+    allTables.length,
+  ).fill(null);
+  if (isJoinQuery && plan.joinedTables) {
+    for (let i = 1; i < allTables.length; i++) {
+      const jPlan = plan.joinedTables[i - 1];
+      if (nextCursor < 16) {
+        const cand = chooseJoinIndex(
+          jPlan,
+          allTables[i],
+          i,
+          allTables,
+          nextCursor,
+        );
+        if (cand) {
+          joinIndices[i] = cand;
+          nextCursor++;
+        }
+      }
+    }
+  }
+
+  const totalCursors = nextCursor;
+  if (totalCursors > 16) {
+    throw new TooManyCursorsError(totalCursors, 16);
+  }
 
   // Short-circuit: top-level conjunction IN () can never match any row
   for (const f of topConjunctions) {
@@ -3260,8 +3493,20 @@ export function compileQuery(
     return result;
   }
 
+  // Check if an active index covers the query filters or directly satisfies ORDER BY
+  const indexScan = !isJoinQuery
+    ? chooseIndexScan(table, topConjunctions, leafFilters, plan.orderBy)
+    : null;
+
   // Case 2: In-Arena Sorter (ORDER BY)
-  if (!isJoinQuery && plan.orderBy && plan.orderBy.length > 0) {
+  // If an active index already satisfies the requested sort order (Interesting Orders optimization),
+  // we bypass the in-arena sorter completely and stream sorted rows directly via index cursor!
+  if (
+    !isJoinQuery &&
+    plan.orderBy &&
+    plan.orderBy.length > 0 &&
+    !indexScan?.satisfiesOrderBy
+  ) {
     const K = plan.orderBy.length;
     const sortKeyStartReg = nextReg;
     const totalRegs = sortKeyStartReg + K;
@@ -3425,6 +3670,12 @@ export function compileQuery(
     const result = emitter.toByteArray();
     (result as any).keyInfos = plan.keyInfos;
     (result as any).inSets = inSets;
+    if (planMetrics) {
+      (result as any).planMetrics = planMetrics;
+      (result as any).estimatedCost = planMetrics.totalCost;
+      (result as any).estimatedRows = planMetrics.estimatedRows;
+      (result as any).joinOrder = planMetrics.joinOrder;
+    }
     return result;
   }
 
@@ -3493,6 +3744,30 @@ export function compileQuery(
     const regJoinLeft = nextReg++;
     const regJoinRight = nextReg++;
     const regZero = nextReg++;
+
+    let regKey0 = -1;
+    if (table0Scan && indexCursor0 !== -1) {
+      if (table0Scan.compositeValue) {
+        regKey0 = nextReg++;
+        if (nextReg >= 64) throw new TooManyRegistersError(nextReg);
+        emitter.emitUint8(OpCode.OP_LOAD_BLOB);
+        emitter.emitUint8(regKey0);
+        emitter.emitUint32(table0Scan.compositeValue.length);
+        emitter.emitBytes(table0Scan.compositeValue);
+      } else if (table0Scan.scanType === "multi_point") {
+        regKey0 = nextReg++;
+        if (nextReg >= 64) throw new TooManyRegistersError(nextReg);
+      } else if (table0Scan.filterIndex >= 0) {
+        regKey0 = table0Scan.filterIndex * 2 + 1;
+      } else {
+        // Synthetic range seek for ORDER BY index scan: load minimum possible value
+        regKey0 = nextReg++;
+        if (nextReg >= 64) throw new TooManyRegistersError(nextReg);
+        const minVal = getMinKeyValueForType(table0Scan.keyType);
+        emitLoadConstant(emitter, regKey0, minVal, table0Scan.keyType);
+      }
+    }
+
     if (nextReg >= 64) {
       throw new TooManyRegistersError(nextReg);
     }
@@ -3502,6 +3777,13 @@ export function compileQuery(
       emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
       emitter.emitUint8(i);
       emitter.emitUint32(allTables[i].rootPageId);
+    }
+
+    // Open Table 0 index cursor if table0Scan is active
+    if (table0Scan && indexCursor0 !== -1) {
+      emitter.emitUint8(OpCode.OP_OPEN_INDEX);
+      emitter.emitUint8(indexCursor0);
+      emitter.emitUint32(table0Scan.index.rootPageId);
     }
 
     // Open index cursors for accelerated joins
@@ -3523,10 +3805,28 @@ export function compileQuery(
     const nextRowEofPatches: number[] = new Array(N);
     const limitHaltPatches: number[] = [];
 
-    // Outer table (Table 0) Rewind
-    emitter.emitUint8(OpCode.OP_REWIND);
-    emitter.emitUint8(0);
-    rewindJumpPatches[0] = emitter.emitUint16(0);
+    // Outer table (Table 0) Seek or Rewind
+    if (table0Scan && indexCursor0 !== -1) {
+      if (table0Scan.scanType === "point") {
+        emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
+        emitter.emitUint8(indexCursor0);
+        emitter.emitUint8(0);
+        emitter.emitUint8(regKey0);
+        emitter.emitUint8(table0Scan.keyType);
+        rewindJumpPatches[0] = emitter.emitUint16(0);
+      } else {
+        emitter.emitUint8(OpCode.OP_INDEX_SEEK_GE);
+        emitter.emitUint8(indexCursor0);
+        emitter.emitUint8(0);
+        emitter.emitUint8(regKey0);
+        emitter.emitUint8(table0Scan.keyType);
+        rewindJumpPatches[0] = emitter.emitUint16(0);
+      }
+    } else {
+      emitter.emitUint8(OpCode.OP_REWIND);
+      emitter.emitUint8(0);
+      rewindJumpPatches[0] = emitter.emitUint16(0);
+    }
 
     loopStartPositions[0] = emitter.currentOffset();
 
@@ -3776,8 +4076,11 @@ export function compileQuery(
       filterSetMap,
     );
 
+    const hasOrderBy = plan.orderBy !== undefined && plan.orderBy.length > 0;
+    const shouldApplyLimitOffset = !hasOrderBy || isJoinOrderPreserved;
+
     let offsetSkipPatch = -1;
-    if (hasOffset) {
+    if (hasOffset && shouldApplyLimitOffset) {
       emitter.emitUint8(OpCode.OP_OFFSET);
       emitter.emitUint8(regOffset);
       offsetSkipPatch = emitter.emitUint16(0);
@@ -3807,7 +4110,7 @@ export function compileQuery(
     emitter.emitUint8(outStartReg);
     emitter.emitUint8(outSelectExprs.length);
 
-    if (hasLimit) {
+    if (hasLimit && shouldApplyLimitOffset) {
       emitter.emitUint8(OpCode.OP_LIMIT);
       emitter.emitUint8(regLimit);
       limitHaltPatches.push(emitter.emitUint16(0));
@@ -3899,7 +4202,7 @@ export function compileQuery(
         }
 
         const afterNullRowPatches: number[] = [];
-        if (hasOffset) {
+        if (hasOffset && shouldApplyLimitOffset) {
           emitter.emitUint8(OpCode.OP_OFFSET);
           emitter.emitUint8(regOffset);
           afterNullRowPatches.push(emitter.emitUint16(0));
@@ -3909,7 +4212,7 @@ export function compileQuery(
         emitter.emitUint8(outStartReg);
         emitter.emitUint8(outSelectExprs.length);
 
-        if (hasLimit) {
+        if (hasLimit && shouldApplyLimitOffset) {
           emitter.emitUint8(OpCode.OP_LIMIT);
           emitter.emitUint8(regLimit);
           limitHaltPatches.push(emitter.emitUint16(0));
@@ -3928,12 +4231,27 @@ export function compileQuery(
       emitter.patchUint16(patch, nextRowPos0);
     }
 
-    emitter.emitUint8(OpCode.OP_NEXT_ROW);
-    emitter.emitUint8(0);
-    nextRowEofPatches[0] = emitter.emitUint16(0);
+    if (table0Scan && indexCursor0 !== -1) {
+      if (table0Scan.scanType === "point") {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        nextRowEofPatches[0] = emitter.emitUint16(0);
+      } else {
+        emitter.emitUint8(OpCode.OP_INDEX_NEXT);
+        emitter.emitUint8(indexCursor0);
+        emitter.emitUint8(0);
+        nextRowEofPatches[0] = emitter.emitUint16(0);
 
-    emitter.emitUint8(OpCode.OP_JUMP);
-    emitter.emitUint16(loopStartPositions[0]);
+        emitter.emitUint8(OpCode.OP_JUMP);
+        emitter.emitUint16(loopStartPositions[0]);
+      }
+    } else {
+      emitter.emitUint8(OpCode.OP_NEXT_ROW);
+      emitter.emitUint8(0);
+      nextRowEofPatches[0] = emitter.emitUint16(0);
+
+      emitter.emitUint8(OpCode.OP_JUMP);
+      emitter.emitUint16(loopStartPositions[0]);
+    }
 
     const eofPos0 = emitter.currentOffset();
     emitter.patchUint16(rewindJumpPatches[0], eofPos0);
@@ -3961,6 +4279,11 @@ export function compileQuery(
     (result as any).joinedTableScans = joinedTableScans;
     (result as any).allTables = allTables;
     (result as any).inSets = inSets;
+    (result as any).table0Scan = table0Scan;
+    (result as any).isOrderSatisfied = isJoinOrderPreserved;
+    if (isJoinOrderPreserved) {
+      plan.isOrderSatisfied = true;
+    }
     if (planMetrics) {
       (result as any).planMetrics = planMetrics;
       (result as any).estimatedCost = planMetrics.totalCost;
@@ -3973,11 +4296,6 @@ export function compileQuery(
     return result;
   }
 
-  // Check if an active index covers the query filters
-  const indexScan = !isJoinQuery
-    ? chooseIndexScan(table, topConjunctions, leafFilters)
-    : null;
-
   if (indexScan) {
     let regKey: number;
     if (indexScan.compositeValue) {
@@ -3989,8 +4307,14 @@ export function compileQuery(
     } else if (indexScan.scanType === "multi_point") {
       regKey = nextReg++;
       if (regKey >= 64) throw new TooManyRegistersError(regKey);
-    } else {
+    } else if (indexScan.filterIndex >= 0) {
       regKey = indexScan.filterIndex * 2 + 1;
+    } else {
+      // Synthetic index scan for ORDER BY: load min key value for the index column
+      regKey = nextReg++;
+      if (regKey >= 64) throw new TooManyRegistersError(regKey);
+      const minVal = getMinKeyValueForType(indexScan.keyType);
+      emitLoadConstant(emitter, regKey, minVal, indexScan.keyType);
     }
 
     if (indexScan.scanType === "point") {
@@ -4080,6 +4404,16 @@ export function compileQuery(
       (result as any).inSets = inSets;
       if (plan.outputColumns) {
         (result as any).outputColumns = plan.outputColumns;
+      }
+      if (indexScan?.satisfiesOrderBy) {
+        (result as any).isOrderSatisfied = true;
+        plan.isOrderSatisfied = true;
+      }
+      if (planMetrics) {
+        (result as any).planMetrics = planMetrics;
+        (result as any).estimatedCost = planMetrics.totalCost;
+        (result as any).estimatedRows = planMetrics.estimatedRows;
+        (result as any).joinOrder = planMetrics.joinOrder;
       }
       return result;
     } else if (indexScan.scanType === "multi_point") {
@@ -4204,6 +4538,16 @@ export function compileQuery(
       if (plan.outputColumns) {
         (result as any).outputColumns = plan.outputColumns;
       }
+      if (indexScan?.satisfiesOrderBy) {
+        (result as any).isOrderSatisfied = true;
+        plan.isOrderSatisfied = true;
+      }
+      if (planMetrics) {
+        (result as any).planMetrics = planMetrics;
+        (result as any).estimatedCost = planMetrics.totalCost;
+        (result as any).estimatedRows = planMetrics.estimatedRows;
+        (result as any).joinOrder = planMetrics.joinOrder;
+      }
       return result;
     } else {
       // Range seek in index
@@ -4305,6 +4649,16 @@ export function compileQuery(
       (result as any).inSets = inSets;
       if (plan.outputColumns) {
         (result as any).outputColumns = plan.outputColumns;
+      }
+      if (indexScan?.satisfiesOrderBy) {
+        (result as any).isOrderSatisfied = true;
+        plan.isOrderSatisfied = true;
+      }
+      if (planMetrics) {
+        (result as any).planMetrics = planMetrics;
+        (result as any).estimatedCost = planMetrics.totalCost;
+        (result as any).estimatedRows = planMetrics.estimatedRows;
+        (result as any).joinOrder = planMetrics.joinOrder;
       }
       return result;
     }
@@ -4410,6 +4764,12 @@ export function compileQuery(
   }
   if (whereMetrics) {
     (result as any).whereMetrics = whereMetrics;
+  }
+  if (planMetrics) {
+    (result as any).planMetrics = planMetrics;
+    (result as any).estimatedCost = planMetrics.totalCost;
+    (result as any).estimatedRows = planMetrics.estimatedRows;
+    (result as any).joinOrder = planMetrics.joinOrder;
   }
   return result;
 }

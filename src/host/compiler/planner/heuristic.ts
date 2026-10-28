@@ -10,6 +10,7 @@ import {
   OptimizedPlanResult,
   getFilterReferencedTables,
   getSingleTableBaseCost,
+  doesTableSatisfyJoinOrderKeys,
   findIndexOnColumn,
   buildJoinEdges,
   materializeOutputSelectExprs,
@@ -59,6 +60,8 @@ export class HeuristicPlanner implements QueryPlanner {
       const base = getSingleTableBaseCost(
         originalTables[0],
         singleTableFilters.get(0) ?? [],
+        plan.orderBy,
+        plan.limit,
       );
       return {
         plan,
@@ -71,16 +74,41 @@ export class HeuristicPlanner implements QueryPlanner {
           crossFilters,
           tableScanTypes: [base.scanType],
           tableIndexNames: [base.indexName],
+          isOrderSatisfied: base.isOrderSatisfied,
+          sortCostAvoided: base.sortCostAvoided,
         },
+        isOrderSatisfied: base.isOrderSatisfied,
+        sortCostAvoided: base.sortCostAvoided,
       };
     }
 
     const { edges, dependencies } = buildJoinEdges(plan, originalTables);
 
     // Compute base costs for each table as a candidate driving table
-    const baseStats = originalTables.map((t, idx) =>
-      getSingleTableBaseCost(t, singleTableFilters.get(idx) ?? []),
-    );
+    const baseStats = originalTables.map((t, idx) => {
+      const canPreserve = doesTableSatisfyJoinOrderKeys(
+        t,
+        idx,
+        originalTables,
+        plan.orderBy,
+        plan.selectExprs,
+      );
+      const orderKeysForTable = canPreserve
+        ? plan.orderBy!.map((k) => {
+            const col = k.colName ?? "";
+            const shortCol = col.includes(".")
+              ? col.slice(col.lastIndexOf(".") + 1)
+              : col;
+            return { ...k, colName: shortCol };
+          })
+        : undefined;
+      return getSingleTableBaseCost(
+        t,
+        singleTableFilters.get(idx) ?? [],
+        orderKeysForTable,
+        canPreserve ? plan.limit : undefined,
+      );
+    });
 
     // Step 1: Pick best driving table
     // Candidates are tables with 0 unmet dependencies
@@ -91,8 +119,11 @@ export class HeuristicPlanner implements QueryPlanner {
       }
     }
 
-    // Sort driving candidates: lowest rows first, tie-break by index scan, then table 0
+    // Sort driving candidates: prefer order preservation, lowest rows first, tie-break by index scan, then table 0
     validDrivingCandidates.sort((a, b) => {
+      const aOrder = baseStats[a].isOrderSatisfied ? 1 : 0;
+      const bOrder = baseStats[b].isOrderSatisfied ? 1 : 0;
+      if (aOrder !== bOrder) return bOrder - aOrder;
       if (baseStats[a].rows !== baseStats[b].rows) {
         return baseStats[a].rows - baseStats[b].rows;
       }
@@ -231,12 +262,19 @@ export class HeuristicPlanner implements QueryPlanner {
     );
     const effectiveSelectExprs = materializeOutputSelectExprs(plan, originalTables);
 
+    const finalOrderSatisfied = baseStats[drivingIdx]?.isOrderSatisfied === true;
+    const finalSortCostAvoided =
+      finalOrderSatisfied && plan.orderBy && plan.orderBy.length > 0 && currentRows > 1
+        ? currentRows * Math.log2(currentRows) * COST_ROW_EVAL
+        : undefined;
+
     return {
       plan: {
         ...plan,
         table: orderedTables[0],
         joinedTables: newJoinedPlans,
         selectExprs: effectiveSelectExprs,
+        isOrderSatisfied: finalOrderSatisfied,
       },
       orderedTables,
       metrics: {
@@ -247,7 +285,11 @@ export class HeuristicPlanner implements QueryPlanner {
         crossFilters,
         tableScanTypes: chosenScanTypes,
         tableIndexNames: chosenIndexNames,
+        isOrderSatisfied: finalOrderSatisfied,
+        sortCostAvoided: finalSortCostAvoided,
       },
+      isOrderSatisfied: finalOrderSatisfied,
+      sortCostAvoided: finalSortCostAvoided,
     };
   }
 }

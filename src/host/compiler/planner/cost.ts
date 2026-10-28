@@ -11,6 +11,7 @@ import {
   JoinEdge,
   getFilterReferencedTables,
   getSingleTableBaseCost,
+  doesTableSatisfyJoinOrderKeys,
   findIndexOnColumn,
   buildJoinEdges,
   materializeOutputSelectExprs,
@@ -101,7 +102,12 @@ export class CostBasedPlanner implements QueryPlanner {
       const singleFilters = new Map<number, QueryFilter[]>();
       singleFilters.set(0, workingFilters);
 
-      const baseCost = getSingleTableBaseCost(plan.table, workingFilters);
+      const baseCost = getSingleTableBaseCost(
+        plan.table,
+        workingFilters,
+        plan.orderBy,
+        plan.limit,
+      );
 
       return {
         plan: {
@@ -117,10 +123,14 @@ export class CostBasedPlanner implements QueryPlanner {
           crossFilters: [],
           tableScanTypes: [baseCost.scanType],
           tableIndexNames: [baseCost.indexName],
+          isOrderSatisfied: baseCost.isOrderSatisfied,
+          sortCostAvoided: baseCost.sortCostAvoided,
         },
         isAlwaysFalse: false,
         isAlwaysTrue: whereMetrics.isAlwaysTrue,
         whereMetrics,
+        isOrderSatisfied: baseCost.isOrderSatisfied,
+        sortCostAvoided: baseCost.sortCostAvoided,
       };
     }
 
@@ -178,6 +188,8 @@ export class CostBasedPlanner implements QueryPlanner {
       scanTypes: ("TableScan" | "IndexScan")[];
       indexNames: (string | undefined)[];
       edgesUsed: JoinEdge[];
+      isOrderSatisfied?: boolean;
+      sortCostAvoided?: number;
     }
 
     const dp = new Map<number, DPState>();
@@ -185,9 +197,28 @@ export class CostBasedPlanner implements QueryPlanner {
     // 1. Base states (subsets of size 1)
     for (let i = 0; i < N; i++) {
       if (dependencies[i].size === 0) {
+        const canPreserve = doesTableSatisfyJoinOrderKeys(
+          originalTables[i],
+          i,
+          originalTables,
+          plan.orderBy,
+          plan.selectExprs,
+        );
+        const orderKeysForTable = canPreserve
+          ? plan.orderBy!.map((k) => {
+              const col = k.colName ?? "";
+              const shortCol = col.includes(".")
+                ? col.slice(col.lastIndexOf(".") + 1)
+                : col;
+              return { ...k, colName: shortCol };
+            })
+          : undefined;
+
         const base = getSingleTableBaseCost(
           originalTables[i],
           singleTableFilters.get(i) ?? [],
+          orderKeysForTable,
+          canPreserve ? plan.limit : undefined,
         );
         const mask = 1 << i;
         dp.set(mask, {
@@ -197,6 +228,8 @@ export class CostBasedPlanner implements QueryPlanner {
           scanTypes: [base.scanType],
           indexNames: [base.indexName],
           edgesUsed: [],
+          isOrderSatisfied: base.isOrderSatisfied,
+          sortCostAvoided: base.sortCostAvoided,
         });
       }
     }
@@ -236,44 +269,70 @@ export class CostBasedPlanner implements QueryPlanner {
           const existing = dp.get(mask);
           let isBetter = false;
 
+          let candidateTotalCost = totalCost;
+          let existingTotalCost = existing ? existing.cost : 0;
+
+          const candidateOrderSatisfied = prevState.isOrderSatisfied === true;
+          const existingOrderSatisfied = existing?.isOrderSatisfied === true;
+
+          // When completing the full join (size === N), account for avoided explicit sort
+          if (size === N && plan.orderBy && plan.orderBy.length > 0) {
+            if (!candidateOrderSatisfied && evalRes.newRows > 1) {
+              candidateTotalCost +=
+                evalRes.newRows * Math.log2(evalRes.newRows) * this.rowEvalCost;
+            }
+            if (existing && !existingOrderSatisfied && existing.rows > 1) {
+              existingTotalCost +=
+                existing.rows * Math.log2(existing.rows) * this.rowEvalCost;
+            }
+          }
+
           if (!existing) {
             isBetter = true;
           } else {
-            const candidateIndexScans =
-              prevState.scanTypes.filter((t) => t === "IndexScan").length +
-              (evalRes.scanType === "IndexScan" ? 1 : 0);
-            const existingIndexScans = existing.scanTypes.filter(
-              (t) => t === "IndexScan",
-            ).length;
-
-            if (
-              candidateIndexScans > existingIndexScans &&
-              totalCost <= existing.cost * 1.2
-            ) {
+            // If one candidate satisfies the sort order and the other does not,
+            // give substantial preference to the order-preserving plan
+            if (candidateOrderSatisfied && !existingOrderSatisfied) {
               isBetter = true;
-            } else if (candidateIndexScans < existingIndexScans) {
-              isBetter = false;
-            } else if (totalCost < existing.cost * 0.75) {
-              isBetter = true;
-            } else if (existing.cost < totalCost * 0.75) {
+            } else if (!candidateOrderSatisfied && existingOrderSatisfied) {
               isBetter = false;
             } else {
-              // Costs are comparable: prefer preserving user's declared driving table (table 0)
-              const candidateStartsWithZero = prevState.order[0] === 0;
-              const existingStartsWithZero = existing.order[0] === 0;
-              if (candidateStartsWithZero && !existingStartsWithZero) {
+              const candidateIndexScans =
+                prevState.scanTypes.filter((t) => t === "IndexScan").length +
+                (evalRes.scanType === "IndexScan" ? 1 : 0);
+              const existingIndexScans = existing.scanTypes.filter(
+                (t) => t === "IndexScan",
+              ).length;
+
+              if (
+                candidateIndexScans > existingIndexScans &&
+                candidateTotalCost <= existingTotalCost * 1.2
+              ) {
                 isBetter = true;
-              } else if (!candidateStartsWithZero && existingStartsWithZero) {
+              } else if (candidateIndexScans < existingIndexScans) {
+                isBetter = false;
+              } else if (candidateTotalCost < existingTotalCost * 0.75) {
+                isBetter = true;
+              } else if (existingTotalCost < candidateTotalCost * 0.75) {
                 isBetter = false;
               } else {
-                const candidateInversions = prevState.order.filter(
-                  (idx) => idx > nextIdx,
-                ).length;
-                const existingInversions = existing.order.filter(
-                  (idx, i) => idx > i,
-                ).length;
-                if (candidateInversions < existingInversions) {
+                // Costs are comparable: prefer preserving user's declared driving table (table 0)
+                const candidateStartsWithZero = prevState.order[0] === 0;
+                const existingStartsWithZero = existing.order[0] === 0;
+                if (candidateStartsWithZero && !existingStartsWithZero) {
                   isBetter = true;
+                } else if (!candidateStartsWithZero && existingStartsWithZero) {
+                  isBetter = false;
+                } else {
+                  const candidateInversions = prevState.order.filter(
+                    (idx) => idx > nextIdx,
+                  ).length;
+                  const existingInversions = existing.order.filter(
+                    (idx, i) => idx > i,
+                  ).length;
+                  if (candidateInversions < existingInversions) {
+                    isBetter = true;
+                  }
                 }
               }
             }
@@ -287,6 +346,8 @@ export class CostBasedPlanner implements QueryPlanner {
               scanTypes: [...prevState.scanTypes, evalRes.scanType],
               indexNames: [...prevState.indexNames, evalRes.indexName],
               edgesUsed: [...prevState.edgesUsed, evalRes.matchedEdge],
+              isOrderSatisfied: prevState.isOrderSatisfied,
+              sortCostAvoided: prevState.sortCostAvoided,
             });
           }
         }
@@ -329,6 +390,12 @@ export class CostBasedPlanner implements QueryPlanner {
       originalTables,
     );
 
+    const finalOrderSatisfied = bestState?.isOrderSatisfied === true;
+    const finalSortCostAvoided =
+      finalOrderSatisfied && plan.orderBy && plan.orderBy.length > 0 && winningRows > 1
+        ? winningRows * Math.log2(winningRows) * this.rowEvalCost
+        : undefined;
+
     return {
       plan: {
         ...plan,
@@ -336,6 +403,7 @@ export class CostBasedPlanner implements QueryPlanner {
         joinedTables: newJoinedPlans,
         selectExprs: effectiveSelectExprs,
         filters: workingFilters,
+        isOrderSatisfied: finalOrderSatisfied,
       },
       orderedTables,
       metrics: {
@@ -346,10 +414,14 @@ export class CostBasedPlanner implements QueryPlanner {
         crossFilters,
         tableScanTypes: winningScanTypes,
         tableIndexNames: winningIndexNames,
+        isOrderSatisfied: finalOrderSatisfied,
+        sortCostAvoided: finalSortCostAvoided,
       },
       isAlwaysFalse: false,
       isAlwaysTrue: whereMetrics.isAlwaysTrue,
       whereMetrics,
+      isOrderSatisfied: finalOrderSatisfied,
+      sortCostAvoided: finalSortCostAvoided,
     };
   }
 
