@@ -31,40 +31,45 @@ export type ComparisonOp =
   | ">="
   | "<"
   | "<="
-  | "LIKE"
-  | "NOT LIKE"
-  | "CONTAINS"
-  | "STARTS_WITH"
-  | "ENDS_WITH"
-  | "IN"
-  | "NOT IN"
   | "like"
   | "not like"
   | "contains"
   | "starts_with"
   | "ends_with"
-  | "startswith"
-  | "endswith"
   | "in"
   | "not in";
 
 export function getCmpOpcode(op: string | undefined): OpCode {
   if (!op) return OpCode.OP_EQ;
-  const norm = String(op).trim().toUpperCase().replace(/\s+/g, " ");
-  if (norm === "=" || norm === "==") return OpCode.OP_EQ;
-  if (norm === "!=" || norm === "<>") return OpCode.OP_NE;
-  if (norm === ">") return OpCode.OP_GT;
-  if (norm === ">=") return OpCode.OP_GE;
-  if (norm === "<") return OpCode.OP_LT;
-  if (norm === "<=") return OpCode.OP_LE;
-  if (norm === "LIKE") return OpCode.OP_STR_LIKE;
-  if (norm === "NOT LIKE") return OpCode.OP_STR_NOT_LIKE;
-  if (norm === "CONTAINS") return OpCode.OP_STR_CONTAINS;
-  if (norm === "STARTS_WITH" || norm === "STARTSWITH")
-    return OpCode.OP_STR_STARTS_WITH;
-  if (norm === "ENDS_WITH" || norm === "ENDSWITH")
-    return OpCode.OP_STR_ENDS_WITH;
-  return OpCode.OP_EQ;
+  const norm = String(op).trim().toLowerCase().replace(/\s+/g, " ");
+  switch (norm) {
+    case "=":
+    case "==":
+      return OpCode.OP_EQ;
+    case "!=":
+    case "<>":
+      return OpCode.OP_NE;
+    case ">":
+      return OpCode.OP_GT;
+    case ">=":
+      return OpCode.OP_GE;
+    case "<":
+      return OpCode.OP_LT;
+    case "<=":
+      return OpCode.OP_LE;
+    case "like":
+      return OpCode.OP_STR_LIKE;
+    case "not like":
+      return OpCode.OP_STR_NOT_LIKE;
+    case "contains":
+      return OpCode.OP_STR_CONTAINS;
+    case "starts_with":
+      return OpCode.OP_STR_STARTS_WITH;
+    case "ends_with":
+      return OpCode.OP_STR_ENDS_WITH;
+    default:
+      return OpCode.OP_EQ;
+  }
 }
 
 export type QueryFilterType =
@@ -374,8 +379,8 @@ export function normalizeFilter(filter: QueryFilter): QueryFilter {
         ">=": "<",
         "<": ">=",
         "<=": ">",
-        LIKE: "NOT LIKE",
-        "NOT LIKE": "LIKE",
+        like: "not like",
+        "not like": "like",
       };
 
       if (child.op && inverseOps[child.op]) {

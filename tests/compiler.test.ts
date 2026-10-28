@@ -186,11 +186,11 @@ describe("Bytecode Compiler & Emitter Unit Tests", () => {
       const bytecode = compileQuery({
         table,
         filters: [
-          { type: "cmp", colName: "name", op: "LIKE", value: "%Alice%" },
-          { type: "cmp", colName: "name", op: "STARTS_WITH", value: "Ali" },
-          { type: "cmp", colName: "name", op: "ENDS_WITH", value: "ce" },
-          { type: "cmp", colName: "name", op: "CONTAINS", value: "lic" },
-          { type: "cmp", colName: "name", op: "NOT LIKE", value: "%Bob%" },
+          { type: "cmp", colName: "name", op: "like", value: "%Alice%" },
+          { type: "cmp", colName: "name", op: "starts_with", value: "Ali" },
+          { type: "cmp", colName: "name", op: "ends_with", value: "ce" },
+          { type: "cmp", colName: "name", op: "contains", value: "lic" },
+          { type: "cmp", colName: "name", op: "not like", value: "%Bob%" },
         ],
       });
 

@@ -743,43 +743,43 @@ export class QueryBuilder {
   }
 
   whereLike(colName: string, pattern: string): this {
-    return this.where(colName, 'LIKE', pattern);
+    return this.where(colName, 'like', pattern);
   }
 
   whereNotLike(colName: string, pattern: string): this {
-    return this.where(colName, 'NOT LIKE', pattern);
+    return this.where(colName, 'not like', pattern);
   }
 
   whereStartsWith(colName: string, prefix: string): this {
-    return this.where(colName, 'STARTS_WITH', prefix);
+    return this.where(colName, 'starts_with', prefix);
   }
 
   whereEndsWith(colName: string, suffix: string): this {
-    return this.where(colName, 'ENDS_WITH', suffix);
+    return this.where(colName, 'ends_with', suffix);
   }
 
   whereContains(colName: string, substring: string): this {
-    return this.where(colName, 'CONTAINS', substring);
+    return this.where(colName, 'contains', substring);
   }
 
   orWhereLike(colName: string, pattern: string): this {
-    return this.orWhere(colName, 'LIKE', pattern);
+    return this.orWhere(colName, 'like', pattern);
   }
 
   orWhereNotLike(colName: string, pattern: string): this {
-    return this.orWhere(colName, 'NOT LIKE', pattern);
+    return this.orWhere(colName, 'not like', pattern);
   }
 
   orWhereStartsWith(colName: string, prefix: string): this {
-    return this.orWhere(colName, 'STARTS_WITH', prefix);
+    return this.orWhere(colName, 'starts_with', prefix);
   }
 
   orWhereEndsWith(colName: string, suffix: string): this {
-    return this.orWhere(colName, 'ENDS_WITH', suffix);
+    return this.orWhere(colName, 'ends_with', suffix);
   }
 
   orWhereContains(colName: string, substring: string): this {
-    return this.orWhere(colName, 'CONTAINS', substring);
+    return this.orWhere(colName, 'contains', substring);
   }
 
   whereIn(colName: string, values: any[]): this {

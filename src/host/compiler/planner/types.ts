@@ -164,10 +164,10 @@ export function estimateFilterSelectivity(
       return 0.9;
     }
     if (
-      op === 'LIKE' ||
-      op === 'CONTAINS' ||
-      op === 'STARTS_WITH' ||
-      op === 'ENDS_WITH'
+      op === 'like' ||
+      op === 'contains' ||
+      op === 'starts_with' ||
+      op === 'ends_with'
     ) {
       return 0.15;
     }

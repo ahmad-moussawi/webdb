@@ -783,47 +783,47 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       // LIKE '%iPhone%'
       const iphones = await db
         .from("gadgets")
-        .where("name", "LIKE", "%iPhone%")
+        .where("name", "like", "%iPhone%")
         .toArray();
       expect(iphones).toHaveLength(1);
       expect(iphones[0].name).toBe("Apple iPhone 15 Pro");
 
-      // STARTS_WITH 'Apple'
+      // starts_with 'Apple'
       const apples = await db
         .from("gadgets")
-        .where("name", "STARTS_WITH", "Apple")
+        .where("name", "starts_with", "Apple")
         .toArray();
       expect(apples).toHaveLength(2);
       expect(apples.map((g) => g.id)).toEqual([1, 4]);
 
-      // LIKE 'Apple%'
+      // like 'Apple%'
       const applesLike = await db
         .from("gadgets")
-        .where("name", "LIKE", "Apple%")
+        .where("name", "like", "Apple%")
         .toArray();
       expect(applesLike).toHaveLength(2);
       expect(applesLike.map((g) => g.id)).toEqual([1, 4]);
 
-      // ENDS_WITH 'Pro'
+      // ends_with 'Pro'
       const pros = await db
         .from("gadgets")
-        .where("name", "ENDS_WITH", "Pro")
+        .where("name", "ends_with", "Pro")
         .toArray();
       expect(pros).toHaveLength(2);
       expect(pros.map((g) => g.id)).toEqual([1, 2]);
 
-      // CONTAINS 'Galaxy'
+      // contains 'Galaxy'
       const galaxy = await db
         .from("gadgets")
-        .where("name", "CONTAINS", "Galaxy")
+        .where("name", "contains", "Galaxy")
         .toArray();
       expect(galaxy).toHaveLength(1);
       expect(galaxy[0].id).toBe(3);
 
-      // NOT LIKE 'Apple%'
+      // not like 'Apple%'
       const nonApples = await db
         .from("gadgets")
-        .where("name", "NOT LIKE", "Apple%")
+        .where("name", "not like", "Apple%")
         .toArray();
       expect(nonApples).toHaveLength(2);
       expect(nonApples.map((g) => g.id)).toEqual([2, 3]);

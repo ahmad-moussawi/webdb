@@ -13,7 +13,7 @@ export function estimateWhereCost(filter: QueryFilter, tables?: TableMeta[]): nu
 
   if (filter.type === 'cmp') {
     const op = filter.op ?? '=';
-    if (op === 'LIKE' || op === 'NOT LIKE') {
+    if (op === 'like' || op === 'not like') {
       const val = typeof filter.value === 'string' ? filter.value : '';
       return val.startsWith('%') ? 25 : 15;
     }

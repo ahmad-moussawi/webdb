@@ -236,7 +236,7 @@ describe('Dedicated WherePlanner Architecture', () => {
       // Query declared with expensive LIKE first, followed by cheap null check and integer comparison
       const explain = await db
         .from('products')
-        .where('name', 'LIKE', '%Pro%')
+        .where('name', 'like', '%Pro%')
         .whereNotNull('category')
         .where('stock', '>', 5)
         .explain();
@@ -256,7 +256,7 @@ describe('Dedicated WherePlanner Architecture', () => {
 
       const rows = await db
         .from('products')
-        .where('name', 'LIKE', '%Pro%')
+        .where('name', 'like', '%Pro%')
         .whereNotNull('category')
         .where('stock', '>', 5)
         .toArray();
