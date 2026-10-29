@@ -4,3 +4,4 @@ export * from './idb.js';
 export * from './opfs.js';
 export * from './crc32.js';
 export * from './io.js';
+export * from './wal_codec.js';

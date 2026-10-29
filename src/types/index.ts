@@ -401,5 +401,19 @@ export class AggregateNotAllowedInWhereError extends Error {
   }
 }
 
+export class CorruptWalHeaderError extends Error {
+  constructor(message: string = 'Corrupted WAL file header detected') {
+    super(message);
+    this.name = 'CorruptWalHeaderError';
+  }
+}
+
+export class CorruptWalFrameError extends Error {
+  constructor(message: string = 'Corrupted WAL frame detected') {
+    super(message);
+    this.name = 'CorruptWalFrameError';
+  }
+}
+
 export * from '../shared/vm_context.js';
 export * from '../shared/page_provider.js';

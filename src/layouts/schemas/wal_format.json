@@ -1,0 +1,92 @@
+{
+  "$schema": "./layout_schema.json",
+  "name": "wal_format",
+  "description": "Write-Ahead Log (WAL) binary file header and frame layout definitions for WebDB",
+  "criticalWarning": [
+    "CRITICAL WARNING: FROZEN WAL BINARY FORMAT SPECIFICATION",
+    "DO NOT modify the order, types, or byte lengths of existing fields in",
+    "WalFileHeader or WalFrameHeader! Changing any offset or field size breaks",
+    "binary determinism, prevents crash recovery, and corrupts WAL logs.",
+    "",
+    "Both the WAL file header (32 bytes) and WAL frame headers (32 bytes)",
+    "must remain rigidly 8-byte aligned."
+  ],
+  "constants": [
+    {
+      "name": "WAL_PAGE_SIZE",
+      "value": 4096,
+      "description": "Rigid page payload size in bytes per WAL frame (4096 bytes)."
+    },
+    {
+      "name": "WAL_FRAME_SIZE",
+      "value": 4128,
+      "description": "Total size in bytes of a single WAL frame (32-byte header + 4096-byte page payload = 4128 bytes)."
+    },
+    {
+      "name": "WAL_CURRENT_VERSION",
+      "value": 1,
+      "description": "Current WAL file format version (Version 1)."
+    },
+    {
+      "name": "WAL_FRAME_MAGIC",
+      "value": 1463897158,
+      "description": "Magic number for WAL frames (0x57414C46 in uint32 LE = 'WALF')."
+    },
+    {
+      "name": "WAL_FRAME_TYPE_PAGE_DATA",
+      "value": 1,
+      "description": "Frame type 0x0001: Committed 4KB page mutation for page_id."
+    },
+    {
+      "name": "WAL_FRAME_TYPE_TX_COMMIT",
+      "value": 2,
+      "description": "Frame type 0x0002: Commit marker for tx_id. Signals that all preceding frames for this tx_id are permanently committed."
+    },
+    {
+      "name": "WAL_FRAME_TYPE_TX_UNCOMMITTED",
+      "value": 3,
+      "description": "Frame type 0x0003: Cache spill frame under memory pressure. Ignored during recovery unless followed by a commit marker."
+    }
+  ],
+  "layouts": [
+    {
+      "id": "WAL_FILE_HEADER",
+      "baseOffset": 0,
+      "fieldsName": "WAL_FILE_HEADER_FIELDS",
+      "layoutName": "WAL_FILE_HEADER_LAYOUT",
+      "sizeName": "WAL_FILE_HEADER_SIZE",
+      "sizeDescription": "Total size in bytes of the WAL file header (32 bytes).",
+      "offsetPrefix": "WAL_HEADER_OFFSET_",
+      "fields": [
+        { "name": "MAGIC", "size": 6, "type": "char[6]", "description": "0..5: Magic string identifier 'WEBWAL'" },
+        { "name": "WAL_VERSION", "size": 2, "type": "uint16_t", "description": "6..7: WAL format version (1 for V1, uint16 LE)" },
+        { "name": "PAGE_SIZE", "size": 4, "type": "uint32_t", "description": "8..11: Rigid page size (4096, uint32 LE)" },
+        { "name": "CHECKPOINT_SEQ", "size": 4, "type": "uint32_t", "description": "12..15: Monotonic checkpoint counter (uint32 LE)" },
+        { "name": "SALT1", "size": 4, "type": "uint32_t", "description": "16..19: Random salt generated on checkpoint (uint32 LE)" },
+        { "name": "SALT2", "size": 4, "type": "uint32_t", "description": "20..23: Random salt tie-breaker (uint32 LE)" },
+        { "name": "CHECKSUM", "size": 4, "type": "uint32_t", "description": "24..27: CRC32 checksum over bytes 0..23 (uint32 LE)" },
+        { "name": "RESERVED", "size": 4, "type": "uint32_t", "description": "28..31: Zero padding for 8-byte alignment (uint32 LE)" }
+      ]
+    },
+    {
+      "id": "WAL_FRAME_HEADER",
+      "baseOffset": 0,
+      "fieldsName": "WAL_FRAME_HEADER_FIELDS",
+      "layoutName": "WAL_FRAME_HEADER_LAYOUT",
+      "sizeName": "WAL_FRAME_HEADER_SIZE",
+      "sizeDescription": "Total size in bytes of a single WAL frame header (32 bytes).",
+      "offsetPrefix": "WAL_FRAME_OFFSET_",
+      "fields": [
+        { "name": "MAGIC", "size": 4, "type": "uint32_t", "description": "0..3: Frame magic 0x57414C46 ('WALF', uint32 LE)" },
+        { "name": "FRAME_TYPE", "size": 2, "type": "uint16_t", "description": "4..5: Frame type (1=PAGE_DATA, 2=TX_COMMIT, 3=TX_UNCOMMITTED, uint16 LE)" },
+        { "name": "FLAGS", "size": 2, "type": "uint16_t", "description": "6..7: Reserved flags (0x0000, uint16 LE)" },
+        { "name": "TX_ID", "size": 4, "type": "uint32_t", "description": "8..11: Monotonic transaction identifier (uint32 LE)" },
+        { "name": "PAGE_ID", "size": 4, "type": "uint32_t", "description": "12..15: Target database Page ID (1..N, uint32 LE)" },
+        { "name": "DB_SIZE_PAGES", "size": 4, "type": "uint32_t", "description": "16..19: Size of DB in pages after commit (uint32 LE)" },
+        { "name": "FRAME_SEQ", "size": 4, "type": "uint32_t", "description": "20..23: Monotonic frame sequence counter in WAL (uint32 LE)" },
+        { "name": "CHECKSUM", "size": 4, "type": "uint32_t", "description": "24..27: CRC32 over header bytes 0..23 + 4096 page bytes (uint32 LE)" },
+        { "name": "RESERVED", "size": 4, "type": "uint32_t", "description": "28..31: Zero padding for 8-byte alignment (uint32 LE)" }
+      ]
+    }
+  ]
+}

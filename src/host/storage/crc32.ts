@@ -53,3 +53,19 @@ export function computePage1Checksum(pageBytes: Uint8Array): number {
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
+
+/**
+ * Computes CRC32 checksum of a WAL Frame.
+ * Checksum is calculated across header bytes 0..23 concatenated with 4096 page payload bytes (bytes 32..4127).
+ */
+export function computeWalFrameChecksum(frameBytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < 24; i++) {
+    crc = CRC_TABLE[(crc ^ frameBytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  const end = Math.min(frameBytes.byteLength, 4128);
+  for (let i = 32; i < end; i++) {
+    crc = CRC_TABLE[(crc ^ frameBytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}

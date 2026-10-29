@@ -218,6 +218,10 @@ export class BufferPoolDriver {
     }
   }
 
+  setTransactionCoordinator(coordinator: any): void {
+    this.io.setTransactionCoordinator(coordinator);
+  }
+
   // ==========================================================================
   // In-Memory Slot Mapping & Hash Table Primitives
   // ==========================================================================

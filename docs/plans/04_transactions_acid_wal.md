@@ -224,14 +224,14 @@ When opening a database (`WebDB.open()`):
 
 ## 7. Exhaustive Edge Cases & Failure Modes
 
-* [ ] **Mid-Transaction Checkpoint Leak Prevention:** Assert that calling `db.checkpoint()` while inside `db.transaction()` does not execute until `COMMIT` or `ROLLBACK`.
-* [ ] **Stale Frame Regression Guard:** Assert that if page 2 was modified, spilled to WAL as frame 1, modified again in memory, and checkpoint runs, page 2 on disk receives the in-memory version (not frame 1).
-* [ ] **WAL Tail Truncation Detection:** Verify that if the `.wal` file has trailing bytes $< 4128$ bytes, recovery halts cleanly and ignores the partial tail without throwing.
-* [ ] **Bit-Rot & Torn Frame CRC32 Check:** Corrupting 1 bit in a WAL frame header or payload causes CRC32 mismatch, causing scanner to stop cleanly at that point.
-* [ ] **Uncommitted Transaction Discard:** Verify that frames for transactions lacking `FRAME_TX_COMMIT` are never applied to the main `.db` file.
-* [ ] **Torn Master Page Self-Healing:** Simulate crash during checkpoint while writing Page 1 to disk; verify startup recovery replays intact Page 1 from WAL and clears corruption.
-* [ ] **WAL Flush Precedence:** Assert that `walSyncHandle.truncate(0)` is strictly never called if `dbSyncHandle.flush()` fails or is aborted.
-* [ ] **Double Rollback Safety:** Calling `ROLLBACK` multiple times or after an error must be idempotent and safe.
+* [x] **Mid-Transaction Checkpoint Leak Prevention:** Assert that calling `db.checkpoint()` while inside `db.transaction()` does not execute until `COMMIT` or `ROLLBACK`.
+* [x] **Stale Frame Regression Guard:** Assert that if page 2 was modified, spilled to WAL as frame 1, modified again in memory, and checkpoint runs, page 2 on disk receives the in-memory version (not frame 1).
+* [x] **WAL Tail Truncation Detection:** Verify that if the `.wal` file has trailing bytes $< 4128$ bytes, recovery halts cleanly and ignores the partial tail without throwing.
+* [x] **Bit-Rot & Torn Frame CRC32 Check:** Corrupting 1 bit in a WAL frame header or payload causes CRC32 mismatch, causing scanner to stop cleanly at that point.
+* [x] **Uncommitted Transaction Discard:** Verify that frames for transactions lacking `FRAME_TX_COMMIT` are never applied to the main `.db` file.
+* [x] **Torn Master Page Self-Healing:** Simulate crash during checkpoint while writing Page 1 to disk; verify startup recovery replays intact Page 1 from WAL and clears corruption.
+* [x] **WAL Flush Precedence:** Assert that `walSyncHandle.truncate(0)` is strictly never called if `dbSyncHandle.flush()` fails or is aborted.
+* [x] **Double Rollback Safety:** Calling `ROLLBACK` multiple times or after an error must be idempotent and safe.
 
 ---
 
@@ -243,3 +243,4 @@ When opening a database (`WebDB.open()`):
 4. **Master Page Torn-Write Healing:** Simulate a half-written/corrupt Page 1 in `.db` alongside an intact committed Page 1 in `.wal`; open DB; assert Page 1 is restored with valid CRC32, schema catalog, and change counter.
 5. **Truncated Tail Frame Recovery:** Write 1 committed transaction (2 frames) and a half-written 3rd frame (2000 bytes truncated); open DB; assert the committed transaction is applied, the partial frame is ignored, and DB is clean.
 6. **Torn WAL Frame Rejection:** Flip a bit in the CRC32 or payload of a WAL frame; verify recovery rejects the torn frame and avoids corrupting `.db`.
+

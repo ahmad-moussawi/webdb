@@ -41,7 +41,9 @@ import { Io } from "../storage/io.ts";
 import {
   BufferPoolDriver,
   createWasmMemory,
-} from "../driver/buffer_pool_driver.ts";
+  TransactionCoordinator,
+  recoverFromWal,
+} from "../driver/index.js";
 import {
   catalog_init_page1,
   catalog_read_page1_header,
@@ -149,6 +151,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     return this.driver;
   }
 
+  readonly coordinator: TransactionCoordinator;
+  currentLeaseId: number | null = null;
   private vmCtx: VmContext;
   private udfs: Map<string, { id: number; def: UdfDefinition }> = new Map();
   private nextUdfId = 1;
@@ -161,6 +165,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     vfs: IVfsAdapter,
     io: Io,
     driver: BufferPoolDriver,
+    coordinator: TransactionCoordinator,
     coreMode: "js" | "wasm" = "js",
     wasmCore?: WasmCoreExports,
     planner?: QueryPlanner,
@@ -168,6 +173,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.vfs = vfs;
     this.io = io;
     this.driver = driver;
+    this.coordinator = coordinator;
     this.coreMode = coreMode;
     this.wasmCore = wasmCore;
     this.planner = planner;
@@ -187,6 +193,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       vfs = new MemoryVfsAdapter();
     }
 
+    // Section 6: Crash Recovery Protocol & Startup WAL Replay
+    await recoverFromWal(vfs);
+
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
     const memory = createWasmMemory(slotCount, maxQueryMemory);
@@ -197,6 +206,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       slotCount,
       maxQueryMemory,
     });
+
+    const coordinator = new TransactionCoordinator(vfs, driver, io);
+    driver.setTransactionCoordinator(coordinator);
 
     // Check if Page 1 exists in storage
     const page1Data = await vfs.readPage(1);
@@ -240,6 +252,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       vfs,
       io,
       driver,
+      coordinator,
       coreMode,
       wasmCore,
       options.planner,
@@ -256,6 +269,16 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async createTable(
+    name: string,
+    columns: ColumnDefinition[],
+  ): Promise<TableMeta> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._createTableInternal(name, columns),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _createTableInternal(
     name: string,
     columns: ColumnDefinition[],
   ): Promise<TableMeta> {
@@ -299,8 +322,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       catPageId = header.nextColCatalogPageId;
     }
 
-    // Flush modified pages
-    await this.driver.flushAllDirty();
+    // Flush modified pages if autocommit (not in transaction)
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
     this.tableMetaCache.delete(name.toLowerCase());
     return table;
   }
@@ -414,6 +439,13 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async dropTable(tableName: string): Promise<void> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._dropTableInternal(tableName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _dropTableInternal(tableName: string): Promise<void> {
     this.tableMetaCache.delete(tableName.toLowerCase());
     this.tableTailPages.delete(tableName);
 
@@ -470,7 +502,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
-    await this.driver.flushAllDirty();
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
 
     if (this.vmCtx.table?.name.toLowerCase() === tableName.toLowerCase()) {
       this.vmCtx.table = null;
@@ -478,6 +512,17 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async createIndex(
+    tableName: string,
+    columns: string | string[],
+    options?: IndexOptions,
+  ): Promise<void> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._createIndexInternal(tableName, columns, options),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _createIndexInternal(
     tableName: string,
     columns: string | string[],
     options?: IndexOptions,
@@ -611,10 +656,19 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.pool.markDirty(0);
     this.tableMetaCache.delete(tableName.toLowerCase());
     this.indexTailPages.delete(indexRootPageId);
-    await this.driver.flushAllDirty();
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
   }
 
   async dropIndex(indexName: string): Promise<void> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._dropIndexInternal(indexName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _dropIndexInternal(indexName: string): Promise<void> {
     const page1View = this.pool.getSlotDataView(0);
     const found = catalog_find_index_by_name(page1View, indexName);
     if (!found) {
@@ -634,7 +688,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.pool.markDirty(0);
     this.tableMetaCache.clear();
     this.indexTailPages.clear();
-    await this.driver.flushAllDirty();
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
   }
 
   async listIndexes(tableName?: string): Promise<IndexDescriptor[]> {
@@ -769,6 +825,13 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async insertMany(tableName: string, rows: DbRow[]): Promise<void> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._insertManyInternal(tableName, rows),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _insertManyInternal(tableName: string, rows: DbRow[]): Promise<void> {
     if (!rows || rows.length === 0) return;
     const table = await this.getTable(tableName);
     const page1View = this.pool.getSlotDataView(0);
@@ -916,66 +979,57 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.pool.markDirty(0);
     }
 
-    // 7. Flush once for the whole batch
-    if (!this.isTransacting) {
+    // 7. Flush once for the whole batch if autocommit (not in transaction)
+    if (!this.coordinator.isInTransaction()) {
       await this.driver.flushAllDirty();
     }
   }
 
   async transaction<T>(callback: (tx: WebDB) => Promise<T>): Promise<T> {
-    const pool = this.pool;
-    const vfsSnap =
-      this.vfs instanceof MemoryVfsAdapter ? this.vfs.snapshot() : null;
-
-    const slotSnapshots = new Map<
-      number,
-      { pageId: number; dirty: boolean; data: Uint8Array }
-    >();
-
-    for (let slot = 0; slot < pool.slotCount; slot++) {
-      const pageId = pool.getAssignedPage(slot);
-      if (pageId > 0) {
-        const dirty = pool.isDirty(slot);
-        const data = new Uint8Array(pool.getPageBytesInSlot(slot));
-        slotSnapshots.set(slot, { pageId, dirty, data });
-      }
-    }
+    const lease = await this.coordinator.begin();
+    const leaseId = lease.leaseId;
 
     const prevTransacting = this.isTransacting;
     this.isTransacting = true;
 
+    const txProxy: WebDB = new Proxy(this, {
+      get: (target, prop, receiver) => {
+        if (prop === "currentLeaseId") {
+          return leaseId;
+        }
+        if (prop === "transaction") {
+          return (cb: (nestedTx: WebDB) => Promise<any>) => cb(txProxy);
+        }
+        if (prop === "checkpoint") {
+          return () => this.checkpoint();
+        }
+        if (prop === "from") {
+          return (tableName: string) => {
+            const qb = new QueryBuilder(txProxy, tableName);
+            if (target.planner) {
+              qb.withPlanner(target.planner);
+            }
+            return qb;
+          };
+        }
+        const val = Reflect.get(target, prop, receiver);
+        if (typeof val === "function") {
+          return val.bind(txProxy);
+        }
+        return val;
+      },
+    });
+
     try {
-      const res = await callback(this);
-      if (!prevTransacting) {
-        await this.driver.flushAllDirty();
-      }
+      const res = await callback(txProxy);
+      await this.coordinator.commit(leaseId);
       return res;
     } catch (err) {
       // Clear caches so rollback doesn't leave stale cached table pointers
       this.tableMetaCache.clear();
       this.tableTailPages.clear();
       this.indexTailPages.clear();
-
-      // Rollback: restore all buffer pool slots and page data
-      for (let slot = 0; slot < pool.slotCount; slot++) {
-        const snap = slotSnapshots.get(slot);
-        if (snap) {
-          pool.assignSlot(slot, snap.pageId);
-          pool.getPageBytesInSlot(slot).set(snap.data);
-          if (snap.dirty) {
-            pool.markDirty(slot);
-          } else {
-            pool.clearDirty(slot);
-          }
-        } else {
-          pool.unassignSlot(slot);
-        }
-      }
-
-      if (vfsSnap && this.vfs instanceof MemoryVfsAdapter) {
-        this.vfs.restoreSnapshot(vfsSnap);
-      }
-
+      await this.coordinator.rollback(leaseId);
       throw err;
     } finally {
       this.isTransacting = prevTransacting;
@@ -1171,6 +1225,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options: QueryExecutionOptions,
   ): Promise<DbRow[]> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._executeQueryInternal(tableName, filters, options),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _executeQueryInternal(
+    tableName: string,
+    filters: QueryFilter[],
+    options: QueryExecutionOptions,
+  ): Promise<DbRow[]> {
     const table = await this.getTable(tableName);
 
     const joinedTablesMeta: TableMeta[] = [];
@@ -1353,7 +1418,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     return rows;
   }
 
+  /**
+   * Deduplicated Monotonic Checkpointing (Section 4.3):
+   * Replays committed WAL frames and resident memory slots to main storage,
+   * flushes main storage, and truncates WAL to 0.
+   */
+  async checkpoint(): Promise<{ pagesWritten: number }> {
+    return this.coordinator.checkpoint();
+  }
+
   async close(): Promise<void> {
+    await this.coordinator.close();
     await this.driver.flushAllDirty();
     await this.vfs.close();
   }

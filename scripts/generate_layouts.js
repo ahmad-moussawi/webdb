@@ -586,6 +586,106 @@ function generateCHeaders() {
     fs.writeFileSync(path.join(cLayoutsDir, "pool_format.h"), out);
     console.log("✓ Generated src/core/c/layouts/pool_format.h");
   }
+
+  // 4. wal_format.h
+  {
+    const schema = JSON.parse(fs.readFileSync(path.join(schemasDir, "wal_format.json"), "utf-8"));
+    let out = `/**\n * AUTO-GENERATED FROM src/layouts/schemas/wal_format.json\n * DO NOT EDIT MANUALLY. Run 'npm run generate:layouts' to rebuild.\n */\n\n`;
+    out += `#ifndef WEBDB_WAL_FORMAT_H\n#define WEBDB_WAL_FORMAT_H\n\n#include <stdint.h>\n\n`;
+
+    for (const c of schema.constants) {
+      out += `// ${cleanDescriptionForTable(c.description, 80)}\n`;
+      out += `#define ${c.name} ${c.value}\n\n`;
+    }
+
+    for (const layout of schema.layouts) {
+      let currentOffset = layout.baseOffset;
+      out += `// ${layout.id}\n`;
+      for (const f of layout.fields) {
+        const offsetConstName = `${layout.offsetPrefix}${f.name}`;
+        out += `#define ${offsetConstName} ${currentOffset}\n`;
+        currentOffset += f.size;
+      }
+      out += `#define ${layout.sizeName} ${currentOffset - layout.baseOffset}\n\n`;
+    }
+
+    out += `#endif /* WEBDB_WAL_FORMAT_H */\n`;
+    fs.writeFileSync(path.join(cLayoutsDir, "wal_format.h"), out);
+    console.log("✓ Generated src/core/c/layouts/wal_format.h");
+  }
+}
+
+function generateWalFormat() {
+  const schemaPath = path.join(schemasDir, "wal_format.json");
+  const schema = JSON.parse(fs.readFileSync(schemaPath, "utf-8"));
+
+  let out = `/**
+ * AUTO-GENERATED AT BUILD TIME FROM src/layouts/schemas/wal_format.json
+ * DO NOT EDIT MANUALLY. Run 'npm run generate:layouts' to rebuild.
+ */
+
+`;
+
+  if (schema.criticalWarning) {
+    out += formatWarning(schema.criticalWarning);
+  }
+
+  for (const c of schema.constants) {
+    out += formatDoc(c.description);
+    out += `export const ${c.name} = ${c.value};\n\n`;
+  }
+
+  for (let i = 0; i < schema.layouts.length; i++) {
+    const layout = schema.layouts[i];
+    out += `// ${"=".repeat(76)}\n`;
+    out += `// ${i + 1}. ${layout.id.replace(/_/g, " ")} Layout\n`;
+    out += `// ${"=".repeat(76)}\n\n`;
+
+    let currentOffset = layout.baseOffset;
+    const computedOffsets = {};
+    const tableRows = [];
+
+    for (const f of layout.fields) {
+      computedOffsets[f.name] = currentOffset;
+      const offsetDisplay = `${currentOffset}`;
+      const sizeDisplay = `${f.size}B`;
+      const typeDisplay = f.type || "";
+      const descDisplay = cleanDescriptionForTable(f.description);
+      tableRows.push([offsetDisplay, sizeDisplay, f.name, typeDisplay, descDisplay]);
+      currentOffset += f.size;
+    }
+    const totalSize = currentOffset - layout.baseOffset;
+
+    const rfcGrid = renderRfcByteGrid(layout.fields);
+    const asciiTable = renderAsciiTable(
+      ["Offset", "Size", "Field Name", "Type", "Description"],
+      tableRows,
+      `Total: ${totalSize} Bytes`,
+    );
+
+    out += `/**\n * 32-bit Word Byte Layout Grid for ${layout.id}:\n${rfcGrid}\n *\n * Field Details:\n${asciiTable}\n */\n`;
+    out += formatDoc(layout.fieldsDescription);
+    out += `export const ${layout.fieldsName} = [\n`;
+    for (const f of layout.fields) {
+      out += `  ["${f.name}", ${f.size}], // ${f.type || ""}\n`;
+    }
+    out += `] as const;\n\n`;
+
+    out += formatDoc(layout.sizeDescription);
+    out += `export const ${layout.sizeName} = ${totalSize};\n\n`;
+
+    if (layout.offsetPrefix) {
+      for (const f of layout.fields) {
+        const offsetConstName = `${layout.offsetPrefix}${f.name}`;
+        const offsetVal = computedOffsets[f.name];
+        out += formatDoc(f.description);
+        out += `export const ${offsetConstName} = ${offsetVal};\n\n`;
+      }
+    }
+  }
+
+  fs.writeFileSync(path.join(layoutsDir, "wal_format.ts"), out);
+  console.log("✓ Generated src/layouts/wal_format.ts");
 }
 
 function main() {
@@ -593,6 +693,7 @@ function main() {
   generatePageFormat();
   generateSyspageFormat();
   generatePoolFormat();
+  generateWalFormat();
   generateCHeaders();
   console.log("✓ All layout files successfully generated at build time.");
 }

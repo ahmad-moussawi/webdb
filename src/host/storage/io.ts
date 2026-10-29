@@ -35,6 +35,16 @@ export class Io {
 
   private in_flight_flushes = new Map<number, Promise<void>>();
   private in_flight_reads = new Map<number, Promise<void>>();
+  private coordinator: {
+    isInTransaction(): boolean;
+    spillUncommittedSlot(slotIdx: number, pageId: number): Promise<void>;
+    hasSpilledPage(pageId: number): boolean;
+    getSpilledPage(pageId: number): Uint8Array | null;
+  } | null = null;
+
+  setTransactionCoordinator(coordinator: any): void {
+    this.coordinator = coordinator;
+  }
 
   constructor(options: IoOptions) {
     if (!options.vfs) {
@@ -185,9 +195,20 @@ export class Io {
     flushPageId: number,
   ): Promise<void> {
     if (flushPageId > 0) {
-      await this.writeSlot(targetSlot, flushPageId);
+      if (this.coordinator && this.coordinator.isInTransaction()) {
+        await this.coordinator.spillUncommittedSlot(targetSlot, flushPageId);
+      } else {
+        await this.writeSlot(targetSlot, flushPageId);
+      }
     }
-    await this.readSlot(targetSlot, faultPageId);
+
+    if (this.coordinator && this.coordinator.hasSpilledPage(faultPageId)) {
+      const slot_offset = targetSlot * PAGE_SIZE;
+      const spilled = this.coordinator.getSpilledPage(faultPageId)!;
+      this.uint8.set(spilled, slot_offset);
+    } else {
+      await this.readSlot(targetSlot, faultPageId);
+    }
   }
 
   /**
