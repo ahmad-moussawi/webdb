@@ -56,8 +56,19 @@ export async function recoverFromWal(vfs: IVfsAdapter): Promise<RecoveryResult> 
     };
   }
 
-  // decodeWalFileHeader verifies magic "WEBWAL" and CRC32, throws CorruptWalHeaderError if invalid
-  decodeWalFileHeader(headerBytes, true);
+  // decodeWalFileHeader verifies magic "WEBWAL" and CRC32.
+  // If a crash occurred while initializing the 32-byte WAL header itself, discard the invalid WAL.
+  try {
+    decodeWalFileHeader(headerBytes, true);
+  } catch (err) {
+    await vfs.truncateWal(0);
+    return {
+      frameCount: 0,
+      committedTxCount: 0,
+      abortedTxCount: 0,
+      replayedPageCount: 0,
+    };
+  }
 
   // Step 2: Linear frame iteration & validation
   const rawFrames = await vfs.readWalFrames(0, frameCount);
@@ -76,6 +87,10 @@ export async function recoverFromWal(vfs: IVfsAdapter): Promise<RecoveryResult> 
     }
 
     const { header } = validation;
+    if (header.frameSeq !== validFramesProcessed + 1) {
+      // Out-of-sequence or stale frame from a prior checkpoint cycle; stop scanning immediately.
+      break;
+    }
     validFramesProcessed++;
 
     if (!txGroups.has(header.txId)) {

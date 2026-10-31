@@ -40,6 +40,7 @@ export class Io {
     spillUncommittedSlot(slotIdx: number, pageId: number): Promise<void>;
     hasSpilledPage(pageId: number): boolean;
     getSpilledPage(pageId: number): Uint8Array | null;
+    onDirectPageWrite(pageId: number, data: Uint8Array): void;
   } | null = null;
 
   setTransactionCoordinator(coordinator: any): void {
@@ -199,6 +200,9 @@ export class Io {
     this.stampSlotChecksum(slotIdx, pageId);
 
     const write_snapshot = page_bytes.slice();
+    if (this.coordinator) {
+      this.coordinator.onDirectPageWrite(pageId, write_snapshot);
+    }
     const write_promise = this.vfs.writePage(pageId, write_snapshot);
     this.in_flight_flushes.set(pageId, write_promise);
     try {

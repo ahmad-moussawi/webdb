@@ -2,6 +2,7 @@ import { IVfsAdapter } from '../storage/vfs.js';
 import { Io } from '../storage/io.js';
 import { BufferPoolDriver } from './buffer_pool_driver.js';
 import {
+  decodeWalFileHeader,
   encodeWalFileHeader,
   encodeWalFrame,
   validateWalFrame,
@@ -162,6 +163,7 @@ export class TransactionCoordinator {
 
   private activeLease: TransactionLease | null = null;
   private snapshotFrameCount = 0;
+  private snapshotWalFrameSeq = 0;
   private slotSnapshots = new Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>();
   private pinCountsSnapshot: Uint32Array | null = null;
   private spilledPages = new Map<number, Uint8Array>();
@@ -203,6 +205,12 @@ export class TransactionCoordinator {
   getSpilledPage(pageId: number): Uint8Array | null {
     const data = this.spilledPages.get(pageId) ?? this.committedWalPages.get(pageId);
     return data ? new Uint8Array(data) : null;
+  }
+
+  onDirectPageWrite(pageId: number, data: Uint8Array): void {
+    if (this.committedWalPages.has(pageId)) {
+      this.committedWalPages.set(pageId, new Uint8Array(data));
+    }
   }
 
   /**
@@ -330,9 +338,18 @@ export class TransactionCoordinator {
     this.activeLease = lease;
     this.pauseIdleTimer();
 
-    // Ensure WAL header is initialized
+    // Ensure WAL header is initialized and valid
     const existingHeader = await this.vfs.readWalHeader();
-    if (!existingHeader) {
+    let headerValid = false;
+    if (existingHeader) {
+      try {
+        decodeWalFileHeader(existingHeader, true);
+        headerValid = true;
+      } catch {
+        headerValid = false;
+      }
+    }
+    if (!headerValid) {
       await this.vfs.writeWalHeader(
         encodeWalFileHeader({
           checkpointSeq: this.checkpointSeq,
@@ -343,6 +360,7 @@ export class TransactionCoordinator {
     this.spilledPages.clear();
     const snap = await this.captureSavepoint();
     this.snapshotFrameCount = snap.frameCount;
+    this.snapshotWalFrameSeq = snap.walFrameSeq;
     this.slotSnapshots = snap.slotSnapshots;
     this.pinCountsSnapshot = snap.pinCounts;
 
@@ -382,6 +400,7 @@ export class TransactionCoordinator {
           pageCopy.set(pageBytes);
 
           this.committedWalPages.set(pageId, pageCopy);
+          this.pool.clearDirty(slot);
 
           framesToAppend.push(
             encodeWalFrame(
@@ -452,7 +471,7 @@ export class TransactionCoordinator {
       slotSnapshots: this.slotSnapshots,
       pinCounts: this.pinCountsSnapshot ?? new Uint32Array(this.pool.pin_counts),
       spilledPages: new Map(),
-      walFrameSeq: this.walFrameSeq,
+      walFrameSeq: this.snapshotWalFrameSeq,
     });
 
     this.activeLease = null;
@@ -523,6 +542,10 @@ export class TransactionCoordinator {
           }
         }
       }
+    }
+
+    for (const [pageId, data] of this.committedWalPages.entries()) {
+      walIndex.set(pageId, data);
     }
 
     // 2. Inspect resident dirty slots in memory (memory_override)
