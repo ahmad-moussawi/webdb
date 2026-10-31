@@ -1,6 +1,7 @@
 import { IVfsAdapter } from '../storage/vfs.js';
 import { Io } from '../storage/io.js';
 import { BufferPoolDriver } from './buffer_pool_driver.js';
+import { recoverFromWal } from './crash_recovery.js';
 import {
   decodeWalFileHeader,
   encodeWalFileHeader,
@@ -8,6 +9,8 @@ import {
   validateWalFrame,
 } from '../storage/wal_codec.js';
 import {
+  HEADER_OFFSET_CHANGE_COUNTER,
+  HEADER_OFFSET_SCHEMA_VERSION,
   HEADER_OFFSET_TOTAL_PAGES,
   WAL_FRAME_HEADER_SIZE,
   WAL_FRAME_TYPE_PAGE_DATA,
@@ -23,7 +26,8 @@ export interface TransactionLease {
 }
 
 /**
- * Enforces the Exclusive Transaction Lease across asynchronous JavaScript microtask boundaries.
+ * Enforces the Exclusive Transaction Lease across asynchronous JavaScript microtask boundaries
+ * and across concurrent browser tabs via the Web Locks API (navigator.locks).
  * While an exclusive lease is held by an active transaction, all external queries, mutations,
  * and checkpoint requests are strictly enqueued in FIFO order.
  */
@@ -34,6 +38,47 @@ export class ExclusiveLeaseQueue {
   private leaseWaiters: Array<{ resolve: (lease: TransactionLease) => void }> = [];
   private nextLeaseId = 1;
   private nextTxId = 1;
+
+  private crossTabLockName?: string;
+  private onSyncCrossTab?: () => Promise<void>;
+  private releaseWebLock: (() => void) | null = null;
+
+  constructor(crossTabLockName?: string, onSyncCrossTab?: () => Promise<void>) {
+    this.crossTabLockName = crossTabLockName;
+    this.onSyncCrossTab = onSyncCrossTab;
+  }
+
+  hasWebLocks(): boolean {
+    return (
+      !!this.crossTabLockName &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator?.locks?.request === 'function'
+    );
+  }
+
+  private async acquireWebLock(): Promise<void> {
+    if (!this.hasWebLocks() || this.releaseWebLock) return;
+    await new Promise<void>((resolveAcquired) => {
+      navigator.locks
+        .request(this.crossTabLockName!, { mode: 'exclusive' }, () => {
+          return new Promise<void>((resolveRelease) => {
+            this.releaseWebLock = resolveRelease;
+            resolveAcquired();
+          });
+        })
+        .catch(() => {
+          resolveAcquired();
+        });
+    });
+  }
+
+  private releaseCurrentWebLock(): void {
+    if (this.releaseWebLock) {
+      const rel = this.releaseWebLock;
+      this.releaseWebLock = null;
+      rel();
+    }
+  }
 
   get isLeased(): boolean {
     return this.activeLease !== null;
@@ -53,19 +98,33 @@ export class ExclusiveLeaseQueue {
       return task();
     }
 
-    // If an exclusive transaction lease is active or there are pending transaction waiters,
-    // queue the external task in FIFO order until the lease is released.
-    if (this.activeLease || this.leaseWaiters.length > 0) {
+    // If an exclusive transaction lease is active, there are pending transaction waiters,
+    // or (in cross-tab Web Locks mode) another non-tx task is currently holding the lock,
+    // queue the external task in FIFO order.
+    if (
+      this.activeLease ||
+      this.leaseWaiters.length > 0 ||
+      (this.hasWebLocks() && this.inFlightNonTxCount > 0)
+    ) {
       return new Promise<T>((resolve, reject) => {
         this.queue.push(async () => {
           this.inFlightNonTxCount++;
           try {
+            if (this.hasWebLocks() && this.inFlightNonTxCount === 1) {
+              await this.acquireWebLock();
+              if (this.onSyncCrossTab) {
+                await this.onSyncCrossTab();
+              }
+            }
             const res = await task();
             resolve(res);
           } catch (err) {
             reject(err);
           } finally {
             this.inFlightNonTxCount--;
+            if (this.inFlightNonTxCount === 0 && !this.activeLease) {
+              this.releaseCurrentWebLock();
+            }
             this.drain();
           }
         });
@@ -75,16 +134,25 @@ export class ExclusiveLeaseQueue {
     // Fast-path: no active lease or waiters; run immediately
     this.inFlightNonTxCount++;
     try {
+      if (this.hasWebLocks() && this.inFlightNonTxCount === 1) {
+        await this.acquireWebLock();
+        if (this.onSyncCrossTab) {
+          await this.onSyncCrossTab();
+        }
+      }
       return await task();
     } finally {
       this.inFlightNonTxCount--;
+      if (this.inFlightNonTxCount === 0 && !this.activeLease) {
+        this.releaseCurrentWebLock();
+      }
       this.drain();
     }
   }
 
   /**
    * Acquires the Exclusive Transaction Lease.
-   * Blocks until all in-flight non-transactional operations finish.
+   * Blocks until all in-flight non-transactional operations finish and acquires the cross-tab Web Lock.
    */
   async acquireExclusiveLease(): Promise<TransactionLease> {
     if (!this.activeLease && this.inFlightNonTxCount === 0 && this.queue.length === 0) {
@@ -94,25 +162,30 @@ export class ExclusiveLeaseQueue {
         createdAt: Date.now(),
       };
       this.activeLease = lease;
+      await this.acquireWebLock();
       return lease;
     }
 
     return new Promise<TransactionLease>((resolve) => {
       this.leaseWaiters.push({
-        resolve: (lease) => resolve(lease),
+        resolve: async (lease) => {
+          await this.acquireWebLock();
+          resolve(lease);
+        },
       });
       this.drain();
     });
   }
 
   /**
-   * Releases the Exclusive Transaction Lease and drains pending operations in FIFO order.
+   * Releases the Exclusive Transaction Lease, releases the cross-tab Web Lock, and drains pending operations.
    */
   releaseExclusiveLease(leaseId: number): void {
     if (!this.activeLease || this.activeLease.leaseId !== leaseId) {
       return;
     }
     this.activeLease = null;
+    this.releaseCurrentWebLock();
     this.drain();
   }
 
@@ -138,7 +211,12 @@ export class ExclusiveLeaseQueue {
     }
 
     // Drain queued external non-transaction tasks
-    while (this.queue.length > 0 && !this.activeLease && this.leaseWaiters.length === 0) {
+    while (
+      this.queue.length > 0 &&
+      !this.activeLease &&
+      this.leaseWaiters.length === 0 &&
+      (!this.hasWebLocks() || this.inFlightNonTxCount === 0)
+    ) {
       const nextTask = this.queue.shift();
       if (nextTask) {
         nextTask();
@@ -159,7 +237,7 @@ export class TransactionCoordinator {
   private vfs: IVfsAdapter;
   private pool: BufferPoolDriver;
   private io: Io;
-  private queue = new ExclusiveLeaseQueue();
+  private queue: ExclusiveLeaseQueue;
 
   private activeLease: TransactionLease | null = null;
   private snapshotFrameCount = 0;
@@ -172,14 +250,110 @@ export class TransactionCoordinator {
   private txCommitCount = 0;
   private checkpointSeq = 0;
 
+  // Cross-tab state tracking
+  private instanceSalt = (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+  private expectedWalFrameCount = 0;
+  private lastDiskChangeCounter = 0;
+  private lastDiskSchemaVersion = 0;
+  private onCrossTabInvalidated?: () => Promise<void>;
+
   // Inactivity idle checkpoint timer (5 seconds)
   private idleTimer: any = null;
   private isClosed = false;
 
-  constructor(vfs: IVfsAdapter, pool: BufferPoolDriver, io: Io) {
+  constructor(
+    vfs: IVfsAdapter,
+    pool: BufferPoolDriver,
+    io: Io,
+    crossTabLockName?: string,
+  ) {
     this.vfs = vfs;
     this.pool = pool;
     this.io = io;
+    this.queue = new ExclusiveLeaseQueue(
+      crossTabLockName,
+      () => this.syncCrossTabState(),
+    );
+  }
+
+  setOnCrossTabInvalidated(cb: () => Promise<void>): void {
+    this.onCrossTabInvalidated = cb;
+  }
+
+  recordDiskPage1State(): void {
+    const view = this.pool.getSlotDataView(0);
+    this.lastDiskChangeCounter = view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
+    this.lastDiskSchemaVersion = view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+  }
+
+  private async reloadFromDisk(
+    diskPage1: Uint8Array,
+    diskChangeCounter: number,
+    diskSchemaVersion: number,
+  ): Promise<void> {
+    this.pool.getPageBytesInSlot(0).set(diskPage1);
+    this.pool.clearDirty(0);
+    this.lastDiskChangeCounter = diskChangeCounter;
+    this.lastDiskSchemaVersion = diskSchemaVersion;
+
+    for (let slot = 1; slot < this.pool.slotCount; slot++) {
+      this.pool.unassignSlot(slot);
+      this.pool.clearDirty(slot);
+      this.pool.pin_counts[slot] = 0;
+    }
+    this.pool.pin_counts[0] = 1;
+
+    if (this.onCrossTabInvalidated) {
+      await this.onCrossTabInvalidated();
+    }
+  }
+
+  async syncCrossTabState(): Promise<void> {
+    if (!this.queue.hasWebLocks()) return;
+
+    const walFrameCount = await this.vfs.getWalFrameCount();
+    let walTouchedByOtherTab = false;
+
+    if (walFrameCount > 0) {
+      const headerBytes = await this.vfs.readWalHeader();
+      let headerSalt = 0;
+      if (headerBytes) {
+        try {
+          headerSalt = decodeWalFileHeader(headerBytes, true).salt1;
+        } catch {
+          headerSalt = 0;
+        }
+      }
+      if (headerSalt !== this.instanceSalt || walFrameCount !== this.expectedWalFrameCount) {
+        walTouchedByOtherTab = true;
+        await recoverFromWal(this.vfs);
+        this.committedWalPages.clear();
+        this.walFrameSeq = 0;
+        this.txCommitCount = 0;
+        this.expectedWalFrameCount = 0;
+      }
+    } else if (this.expectedWalFrameCount > 0) {
+      walTouchedByOtherTab = true;
+      this.committedWalPages.clear();
+      this.walFrameSeq = 0;
+      this.txCommitCount = 0;
+      this.expectedWalFrameCount = 0;
+    }
+
+    const diskPage1 = await this.vfs.readPage(1);
+    if (diskPage1) {
+      const diskView = new DataView(diskPage1.buffer, diskPage1.byteOffset, diskPage1.byteLength);
+      const diskChangeCounter = diskView.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
+      const diskSchemaVersion = diskView.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+
+      if (
+        walTouchedByOtherTab ||
+        diskChangeCounter !== this.lastDiskChangeCounter ||
+        diskSchemaVersion !== this.lastDiskSchemaVersion
+      ) {
+        await this.reloadFromDisk(diskPage1, diskChangeCounter, diskSchemaVersion);
+      }
+    }
   }
 
   get leaseQueue(): ExclusiveLeaseQueue {
@@ -210,6 +384,11 @@ export class TransactionCoordinator {
   onDirectPageWrite(pageId: number, data: Uint8Array): void {
     if (this.committedWalPages.has(pageId)) {
       this.committedWalPages.set(pageId, new Uint8Array(data));
+    }
+    if (pageId === 1) {
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      this.lastDiskChangeCounter = view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
+      this.lastDiskSchemaVersion = view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
     }
   }
 
@@ -248,6 +427,7 @@ export class TransactionCoordinator {
     );
 
     await this.vfs.appendWalFrames([frame]);
+    this.expectedWalFrameCount = await this.vfs.getWalFrameCount();
   }
 
   /**
@@ -325,46 +505,58 @@ export class TransactionCoordinator {
     }
     this.walFrameSeq = savepoint.walFrameSeq;
     await this.vfs.truncateWal(savepoint.frameCount);
+    this.expectedWalFrameCount = savepoint.frameCount;
   }
 
   /**
    * Begins an explicit transaction:
-   * 1. Acquires exclusive lease on the async queue.
-   * 2. Snapshots resident buffer pool slots and current WAL frame count.
-   * 3. Pauses idle checkpoint timer.
+   * 1. Acquires exclusive lease on the async queue (and cross-tab Web Lock).
+   * 2. Synchronizes cross-tab storage state if another tab modified .db / .wal.
+   * 3. Snapshots resident buffer pool slots and current WAL frame count.
+   * 4. Pauses idle checkpoint timer.
    */
   async begin(): Promise<TransactionLease> {
     const lease = await this.queue.acquireExclusiveLease();
     this.activeLease = lease;
     this.pauseIdleTimer();
 
-    // Ensure WAL header is initialized and valid
-    const existingHeader = await this.vfs.readWalHeader();
-    let headerValid = false;
-    if (existingHeader) {
-      try {
-        decodeWalFileHeader(existingHeader, true);
-        headerValid = true;
-      } catch {
-        headerValid = false;
+    try {
+      await this.syncCrossTabState();
+
+      // Ensure WAL header is initialized with this instance's salt
+      const currentFrames = await this.vfs.getWalFrameCount();
+      const existingHeader = await this.vfs.readWalHeader();
+      let headerValid = false;
+      if (existingHeader && currentFrames > 0) {
+        try {
+          const decoded = decodeWalFileHeader(existingHeader, true);
+          headerValid = decoded.salt1 === this.instanceSalt;
+        } catch {
+          headerValid = false;
+        }
       }
-    }
-    if (!headerValid) {
-      await this.vfs.writeWalHeader(
-        encodeWalFileHeader({
-          checkpointSeq: this.checkpointSeq,
-        }),
-      );
-    }
+      if (!headerValid) {
+        await this.vfs.writeWalHeader(
+          encodeWalFileHeader({
+            checkpointSeq: this.checkpointSeq,
+            salt1: this.instanceSalt,
+          }),
+        );
+      }
 
-    this.spilledPages.clear();
-    const snap = await this.captureSavepoint();
-    this.snapshotFrameCount = snap.frameCount;
-    this.snapshotWalFrameSeq = snap.walFrameSeq;
-    this.slotSnapshots = snap.slotSnapshots;
-    this.pinCountsSnapshot = snap.pinCounts;
+      this.spilledPages.clear();
+      const snap = await this.captureSavepoint();
+      this.snapshotFrameCount = snap.frameCount;
+      this.snapshotWalFrameSeq = snap.walFrameSeq;
+      this.slotSnapshots = snap.slotSnapshots;
+      this.pinCountsSnapshot = snap.pinCounts;
 
-    return lease;
+      return lease;
+    } catch (err) {
+      this.activeLease = null;
+      this.queue.releaseExclusiveLease(lease.leaseId);
+      throw err;
+    }
   }
 
   /**
@@ -434,6 +626,8 @@ export class TransactionCoordinator {
     // Durably write WAL frames
     await this.vfs.appendWalFrames(framesToAppend);
     await this.vfs.flushWal();
+    const currentFrames = await this.vfs.getWalFrameCount();
+    this.expectedWalFrameCount = currentFrames;
 
     // Cleanup active transaction state
     this.activeLease = null;
@@ -447,7 +641,6 @@ export class TransactionCoordinator {
     this.scheduleIdleTimer();
 
     // Check passive checkpoint size trigger (> 256 frames or 100 txs)
-    const currentFrames = await this.vfs.getWalFrameCount();
     if (currentFrames >= 256 || this.txCommitCount >= 100) {
       // Trigger checkpoint asynchronously in queue without blocking caller
       this.queue.enqueue(() => this.executeCheckpoint());
@@ -596,9 +789,12 @@ export class TransactionCoordinator {
     this.checkpointSeq++;
     this.walFrameSeq = 0;
     this.txCommitCount = 0;
+    this.expectedWalFrameCount = 0;
+    this.recordDiskPage1State();
     await this.vfs.writeWalHeader(
       encodeWalFileHeader({
         checkpointSeq: this.checkpointSeq,
+        salt1: this.instanceSalt,
       }),
     );
 

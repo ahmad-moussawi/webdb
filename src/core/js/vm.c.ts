@@ -4,11 +4,7 @@ import {
   SLOT_TO_PAGE_OFFSET,
   MAX_TOPK_HEAP_LIMIT,
 } from "../../constants.ts";
-import {
-  OpCode,
-  VmStatus,
-  DataType,
-} from "../../types/index.ts";
+import { OpCode, VmStatus, DataType } from "../../types/index.ts";
 import {
   page_get_cell_count,
   page_get_cell_offset,
@@ -622,9 +618,16 @@ export function vm_step(
             found = true;
             idx_cursor.pageId = curr_page_id;
             idx_cursor.cellIdx = search.slot_idx;
-            const cell_offset = page_get_cell_offset(view, page_offset, search.slot_idx);
+            const cell_offset = page_get_cell_offset(
+              view,
+              page_offset,
+              search.slot_idx,
+            );
             const k_len = view.getUint16(page_offset + cell_offset, true);
-            matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+            matched_rowid = view.getBigInt64(
+              page_offset + cell_offset + 2 + k_len,
+              true,
+            );
             break;
           }
 
@@ -656,7 +659,11 @@ export function vm_step(
           data_cursor.pageId = data_page_id;
           data_cursor.cellIdx = data_cell_idx;
           const data_page_offset = resolve_page_offset(view, data_page_id);
-          const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+          const rel_cell_offset = page_get_cell_offset(
+            view,
+            data_page_offset,
+            data_cell_idx,
+          );
           data_cursor.rowOffset = data_page_offset + rel_cell_offset;
         }
         break;
@@ -724,9 +731,16 @@ export function vm_step(
             found = true;
             idx_cursor.pageId = curr_page_id;
             idx_cursor.cellIdx = search.slot_idx;
-            const cell_offset = page_get_cell_offset(view, page_offset, search.slot_idx);
+            const cell_offset = page_get_cell_offset(
+              view,
+              page_offset,
+              search.slot_idx,
+            );
             const k_len = view.getUint16(page_offset + cell_offset, true);
-            matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+            matched_rowid = view.getBigInt64(
+              page_offset + cell_offset + 2 + k_len,
+              true,
+            );
             break;
           }
 
@@ -758,7 +772,11 @@ export function vm_step(
           data_cursor.pageId = data_page_id;
           data_cursor.cellIdx = data_cell_idx;
           const data_page_offset = resolve_page_offset(view, data_page_id);
-          const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+          const rel_cell_offset = page_get_cell_offset(
+            view,
+            data_page_offset,
+            data_cell_idx,
+          );
           data_cursor.rowOffset = data_page_offset + rel_cell_offset;
         }
         break;
@@ -810,14 +828,20 @@ export function vm_step(
           }
           page_offset = resolve_page_offset(view, curr_page_id);
           next_cell_idx = 0;
+          idx_cursor.pageId = curr_page_id;
+          idx_cursor.cellIdx = -1;
         }
 
-        idx_cursor.pageId = curr_page_id;
-        idx_cursor.cellIdx = next_cell_idx;
-
-        const cell_offset = page_get_cell_offset(view, page_offset, next_cell_idx);
+        const cell_offset = page_get_cell_offset(
+          view,
+          page_offset,
+          next_cell_idx,
+        );
         const k_len = view.getUint16(page_offset + cell_offset, true);
-        const matched_rowid = view.getBigInt64(page_offset + cell_offset + 2 + k_len, true);
+        const matched_rowid = view.getBigInt64(
+          page_offset + cell_offset + 2 + k_len,
+          true,
+        );
 
         const data_page_id = Number(matched_rowid >> 16n);
         const data_cell_idx = Number(matched_rowid & 0xffffn);
@@ -837,11 +861,18 @@ export function vm_step(
           }
         }
 
+        idx_cursor.pageId = curr_page_id;
+        idx_cursor.cellIdx = next_cell_idx;
+
         const data_cursor = get_cursor(ctx, data_cursor_idx);
         data_cursor.pageId = data_page_id;
         data_cursor.cellIdx = data_cell_idx;
         const data_page_offset = resolve_page_offset(view, data_page_id);
-        const rel_cell_offset = page_get_cell_offset(view, data_page_offset, data_cell_idx);
+        const rel_cell_offset = page_get_cell_offset(
+          view,
+          data_page_offset,
+          data_cell_idx,
+        );
         data_cursor.rowOffset = data_page_offset + rel_cell_offset;
         break;
       }
@@ -1203,8 +1234,10 @@ export function vm_step(
         if (set) {
           if (
             set.has(val) ||
-            (typeof val === 'number' && Number.isSafeInteger(val) && set.has(BigInt(val))) ||
-            (typeof val === 'bigint' && set.has(Number(val)))
+            (typeof val === "number" &&
+              Number.isSafeInteger(val) &&
+              set.has(BigInt(val))) ||
+            (typeof val === "bigint" && set.has(Number(val)))
           ) {
             ctx.pc = jump_target;
           }
@@ -1903,7 +1936,7 @@ export function vm_step(
         const num_regs = bytecode[ctx.pc + 1];
         const dest_reg = bytecode[ctx.pc + 2];
         ctx.pc += 3;
-        let res = '';
+        let res = "";
         let has_val = false;
         for (let i = 0; i < num_regs; i++) {
           const v = ctx.registers[start_reg + i];

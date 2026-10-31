@@ -933,5 +933,142 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
         }
       }
     });
+
+    it('handles large bulk insertMany (500+ large rows, ~150+ pages) and mid-transaction createIndex backfill under tight 16-slot buffer pool', async () => {
+      await db.close();
+
+      const largeVfs = new MemoryVfsAdapter();
+      const constrainedDb = await WebDB.open({ vfs: largeVfs, slotCount: 16 });
+
+      await constrainedDb.createTable('documents', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'slug', type: 'TEXT' },
+        { name: 'category', type: 'TEXT' },
+        { name: 'body', type: 'TEXT' },
+      ]);
+      await constrainedDb.createIndex('documents', 'slug', { unique: true });
+
+      const bodyChunk = 'D'.repeat(800); // ~850B per row -> 4 rows per 4KB page -> ~125 data pages for 500 rows
+      const batch500 = Array.from({ length: 500 }, (_, idx) => {
+        const id = idx + 1;
+        return {
+          id,
+          slug: `doc-slug-${String(id).padStart(4, '0')}`,
+          category: `cat_${id % 10}`,
+          body: `${id}_${bodyChunk}`,
+        };
+      });
+
+      await constrainedDb.transaction(async (tx) => {
+        // 1. Bulk insert 500 large rows in a single insertMany call (forces >150 page evictions & WAL spills)
+        await tx.insertMany('documents', batch500);
+
+        // 2. Backfill a brand-new secondary index across all 500 spilled/resident rows mid-transaction
+        await tx.createIndex('documents', 'category');
+
+        // 3. Test a nested savepoint that inserts 100 more large rows and aborts
+        await expect(
+          tx.transaction(async (savepointTx) => {
+            const extra100 = Array.from({ length: 100 }, (_, idx) => {
+              const id = 501 + idx;
+              return {
+                id,
+                slug: `aborted-slug-${id}`,
+                category: 'cat_aborted',
+                body: `abort_${bodyChunk}`,
+              };
+            });
+            await savepointTx.insertMany('documents', extra100);
+            throw new Error('Rollback 100-row savepoint');
+          }),
+        ).rejects.toThrow('Rollback 100-row savepoint');
+      });
+
+      // Simulate hard crash right after commit (before checkpoint) and reopen
+      const recovered = await WebDB.open({ vfs: largeVfs, slotCount: 32 });
+
+      const allDocs = await recovered.from('documents').orderBy('id', 'asc').toArray();
+      expect(allDocs).toHaveLength(500);
+      expect(allDocs[0]).toMatchObject({ id: 1, slug: 'doc-slug-0001', category: 'cat_1' });
+      expect(allDocs[499]).toMatchObject({ id: 500, slug: 'doc-slug-0500', category: 'cat_0' });
+
+      // Verify both unique slug index and backfilled category index after recovery
+      const bySlug = await recovered
+        .from('documents')
+        .where('slug', '=', 'doc-slug-0345')
+        .toArray();
+      expect(bySlug).toHaveLength(1);
+      expect(bySlug[0]).toMatchObject({ id: 345, category: 'cat_5' });
+
+      const byCat = await recovered
+        .from('documents')
+        .where('category', '=', 'cat_7')
+        .toArray();
+      expect(byCat).toHaveLength(50);
+
+      await recovered.close();
+    });
+
+    it('preserves byte-for-byte integrity for near-max-size (~1.9KB) binary BLOB + TEXT rows across multi-table transactions and rollback', async () => {
+      await db.createTable('blobs_a', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'hash', type: 'TEXT' },
+        { name: 'raw', type: 'BLOB' },
+      ]);
+      await db.createTable('blobs_b', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'raw', type: 'BLOB' },
+      ]);
+
+      const makeBinaryPayload = (seed: number, length = 1800): Uint8Array => {
+        const arr = new Uint8Array(length);
+        for (let i = 0; i < length; i++) {
+          arr[i] = (seed * 31 + i * 17) & 0xff;
+        }
+        return arr;
+      };
+
+      // Commit 60 near-max-size (~1.8KB) binary BLOB rows across both tables
+      await db.transaction(async (tx) => {
+        const rowsA = Array.from({ length: 40 }, (_, idx) => ({
+          id: idx + 1,
+          hash: `sha256_${idx + 1}_${'f'.repeat(40)}`,
+          raw: makeBinaryPayload(idx + 1, 1800),
+        }));
+        const rowsB = Array.from({ length: 20 }, (_, idx) => ({
+          id: idx + 1,
+          raw: makeBinaryPayload(1000 + idx, 1850),
+        }));
+        await tx.insertMany('blobs_a', rowsA);
+        await tx.insertMany('blobs_b', rowsB);
+      });
+
+      // Attempt an aborted transaction that drops blobs_b and inserts corrupted blobs into blobs_a
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.dropTable('blobs_b');
+          await tx.insert('blobs_a', {
+            id: 999,
+            hash: 'aborted',
+            raw: new Uint8Array([9, 9, 9]),
+          });
+          throw new Error('Abort binary mutation');
+        }),
+      ).rejects.toThrow('Abort binary mutation');
+
+      await db.checkpoint();
+      await db.close();
+
+      const reopened = await WebDB.open({ vfs });
+      const resA = await reopened.from('blobs_a').orderBy('id', 'asc').toArray();
+      const resB = await reopened.from('blobs_b').orderBy('id', 'asc').toArray();
+
+      expect(resA).toHaveLength(40);
+      expect(resB).toHaveLength(20);
+      expect(new Uint8Array(resA[27].raw as Uint8Array)).toEqual(makeBinaryPayload(28, 1800));
+      expect(new Uint8Array(resB[14].raw as Uint8Array)).toEqual(makeBinaryPayload(1014, 1850));
+
+      await reopened.close();
+    });
   });
 });

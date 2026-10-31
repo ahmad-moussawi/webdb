@@ -157,7 +157,6 @@ export class WebDB implements IDatabaseQueryExecutor {
   private tableMetaCache: Map<string, TableMeta> = new Map();
   private tableTailPages: Map<string, number> = new Map();
   private indexTailPages: Map<number, number> = new Map();
-  private isTransacting = false;
 
   private constructor(
     vfs: IVfsAdapter,
@@ -176,6 +175,25 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.wasmCore = wasmCore;
     this.planner = planner;
     this.vmCtx = createVmContext();
+
+    this.coordinator.setOnCrossTabInvalidated(async () => {
+      this.tableMetaCache.clear();
+      this.tableTailPages.clear();
+      this.indexTailPages.clear();
+
+      const tableDescriptors = catalog_list_table_descriptors(
+        this.driver.getSlotDataView(0),
+      );
+      for (const desc of tableDescriptors) {
+        let catPageId = desc.colCatalogPageId;
+        while (catPageId !== 0) {
+          const slot = await this.driver.acquireAndPinPage(catPageId);
+          const view = this.driver.getSlotDataView(slot);
+          const header = catalog_read_page_header(view, 0);
+          catPageId = header.nextColCatalogPageId;
+        }
+      }
+    });
   }
 
   static async open(options: WebDbOptions): Promise<WebDB> {
@@ -190,9 +208,6 @@ export class WebDB implements IDatabaseQueryExecutor {
     } else {
       vfs = new MemoryVfsAdapter();
     }
-
-    // Section 6: Crash Recovery Protocol & Startup WAL Replay
-    await recoverFromWal(vfs);
 
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
@@ -209,37 +224,54 @@ export class WebDB implements IDatabaseQueryExecutor {
       useDefaultLayoutOffsets: true,
     });
 
-    const coordinator = new TransactionCoordinator(vfs, driver, io);
+    const crossTabLockName =
+      options.name && vfs.name !== "memory"
+        ? `webdb_lock_${vfs.name}_${options.name}`
+        : undefined;
+
+    const coordinator = new TransactionCoordinator(
+      vfs,
+      driver,
+      io,
+      crossTabLockName,
+    );
+
     driver.setTransactionCoordinator(coordinator);
 
-    // Check if Page 1 exists in storage
-    const page1Data = await vfs.readPage(1);
-    if (!page1Data) {
-      // Initialize Page 1 in slot 0
-      catalog_init_page1(driver.getSlotDataView(0));
-      driver.markDirty(0);
-      await driver.flushSlot(0);
-    } else {
-      // Load Page 1 into slot 0
-      driver.getPageBytesInSlot(0).set(page1Data);
-      driver.clearDirty(0);
-      // Validate Page 1 header & checksum
-      catalog_read_page1_header(driver.getSlotDataView(0), true);
+    await coordinator.leaseQueue.enqueue(async () => {
+      // Section 6: Crash Recovery Protocol & Startup WAL Replay
+      await recoverFromWal(vfs);
 
-      // Section 6.2: Pre-load and permanently pin all column catalog pages for active tables
-      const tableDescriptors = catalog_list_table_descriptors(
-        driver.getSlotDataView(0),
-      );
-      for (const desc of tableDescriptors) {
-        let catPageId = desc.colCatalogPageId;
-        while (catPageId !== 0) {
-          const slot = await driver.acquireAndPinPage(catPageId);
-          const view = driver.getSlotDataView(slot);
-          const header = catalog_read_page_header(view, 0);
-          catPageId = header.nextColCatalogPageId;
+      // Check if Page 1 exists in storage
+      const page1Data = await vfs.readPage(1);
+      if (!page1Data) {
+        // Initialize Page 1 in slot 0
+        catalog_init_page1(driver.getSlotDataView(0));
+        driver.markDirty(0);
+        await driver.flushSlot(0);
+      } else {
+        // Load Page 1 into slot 0
+        driver.getPageBytesInSlot(0).set(page1Data);
+        driver.clearDirty(0);
+        // Validate Page 1 header & checksum
+        catalog_read_page1_header(driver.getSlotDataView(0), true);
+
+        // Section 6.2: Pre-load and permanently pin all column catalog pages for active tables
+        const tableDescriptors = catalog_list_table_descriptors(
+          driver.getSlotDataView(0),
+        );
+        for (const desc of tableDescriptors) {
+          let catPageId = desc.colCatalogPageId;
+          while (catPageId !== 0) {
+            const slot = await driver.acquireAndPinPage(catPageId);
+            const view = driver.getSlotDataView(slot);
+            const header = catalog_read_page_header(view, 0);
+            catPageId = header.nextColCatalogPageId;
+          }
         }
       }
-    }
+      coordinator.recordDiskPage1State();
+    });
 
     const coreMode = options.core ?? "js";
     let wasmCore: WasmCoreExports | undefined;
@@ -606,11 +638,14 @@ export class WebDB implements IDatabaseQueryExecutor {
     // Backfill: iterate all data pages and insert existing rows into new index
     let currentPageId = table.rootPageId;
     while (currentPageId !== 0) {
-      const pageSlot = await this.driver.acquirePage(currentPageId);
-      const pageView = this.pool.getSlotDataView(pageSlot);
+      let pageSlot = await this.driver.acquirePage(currentPageId);
+      let pageView = this.pool.getSlotDataView(pageSlot);
       const cellCount = page_get_cell_count(pageView, 0);
+      const nextPageId = page_get_next_page_id(pageView, 0);
 
       for (let i = 0; i < cellCount; i++) {
+        pageSlot = await this.driver.acquirePage(currentPageId);
+        pageView = this.pool.getSlotDataView(pageSlot);
         const cellOffset = page_get_cell_offset(pageView, 0, i);
         const row = page_deserialize_row(table.columns, pageView, cellOffset);
         if (row) {
@@ -642,7 +677,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
-      currentPageId = page_get_next_page_id(pageView, 0);
+      currentPageId = nextPageId;
     }
 
     // Write index descriptor into Page 1 catalog
@@ -961,7 +996,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         row[autoIncCol.name] = assignedAutoInc;
       }
 
-      // 4. Data page insertion
+      // 4. Data page insertion (re-acquire currentPageId in case index insertion evicted it)
+      slot = await this.driver.acquirePage(currentPageId);
+      view = this.pool.getSlotDataView(slot);
       let targetPageId = currentPageId;
       let insertSlot = page_insert_row(
         view,
@@ -1031,6 +1068,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         desc.autoIncNext = table.autoIncNext;
       }
       catalog_write_table_descriptor(page1View, slotIdx, desc);
+      catalog_increment_change_counter(page1View);
+      catalog_update_page1_checksum(page1View);
       this.pool.markDirty(0);
     }
 
@@ -1043,8 +1082,6 @@ export class WebDB implements IDatabaseQueryExecutor {
   async transaction<T>(callback: (tx: WebDB) => Promise<T>): Promise<T> {
     const lease = await this.coordinator.begin();
     const leaseId = lease.leaseId;
-
-    this.isTransacting = true;
 
     const txProxy: WebDB = new Proxy(this, {
       get: (target, prop, receiver) => {
@@ -1096,8 +1133,6 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.indexTailPages.clear();
       await this.coordinator.rollback(leaseId);
       throw err;
-    } finally {
-      this.isTransacting = this.coordinator.isInTransaction();
     }
   }
 

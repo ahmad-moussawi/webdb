@@ -23,7 +23,8 @@
     "prebuild": "node scripts/generate_layouts.js",
     "build": "vite build",
     "pretest": "node scripts/generate_layouts.js",
-    "test": "vitest run",
+    "test": "vitest run tests",
+    "test:e2e": "playwright test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "demo": "vite-node examples/demo.ts",
@@ -39,6 +40,7 @@
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@playwright/test": "^1.63.0",
     "@sqlite.org/sqlite-wasm": "^3.53.4-build1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
