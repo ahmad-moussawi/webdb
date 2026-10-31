@@ -46,6 +46,29 @@ export class Io {
     this.coordinator = coordinator;
   }
 
+  isInTransaction(): boolean {
+    return this.coordinator ? this.coordinator.isInTransaction() : false;
+  }
+
+  /**
+   * Computes and writes the page-level CRC32 checksum into the slot header in linear memory.
+   */
+  stampSlotChecksum(slotIdx: number, pageId: number): void {
+    const slot_offset = slotIdx * PAGE_SIZE;
+    const page_bytes = this.uint8.subarray(
+      slot_offset,
+      slot_offset + PAGE_SIZE,
+    );
+
+    if (pageId === 1) {
+      const chk = computePage1Checksum(page_bytes);
+      write_u32(this.view, slot_offset + HEADER_OFFSET_PAGE_CHECKSUM, chk);
+    } else {
+      const chk = computePageChecksum(page_bytes);
+      write_u32(this.view, slot_offset + PAGE_HEADER_OFFSET_CHECKSUM, chk);
+    }
+  }
+
   constructor(options: IoOptions) {
     if (!options.vfs) {
       throw new Error("Io requires a valid IVfsAdapter instance");
@@ -77,6 +100,13 @@ export class Io {
       throw new Error(
         `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
       );
+    }
+
+    if (this.coordinator && this.coordinator.hasSpilledPage(pageId)) {
+      const slot_offset = slotIdx * PAGE_SIZE;
+      const spilled = this.coordinator.getSpilledPage(pageId)!;
+      this.uint8.set(spilled, slot_offset);
+      return;
     }
 
     // Await any in-flight flush for this page first
@@ -166,13 +196,7 @@ export class Io {
       slot_offset + PAGE_SIZE,
     );
 
-    if (pageId === 1) {
-      const chk = computePage1Checksum(page_bytes);
-      write_u32(this.view, slot_offset + HEADER_OFFSET_PAGE_CHECKSUM, chk);
-    } else {
-      const chk = computePageChecksum(page_bytes);
-      write_u32(this.view, slot_offset + PAGE_HEADER_OFFSET_CHECKSUM, chk);
-    }
+    this.stampSlotChecksum(slotIdx, pageId);
 
     const write_snapshot = page_bytes.slice();
     const write_promise = this.vfs.writePage(pageId, write_snapshot);
@@ -181,6 +205,17 @@ export class Io {
       await write_promise;
     } finally {
       this.in_flight_flushes.delete(pageId);
+    }
+  }
+
+  /**
+   * Spills a slot to the WAL if an active transaction is open, otherwise writes it to VFS.
+   */
+  async spillOrWriteSlot(slotIdx: number, pageId: number): Promise<void> {
+    if (this.coordinator && this.coordinator.isInTransaction()) {
+      await this.coordinator.spillUncommittedSlot(slotIdx, pageId);
+    } else {
+      await this.writeSlot(slotIdx, pageId);
     }
   }
 

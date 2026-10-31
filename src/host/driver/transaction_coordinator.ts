@@ -4,8 +4,11 @@ import { BufferPoolDriver } from './buffer_pool_driver.js';
 import {
   encodeWalFileHeader,
   encodeWalFrame,
+  validateWalFrame,
 } from '../storage/wal_codec.js';
 import {
+  HEADER_OFFSET_TOTAL_PAGES,
+  WAL_FRAME_HEADER_SIZE,
   WAL_FRAME_TYPE_PAGE_DATA,
   WAL_FRAME_TYPE_TX_COMMIT,
   WAL_FRAME_TYPE_TX_UNCOMMITTED,
@@ -160,7 +163,9 @@ export class TransactionCoordinator {
   private activeLease: TransactionLease | null = null;
   private snapshotFrameCount = 0;
   private slotSnapshots = new Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>();
+  private pinCountsSnapshot: Uint32Array | null = null;
   private spilledPages = new Map<number, Uint8Array>();
+  private committedWalPages = new Map<number, Uint8Array>();
   private walFrameSeq = 0;
   private txCommitCount = 0;
   private checkpointSeq = 0;
@@ -192,11 +197,11 @@ export class TransactionCoordinator {
   }
 
   hasSpilledPage(pageId: number): boolean {
-    return this.spilledPages.has(pageId);
+    return this.spilledPages.has(pageId) || this.committedWalPages.has(pageId);
   }
 
   getSpilledPage(pageId: number): Uint8Array | null {
-    const data = this.spilledPages.get(pageId);
+    const data = this.spilledPages.get(pageId) ?? this.committedWalPages.get(pageId);
     return data ? new Uint8Array(data) : null;
   }
 
@@ -211,11 +216,15 @@ export class TransactionCoordinator {
       return;
     }
 
+    this.io.stampSlotChecksum(slotIdx, pageId);
+
     const slotBytes = this.pool.getPageBytesInSlot(slotIdx);
     const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
     pageCopy.set(slotBytes);
 
     this.spilledPages.set(pageId, pageCopy);
+
+    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
     // Append FRAME_TX_UNCOMMITTED frame to WAL
     const frame = encodeWalFrame(
@@ -224,13 +233,90 @@ export class TransactionCoordinator {
         flags: 0,
         txId: this.activeLease.txId,
         pageId,
-        dbSizePages: 0,
+        dbSizePages,
         frameSeq: ++this.walFrameSeq,
       },
       pageCopy,
     );
 
     await this.vfs.appendWalFrames([frame]);
+  }
+
+  /**
+   * Captures a point-in-time snapshot of the buffer pool, spilled pages, and WAL frame count.
+   * Used both at transaction BEGIN and for nested savepoints.
+   */
+  async captureSavepoint(): Promise<{
+    frameCount: number;
+    slotSnapshots: Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>;
+    pinCounts: Uint32Array;
+    spilledPages: Map<number, Uint8Array>;
+    walFrameSeq: number;
+  }> {
+    const frameCount = await this.vfs.getWalFrameCount();
+    const slotSnapshots = new Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>();
+    for (let slot = 0; slot < this.pool.slotCount; slot++) {
+      const pageId = this.pool.getAssignedPage(slot);
+      if (pageId > 0) {
+        const dirty = this.pool.isDirty(slot);
+        const data = new Uint8Array(this.pool.getPageBytesInSlot(slot));
+        slotSnapshots.set(slot, { pageId, dirty, data });
+      }
+    }
+    const pinCounts = new Uint32Array(this.pool.pin_counts);
+    const spilledPages = new Map<number, Uint8Array>();
+    for (const [k, v] of this.spilledPages.entries()) {
+      spilledPages.set(k, new Uint8Array(v));
+    }
+    return {
+      frameCount,
+      slotSnapshots,
+      pinCounts,
+      spilledPages,
+      walFrameSeq: this.walFrameSeq,
+    };
+  }
+
+  /**
+   * Restores buffer pool slots, pin counts, spilled pages, and truncates WAL back to a savepoint.
+   */
+  async restoreSavepoint(savepoint: {
+    frameCount: number;
+    slotSnapshots: Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>;
+    pinCounts: Uint32Array;
+    spilledPages: Map<number, Uint8Array>;
+    walFrameSeq: number;
+  }): Promise<void> {
+    // Pass 1: Unassign all non-zero slots first to avoid page-to-slot collision if a page moved slots
+    for (let slot = 1; slot < this.pool.slotCount; slot++) {
+      this.pool.unassignSlot(slot);
+      this.pool.clearDirty(slot);
+    }
+
+    // Pass 2: Restore slot assignments, page data, and dirty flags
+    for (let slot = 0; slot < this.pool.slotCount; slot++) {
+      const snap = savepoint.slotSnapshots.get(slot);
+      if (snap) {
+        this.pool.assignSlot(slot, snap.pageId);
+        this.pool.getPageBytesInSlot(slot).set(snap.data);
+        if (snap.dirty) {
+          this.pool.markDirty(slot);
+        } else {
+          this.pool.clearDirty(slot);
+        }
+      }
+    }
+
+    // Pass 3: Restore pin counts
+    this.pool.pin_counts.set(savepoint.pinCounts);
+
+    // Restore spilled pages & WAL length
+    this.spilledPages.clear();
+    for (const [k, v] of savepoint.spilledPages.entries()) {
+      this.spilledPages.set(k, new Uint8Array(v));
+    }
+    this.walFrameSeq = savepoint.walFrameSeq;
+    await this.vfs.truncateWal(savepoint.frameCount);
   }
 
   /**
@@ -254,19 +340,11 @@ export class TransactionCoordinator {
       );
     }
 
-    this.snapshotFrameCount = await this.vfs.getWalFrameCount();
     this.spilledPages.clear();
-    this.slotSnapshots.clear();
-
-    // Snapshot all resident slots in the buffer pool
-    for (let slot = 0; slot < this.pool.slotCount; slot++) {
-      const pageId = this.pool.getAssignedPage(slot);
-      if (pageId > 0) {
-        const dirty = this.pool.isDirty(slot);
-        const data = new Uint8Array(this.pool.getPageBytesInSlot(slot));
-        this.slotSnapshots.set(slot, { pageId, dirty, data });
-      }
-    }
+    const snap = await this.captureSavepoint();
+    this.snapshotFrameCount = snap.frameCount;
+    this.slotSnapshots = snap.slotSnapshots;
+    this.pinCountsSnapshot = snap.pinCounts;
 
     return lease;
   }
@@ -285,15 +363,25 @@ export class TransactionCoordinator {
 
     const txId = this.activeLease.txId;
     const framesToAppend: Uint8Array[] = [];
+    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+
+    // Promote any spilled pages from this transaction into committedWalPages first
+    for (const [pageId, data] of this.spilledPages.entries()) {
+      this.committedWalPages.set(pageId, data);
+    }
 
     // Append all resident dirty pages to WAL as FRAME_PAGE_DATA frames
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
       if (this.pool.isDirty(slot)) {
         const pageId = this.pool.getAssignedPage(slot);
         if (pageId > 0) {
+          this.io.stampSlotChecksum(slot, pageId);
+
           const pageBytes = this.pool.getPageBytesInSlot(slot);
           const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
           pageCopy.set(pageBytes);
+
+          this.committedWalPages.set(pageId, pageCopy);
 
           framesToAppend.push(
             encodeWalFrame(
@@ -302,7 +390,7 @@ export class TransactionCoordinator {
                 flags: 0,
                 txId,
                 pageId,
-                dbSizePages: 0,
+                dbSizePages,
                 frameSeq: ++this.walFrameSeq,
               },
               pageCopy,
@@ -319,7 +407,7 @@ export class TransactionCoordinator {
         flags: 0,
         txId,
         pageId: 0,
-        dbSizePages: 0,
+        dbSizePages,
         frameSeq: ++this.walFrameSeq,
       }),
     );
@@ -332,6 +420,7 @@ export class TransactionCoordinator {
     this.activeLease = null;
     this.spilledPages.clear();
     this.slotSnapshots.clear();
+    this.pinCountsSnapshot = null;
     this.txCommitCount++;
 
     // Release lease to unblock queued external operations
@@ -358,28 +447,18 @@ export class TransactionCoordinator {
       return;
     }
 
-    // Restore buffer pool slots
-    for (let slot = 0; slot < this.pool.slotCount; slot++) {
-      const snap = this.slotSnapshots.get(slot);
-      if (snap) {
-        this.pool.assignSlot(slot, snap.pageId);
-        this.pool.getPageBytesInSlot(slot).set(snap.data);
-        if (snap.dirty) {
-          this.pool.markDirty(slot);
-        } else {
-          this.pool.clearDirty(slot);
-        }
-      } else {
-        this.pool.unassignSlot(slot);
-      }
-    }
-
-    // Truncate any uncommitted spilled frames back to snapshot length
-    await this.vfs.truncateWal(this.snapshotFrameCount);
+    await this.restoreSavepoint({
+      frameCount: this.snapshotFrameCount,
+      slotSnapshots: this.slotSnapshots,
+      pinCounts: this.pinCountsSnapshot ?? new Uint32Array(this.pool.pin_counts),
+      spilledPages: new Map(),
+      walFrameSeq: this.walFrameSeq,
+    });
 
     this.activeLease = null;
     this.spilledPages.clear();
     this.slotSnapshots.clear();
+    this.pinCountsSnapshot = null;
 
     this.queue.releaseExclusiveLease(leaseId);
     this.scheduleIdleTimer();
@@ -410,22 +489,26 @@ export class TransactionCoordinator {
       const committedTxs = new Set<number>();
 
       for (const frameBytes of rawFrames) {
-        if (frameBytes.byteLength < 4128) break;
-        const view = new DataView(frameBytes.buffer, frameBytes.byteOffset, frameBytes.byteLength);
-        const magic = view.getUint32(0, true);
-        if (magic !== 0x57414c46) break;
-
-        const frameType = view.getUint16(4, true);
-        const txId = view.getUint32(8, true);
-        const pageId = view.getUint32(12, true);
+        const validation = validateWalFrame(frameBytes);
+        if (!validation.valid || !validation.header) {
+          break;
+        }
+        const { frameType, txId, pageId } = validation.header;
 
         if (!txGroups.has(txId)) txGroups.set(txId, []);
 
         if (frameType === WAL_FRAME_TYPE_TX_COMMIT) {
           committedTxs.add(txId);
-        } else if (frameType === WAL_FRAME_TYPE_PAGE_DATA) {
-          const pageData = new Uint8Array(frameBytes.buffer, frameBytes.byteOffset + 32, 4096);
-          const copy = new Uint8Array(4096);
+        } else if (
+          frameType === WAL_FRAME_TYPE_PAGE_DATA ||
+          frameType === WAL_FRAME_TYPE_TX_UNCOMMITTED
+        ) {
+          const pageData = new Uint8Array(
+            frameBytes.buffer,
+            frameBytes.byteOffset + WAL_FRAME_HEADER_SIZE,
+            WAL_PAGE_SIZE,
+          );
+          const copy = new Uint8Array(WAL_PAGE_SIZE);
           copy.set(pageData);
           txGroups.get(txId)!.push({ pageId, data: copy });
         }
@@ -448,8 +531,9 @@ export class TransactionCoordinator {
       if (this.pool.isDirty(slot)) {
         const pageId = this.pool.getAssignedPage(slot);
         if (pageId > 0) {
+          this.io.stampSlotChecksum(slot, pageId);
           const pageData = this.pool.getPageBytesInSlot(slot);
-          const copy = new Uint8Array(4096);
+          const copy = new Uint8Array(WAL_PAGE_SIZE);
           copy.set(pageData);
           memoryOverride.set(pageId, { slotIdx: slot, data: copy });
         }
@@ -481,8 +565,9 @@ export class TransactionCoordinator {
     // 4. Durably flush main storage
     await this.vfs.flush();
 
-    // 5. Strictly AFTER flush succeeds, reset WAL to 0
+    // 5. Strictly AFTER flush succeeds, reset WAL to 0 and clear in-memory WAL page cache
     await this.vfs.truncateWal(0);
+    this.committedWalPages.clear();
 
     // Increment checkpoint counter and re-write clean WAL file header
     this.checkpointSeq++;

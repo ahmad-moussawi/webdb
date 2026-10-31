@@ -131,14 +131,16 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     const offset = 32 + (frameIndex * 4128);
     if (this.walSyncHandle) {
       const size = this.walSyncHandle.getSize();
-      if (offset + 4128 > size) return null;
-      const frame = new Uint8Array(4128);
+      if (offset >= size) return null;
+      const readLen = Math.min(4128, size - offset);
+      const frame = new Uint8Array(readLen);
       this.walSyncHandle.read(frame, { at: offset });
       return frame;
     }
     const file = await this.walFileHandle!.getFile();
-    if (offset + 4128 > file.size) return null;
-    const slice = file.slice(offset, offset + 4128);
+    if (offset >= file.size) return null;
+    const readLen = Math.min(4128, file.size - offset);
+    const slice = file.slice(offset, offset + readLen);
     return new Uint8Array(await slice.arrayBuffer());
   }
 
@@ -159,7 +161,7 @@ export class OpfsVfsAdapter implements IVfsAdapter {
   async appendWalFrames(frames: Uint8Array[]): Promise<void> {
     await this.initHandles();
     if (this.walSyncHandle) {
-      let offset = this.walSyncHandle.getSize();
+      let offset = Math.max(32, this.walSyncHandle.getSize());
       for (const frame of frames) {
         this.walSyncHandle.write(frame, { at: offset });
         offset += frame.byteLength;
@@ -168,7 +170,7 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     }
     const file = await this.walFileHandle!.getFile();
     const writable = await (this.walFileHandle as any).createWritable({ keepExistingData: true });
-    await writable.seek(file.size);
+    await writable.seek(Math.max(32, file.size));
     for (const frame of frames) {
       await writable.write(frame);
     }
@@ -188,7 +190,9 @@ export class OpfsVfsAdapter implements IVfsAdapter {
       this.walSyncHandle.truncate(newSize);
       return;
     }
-    const writable = await (this.walFileHandle as any).createWritable();
+    const writable = await (this.walFileHandle as any).createWritable({
+      keepExistingData: frameIndex > 0,
+    });
     await writable.truncate(newSize);
     await writable.close();
   }
@@ -202,8 +206,8 @@ export class OpfsVfsAdapter implements IVfsAdapter {
       const file = await this.walFileHandle!.getFile();
       size = file.size;
     }
-    if (size < 32) return 0;
-    return Math.floor((size - 32) / 4128);
+    if (size <= 32) return 0;
+    return Math.ceil((size - 32) / 4128);
   }
 
   async close(): Promise<void> {

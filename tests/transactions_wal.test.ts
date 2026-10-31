@@ -383,5 +383,157 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       await recoveredDb.close();
     });
+
+    it('preserves valid page CRC32 checksums across transaction commit, checkpoint, and reopen', async () => {
+      await db.createTable('orders', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'customer', type: 'TEXT' },
+      ]);
+      await db.insert('orders', { id: 1, customer: 'Initial' });
+
+      await db.transaction(async (tx) => {
+        await tx.insert('orders', { id: 2, customer: 'InTx_1' });
+        await tx.insert('orders', { id: 3, customer: 'InTx_2' });
+        await tx.createIndex('orders', 'customer', { unique: true });
+      });
+
+      await db.close();
+
+      // Reopen from VFS and read both table and index pages from disk (validating CRC32 checksums)
+      const reopened = await WebDB.open({ vfs });
+      const rows = await reopened.from('orders').where('customer', '=', 'InTx_2').toArray();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: 3, customer: 'InTx_2' });
+
+      const allRows = await reopened.from('orders').orderBy('id', 'asc').toArray();
+      expect(allRows).toHaveLength(3);
+      await reopened.close();
+    });
+
+    it('handles uncommitted cache spilling (FRAME_TX_UNCOMMITTED) under tight buffer pool pressure for both rollback and commit', async () => {
+      await db.close();
+
+      // Open with a very small buffer pool (8 slots) so inserting many large rows forces evictions mid-transaction
+      const smallVfs = new MemoryVfsAdapter();
+      const smallDb = await WebDB.open({ vfs: smallVfs, slotCount: 8 });
+      await smallDb.createTable('big_logs', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'payload', type: 'TEXT' },
+      ]);
+
+      const largeText = 'X'.repeat(500); // ~7-8 rows per 4KB page
+
+      // 1. Test ROLLBACK after spilling many pages beyond the 8-slot pool
+      await expect(
+        smallDb.transaction(async (tx) => {
+          for (let i = 1; i <= 80; i++) {
+            await tx.insert('big_logs', { id: i, payload: `${i}_${largeText}` });
+          }
+          throw new Error('Abort after cache spill');
+        }),
+      ).rejects.toThrow('Abort after cache spill');
+
+      expect(await smallVfs.getWalFrameCount()).toBe(0);
+      expect(await smallDb.from('big_logs').toArray()).toHaveLength(0);
+
+      // 2. Test COMMIT after spilling many pages beyond the 8-slot pool
+      await smallDb.transaction(async (tx) => {
+        for (let i = 1; i <= 80; i++) {
+          await tx.insert('big_logs', { id: i, payload: `${i}_${largeText}` });
+        }
+      });
+
+      // Immediately query all 80 rows before checkpointing (reads both resident and spilled WAL pages)
+      const beforeCp = await smallDb.from('big_logs').toArray();
+      expect(beforeCp).toHaveLength(80);
+
+      // Close (triggers checkpoint) and reopen from disk
+      await smallDb.close();
+      const reopened = await WebDB.open({ vfs: smallVfs, slotCount: 16 });
+      const afterReopen = await reopened.from('big_logs').toArray();
+      expect(afterReopen).toHaveLength(80);
+      await reopened.close();
+    });
+
+    it('atomically rolls back DDL operations (dropTable / createTable) without corrupting disk pages', async () => {
+      await db.createTable('preserved', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'tag', type: 'TEXT' },
+      ]);
+      await db.insert('preserved', { id: 1, tag: 'keep_me_1' });
+      await db.insert('preserved', { id: 2, tag: 'keep_me_2' });
+      await db.checkpoint();
+
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.dropTable('preserved');
+          await tx.createTable('ephemeral', [{ name: 'id', type: 'INT32' }]);
+          await tx.insert('ephemeral', { id: 99 });
+          throw new Error('Cancel DDL migration');
+        }),
+      ).rejects.toThrow('Cancel DDL migration');
+
+      // Preserved table and rows must still exist in memory
+      const rows = await db.from('preserved').orderBy('id', 'asc').toArray();
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ id: 1, tag: 'keep_me_1' });
+
+      // And must remain intact on disk after close & reopen
+      await db.close();
+      const reopened = await WebDB.open({ vfs });
+      const diskRows = await reopened.from('preserved').orderBy('id', 'asc').toArray();
+      expect(diskRows).toHaveLength(2);
+      await reopened.close();
+    });
+
+    it('supports nested tx.transaction() savepoints that roll back independently when caught', async () => {
+      await db.createTable('steps', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'label', type: 'TEXT' },
+      ]);
+
+      await db.transaction(async (tx) => {
+        await tx.insert('steps', { id: 1, label: 'outer_before' });
+
+        try {
+          await tx.transaction(async (nestedTx) => {
+            await nestedTx.insert('steps', { id: 2, label: 'inner_aborted' });
+            throw new Error('Inner savepoint failed');
+          });
+        } catch {
+          // Outer transaction catches inner error and continues
+        }
+
+        await tx.insert('steps', { id: 3, label: 'outer_after' });
+      });
+
+      const rows = await db.from('steps').orderBy('id', 'asc').toArray();
+      expect(rows).toEqual([
+        { id: 1, label: 'outer_before' },
+        { id: 3, label: 'outer_after' },
+      ]);
+    });
+
+    it('enforces statement-level atomicity on insertMany when a mid-batch constraint fails', async () => {
+      await db.createTable('unique_users', [
+        { name: 'id', type: 'INT32', flags: { primaryKey: true } },
+        { name: 'email', type: 'TEXT' },
+      ]);
+      await db.createIndex('unique_users', 'email', { unique: true });
+      await db.insert('unique_users', { id: 1, email: 'existing@test.com' });
+
+      await expect(
+        db.insertMany('unique_users', [
+          { id: 2, email: 'new1@test.com' },
+          { id: 3, email: 'new2@test.com' },
+          { id: 4, email: 'existing@test.com' }, // duplicate on 3rd item in batch!
+        ]),
+      ).rejects.toThrow();
+
+      // Neither id 2 nor id 3 should have been partially inserted
+      const rows = await db.from('unique_users').toArray();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: 1, email: 'existing@test.com' });
+    });
   });
 });

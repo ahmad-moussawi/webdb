@@ -77,6 +77,7 @@ export interface BufferPoolDriverOptions {
   };
   slotCount?: number;
   maxQueryMemory?: number;
+  useDefaultLayoutOffsets?: boolean;
 }
 
 /**
@@ -140,7 +141,7 @@ export class BufferPoolDriver {
     this.uint8 = new Uint8Array(this.buffer);
 
     this.offsets = computeBufferPoolOffsets(
-      this.slotCount,
+      options.useDefaultLayoutOffsets ? DEFAULT_SLOT_COUNT : this.slotCount,
       this.maxQueryMemory,
     );
 
@@ -646,7 +647,11 @@ export class BufferPoolDriver {
           PAGE_SIZE - PAGE_HEADER_SIZE,
         );
 
-        await this.flushSlot(slot);
+        if (this.io.isInTransaction()) {
+          await this.io.spillOrWriteSlot(slot, page_id);
+        } else {
+          await this.flushSlot(slot);
+        }
 
         this.unassignSlot(slot);
         this.clearDirty(slot);

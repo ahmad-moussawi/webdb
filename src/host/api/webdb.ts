@@ -95,10 +95,11 @@ import {
   disassembleBytecode,
   formatDisassembly,
 } from "../compiler/compiler.ts";
-import { ParsedSelectExpr, deriveDefaultAlias } from "../compiler/expr_parser.ts";
 import {
-  QueryPlanner,
-} from "../compiler/planner/index.ts";
+  ParsedSelectExpr,
+  deriveDefaultAlias,
+} from "../compiler/expr_parser.ts";
+import { QueryPlanner } from "../compiler/planner/index.ts";
 import {
   QueryBuilder,
   type ExplainOutput,
@@ -120,10 +121,7 @@ export {
   type QueryExecutionOptions,
 };
 
-import {
-  createWasmCore,
-  type WasmCoreExports,
-} from "../../core/index.ts";
+import { createWasmCore, type WasmCoreExports } from "../../core/index.ts";
 
 export interface WebDbOptions {
   name: string;
@@ -198,13 +196,17 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
-    const memory = createWasmMemory(slotCount, maxQueryMemory);
+    const memory = createWasmMemory(
+      Math.max(slotCount, DEFAULT_SLOT_COUNT),
+      maxQueryMemory,
+    );
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({
       io,
       memory,
       slotCount,
       maxQueryMemory,
+      useDefaultLayoutOffsets: true,
     });
 
     const coordinator = new TransactionCoordinator(vfs, driver, io);
@@ -331,6 +333,13 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async getTable(tableName: string): Promise<TableMeta> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._getTableInternal(tableName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _getTableInternal(tableName: string): Promise<TableMeta> {
     const key = tableName.toLowerCase();
     const cached = this.tableMetaCache.get(key);
     if (cached) {
@@ -370,13 +379,17 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async listTables(): Promise<TableMeta[]> {
-    const page1View = this.pool.getSlotDataView(0);
-    const descriptors = catalog_list_table_descriptors(page1View);
-    const tables: TableMeta[] = [];
-    for (const desc of descriptors) {
-      tables.push(await this.getTable(desc.name));
-    }
-    return tables;
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const page1View = this.pool.getSlotDataView(0);
+      const descriptors = catalog_list_table_descriptors(page1View);
+      const tables: TableMeta[] = [];
+
+      for (const desc of descriptors) {
+        tables.push(await this._getTableInternal(desc.name));
+      }
+
+      return tables;
+    }, this.currentLeaseId ?? undefined);
   }
 
   private async freeTableTreePages(rootPageId: number): Promise<void> {
@@ -463,7 +476,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       if (
         idx &&
         (idx.tableId === desc.tableId ||
-          idx.name.toLowerCase().startsWith(`idx_${tableName.toLowerCase()}_`) ||
+          idx.name
+            .toLowerCase()
+            .startsWith(`idx_${tableName.toLowerCase()}_`) ||
           idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)
       ) {
         if (idx.rootPageId > 1) {
@@ -527,7 +542,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     columns: string | string[],
     options?: IndexOptions,
   ): Promise<void> {
-    const table = await this.getTable(tableName);
+    const table = await this._getTableInternal(tableName);
     const colNames = Array.isArray(columns) ? columns : [columns];
 
     if (colNames.length === 0) {
@@ -550,7 +565,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       colIndices.push(idx);
     }
 
-    const indexName = options?.name ?? `idx_${tableName}_${colNames.join('_')}`;
+    const indexName = options?.name ?? `idx_${tableName}_${colNames.join("_")}`;
 
     const page1View = this.pool.getSlotDataView(0);
 
@@ -570,9 +585,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       return true;
     });
     if (duplicateColIndex) {
-      throw new IndexAlreadyExistsError(
-        duplicateColIndex.name || indexName,
-      );
+      throw new IndexAlreadyExistsError(duplicateColIndex.name || indexName);
     }
 
     const freeSlot = catalog_find_free_index_slot(page1View);
@@ -616,7 +629,8 @@ export class WebDB implements IDatabaseQueryExecutor {
                 keyVal,
               );
               if (duplicate) {
-                await this.driver.freePage(indexRootPageId);
+                await this.freeTableTreePages(indexRootPageId);
+                this.indexTailPages.delete(indexRootPageId);
                 throw new UniqueConstraintViolationError(
                   `Duplicate key value violates unique constraint "${indexName}" on table "${tableName}"`,
                 );
@@ -694,19 +708,21 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async listIndexes(tableName?: string): Promise<IndexDescriptor[]> {
-    const page1View = this.pool.getSlotDataView(0);
-    if (tableName) {
-      const table = await this.getTable(tableName);
-      return catalog_list_table_indexes(page1View, table.tableId);
-    }
-    const allIndexes: IndexDescriptor[] = [];
-    for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
-      const desc = catalog_read_index_descriptor(page1View, i);
-      if (desc) {
-        allIndexes.push(desc);
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const page1View = this.pool.getSlotDataView(0);
+      if (tableName) {
+        const table = await this._getTableInternal(tableName);
+        return catalog_list_table_indexes(page1View, table.tableId);
       }
-    }
-    return allIndexes;
+      const allIndexes: IndexDescriptor[] = [];
+      for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+        const desc = catalog_read_index_descriptor(page1View, i);
+        if (desc) {
+          allIndexes.push(desc);
+        }
+      }
+      return allIndexes;
+    }, this.currentLeaseId ?? undefined);
   }
 
   private extractIndexKey(
@@ -740,12 +756,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
-        const search = page_binary_search_index_leaf(
-          view,
-          0,
-          keyType,
-          keyVal,
-        );
+        const search = page_binary_search_index_leaf(view, 0, keyType, keyVal);
         if (search.found) {
           return true;
         }
@@ -831,9 +842,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
   }
 
-  private async _insertManyInternal(tableName: string, rows: DbRow[]): Promise<void> {
+  private async _insertManyInternal(
+    tableName: string,
+    rows: DbRow[],
+  ): Promise<void> {
     if (!rows || rows.length === 0) return;
-    const table = await this.getTable(tableName);
+    const table = await this._getTableInternal(tableName);
     const page1View = this.pool.getSlotDataView(0);
     const indexes = catalog_list_table_indexes(page1View, table.tableId);
     const uniqueIndexes = indexes.filter(
@@ -843,6 +857,88 @@ export class WebDB implements IDatabaseQueryExecutor {
     const autoIncCol = table.columns.find(
       (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
     );
+
+    // Pass 1: Pre-validate all rows in the batch (NOT NULL, uniqueness, row serialization size)
+    // before mutating any data pages, index pages, or auto-increment counters.
+    const batchUniqueSets: Map<string, Set<any>> = new Map();
+    for (const idx of uniqueIndexes) {
+      batchUniqueSets.set(idx.name, new Set());
+    }
+
+    let tentativeAutoInc = table.autoIncNext;
+    const preparedRows: Array<{
+      row: DbRow;
+      rowBytes: Uint8Array;
+      assignedAutoInc?: number;
+    }> = [];
+
+    for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+      const origRow = rows[rIdx];
+
+      // 1. Primary Key NOT NULL validation
+      for (const c of table.columns) {
+        if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+          if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
+            if (origRow[c.name] === undefined || origRow[c.name] === null) {
+              throw new NotNullConstraintError(c.name, tableName);
+            }
+          }
+        }
+      }
+
+      // 2. Tentative Auto-Inc calculation
+      let assignedAutoInc: number | undefined;
+      let effectiveRow = origRow;
+      if (
+        autoIncCol &&
+        (origRow[autoIncCol.name] === undefined ||
+          origRow[autoIncCol.name] === null)
+      ) {
+        assignedAutoInc = Number(tentativeAutoInc);
+        tentativeAutoInc += 1n;
+        effectiveRow = { ...origRow, [autoIncCol.name]: assignedAutoInc };
+      }
+
+      // 3. Uniqueness constraint probe (intra-batch and existing index pages)
+      for (const idx of uniqueIndexes) {
+        const { keyVal, keyType } = this.extractIndexKey(
+          table.columns,
+          idx,
+          effectiveRow,
+        );
+        if (keyVal !== undefined && keyVal !== null) {
+          const setKey =
+            keyVal instanceof Uint8Array
+              ? Array.from(keyVal).join(",")
+              : keyVal;
+          const set = batchUniqueSets.get(idx.name)!;
+          if (set.has(setKey)) {
+            throw new UniqueConstraintViolationError(
+              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+            );
+          }
+          set.add(setKey);
+
+          const duplicate = await this.probeIndexUnique(
+            idx.rootPageId,
+            keyType,
+            keyVal,
+          );
+          if (duplicate) {
+            throw new UniqueConstraintViolationError(
+              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+            );
+          }
+        }
+      }
+
+      // 4. Pre-serialize row (validates row size <= 2048 bytes before any page mutation)
+      const rowBytes = page_serialize_row(table.columns, effectiveRow);
+      preparedRows.push({ row: origRow, rowBytes, assignedAutoInc });
+    }
+
+    // Commit tentative auto-inc after full batch validation succeeds
+    table.autoIncNext = tentativeAutoInc;
 
     // Fast resolution of tail data page
     let currentPageId = this.tableTailPages.get(tableName) ?? table.rootPageId;
@@ -858,62 +954,14 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
     this.tableTailPages.set(tableName, currentPageId);
 
-    // Batch duplicate tracking
-    const batchUniqueSets: Map<string, Set<any>> = new Map();
-    for (const idx of uniqueIndexes) {
-      batchUniqueSets.set(idx.name, new Set());
-    }
-
-    for (let rIdx = 0; rIdx < rows.length; rIdx++) {
-      const row = rows[rIdx];
-
-      // 1. Primary Key NOT NULL validation
-      for (const c of table.columns) {
-        if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
-          if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
-            if (row[c.name] === undefined || row[c.name] === null) {
-              throw new NotNullConstraintError(c.name, tableName);
-            }
-          }
-        }
-      }
-
-      // 2. Auto-Inc
-      if (
-        autoIncCol &&
-        (row[autoIncCol.name] === undefined || row[autoIncCol.name] === null)
-      ) {
-        row[autoIncCol.name] = Number(table.autoIncNext);
-        table.autoIncNext += 1n;
-      }
-
-      // 3. Uniqueness constraint probe
-      for (const idx of uniqueIndexes) {
-        const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
-        if (keyVal !== undefined && keyVal !== null) {
-          const set = batchUniqueSets.get(idx.name)!;
-          if (set.has(keyVal)) {
-            throw new UniqueConstraintViolationError(
-              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
-            );
-          }
-          set.add(keyVal);
-
-          const duplicate = await this.probeIndexUnique(
-            idx.rootPageId,
-            keyType,
-            keyVal,
-          );
-          if (duplicate) {
-            throw new UniqueConstraintViolationError(
-              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
-            );
-          }
-        }
+    // Pass 2: Apply validated row insertions to data pages and secondary indexes
+    for (let rIdx = 0; rIdx < preparedRows.length; rIdx++) {
+      const { row, rowBytes, assignedAutoInc } = preparedRows[rIdx];
+      if (autoIncCol && assignedAutoInc !== undefined) {
+        row[autoIncCol.name] = assignedAutoInc;
       }
 
       // 4. Data page insertion
-      const rowBytes = page_serialize_row(table.columns, row);
       let targetPageId = currentPageId;
       let insertSlot = page_insert_row(
         view,
@@ -923,13 +971,14 @@ export class WebDB implements IDatabaseQueryExecutor {
       );
 
       if (insertSlot === -1) {
-        this.pool.pinSlot(slot);
+        const prevSlot = slot;
+        this.pool.pinSlot(prevSlot);
         try {
           const newPageId = await this.driver.allocateAndPinPage();
           const newSlot = this.pool.getResidentSlot(newPageId);
           try {
             page_set_next_page_id(view, 0, newPageId);
-            this.pool.markDirty(slot);
+            this.pool.markDirty(prevSlot);
 
             const newView = this.pool.getSlotDataView(newSlot);
             insertSlot = page_insert_row(
@@ -939,7 +988,9 @@ export class WebDB implements IDatabaseQueryExecutor {
               this.pool.pageScratchpadOffset,
             );
             if (insertSlot === -1) {
-              throw new Error("Unexpected error: row does not fit in empty page");
+              throw new Error(
+                "Unexpected error: row does not fit in empty page",
+              );
             }
             this.pool.markDirty(newSlot);
             currentPageId = newPageId;
@@ -951,7 +1002,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             this.pool.unpinSlot(newSlot);
           }
         } finally {
-          this.pool.unpinSlot(slot);
+          this.pool.unpinSlot(prevSlot);
         }
       } else {
         this.pool.markDirty(slot);
@@ -960,7 +1011,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       // 5. Index insertion
       const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
       for (const idx of indexes) {
-        const { keyVal, keyType } = this.extractIndexKey(table.columns, idx, row);
+        const { keyVal, keyType } = this.extractIndexKey(
+          table.columns,
+          idx,
+          row,
+        );
         if (keyVal !== undefined && keyVal !== null) {
           await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
         }
@@ -989,7 +1044,6 @@ export class WebDB implements IDatabaseQueryExecutor {
     const lease = await this.coordinator.begin();
     const leaseId = lease.leaseId;
 
-    const prevTransacting = this.isTransacting;
     this.isTransacting = true;
 
     const txProxy: WebDB = new Proxy(this, {
@@ -998,7 +1052,18 @@ export class WebDB implements IDatabaseQueryExecutor {
           return leaseId;
         }
         if (prop === "transaction") {
-          return (cb: (nestedTx: WebDB) => Promise<any>) => cb(txProxy);
+          return async <U>(cb: (nestedTx: WebDB) => Promise<U>): Promise<U> => {
+            const savepoint = await this.coordinator.captureSavepoint();
+            try {
+              return await cb(txProxy);
+            } catch (err) {
+              this.tableMetaCache.clear();
+              this.tableTailPages.clear();
+              this.indexTailPages.clear();
+              await this.coordinator.restoreSavepoint(savepoint);
+              throw err;
+            }
+          };
         }
         if (prop === "checkpoint") {
           return () => this.checkpoint();
@@ -1032,7 +1097,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       await this.coordinator.rollback(leaseId);
       throw err;
     } finally {
-      this.isTransacting = prevTransacting;
+      this.isTransacting = this.coordinator.isInTransaction();
     }
   }
 
@@ -1120,7 +1185,29 @@ export class WebDB implements IDatabaseQueryExecutor {
       planner?: QueryPlanner;
     },
   ): Promise<ExplainOutput> {
-    const table = await this.getTable(tableName);
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._explainQueryInternal(tableName, filters, options),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _explainQueryInternal(
+    tableName: string,
+    filters: QueryFilter[],
+    options?: {
+      orderBy?: SortKey[];
+      groupBy?: (string | GroupKey)[];
+      aggregates?: AggExpr[];
+      having?: QueryFilter[];
+      select?: any;
+      selectExprs?: ParsedSelectExpr[];
+      joins?: JoinClause[];
+      limit?: number;
+      offset?: number;
+      planner?: QueryPlanner;
+    },
+  ): Promise<ExplainOutput> {
+    const table = await this._getTableInternal(tableName);
 
     const joinPlans: JoinPlan[] = [];
     if (options?.joins && options.joins.length > 0) {
@@ -1129,7 +1216,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
       for (let i = 0; i < options.joins.length; i++) {
         const j = options.joins[i];
-        const joinedTable = await this.getTable(j.table);
+        const joinedTable = await this._getTableInternal(j.table);
         joinPlans.push({
           type: j.type,
           table: joinedTable,
@@ -1157,7 +1244,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       planner: options?.planner ?? this.planner,
     });
     const executionTables: TableMeta[] =
-      (bytecode as any).allTables ?? (joinPlans.length > 0 ? [table, ...joinPlans.map((j) => j.table)] : [table]);
+      (bytecode as any).allTables ??
+      (joinPlans.length > 0
+        ? [table, ...joinPlans.map((j) => j.table)]
+        : [table]);
     const drivingTable = executionTables[0];
     const instructions = disassembleBytecode(bytecode, drivingTable);
     const assembly = formatDisassembly(instructions);
@@ -1211,8 +1301,7 @@ export class WebDB implements IDatabaseQueryExecutor {
           (bytecode as any).planMetrics?.isOrderSatisfied ??
           false,
         sortCostAvoided:
-          (bytecode as any).planMetrics?.sortCostAvoided ??
-          undefined,
+          (bytecode as any).planMetrics?.sortCostAvoided ?? undefined,
       },
       bytecodeSize: bytecode.byteLength,
       instructions,
@@ -1236,7 +1325,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options: QueryExecutionOptions,
   ): Promise<DbRow[]> {
-    const table = await this.getTable(tableName);
+    const table = await this._getTableInternal(tableName);
 
     const joinedTablesMeta: TableMeta[] = [];
     const joinPlans: JoinPlan[] = [];
@@ -1246,7 +1335,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
       for (let i = 0; i < options.joins.length; i++) {
         const j = options.joins[i];
-        const joinedTable = await this.getTable(j.table);
+        const joinedTable = await this._getTableInternal(j.table);
         joinedTablesMeta.push(joinedTable);
         joinPlans.push({
           type: j.type,
@@ -1300,8 +1389,10 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const bytecode = compileQuery(plan);
 
-    const executionTables: TableMeta[] =
-      (bytecode as any).allTables ?? [table, ...joinedTablesMeta];
+    const executionTables: TableMeta[] = (bytecode as any).allTables ?? [
+      table,
+      ...joinedTablesMeta,
+    ];
 
     resetVmContext(this.vmCtx, executionTables[0], executionTables);
     if ((bytecode as any).inSets) {
@@ -1332,9 +1423,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         const groupByCols = plan.groupBy ?? [];
         for (const gItem of groupByCols) {
           const gColName =
-            typeof gItem === 'string'
+            typeof gItem === "string"
               ? gItem
-              : (gItem.colName ?? (gItem.expr ? deriveDefaultAlias(gItem.expr) : 'group_key'));
+              : (gItem.colName ??
+                (gItem.expr ? deriveDefaultAlias(gItem.expr) : "group_key"));
           const col = table.columns.find((c) => c.name === gColName);
           if (col) {
             outputColumns.push(col);
@@ -1350,8 +1442,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         for (let j = 0; j < (plan.aggregates?.length ?? 0); j++) {
           const agg = plan.aggregates![j];
           const aggName =
-            agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
-          const aggType = agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
+            agg.alias ??
+            (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+          const aggType =
+            agg.func === "count" ? DataType.INT32 : DataType.FLOAT64;
           outputColumns.push({
             name: aggName,
             type: aggType,
@@ -1394,7 +1488,28 @@ export class WebDB implements IDatabaseQueryExecutor {
         this.vmCtx.resultCount = 0;
         this.vmCtx.status = VmStatus.RUNNING;
       } else if (status === VmStatus.PAGE_FAULT) {
-        await this.driver.acquirePage(this.vmCtx.fault_page_id);
+        this.vmCtx.resultOffset = 0;
+        this.vmCtx.resultCount = 0;
+        // Temporarily pin any currently resident active cursor pages so acquiring fault_page_id
+        // does not evict the page a cursor is actively transitioning from.
+        const pinnedCursorSlots: number[] = [];
+        const cursors = this.vmCtx.cursors ?? [this.vmCtx.cursor];
+        for (const c of cursors) {
+          if (c && c.pageId > 1) {
+            const s = this.pool.getResidentSlot(c.pageId);
+            if (s > 0) {
+              this.pool.pinSlot(s);
+              pinnedCursorSlots.push(s);
+            }
+          }
+        }
+        try {
+          await this.driver.acquirePage(this.vmCtx.fault_page_id);
+        } finally {
+          for (const s of pinnedCursorSlots) {
+            this.pool.unpinSlot(s);
+          }
+        }
         this.vmCtx.status = VmStatus.RUNNING;
       } else if (status === VmStatus.ARENA_EXHAUSTED) {
         this.vmCtx.arenaOffset = 0;
