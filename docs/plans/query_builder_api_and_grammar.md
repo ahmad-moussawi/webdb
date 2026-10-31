@@ -372,10 +372,10 @@ const results = await db.from('articles')
 WebDB provides two complementary syntax paths for building dynamic expressions. Both compile into the exact same `ExprNode` AST:
 
 #### A. Standalone Helper Functions (Drizzle Style)
-Imported directly from `@webdb/core`, providing type safety, autocompletion, and zero runtime string parsing:
+Imported directly from `webdb-core`, providing type safety, autocompletion, and zero runtime string parsing:
 
 ```typescript
-import { col, fn } from '@webdb/core';
+import { col, fn } from 'webdb-core';
 
 const results = await db.from('students')
   .select([

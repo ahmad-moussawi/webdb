@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { WebDB } from '@webdb/core';
+import { WebDB } from 'webdb-core';
 import type {
   EditorTab,
   TableMeta,

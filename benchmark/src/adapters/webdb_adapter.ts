@@ -1,4 +1,4 @@
-import { WebDB } from "@webdb/core";
+import { WebDB } from "webdb-core";
 import {
   BenchmarkAdapter,
   BenchmarkRecord,

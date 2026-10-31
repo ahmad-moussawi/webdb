@@ -1,8 +1,27 @@
 {
-  "name": "@webdb/core",
-  "version": "0.1.0",
+  "name": "webdb-core",
+  "version": "0.1.0-alpha.0",
   "type": "module",
   "description": "Ultra-lean browser-native relational database engine",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahmad-moussawi/webdb.git"
+  },
+  "keywords": [
+    "database",
+    "browser-database",
+    "sql",
+    "indexeddb",
+    "opfs",
+    "wasm",
+    "btree",
+    "wal",
+    "acid"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "./dist/webdb.umd.cjs",
   "module": "./dist/webdb.js",
   "types": "./dist/index.d.ts",
@@ -14,7 +33,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "generate:layouts": "node scripts/generate_layouts.js",
@@ -22,9 +42,11 @@
     "build:wasm": "node scripts/build_wasm.js",
     "prebuild": "node scripts/generate_layouts.js",
     "build": "vite build",
+    "prepack": "npm run build",
     "pretest": "node scripts/generate_layouts.js",
     "test": "vitest run tests",
     "test:e2e": "playwright test",
+    "release:alpha": "npm version prerelease --preid=alpha && git push && git push --tags",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "demo": "vite-node examples/demo.ts",

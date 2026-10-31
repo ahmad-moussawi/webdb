@@ -6,7 +6,7 @@ import {
   PAGE_TYPE_FREE,
   PAGE_SIZE,
   page_deserialize_row,
-} from '@webdb/core';
+} from 'webdb-core';
 import { PAGE_TYPE_NAMES } from './pageInspector';
 
 export interface PoolSlotInfo {

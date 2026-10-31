@@ -13,9 +13,9 @@
   <img src="https://img.shields.io/badge/wasm%20size-%3C50%20KB-success.svg?logo=webassembly&logoColor=white" alt="Wasm Size: <50KB" />
   <a href="https://ahmad-moussawi.github.io/webdb/playground/"><img src="https://img.shields.io/badge/Studio%20IDE-live%20playground-7c3aed?logo=visualstudiocode&logoColor=white" alt="Studio IDE" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/benchmark/"><img src="https://img.shields.io/badge/benchmarks-live%20suite-059669?logo=speedtest&logoColor=white" alt="Live Benchmarks" /></a>
-  <a href="https://github.com/ahmad-moussawi/webdb"><img src="https://img.shields.io/badge/status-early%20prototype-orange.svg" alt="Status: Prototype" /></a>
+  <a href="https://www.npmjs.com/package/webdb-core"><img src="https://img.shields.io/npm/v/webdb-core/alpha?label=npm%20alpha&color=orange&logo=npm" alt="npm alpha" /></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.7-blue?logo=typescript&logoColor=white" alt="TypeScript" /></a>
-  <a href="https://vitest.dev/"><img src="https://img.shields.io/badge/tests-15%2F15%20passing-brightgreen?logo=vitest&logoColor=white" alt="Tests" /></a>
+  <a href="https://vitest.dev/"><img src="https://img.shields.io/badge/tests-348%20unit%20%2B%206%20e2e%20passing-brightgreen?logo=vitest&logoColor=white" alt="Tests" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/"><img src="https://img.shields.io/badge/docs-online-646cff?logo=vite&logoColor=white" alt="Docs" /></a>
 </p>
 
@@ -95,95 +95,120 @@ Read our complete specifications:
 
 ---
 
-## Expected Usage (V1 API)
+## 📦 Installation
 
-### 1. Initialize & Create Tables
+Install the alpha release of `webdb-core` via npm, pnpm, or yarn:
 
-```typescript
-import { WebDB } from "@webdb/core";
+```bash
+# npm
+npm install webdb-core@alpha
 
-// Open database with automatic capability detection (OPFS if available, else IndexedDB)
-const db = await WebDB.open({
-  name: "app_data",
-  storage: "auto", // 'opfs' | 'idb' | 'memory'
-});
+# pnpm
+pnpm add webdb-core@alpha
 
-// Define a schema stored directly in Page 1 (Binary Master Table)
-await db.createTable("users", [
-  { name: "id", type: "UUID", flags: { primaryKey: true } }, // Native 16-byte binary storage
-  { name: "name", type: "TEXT", flags: { notNull: true } },
-  { name: "age", type: "INT32" },
-  { name: "score", type: "FLOAT64" },
-  { name: "embedding", type: "VECTOR", dimensions: 128 }, // Planned for future versions (SIMD search)
-]);
-
-await db.createIndex("users", "score");
+# yarn
+yarn add webdb-core@alpha
 ```
 
-### 2. Insert & Query Data
+---
+
+## 🚀 Quick Start (Runnable Example)
+
+The snippet below is a complete, runnable example you can paste into any TypeScript or JavaScript project (Vite, Next.js, Node 20+, or Vitest):
 
 ```typescript
-// Insert records (string UUIDs or crypto.randomUUID() auto-packed into 16 bytes)
-await db.insert("users", {
-  id: "018d3e2a-1b4c-7000-8000-123456789abc",
-  name: "Alice",
-  age: 28,
-  score: 95.5,
-});
-await db.insert("users", {
-  id: crypto.randomUUID(),
-  name: "Bob",
-  age: 19,
-  score: 82.0,
-});
+import { WebDB } from "webdb-core";
 
-// Fluent, type-safe queries compiled to VDBE bytecode
-const topScorers = await db
-  .from("users")
-  .where("age", ">=", 21)
-  .whereNotNull("score")
-  .orderBy("score", "desc")
-  .limit(10)
-  .toArray();
-
-console.table(topScorers);
-```
-
-### 3. ACID Transactions with Auto-Rollback
-
-```typescript
-// Exclusive transaction lease logged to WAL before main disk sync
-await db.transaction(async (tx) => {
-  await tx.insert("users", {
-    id: crypto.randomUUID(),
-    name: "Charlie",
-    age: 34,
-    score: 88.0,
+async function main() {
+  // 1. Open a database
+  //    storage: 'idb' (IndexedDB) | 'opfs' (Origin Private File System) | 'memory' (In-Memory)
+  //    core:    'wasm' (default ~13 KB Wasm engine) | 'js' (pure JS fallback)
+  const db = await WebDB.open({
+    name: "app_data",
+    storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
+    core: "wasm",
   });
-  await tx
-    .update("users", { score: 99.0 })
-    .where("id", "=", "018d3e2a-1b4c-7000-8000-123456789abc");
-  // Auto-commits on block exit; automatically rolls back on error
-});
-```
 
-### 4. Query Inspection & Disassembly
+  // 2. Define a table schema stored in Page 1 (Binary Master Catalog)
+  //    Supported column types: 'INT32' | 'INT64' | 'FLOAT64' | 'TEXT' | 'BLOB' | 'UUID' | 'ULID'
+  await db.createTable("users", [
+    { name: "id", type: "UUID", flags: { primaryKey: true } }, // Packed into 16 raw bytes
+    { name: "name", type: "TEXT", flags: { notNull: true } },
+    { name: "age", type: "INT32" },
+    { name: "score", type: "FLOAT64" },
+  ]);
 
-```typescript
-// Inspect the execution plan and disassembly
-const explain = await db.from("users").where("score", ">", 80.0).explain();
+  // Create a secondary B+Tree index for fast range scans & ordered queries
+  await db.createIndex("users", "score");
 
-console.log(explain.assembly);
-/*
-  ADDR  OPCODE          P1   P2   P3   COMMENT
-  0000  OP_INIT          0    0    0   Start execution
-  0001  OP_CURSOR_OPEN   0    2    0   Open table 'users'
-  0002  OP_NEXT_ROW      0    6    0   Scan next slot
-  0003  OP_COLUMN        0    3    1   Extract 'score' into r[1]
-  0004  OP_GT            1   80    2   Compare score > 80.0
-  0005  OP_EMIT_ROW      0    0    0   Emit row to result buffer
-  0006  OP_HALT          0    0    0   Query complete
-*/
+  // 3. Insert single or bulk records
+  await db.insert("users", {
+    id: "018d3e2a-1b4c-7000-8000-123456789abc",
+    name: "Alice",
+    age: 28,
+    score: 95.5,
+  });
+
+  await db.insertMany("users", [
+    { id: crypto.randomUUID(), name: "Bob", age: 19, score: 82.0 },
+    { id: crypto.randomUUID(), name: "Charlie", age: 34, score: 88.0 },
+  ]);
+
+  // 4. ACID Transactions with Write-Ahead Logging (WAL) & Nested Savepoints
+  //    Automatically coordinates across browser tabs via Web Locks (navigator.locks)
+  await db.transaction(async (tx) => {
+    await tx.insert("users", {
+      id: crypto.randomUUID(),
+      name: "Diana",
+      age: 25,
+      score: 99.0,
+    });
+
+    // Nested transactions act as savepoints — rolling back an inner block
+    // restores state without aborting the outer transaction
+    await tx
+      .transaction(async (nestedTx) => {
+        await nestedTx.insert("users", {
+          id: crypto.randomUUID(),
+          name: "Temporary User",
+          age: 40,
+          score: 10.0,
+        });
+        throw new Error("Abort inner savepoint only");
+      })
+      .catch(() => {
+        // Inner insert was cleanly rolled back; Diana remains!
+      });
+  });
+
+  // 5. Fluent Queries (compiled directly to compact VDBE binary bytecode)
+  const topAdults = await db
+    .from("users")
+    .select("name", "age", "score")
+    .where("age", ">=", 21)
+    .whereNotNull("score")
+    .orderBy("score", "desc")
+    .limit(10)
+    .toArray();
+
+  console.table(topAdults);
+  // ┌─────────┬───────────┬─────┬───────┐
+  // │ (index) │ name      │ age │ score │
+  // ├─────────┼───────────┼─────┼───────┤
+  // │ 0       │ 'Diana'   │ 25  │ 99    │
+  // │ 1       │ 'Alice'   │ 28  │ 95.5  │
+  // │ 2       │ 'Charlie' │ 34  │ 88    │
+  // └─────────┴───────────┴─────┴───────┘
+
+  // 6. Inspect the Query Plan & VDBE Bytecode Disassembly
+  const explain = await db.from("users").where("score", ">", 80).explain();
+  console.log("Execution Plan:", explain.plan);
+  console.table(explain.instructions);
+
+  await db.close();
+}
+
+main();
 ```
 
 ---

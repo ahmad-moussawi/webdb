@@ -1,5 +1,5 @@
 import { TableMeta, TableColumnMeta } from '../types/studio';
-import { DataType, ColumnFlag } from '@webdb/core';
+import { DataType, ColumnFlag } from 'webdb-core';
 
 export interface SqlExportResult {
   sql: string;

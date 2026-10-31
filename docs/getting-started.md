@@ -31,7 +31,7 @@ npm test
 Here is how to create a database, define a table, insert records, and execute queries:
 
 ```typescript
-import { WebDB } from '@webdb/core';
+import { WebDB } from 'webdb-core';
 
 // 1. Open a database (in-memory or persistent IndexedDB)
 const db = await WebDB.open({
