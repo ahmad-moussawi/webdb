@@ -1,13 +1,12 @@
-import { TableMeta } from '../types/studio';
+import { TableMeta } from "../types/studio";
 import {
   PAGE_TYPE_LEAF_DATA,
   PAGE_TYPE_CATALOG_PAGE,
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_FREE,
-  PAGE_SIZE,
   page_deserialize_row,
-} from 'webdb-core';
-import { PAGE_TYPE_NAMES } from './pageInspector';
+} from "@ahmadmoussawi/webdb";
+import { PAGE_TYPE_NAMES } from "./pageInspector";
 
 export interface PoolSlotInfo {
   slotIndex: number;
@@ -44,9 +43,9 @@ export interface PoolStats {
 function formatBytesHex(bytes: Uint8Array): string {
   const hex: string[] = [];
   for (let i = 0; i < bytes.length; i++) {
-    hex.push(bytes[i].toString(16).padStart(2, '0'));
+    hex.push(bytes[i].toString(16).padStart(2, "0"));
   }
-  return hex.join(' ');
+  return hex.join(" ");
 }
 
 /**
@@ -59,7 +58,7 @@ export function inspectBufferPool(
 ): { stats: PoolStats; slots: PoolSlotInfo[] } {
   const driver = db?.driver || db?.pool;
 
-  if (!driver || typeof driver.getAssignedPage !== 'function') {
+  if (!driver || typeof driver.getAssignedPage !== "function") {
     return {
       stats: {
         totalSlots: 0,
@@ -120,7 +119,11 @@ export function inspectBufferPool(
   try {
     const page1Bytes = driver.getPageBytesInSlot(0);
     if (page1Bytes && page1Bytes.byteLength >= 2148) {
-      const p1View = new DataView(page1Bytes.buffer, page1Bytes.byteOffset, page1Bytes.byteLength);
+      const p1View = new DataView(
+        page1Bytes.buffer,
+        page1Bytes.byteOffset,
+        page1Bytes.byteLength,
+      );
       const textDecoder = new TextDecoder();
       for (let i = 0; i < 16; i++) {
         const off = 100 + i * 128;
@@ -130,9 +133,17 @@ export function inspectBufferPool(
           const rootPageId = p1View.getUint32(off + 4, true);
           const colCatalogPageId = p1View.getUint32(off + 8, true);
           let endName = 0;
-          while (endName < 64 && page1Bytes[off + 12 + endName] !== 0) endName++;
-          const name = textDecoder.decode(page1Bytes.subarray(off + 12, off + 12 + endName)).trim();
-          if (name && !knownTables.some((t) => t.name.toLowerCase() === name.toLowerCase())) {
+          while (endName < 64 && page1Bytes[off + 12 + endName] !== 0)
+            endName++;
+          const name = textDecoder
+            .decode(page1Bytes.subarray(off + 12, off + 12 + endName))
+            .trim();
+          if (
+            name &&
+            !knownTables.some(
+              (t) => t.name.toLowerCase() === name.toLowerCase(),
+            )
+          ) {
             knownTables.push({ name, rootPageId, colCatalogPageId });
           }
         }
@@ -165,13 +176,20 @@ export function inspectBufferPool(
 
       const slotBytes = driver.getPageBytesInSlot(slotIdx);
       if (!slotBytes || slotBytes.byteLength < 16) continue;
-      const view = new DataView(slotBytes.buffer, slotBytes.byteOffset, slotBytes.byteLength);
+      const view = new DataView(
+        slotBytes.buffer,
+        slotBytes.byteOffset,
+        slotBytes.byteLength,
+      );
       const pType = view.getUint8(0);
 
       const tblName = tableMap.get(pId);
       if (tblName) {
         // Forward propagate via next_page_id (leaf data or interior)
-        if (pType === PAGE_TYPE_LEAF_DATA || pType === PAGE_TYPE_TABLE_INTERIOR) {
+        if (
+          pType === PAGE_TYPE_LEAF_DATA ||
+          pType === PAGE_TYPE_TABLE_INTERIOR
+        ) {
           const nextId = view.getUint32(8, true);
           if (nextId > 1 && !tableMap.has(nextId)) {
             tableMap.set(nextId, tblName);
@@ -225,7 +243,11 @@ export function inspectBufferPool(
 
     const slotBytes = driver.getPageBytesInSlot(slotIdx);
     if (!slotBytes || slotBytes.byteLength < 16) continue;
-    const view = new DataView(slotBytes.buffer, slotBytes.byteOffset, slotBytes.byteLength);
+    const view = new DataView(
+      slotBytes.buffer,
+      slotBytes.byteOffset,
+      slotBytes.byteLength,
+    );
     const pType = view.getUint8(0);
 
     if (pType === PAGE_TYPE_LEAF_DATA) {
@@ -243,12 +265,20 @@ export function inspectBufferPool(
               try {
                 const colMetas = tbl.columns.map((c: any, cIdx: number) => ({
                   name: c.name,
-                  type: typeof c.type === 'number' ? c.type : 4,
-                  flags: typeof c.flags === 'number' ? c.flags : 0,
+                  type: typeof c.type === "number" ? c.type : 4,
+                  flags: typeof c.flags === "number" ? c.flags : 0,
                   columnIndex: cIdx,
                 }));
-                const row = page_deserialize_row(colMetas as any, view, firstOff);
-                if (row && typeof row === 'object' && Object.keys(row).length > 0) {
+                const row = page_deserialize_row(
+                  colMetas as any,
+                  view,
+                  firstOff,
+                );
+                if (
+                  row &&
+                  typeof row === "object" &&
+                  Object.keys(row).length > 0
+                ) {
                   tableMap.set(pId, tbl.name);
                   break;
                 }
@@ -275,7 +305,9 @@ export function inspectBufferPool(
     const isPinned = driver.isSlotPinned(slotIdx);
     const pinCount = driver.getPinCount(slotIdx);
     const refBit = driver.getRefBit(slotIdx);
-    const dirtyGeneration = driver.slot_dirty_generations ? driver.slot_dirty_generations[slotIdx] : 0;
+    const dirtyGeneration = driver.slot_dirty_generations
+      ? driver.slot_dirty_generations[slotIdx]
+      : 0;
     const offset = driver.getSlotOffset(slotIdx);
 
     if (isDirty) dirtyCount++;
@@ -283,35 +315,44 @@ export function inspectBufferPool(
 
     let tableName: string | undefined;
     let pageType: number | undefined;
-    let pageTypeName = 'Unassigned Slot';
+    let pageTypeName = "Unassigned Slot";
     let usagePercent = 0;
     let usedBytes = 0;
     let cellCount = 0;
-    let rawSnippetHex = '';
+    let rawSnippetHex = "";
 
     if (pageId > 0) {
       residentCount++;
       const slotBytes = driver.getPageBytesInSlot(slotIdx);
       if (slotBytes && slotBytes.byteLength >= 16) {
         rawSnippetHex = formatBytesHex(slotBytes.subarray(0, 16));
-        const view = new DataView(slotBytes.buffer, slotBytes.byteOffset, slotBytes.byteLength);
+        const view = new DataView(
+          slotBytes.buffer,
+          slotBytes.byteOffset,
+          slotBytes.byteLength,
+        );
 
         if (pageId === 1) {
           pageType = -1;
-          pageTypeName = 'System Page (0x01)';
-          tableName = 'System Catalog';
+          pageTypeName = "System Page (0x01)";
+          tableName = "System Catalog";
           usedBytes = 100 + 2048 + 1024;
           usagePercent = Math.round((usedBytes / 4096) * 100);
           cellCount = knownTables.length;
         } else {
           pageType = view.getUint8(0);
-          pageTypeName = PAGE_TYPE_NAMES[pageType] || `Type 0x${pageType.toString(16)}`;
+          pageTypeName =
+            PAGE_TYPE_NAMES[pageType] || `Type 0x${pageType.toString(16)}`;
 
           // Lookup from our multi-layer tableMap
           tableName = tableMap.get(pageId);
 
           // Fallback if only 1 table exists
-          if (!tableName && knownTables.length === 1 && pageType === PAGE_TYPE_LEAF_DATA) {
+          if (
+            !tableName &&
+            knownTables.length === 1 &&
+            pageType === PAGE_TYPE_LEAF_DATA
+          ) {
             tableName = knownTables[0].name;
           }
 
@@ -319,10 +360,16 @@ export function inspectBufferPool(
             cellCount = view.getUint16(2, true);
             usedBytes = 16 + cellCount * 72;
             usagePercent = Math.min(100, Math.round((usedBytes / 4096) * 100));
-          } else if (pageType === PAGE_TYPE_LEAF_DATA || pageType === PAGE_TYPE_TABLE_INTERIOR) {
+          } else if (
+            pageType === PAGE_TYPE_LEAF_DATA ||
+            pageType === PAGE_TYPE_TABLE_INTERIOR
+          ) {
             cellCount = view.getUint16(2, true);
             const contentOffset = view.getUint16(4, true);
-            const payloadSize = Math.max(0, 4096 - Math.max(contentOffset, 16 + cellCount * 2));
+            const payloadSize = Math.max(
+              0,
+              4096 - Math.max(contentOffset, 16 + cellCount * 2),
+            );
             usedBytes = 16 + cellCount * 2 + payloadSize;
             usagePercent = Math.min(100, Math.round((usedBytes / 4096) * 100));
           } else if (pageType === PAGE_TYPE_FREE) {
@@ -353,9 +400,12 @@ export function inspectBufferPool(
   }
 
   const freeSlotsCount = Math.max(0, slotCount - residentCount);
-  const residentPercent = slotCount > 0 ? Math.round((residentCount / slotCount) * 100) : 0;
-  const dirtyPercent = residentCount > 0 ? Math.round((dirtyCount / residentCount) * 100) : 0;
-  const arenaUsedBytes = typeof driver.getArenaOffset === 'function' ? driver.getArenaOffset() : 0;
+  const residentPercent =
+    slotCount > 0 ? Math.round((residentCount / slotCount) * 100) : 0;
+  const dirtyPercent =
+    residentCount > 0 ? Math.round((dirtyCount / residentCount) * 100) : 0;
+  const arenaUsedBytes =
+    typeof driver.getArenaOffset === "function" ? driver.getArenaOffset() : 0;
   const arenaMaxBytes = driver.maxQueryMemory || 262144;
   const totalPoolMemoryBytes = slotCount * 4096 + arenaMaxBytes;
 
@@ -366,7 +416,7 @@ export function inspectBufferPool(
       freeSlotsCount,
       dirtyCount,
       pinnedCount,
-      clockHand: typeof driver.clock_hand === 'number' ? driver.clock_hand : 0,
+      clockHand: typeof driver.clock_hand === "number" ? driver.clock_hand : 0,
       arenaUsedBytes,
       arenaMaxBytes,
       totalPoolMemoryBytes,

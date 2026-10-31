@@ -383,7 +383,7 @@ Different database engines make distinct architectural trade-offs based on their
 Set the default planner for all queries executed on the database instance:
 
 ```typescript
-import { WebDB, HeuristicPlanner } from "webdb-core";
+import { WebDB, HeuristicPlanner } from "@ahmadmoussawi/webdb";
 
 const db = await WebDB.open({
   name: "analytics_db",
@@ -399,7 +399,7 @@ console.log(db.getPlanner().name); // "heuristic"
 You can switch the database planner at runtime:
 
 ```typescript
-import { CostBasedPlanner, NoOpPlanner } from "webdb-core";
+import { CostBasedPlanner, NoOpPlanner } from "@ahmadmoussawi/webdb";
 
 // Switch to straight-join execution
 db.setPlanner(new NoOpPlanner());
@@ -413,7 +413,7 @@ db.setPlanner(new CostBasedPlanner());
 Override the planner for an individual critical query using `.withPlanner()`:
 
 ```typescript
-import { CostBasedPlanner, CustomOrderPlanner } from "webdb-core";
+import { CostBasedPlanner, CustomOrderPlanner } from "@ahmadmoussawi/webdb";
 
 // Force a specific join sequence for this single query
 const results = await db

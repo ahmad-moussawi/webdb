@@ -28,7 +28,7 @@ const topScorers = await db
 console.table(topScorers);`,
 
   http: `// Remote Page Streaming via HTTP Range Requests
-import { WebDB, HttpVfsAdapter } from "webdb-core";
+import { WebDB, HttpVfsAdapter } from "@ahmadmoussawi/webdb";
 
 // 1. Mount a remote database directly on CDN, S3, or Cloudflare R2
 const db = await WebDB.open({
@@ -165,7 +165,7 @@ const highlightedCustomVfs = computed(() => {
   return highlightCode(customVfsSnippet, "ts");
 });
 
-const httpVfsSnippet = `import { WebDB, HttpVfsAdapter } from "webdb-core";
+const httpVfsSnippet = `import { WebDB, HttpVfsAdapter } from "@ahmadmoussawi/webdb";
 
 const httpStorage = new HttpVfsAdapter(
   "https://example.com/ecommerce.db"

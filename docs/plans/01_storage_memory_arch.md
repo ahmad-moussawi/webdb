@@ -855,7 +855,7 @@ export class UlidCodec {
 #### End-to-End WebDB Usage Example
 
 ```typescript
-import { WebDB } from "webdb-core";
+import { WebDB } from "@ahmadmoussawi/webdb";
 
 const db = await WebDB.open({ name: "ecommerce", storage: "opfs" });
 

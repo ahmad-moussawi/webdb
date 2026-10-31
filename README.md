@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/wasm%20size-%3C50%20KB-success.svg?logo=webassembly&logoColor=white" alt="Wasm Size: <50KB" />
   <a href="https://ahmad-moussawi.github.io/webdb/playground/"><img src="https://img.shields.io/badge/Studio%20IDE-live%20playground-7c3aed?logo=visualstudiocode&logoColor=white" alt="Studio IDE" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/benchmark/"><img src="https://img.shields.io/badge/benchmarks-live%20suite-059669?logo=speedtest&logoColor=white" alt="Live Benchmarks" /></a>
-  <a href="https://www.npmjs.com/package/webdb-core"><img src="https://img.shields.io/npm/v/webdb-core/alpha?label=npm%20alpha&color=orange&logo=npm" alt="npm alpha" /></a>
+  <a href="https://www.npmjs.com/package/@ahmadmoussawi/webdb"><img src="https://img.shields.io/npm/v/@ahmadmoussawi/webdb/alpha?label=npm%20alpha&color=orange&logo=npm" alt="npm alpha" /></a>
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.7-blue?logo=typescript&logoColor=white" alt="TypeScript" /></a>
   <a href="https://vitest.dev/"><img src="https://img.shields.io/badge/tests-348%20unit%20%2B%206%20e2e%20passing-brightgreen?logo=vitest&logoColor=white" alt="Tests" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/"><img src="https://img.shields.io/badge/docs-online-646cff?logo=vite&logoColor=white" alt="Docs" /></a>
@@ -97,17 +97,17 @@ Read our complete specifications:
 
 ## 📦 Installation
 
-Install the alpha release of `webdb-core` via npm, pnpm, or yarn:
+Install the alpha release of `@ahmadmoussawi/webdb` via npm, pnpm, or yarn:
 
 ```bash
 # npm
-npm install webdb-core@alpha
+npm install @ahmadmoussawi/webdb@alpha
 
 # pnpm
-pnpm add webdb-core@alpha
+pnpm add @ahmadmoussawi/webdb@alpha
 
 # yarn
-yarn add webdb-core@alpha
+yarn add @ahmadmoussawi/webdb@alpha
 ```
 
 ---
@@ -117,7 +117,7 @@ yarn add webdb-core@alpha
 The snippet below is a complete, runnable example you can paste into any TypeScript or JavaScript project (Vite, Next.js, Node 20+, or Vitest):
 
 ```typescript
-import { WebDB } from "webdb-core";
+import { WebDB } from "@ahmadmoussawi/webdb";
 
 async function main() {
   // 1. Open a database

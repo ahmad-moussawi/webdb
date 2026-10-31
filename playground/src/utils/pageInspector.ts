@@ -31,7 +31,7 @@ import {
   HEADER_OFFSET_CHANGE_COUNTER,
   HEADER_OFFSET_PAGE_CHECKSUM,
   page_deserialize_row,
-} from 'webdb-core';
+} from '@ahmadmoussawi/webdb';
 import type { TableMeta, TableColumnMeta } from '../types/studio.ts';
 
 export interface DiscoveredPage {

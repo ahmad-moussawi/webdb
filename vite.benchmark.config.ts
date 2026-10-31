@@ -22,7 +22,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      'webdb-core': resolve(__dirname, 'src/index.ts'),
+      '@ahmadmoussawi/webdb': resolve(__dirname, 'src/index.ts'),
     },
   },
 });

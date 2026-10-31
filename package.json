@@ -1,5 +1,5 @@
 {
-  "name": "webdb-core",
+  "name": "@ahmadmoussawi/webdb",
   "version": "0.1.0-alpha.0",
   "type": "module",
   "description": "Ultra-lean browser-native relational database engine",
