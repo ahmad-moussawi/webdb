@@ -498,4 +498,121 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     await context.close();
   });
+
+  test("7. Binary Export & Import (IndexedDB -> OPFS & Multi-Tab Cache Coherency) with ALTER TABLE mutations", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const idbSourceName = `e2e_export_idb_${Date.now()}`;
+    const opfsTargetName = `e2e_import_opfs_${Date.now()}`;
+    const multiTabIdbName = `e2e_multitab_import_${Date.now()}`;
+
+    const tab1 = await context.newPage();
+    const tab2 = await context.newPage();
+    await Promise.all([tab1.goto(baseUrl), tab2.goto(baseUrl)]);
+    await Promise.all([
+      tab1.waitForFunction(() => (window as any).__harnessReady === true),
+      tab2.waitForFunction(() => (window as any).__harnessReady === true),
+    ]);
+
+    // 1. In Tab 1: Create IndexedDB database, run ALTER TABLE mutations, export binary image, and import into native OPFS
+    const opfsVerification = await tab1.evaluate(
+      async ({ srcName, opfsName }) => {
+        const WebDB = (window as any).WebDB;
+        const srcDb = await WebDB.open({ name: srcName, storage: "idb" });
+
+        await srcDb.createTable("inventory", [
+          { name: "id", type: "INT32", primaryKey: true, autoInc: true },
+          { name: "old_sku", type: "TEXT", notNull: true },
+          { name: "deprecated_col", type: "INT32" },
+        ]);
+        await srcDb.createIndex("inventory", "old_sku", { unique: true });
+
+        await srcDb.insertMany("inventory", [
+          { old_sku: "ITEM-101", deprecated_col: 1 },
+          { old_sku: "ITEM-202", deprecated_col: 2 },
+        ]);
+
+        // Perform ALTER TABLE mutations before binary export
+        await srcDb.renameColumn("inventory", "old_sku", "sku");
+        await srcDb.addColumn(
+          "inventory",
+          { name: "stock", type: "INT32", notNull: true },
+          { defaultValue: 50 },
+        );
+        await srcDb.dropColumn("inventory", "deprecated_col");
+
+        const exportedBytes: Uint8Array = await srcDb.exportBinary();
+        (window as any).__exportedBytes = exportedBytes;
+        await srcDb.close();
+
+        // Import into a real browser OPFS database and verify persistence across close/reopen
+        const opfsDb = await WebDB.open({ name: opfsName, storage: "opfs" });
+        await opfsDb.importBinary(exportedBytes);
+        await opfsDb.insert("inventory", { sku: "ITEM-303", stock: 120 });
+        await opfsDb.close();
+
+        const opfsReopened = await WebDB.open({
+          name: opfsName,
+          storage: "opfs",
+        });
+        const rows = await opfsReopened
+          .from("inventory")
+          .orderBy("id", "asc")
+          .toArray();
+        await opfsReopened.close();
+        return {
+          byteLength: exportedBytes.byteLength,
+          rows,
+        };
+      },
+      { srcName: idbSourceName, opfsName: opfsTargetName },
+    );
+
+    expect(opfsVerification.byteLength % 4096).toBe(0);
+    expect(opfsVerification.rows).toEqual([
+      { id: 1, sku: "ITEM-101", stock: 50 },
+      { id: 2, sku: "ITEM-202", stock: 50 },
+      { id: 3, sku: "ITEM-303", stock: 120 },
+    ]);
+
+    // 2. Open a shared IndexedDB database in both Tab 1 and Tab 2 with initial seed schema
+    await tab1.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      const db = await WebDB.open({ name, storage: "idb" });
+      await db.createTable("old_table", [
+        { name: "id", type: "INT32", primaryKey: true },
+      ]);
+      await db.insert("old_table", { id: 999 });
+      (window as any).__sharedDb = db;
+    }, multiTabIdbName);
+
+    const tab2BeforeImport = await tab2.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      const db = await WebDB.open({ name, storage: "idb" });
+      (window as any).__sharedDb = db;
+      return await db.from("old_table").toArray();
+    }, multiTabIdbName);
+    expect(tab2BeforeImport).toEqual([{ id: 999 }]);
+
+    // Tab 1 imports the binary image into the shared IndexedDB database
+    await tab1.evaluate(async () => {
+      const db = (window as any).__sharedDb;
+      const exportedBytes = (window as any).__exportedBytes;
+      await db.importBinary(exportedBytes);
+    });
+
+    // Tab 2 queries the shared database and automatically detects the imported schema & rows via cross-tab coherency
+    const tab2AfterImport = await tab2.evaluate(async () => {
+      const db = (window as any).__sharedDb;
+      return await db.from("inventory").orderBy("id", "asc").toArray();
+    });
+    expect(tab2AfterImport).toEqual([
+      { id: 1, sku: "ITEM-101", stock: 50 },
+      { id: 2, sku: "ITEM-202", stock: 50 },
+    ]);
+
+    await context.close();
+  });
 });

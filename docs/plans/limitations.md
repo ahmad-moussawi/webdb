@@ -23,12 +23,13 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 | **VM**          | Transient Query Arena Ceiling         |      `16 MB` (default, configurable)       | `QueryArenaExhaustedError` (fail-fast OOM)          |
 | **Query**       | Maximum Sort Columns (`ORDER BY`)     |                `8 columns`                 | `TooManyOrderByColumnsError`                        |
 | **Query**       | Maximum Group By Columns (`GROUP BY`) |                `8 columns`                 | `TooManyGroupByColumnsError`                        |
-| **Query**       | Secondary Indexes                     | Single-column in V1 (`IndexDescriptor` reserved) | Composite indexes deferred to V1.1+ (zero migration)|
+| **Query**       | Secondary Indexes                     | `8 indexes` (Page 1), up to `8 columns` each | `TooManyIndexesError` (DDL time)                    |
+| **DDL**         | Schema Mutations (`ALTER TABLE`)      | $O(1)$ rename; transactional table rebuild (`ADD`/`DROP COLUMN`) | `CannotDropColumnError`, `NotNullConstraintError`   |
 | **Query**       | Table Joins                           |     Up to `16 tables` per query level      | `TooManyCursorsError` if > 16 cursors needed        |
 | **Query**       | Subqueries                            | Correlated depth ≤ 7; sequential unlimited | `SubqueryNestingTooDeepError` (compile time)        |
 | **Query**       | Client-Side Projections (`projectRow`)| Terminal execution only (not in subqueries)| VM executes native bytecode; JS projections bypassed|
 | **Concurrency** | Concurrent Writers                    |         `1 writer` (Web Locks API)         | Serialized in FIFO order via browser locks          |
-| **Concurrency** | Active Transactions per Connection    |              `1 transaction`               | `TransactionAlreadyActiveError`                     |
+| **Concurrency** | Active Transactions per Connection    |  `1 top-level` (nested via savepoints)     |Queued via `ExclusiveLeaseQueue`; `tx.transaction()` uses savepoints |
 
 ---
 
@@ -190,12 +191,10 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
   - **Stream Aggregation (Indexed/Sorted):** Groups pre-ordered by an index or sorter stream through in $O(1)$ constant memory without allocating a hash table.
 - **Failure Mode:** Querying with $> 8$ grouping columns throws `TooManyGroupByColumnsError` at compile time.
 
-### 4.3 Single-Column Secondary Indexes (Forward-Compatible `IndexDescriptor` Architecture)
+### 4.3 Secondary & Composite Indexes (`IndexDescriptor` Architecture)
 
-- **Supported in V1:** Single-column secondary B+Tree indexes (`createIndex(tableName, columnName)`).
-- **Format in V1:** Index leaf cells store fixed-width `(indexed_value, rowid)` binary pairs.
-- **Forward-Compatible Schema Reservation (Zero Format Breakage in V1.1+):**
-  - To prevent breaking changes when composite multi-column indexes (`createIndex('users', ['org_id', 'created_at'])`) are introduced in V1.1, Page 1 pre-allocates an array of **128-byte `IndexDescriptor` structs** at bytes `2148..3171`:
+- **Supported in V1:** Both single-column (`createIndex(tableName, 'col')`) and composite multi-column (`createIndex(tableName, ['col1', 'col2'])`, up to **8 columns per index**) B+Tree indexes, with optional uniqueness enforcement (`{ unique: true }`).
+- **Page 1 Capacity:** Page 1 pre-allocates **8 `IndexDescriptor` slots** (128 bytes each at bytes `2148..3171`), shared across automatic primary key indexes (`pk_<table>`) and user-defined secondary indexes (`TooManyIndexesError` if exceeded):
     ```c
     typedef struct {
         uint16_t index_id;              // Numeric index ID (1..65535)                    (offset 0..1,   2B)
@@ -209,9 +208,8 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
         uint8_t  _reserved[30];         // Reserved for partial index filters / stats     (offset 98..127,30B)
     } IndexDescriptor;                  // Exact size: 128 bytes (128 % 8 = 0, power of 2)
     ```
-  - **V1 Execution:** Single-column indexes populate `column_count = 1` and `column_indices[0] = col_idx`. The engine creates a single-key B+Tree.
-  - **V1.1 Upgrade Path (Zero Migration):** In V1.1+, multi-column indexes populate `column_count = 2..8` and `column_indices[0..N-1]`, with leaf keys serialized as `(val1, val2, ..., rowid)`.
-  - **Zero Migration Guarantee:** Because the `IndexDescriptor` slot is already burned into the V1 Page 1 binary format, existing V1 `.db` files load seamlessly in V1.1+ with zero file rewriting or migration tools.
+  - **Single-Column Execution:** Populates `column_count = 1` and `column_indices[0] = col_idx`, storing typed `(indexed_value, rowid)` entries.
+  - **Composite Index Execution:** Populates `column_count = 2..8` and `column_indices[0..N-1]`, serializing composite tuples into order-preserving binary keys via `serialize_composite_key`.
 
 ### 4.4 Join Constraints & Cursor Slot Allocation (Query Builder vs. Engine Hard Limit)
 
@@ -275,8 +273,18 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 
 ### 4.8 Schema Mutations (`ALTER TABLE`)
 
-- **Invariant:** Tables cannot be modified in-place dynamically after creation.
-- **Migration Pattern:** To alter a schema in V1, applications create the new table, migrate data via `insert()`, and drop the old table. Dynamic column addition/removal is scheduled for future catalog revisions.
+WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) and dedicated DDL methods (`renameTable`, `renameColumn`, `addColumn`, `dropColumn`), split into two architectural pathways:
+
+1. **$O(1)$ Metadata-Only Mutations (`renameTable`, `renameColumn`):**
+   - **Mechanism:** Directly updates the fixed 64-byte UTF-8 `name` field inside `TableDescriptor` (on Page 1) or `ColumnMeta` (on the table's dedicated Column Catalog Page `0x0C`), increments `schema_version`, and recomputes page CRC32 checksums in $O(1)$ time with zero data or index page rewrites.
+   - **Index Continuity:** Because `IndexDescriptor.columnIndices` references columns by numeric index (`0..255`), renaming a column preserves all single-column and composite B+Tree indexes in place without rebuilding index trees. Renaming a table also updates auto-named index descriptors (`pk_<old>` $\rightarrow$ `pk_<new>`, `idx_<old>_*` $\rightarrow$ `idx_<new>_*`).
+2. **Transactional Table-Rebuild Mutations (`addColumn`, `dropColumn`):**
+   - **Why Table Rebuild is Required:** Row records use a compact binary layout with a column-count-dependent Null-Bitmap ($\lceil\text{column\_count}/8\rceil$ bytes) and precomputed fixed-slice `col_offset` pointers. Changing `column_count` alters the binary layout of every row.
+   - **Atomic Execution:** `addColumn` and `dropColumn` execute atomically inside a WAL transaction (or a nested savepoint when invoked inside an active `db.transaction()` block). All existing rows, `autoIncNext` sequences, primary key indexes, and surviving secondary indexes are migrated and rebuilt; any constraint failure (`NotNullConstraintError`, `RowSizeLimitExceededError`, `UniqueConstraintViolationError`) rolls back the entire operation cleanly.
+   - **Guardrails & Constraints:**
+     - Dropping a `PRIMARY KEY` column or the last remaining column on a table is rejected with `CannotDropColumnError`.
+     - Adding a `PRIMARY KEY` column to a table that already defines a primary key is rejected.
+     - Dropping a column automatically cascade-drops any secondary index referencing that column while preserving all other indexes.
 
 ### 4.9 Client-Side Projection (`projectRow`) & Subquery Boundary Limitation
 
@@ -290,18 +298,18 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 
 ### 5.1 Single Writer Lock (Multi-Tab Coordination)
 
-- **Invariant:** Only one browser tab or Web Worker may hold an active write transaction at any instant.
-- **Mechanism:** Coordination is enforced via the browser's native **Web Locks API** (`navigator.locks.request('webdb_writer_lock_...')`).
-- **Behavior:** Concurrent tabs attempting write transactions wait asynchronously in FIFO order. If a holding tab crashes or closes, the browser automatically releases the lock without file corruption.
+- **Invariant:** Only one browser tab or Web Worker may hold an active write transaction or execute a database operation at any instant.
+- **Mechanism:** Coordination is enforced via the browser's native **Web Locks API** (`navigator.locks.request('webdb_lock_...')`) combined with Page 1 `changeCounter` / `schemaVersion` cache coherency checks across tabs.
+- **Behavior:** Concurrent tabs attempting transactions wait asynchronously in FIFO order, automatically replaying any uncheckpointed WAL frames and invalidating stale unpinned buffer pool pages when acquiring the cross-tab lock. If a holding tab crashes or closes, the browser automatically releases the lock without file corruption.
 
-### 5.2 Single Active Transaction per Database Instance
+### 5.2 Serialized Top-Level Transactions & Nested Savepoints
 
-- **Invariant:** A single `WebDB` instance supports at most one active `db.transaction()` block at a time.
-- **Failure Mode:** Initiating a second transaction before the first has resolved or rolled back throws `TransactionAlreadyActiveError`. Nested transactions (savepoints) are deferred.
+- **Invariant:** A single `WebDB` instance serializes concurrent top-level `db.transaction()` calls in FIFO order via [`ExclusiveLeaseQueue`](file:///Users/ahmad/h/webdb/src/host/driver/transaction_coordinator.ts).
+- **Nested Savepoints:** Calling `tx.transaction(async (nestedTx) => ...)` inside an active transaction captures an in-memory and WAL savepoint (`captureSavepoint` / `restoreSavepoint`), allowing inner blocks to roll back independently without aborting the outer transaction.
 
-### 5.3 WAL Checkpoint Threshold (1,000 Frames)
+### 5.3 WAL Auto-Checkpoint Threshold (256 Frames / 100 Committed Transactions)
 
-- **Invariant:** The Write-Ahead Log (.wal file) automatically triggers a synchronous checkpoint and truncation when it accumulates **1,000 frames** (~4.1 MB).
+- **Invariant:** The Write-Ahead Log (`.wal` file) automatically triggers a passive checkpoint and truncation when it accumulates **$\ge 256$ frames** (~1 MB) or **$\ge 100$ committed transactions**.
 - **Rationale:** Keeps crash recovery scans fast (<10 ms on database open) and bounds storage expansion in quota-constrained environments.
 
 ### 5.4 Abandoned Transaction Timeout (30 Seconds)
@@ -342,7 +350,8 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 | **Max Identifier Length**         |          `64 characters`           | Unlimited (no fixed limit) | Standard SQL length (`char name[64]`); zero string parsing. |
 | **Sort Columns (`ORDER BY`)**     |            `8 columns`             |         Unlimited          | Compact 18B key descriptor; unrolled comparisons.           |
 | **Grouping Columns (`GROUP BY`)** |            `8 columns`             |         Unlimited          | Compact 40B `AggBucket`; unrolled key comparisons.          |
-| **Secondary Indexes**             | Single-column in V1 (`IndexDescriptor` reserved) |   Multi-column composite   | Lean binary traversal in V1; zero-migration composite support in V1.1+. |
+| **Secondary Indexes**             | Up to 8 indexes (1..8 cols each)   |   Multi-column composite   | Fixed 128B `IndexDescriptor` slots on Page 1.               |
+| **Schema Mutations (`ALTER`)**    | $O(1)$ rename; atomic rebuild `ADD`/`DROP` | $O(1)$ `ADD`; rebuild `DROP` | Compact Null-Bitmap + fixed-slice offsets rebuilt in WAL tx.|
 | **Virtual Registers**             |   `64 per frame` (8-frame stack)   |    Unlimited (dynamic)     | Static 1,024B inline per frame; per-level isolation.        |
 | **Subquery Nesting**              |       Depth ≤ 7 (correlated)       |         Unlimited          | 8-frame fixed stack; sequential subqueries unlimited.       |
 | **Table Joins**                   | Up to 16 tables (16 cursors/frame) |         Unlimited          | One cursor per table; 16-cursor frame ceiling.              |

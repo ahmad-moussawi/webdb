@@ -144,7 +144,7 @@ export type DataTypeString =
 
 export interface ColumnDefinition {
   name: string;
-  type: DataTypeString;
+  type: DataTypeString | DataType;
   primaryKey?: boolean;
   notNull?: boolean;
   autoInc?: boolean;
@@ -237,6 +237,39 @@ export class NotNullConstraintError extends Error {
 export interface IndexOptions {
   unique?: boolean;
   name?: string;
+}
+
+export type AlterTableOperation =
+  | { type: 'renameTable'; newName: string }
+  | { type: 'renameColumn'; from: string; to: string }
+  | { type: 'addColumn'; column: ColumnDefinition; defaultValue?: DbValue }
+  | { type: 'dropColumn'; column: string };
+
+export class IdentifierTooLongError extends Error {
+  constructor(identifier: string, limit: number = 64) {
+    super(
+      `Identifier "${identifier}" (${identifier.length} characters) exceeds maximum limit of ${limit} characters`,
+    );
+    this.name = 'IdentifierTooLongError';
+  }
+}
+
+export class ColumnAlreadyExistsError extends Error {
+  constructor(columnName: string, tableName?: string) {
+    super(
+      tableName
+        ? `Column "${columnName}" already exists on table "${tableName}"`
+        : `Column "${columnName}" already exists`,
+    );
+    this.name = 'ColumnAlreadyExistsError';
+  }
+}
+
+export class CannotDropColumnError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CannotDropColumnError';
+  }
 }
 
 export class ColumnNotFoundError extends Error {

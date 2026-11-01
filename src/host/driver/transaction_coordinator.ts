@@ -690,7 +690,7 @@ export class TransactionCoordinator {
     return this.queue.enqueue(() => this.executeCheckpoint());
   }
 
-  private async executeCheckpoint(): Promise<{ pagesWritten: number }> {
+  async executeCheckpoint(): Promise<{ pagesWritten: number }> {
     const frameCount = await this.vfs.getWalFrameCount();
 
     // 1. Scan WAL frames chronologically
@@ -799,6 +799,23 @@ export class TransactionCoordinator {
     );
 
     return { pagesWritten: pagesToWrite.length };
+  }
+
+  async resetWalAfterImport(): Promise<void> {
+    this.spilledPages.clear();
+    this.committedWalPages.clear();
+    await this.vfs.truncateWal(0);
+    this.checkpointSeq++;
+    this.walFrameSeq = 0;
+    this.txCommitCount = 0;
+    this.expectedWalFrameCount = 0;
+    this.recordDiskPage1State();
+    await this.vfs.writeWalHeader(
+      encodeWalFileHeader({
+        checkpointSeq: this.checkpointSeq,
+        salt1: this.instanceSalt,
+      }),
+    );
   }
 
   private scheduleIdleTimer(): void {

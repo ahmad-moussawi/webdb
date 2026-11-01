@@ -4,6 +4,10 @@ import {
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_INDEXES_PAGE1,
+  MAX_TABLES_PAGE1,
+  MAX_COLUMNS_PER_CATALOG_PAGE,
+  MAX_COLUMNS_PER_TABLE,
+  MAX_NAME_LENGTH,
   PAGE_TYPE_FREE,
   PAGE_TYPE_INDEX_INTERIOR,
   PAGE_TYPE_TABLE_INTERIOR,
@@ -15,7 +19,9 @@ import {
   ColumnMeta,
   TableMeta,
   DbRow,
+  DbValue,
   TableNotFoundError,
+  TableAlreadyExistsError,
   ColumnFlag,
   DataType,
   VmStatus,
@@ -23,21 +29,30 @@ import {
   InvalidBytecodeError,
   QueryArenaExhaustedError,
   TooManyCursorsError,
+  TooManyColumnsError,
+  TooManyTablesError,
   UniqueConstraintViolationError,
   NotNullConstraintError,
   IndexFlag,
   IndexOptions,
+  AlterTableOperation,
+  IdentifierTooLongError,
+  ColumnAlreadyExistsError,
+  CannotDropColumnError,
   ColumnNotFoundError,
   IndexNotFoundError,
   IndexAlreadyExistsError,
   TooManyIndexesError,
   IndexDescriptor,
+  InvalidDatabaseError,
+  CorruptPageError,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
 import { IndexedDbVfsAdapter } from "../storage/idb.ts";
 import { OpfsVfsAdapter } from "../storage/opfs.ts";
 import { Io } from "../storage/io.ts";
+import { computePageChecksum } from "../storage/crc32.ts";
 import {
   BufferPoolDriver,
   createWasmMemory,
@@ -47,13 +62,17 @@ import {
 import {
   catalog_init_page1,
   catalog_read_page1_header,
+  catalog_get_total_pages,
   catalog_create_table,
   catalog_load_table_meta,
   catalog_find_table_slot,
+  catalog_find_free_table_slot,
   catalog_read_table_descriptor,
   catalog_write_table_descriptor,
   catalog_list_table_descriptors,
   catalog_read_page_header,
+  catalog_write_column_meta,
+  catalog_map_column_location,
   catalog_list_table_indexes,
   catalog_find_index_by_name,
   catalog_find_free_index_slot,
@@ -132,6 +151,7 @@ export interface WebDbOptions {
   core?: "js" | "wasm";
   wasmBinary?: ArrayBuffer | Uint8Array;
   planner?: QueryPlanner;
+  initialData?: Uint8Array | ArrayBuffer;
 }
 
 export class WebDB implements IDatabaseQueryExecutor {
@@ -282,7 +302,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       );
     }
 
-    return new WebDB(
+    const dbInstance = new WebDB(
       vfs,
       io,
       driver,
@@ -291,6 +311,12 @@ export class WebDB implements IDatabaseQueryExecutor {
       wasmCore,
       options.planner,
     );
+
+    if (options.initialData) {
+      await dbInstance.importBinary(options.initialData);
+    }
+
+    return dbInstance;
   }
 
   getPlanner(): QueryPlanner | undefined {
@@ -300,6 +326,15 @@ export class WebDB implements IDatabaseQueryExecutor {
   setPlanner(planner?: QueryPlanner): this {
     this.planner = planner;
     return this;
+  }
+
+  private validateIdentifier(identifier: string, label: string = "Identifier"): void {
+    if (!identifier || typeof identifier !== "string" || identifier.length === 0) {
+      throw new Error(`${label} cannot be empty`);
+    }
+    if (identifier.length > MAX_NAME_LENGTH) {
+      throw new IdentifierTooLongError(identifier, MAX_NAME_LENGTH);
+    }
   }
 
   async createTable(
@@ -316,11 +351,57 @@ export class WebDB implements IDatabaseQueryExecutor {
     name: string,
     columns: ColumnDefinition[],
   ): Promise<TableMeta> {
-    const page1View = this.pool.getSlotDataView(0);
+    this.validateIdentifier(name, "Table name");
+    if (columns.length === 0) {
+      throw new Error("Table must have at least one column");
+    }
+    if (columns.length > MAX_COLUMNS_PER_TABLE) {
+      throw new TooManyColumnsError(columns.length, MAX_COLUMNS_PER_TABLE);
+    }
 
-    // Dynamic pager provider for table creation
+    const seenColNames = new Set<string>();
+    let hasPk = false;
+    for (const col of columns) {
+      this.validateIdentifier(col.name, "Column name");
+      if (seenColNames.has(col.name)) {
+        throw new ColumnAlreadyExistsError(col.name, name);
+      }
+      seenColNames.add(col.name);
+      const flagsNum = typeof (col as any).flags === "number" ? (col as any).flags : 0;
+      if (
+        col.primaryKey ||
+        col.flags?.primaryKey ||
+        (flagsNum & ColumnFlag.PRIMARY_KEY) !== 0
+      ) {
+        hasPk = true;
+      }
+    }
+
+    const page1View = this.pool.getSlotDataView(0);
+    if (catalog_find_table_slot(page1View, name) !== -1) {
+      throw new TableAlreadyExistsError(name);
+    }
+    if (catalog_find_free_table_slot(page1View) === -1) {
+      throw new TooManyTablesError(MAX_TABLES_PAGE1, MAX_TABLES_PAGE1);
+    }
+
+    const numCatPages = Math.ceil(columns.length / MAX_COLUMNS_PER_CATALOG_PAGE);
+    const needsPkIndexPage =
+      hasPk && catalog_find_free_index_slot(page1View) !== -1 ? 1 : 0;
+    const totalPagesToAllocate = 1 + numCatPages + needsPkIndexPage;
+
+    const preAllocatedPages: number[] = [];
+    for (let i = 0; i < totalPagesToAllocate; i++) {
+      preAllocatedPages.push(await this.driver.allocateAndPinPage());
+    }
+
+    let allocCursor = 0;
+    // Dynamic pager provider for table creation backed by pre-allocated pinned buffer pool slots
     const pager: IPageProvider = {
       allocateNewPage: () => {
+        if (allocCursor < preAllocatedPages.length) {
+          return preAllocatedPages[allocCursor++];
+        }
         const currentTotal = page1View.getUint32(12, true);
         const newPageId = currentTotal + 1;
         page1View.setUint32(12, newPageId, true);
@@ -343,12 +424,32 @@ export class WebDB implements IDatabaseQueryExecutor {
       },
     };
 
-    const table = catalog_create_table(page1View, pager, name, columns);
+    let table: TableMeta;
+    try {
+      table = catalog_create_table(page1View, pager, name, columns);
+    } catch (err) {
+      for (const pId of preAllocatedPages) {
+        this.driver.forceUnpinPage(pId);
+        await this.driver.freePage(pId, true);
+      }
+      throw err;
+    }
 
-    // Permanently pin column catalog pages for this new table
+    // Unpin data root page and PK index root page (column catalog pages stay permanently pinned)
+    this.driver.unpinPage(table.rootPageId);
+    for (const idx of table.indexes ?? []) {
+      if (idx.rootPageId > 1) {
+        this.driver.unpinPage(idx.rootPageId);
+      }
+    }
+
+    // Ensure column catalog pages for this new table remain permanently pinned
     let catPageId = table.colCatalogPageId;
     while (catPageId !== 0) {
-      const slot = await this.driver.acquireAndPinPage(catPageId);
+      const slot = await this.driver.acquirePage(catPageId);
+      if (!this.pool.isSlotPinned(slot)) {
+        this.pool.pinSlot(slot);
+      }
       const header = catalog_read_page_header(
         this.pool.getSlotDataView(slot),
         0,
@@ -556,6 +657,434 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (this.vmCtx.table?.name.toLowerCase() === tableName.toLowerCase()) {
       this.vmCtx.table = null;
     }
+  }
+
+  async renameTable(oldName: string, newName: string): Promise<TableMeta> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._renameTableInternal(oldName, newName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _renameTableInternal(
+    oldName: string,
+    newName: string,
+  ): Promise<TableMeta> {
+    this.validateIdentifier(newName, "Table name");
+    const page1View = this.pool.getSlotDataView(0);
+    const slotIdx = catalog_find_table_slot(page1View, oldName);
+    if (slotIdx === -1) {
+      throw new TableNotFoundError(oldName);
+    }
+
+    if (oldName === newName) {
+      return this._getTableInternal(newName);
+    }
+
+    if (catalog_find_table_slot(page1View, newName) !== -1) {
+      throw new TableAlreadyExistsError(newName);
+    }
+
+    const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
+    desc.name = newName;
+    catalog_write_table_descriptor(page1View, slotIdx, desc);
+
+    // Update auto-generated PK and secondary index names belonging to this table
+    const oldPkName = `pk_${oldName}`;
+    const oldIdxPrefix = `idx_${oldName}_`;
+    for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+      const idx = catalog_read_index_descriptor(page1View, i);
+      if (idx && idx.tableId === desc.tableId) {
+        let updatedName: string | null = null;
+        if (idx.name === oldPkName) {
+          updatedName = `pk_${newName}`;
+        } else if (idx.name.startsWith(oldIdxPrefix)) {
+          updatedName = `idx_${newName}_${idx.name.slice(oldIdxPrefix.length)}`;
+        }
+        if (
+          updatedName &&
+          updatedName.length <= MAX_NAME_LENGTH &&
+          !catalog_find_index_by_name(page1View, updatedName)
+        ) {
+          idx.name = updatedName;
+          catalog_write_index_descriptor(page1View, i, idx);
+        }
+      }
+    }
+
+    catalog_increment_schema_version(page1View);
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+
+    this.tableMetaCache.delete(oldName.toLowerCase());
+    this.tableMetaCache.delete(newName.toLowerCase());
+    const tailPage = this.tableTailPages.get(oldName);
+    if (tailPage !== undefined) {
+      this.tableTailPages.delete(oldName);
+      this.tableTailPages.set(newName, tailPage);
+    }
+    if (this.vmCtx.table?.name.toLowerCase() === oldName.toLowerCase()) {
+      this.vmCtx.table = null;
+    }
+
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
+
+    return this._getTableInternal(newName);
+  }
+
+  async renameColumn(
+    tableName: string,
+    oldColumnName: string,
+    newColumnName: string,
+  ): Promise<TableMeta> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._renameColumnInternal(tableName, oldColumnName, newColumnName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _renameColumnInternal(
+    tableName: string,
+    oldColumnName: string,
+    newColumnName: string,
+  ): Promise<TableMeta> {
+    this.validateIdentifier(newColumnName, "Column name");
+    const table = await this._getTableInternal(tableName);
+    const colIdx = table.columns.findIndex((c) => c.name === oldColumnName);
+    if (colIdx === -1) {
+      throw new ColumnNotFoundError(oldColumnName, tableName);
+    }
+
+    if (oldColumnName === newColumnName) {
+      return table;
+    }
+
+    if (table.columns.some((c, idx) => idx !== colIdx && c.name === newColumnName)) {
+      throw new ColumnAlreadyExistsError(newColumnName, tableName);
+    }
+
+    const { pageChainIdx, colIdxInPage } = catalog_map_column_location(colIdx);
+    let catPageId = table.colCatalogPageId;
+    for (let p = 0; p < pageChainIdx; p++) {
+      const slot = await this.driver.acquirePage(catPageId);
+      const header = catalog_read_page_header(
+        this.pool.getSlotDataView(slot),
+        0,
+      );
+      catPageId = header.nextColCatalogPageId;
+    }
+
+    const catSlot = await this.driver.acquirePage(catPageId);
+    const catView = this.pool.getSlotDataView(catSlot);
+    const updatedCol: ColumnMeta = {
+      ...table.columns[colIdx],
+      name: newColumnName,
+    };
+    catalog_write_column_meta(catView, 0, colIdxInPage, updatedCol);
+    const chk = computePageChecksum(this.pool.getPageBytesInSlot(catSlot));
+    catView.setUint32(12, chk, true);
+    this.pool.markDirty(catSlot);
+
+    const page1View = this.pool.getSlotDataView(0);
+    catalog_increment_schema_version(page1View);
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    if (this.vmCtx.table?.name.toLowerCase() === tableName.toLowerCase()) {
+      this.vmCtx.table = null;
+    }
+
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
+
+    return this._getTableInternal(tableName);
+  }
+
+  async addColumn(
+    tableName: string,
+    column: ColumnDefinition,
+    options?: { defaultValue?: DbValue },
+  ): Promise<TableMeta> {
+    this.validateIdentifier(column.name, "Column name");
+    const defaultVal: DbValue =
+      options?.defaultValue !== undefined
+        ? options.defaultValue
+        : (column as any).defaultValue !== undefined
+          ? (column as any).defaultValue
+          : null;
+
+    return this._executeTableRebuildAtomic(tableName, (table) => {
+      if (table.columns.some((c) => c.name === column.name)) {
+        throw new ColumnAlreadyExistsError(column.name, tableName);
+      }
+      if (table.columns.length + 1 > MAX_COLUMNS_PER_TABLE) {
+        throw new TooManyColumnsError(
+          table.columns.length + 1,
+          MAX_COLUMNS_PER_TABLE,
+        );
+      }
+
+      const rawFlags =
+        typeof (column as any).flags === "number" ? (column as any).flags : 0;
+      const isPk =
+        !!column.primaryKey ||
+        !!column.flags?.primaryKey ||
+        (rawFlags & ColumnFlag.PRIMARY_KEY) !== 0;
+      const isAutoInc =
+        !!column.autoInc ||
+        !!column.flags?.autoInc ||
+        (rawFlags & ColumnFlag.AUTO_INC) !== 0;
+      const isIndexed =
+        !!column.indexed ||
+        !!column.flags?.indexed ||
+        (rawFlags & ColumnFlag.INDEXED) !== 0;
+
+      if (
+        isPk &&
+        table.columns.some((c) => (c.flags & ColumnFlag.PRIMARY_KEY) !== 0)
+      ) {
+        throw new Error(
+          `Cannot add a PRIMARY KEY column "${column.name}" to table "${tableName}" because it already has a primary key`,
+        );
+      }
+
+      const existingColDefs: ColumnDefinition[] = table.columns.map((c) => ({
+        name: c.name,
+        type: c.type,
+        flags: {
+          primaryKey: (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
+          notNull: (c.flags & ColumnFlag.NOT_NULL) !== 0,
+          indexed: (c.flags & ColumnFlag.INDEXED) !== 0,
+          autoInc: (c.flags & ColumnFlag.AUTO_INC) !== 0,
+        },
+      }));
+
+      return {
+        newColumns: [...existingColDefs, column],
+        transformRow: (row: DbRow) => {
+          const nextRow: DbRow = { ...row };
+          if (!isAutoInc || defaultVal !== null) {
+            nextRow[column.name] = defaultVal;
+          }
+          return nextRow;
+        },
+        keepIndex: () => true,
+        newAutoIndexCol: isIndexed && !isPk ? column.name : undefined,
+      };
+    });
+  }
+
+  async dropColumn(tableName: string, columnName: string): Promise<TableMeta> {
+    this.validateIdentifier(columnName, "Column name");
+
+    return this._executeTableRebuildAtomic(tableName, (table) => {
+      const colIdx = table.columns.findIndex((c) => c.name === columnName);
+      if (colIdx === -1) {
+        throw new ColumnNotFoundError(columnName, tableName);
+      }
+      if (table.columns.length <= 1) {
+        throw new CannotDropColumnError(
+          `Cannot drop column "${columnName}" from table "${tableName}": table must have at least one column`,
+        );
+      }
+
+      const targetCol = table.columns[colIdx];
+      if ((targetCol.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+        throw new CannotDropColumnError(
+          `Cannot drop PRIMARY KEY column "${columnName}" from table "${tableName}"`,
+        );
+      }
+
+      const newColumns: ColumnDefinition[] = table.columns
+        .filter((c) => c.name !== columnName)
+        .map((c) => ({
+          name: c.name,
+          type: c.type,
+          flags: {
+            primaryKey: (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
+            notNull: (c.flags & ColumnFlag.NOT_NULL) !== 0,
+            indexed: (c.flags & ColumnFlag.INDEXED) !== 0,
+            autoInc: (c.flags & ColumnFlag.AUTO_INC) !== 0,
+          },
+        }));
+
+      return {
+        newColumns,
+        transformRow: (row: DbRow) => {
+          const nextRow: DbRow = { ...row };
+          delete nextRow[columnName];
+          return nextRow;
+        },
+        keepIndex: (colNames: string[]) => !colNames.includes(columnName),
+      };
+    });
+  }
+
+  async alterTable(
+    tableName: string,
+    operation: AlterTableOperation,
+  ): Promise<TableMeta> {
+    switch (operation.type) {
+      case "renameTable":
+        return this.renameTable(tableName, operation.newName);
+      case "renameColumn":
+        return this.renameColumn(tableName, operation.from, operation.to);
+      case "addColumn":
+        return this.addColumn(tableName, operation.column, {
+          defaultValue: operation.defaultValue,
+        });
+      case "dropColumn":
+        return this.dropColumn(tableName, operation.column);
+      default:
+        throw new Error(
+          `Unsupported alterTable operation: ${(operation as any)?.type}`,
+        );
+    }
+  }
+
+  private async _executeTableRebuildAtomic(
+    tableName: string,
+    prepare: (table: TableMeta) => {
+      newColumns: ColumnDefinition[];
+      transformRow: (row: DbRow) => DbRow;
+      keepIndex: (colNames: string[]) => boolean;
+      newAutoIndexCol?: string;
+    },
+  ): Promise<TableMeta> {
+    if (!this.coordinator.isInTransaction()) {
+      return this.transaction((tx) =>
+        tx._rebuildTableSchemaInternal(tableName, prepare),
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const savepoint = await this.coordinator.captureSavepoint();
+      try {
+        return await this._rebuildTableSchemaInternal(tableName, prepare);
+      } catch (err) {
+        this.tableMetaCache.clear();
+        this.tableTailPages.clear();
+        this.indexTailPages.clear();
+        await this.coordinator.restoreSavepoint(savepoint);
+        throw err;
+      }
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  private async _rebuildTableSchemaInternal(
+    tableName: string,
+    prepare: (table: TableMeta) => {
+      newColumns: ColumnDefinition[];
+      transformRow: (row: DbRow) => DbRow;
+      keepIndex: (colNames: string[]) => boolean;
+      newAutoIndexCol?: string;
+    },
+  ): Promise<TableMeta> {
+    const table = await this._getTableInternal(tableName);
+    const { newColumns, transformRow, keepIndex, newAutoIndexCol } =
+      prepare(table);
+
+    // 1. Read all existing rows across the table's data pages
+    const migratedRows: DbRow[] = [];
+    let currentPageId = table.rootPageId;
+    while (currentPageId !== 0) {
+      let pageSlot = await this.driver.acquirePage(currentPageId);
+      let pageView = this.pool.getSlotDataView(pageSlot);
+      const cellCount = page_get_cell_count(pageView, 0);
+      const nextPageId = page_get_next_page_id(pageView, 0);
+
+      for (let i = 0; i < cellCount; i++) {
+        pageSlot = await this.driver.acquirePage(currentPageId);
+        pageView = this.pool.getSlotDataView(pageSlot);
+        const cellOffset = page_get_cell_offset(pageView, 0, i);
+        const row = page_deserialize_row(table.columns, pageView, cellOffset);
+        if (row) {
+          migratedRows.push(transformRow(row));
+        }
+      }
+
+      currentPageId = nextPageId;
+    }
+
+    // 2. Capture autoIncNext and surviving secondary indexes
+    const savedAutoIncNext = table.autoIncNext;
+    const page1View = this.pool.getSlotDataView(0);
+    const existingIndexes = catalog_list_table_indexes(
+      page1View,
+      table.tableId,
+    );
+    const survivingSecondaryIndexes: Array<{
+      name: string;
+      colNames: string[];
+      unique: boolean;
+    }> = [];
+
+    for (const idx of existingIndexes) {
+      if ((idx.flags & IndexFlag.PRIMARY) !== 0) continue;
+      const colNames = idx.columnIndices
+        .slice(0, idx.columnCount)
+        .map((cIdx) => table.columns[cIdx]?.name)
+        .filter((n): n is string => typeof n === "string");
+      if (colNames.length === idx.columnCount && keepIndex(colNames)) {
+        survivingSecondaryIndexes.push({
+          name: idx.name,
+          colNames,
+          unique: (idx.flags & IndexFlag.UNIQUE) !== 0,
+        });
+      }
+    }
+
+    // 3. Drop old table and recreate with the new column layout
+    await this._dropTableInternal(tableName);
+    await this._createTableInternal(tableName, newColumns);
+
+    // 4. Recreate surviving secondary indexes
+    for (const idxSpec of survivingSecondaryIndexes) {
+      await this._createIndexInternal(tableName, idxSpec.colNames, {
+        name: idxSpec.name,
+        unique: idxSpec.unique,
+      });
+    }
+
+    if (
+      newAutoIndexCol &&
+      !survivingSecondaryIndexes.some(
+        (idx) =>
+          idx.colNames.length === 1 && idx.colNames[0] === newAutoIndexCol,
+      )
+    ) {
+      await this._createIndexInternal(tableName, newAutoIndexCol);
+    }
+
+    // 5. Re-insert migrated rows
+    if (migratedRows.length > 0) {
+      await this._insertManyInternal(tableName, migratedRows);
+    }
+
+    // 6. Restore autoIncNext sequence if needed
+    const newSlotIdx = catalog_find_table_slot(page1View, tableName);
+    if (newSlotIdx !== -1) {
+      const newDesc = catalog_read_table_descriptor(page1View, newSlotIdx)!;
+      if (savedAutoIncNext > newDesc.autoIncNext) {
+        newDesc.autoIncNext = savedAutoIncNext;
+        catalog_write_table_descriptor(page1View, newSlotIdx, newDesc);
+        catalog_update_page1_checksum(page1View);
+        this.pool.markDirty(0);
+      }
+    }
+
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
+
+    return this._getTableInternal(tableName);
   }
 
   async createIndex(
@@ -1575,6 +2104,161 @@ export class WebDB implements IDatabaseQueryExecutor {
    */
   async checkpoint(): Promise<{ pagesWritten: number }> {
     return this.coordinator.checkpoint();
+  }
+
+  /**
+   * Exports the entire database as a self-contained binary image (totalPages * 4096 bytes)
+   * with verified IEEE 802.3 CRC32 checksums on every page.
+   */
+  async exportBinary(): Promise<Uint8Array> {
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      if (!this.coordinator.isInTransaction()) {
+        await this.coordinator.executeCheckpoint();
+        await this.driver.flushAllDirty();
+      }
+
+      const page1View = this.pool.getSlotDataView(0);
+      const totalPages = catalog_get_total_pages(page1View);
+      const out = new Uint8Array(totalPages * PAGE_SIZE);
+
+      // Copy Page 1 from Slot 0 and stamp valid Page 1 CRC32 checksum
+      out.set(this.pool.getPageBytesInSlot(0), 0);
+      const outPage1View = new DataView(out.buffer, out.byteOffset, PAGE_SIZE);
+      catalog_update_page1_checksum(outPage1View, 0);
+
+      // Copy Pages 2..totalPages
+      for (let p = 2; p <= totalPages; p++) {
+        const offset = (p - 1) * PAGE_SIZE;
+        const slice = out.subarray(offset, offset + PAGE_SIZE);
+        const residentSlot = this.pool.getResidentSlot(p);
+
+        if (residentSlot !== -1) {
+          slice.set(this.pool.getPageBytesInSlot(residentSlot));
+        } else if (this.coordinator.hasSpilledPage(p)) {
+          slice.set(this.coordinator.getSpilledPage(p)!);
+        } else {
+          const diskPage = await this.vfs.readPage(p);
+          if (diskPage) {
+            slice.set(diskPage);
+          }
+        }
+
+        // Stamp CRC32 checksum at page header offset 12..15
+        const chk = computePageChecksum(slice);
+        new DataView(slice.buffer, slice.byteOffset, PAGE_SIZE).setUint32(
+          12,
+          chk,
+          true,
+        );
+      }
+
+      return out;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  /**
+   * Validates and atomically imports a binary WebDB database image (totalPages * 4096 bytes),
+   * replacing all pages, resetting the WAL, and pinning the imported schema catalog.
+   */
+  async importBinary(data: Uint8Array | ArrayBuffer): Promise<void> {
+    if (this.coordinator.isInTransaction()) {
+      throw new Error(
+        "Cannot import binary database while a transaction is active",
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const bytes =
+        data instanceof Uint8Array
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data);
+
+      // Pass 1: Pre-validate binary image size, Page 1 header, magic bytes, version, and all page CRC32 checksums
+      if (bytes.byteLength < PAGE_SIZE || bytes.byteLength % PAGE_SIZE !== 0) {
+        throw new InvalidDatabaseError(
+          `Invalid database binary size (${bytes.byteLength} bytes): must be a non-zero multiple of ${PAGE_SIZE} bytes`,
+        );
+      }
+
+      const numPages = bytes.byteLength / PAGE_SIZE;
+      const page1Slice = bytes.subarray(0, PAGE_SIZE);
+      const page1View = new DataView(
+        page1Slice.buffer,
+        page1Slice.byteOffset,
+        PAGE_SIZE,
+      );
+
+      const header = catalog_read_page1_header(page1View, true);
+      if (header.pageSize !== PAGE_SIZE) {
+        throw new InvalidDatabaseError(
+          `Invalid database page size ${header.pageSize} (expected ${PAGE_SIZE})`,
+        );
+      }
+      if (header.totalPages !== numPages) {
+        throw new InvalidDatabaseError(
+          `Database page count mismatch: header specifies ${header.totalPages} pages, but binary image contains ${numPages} pages`,
+        );
+      }
+
+      for (let p = 2; p <= numPages; p++) {
+        const offset = (p - 1) * PAGE_SIZE;
+        const pageSlice = bytes.subarray(offset, offset + PAGE_SIZE);
+        const view = new DataView(
+          pageSlice.buffer,
+          pageSlice.byteOffset,
+          PAGE_SIZE,
+        );
+        const storedChk = view.getUint32(12, true);
+        if (storedChk !== 0) {
+          const computedChk = computePageChecksum(pageSlice);
+          if (computedChk !== storedChk) {
+            throw new CorruptPageError(p, storedChk, computedChk);
+          }
+        }
+      }
+
+      // Pass 2: Atomically replace storage, reset buffer pool & WAL, and pin imported catalog pages
+      const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
+      for (let p = 1; p <= numPages; p++) {
+        const offset = (p - 1) * PAGE_SIZE;
+        pagesToWrite.push({
+          pageId: p,
+          data: bytes.subarray(offset, offset + PAGE_SIZE).slice(),
+        });
+      }
+
+      for (let slot = 1; slot < this.pool.slotCount; slot++) {
+        this.pool.forceUnpinSlot(slot);
+        this.pool.unassignSlot(slot);
+        this.pool.clearDirty(slot);
+        this.pool.getPageBytesInSlot(slot).fill(0);
+      }
+
+      this.pool.getPageBytesInSlot(0).set(pagesToWrite[0].data);
+      this.pool.clearDirty(0);
+
+      await this.vfs.writePages(pagesToWrite);
+      await this.vfs.flush();
+      await this.coordinator.resetWalAfterImport();
+
+      this.tableMetaCache.clear();
+      this.tableTailPages.clear();
+      this.indexTailPages.clear();
+      this.vmCtx.table = null;
+
+      const tableDescriptors = catalog_list_table_descriptors(
+        this.pool.getSlotDataView(0),
+      );
+      for (const desc of tableDescriptors) {
+        let catPageId = desc.colCatalogPageId;
+        while (catPageId !== 0) {
+          const slot = await this.driver.acquireAndPinPage(catPageId);
+          const view = this.pool.getSlotDataView(slot);
+          const catHeader = catalog_read_page_header(view, 0);
+          catPageId = catHeader.nextColCatalogPageId;
+        }
+      }
+    });
   }
 
   async close(): Promise<void> {
