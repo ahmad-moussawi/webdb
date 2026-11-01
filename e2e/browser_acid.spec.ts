@@ -615,4 +615,144 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     await context.close();
   });
+
+  test("8. Sync Primitives: Atomic Outbox (onBeforeCommit), LWW Upsert, and Real-Time Cross-Tab BroadcastChannel Subscriptions", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const tab1 = await context.newPage();
+    const tab2 = await context.newPage();
+
+    await Promise.all([tab1.goto(baseUrl), tab2.goto(baseUrl)]);
+    await Promise.all([
+      tab1.waitForFunction(() => (window as any).__harnessReady === true),
+      tab2.waitForFunction(() => (window as any).__harnessReady === true),
+    ]);
+
+    const dbName = `sync_e2e_${Date.now()}`;
+
+    // 1. Tab 1 initializes schema and registers an atomic outbox hook via onBeforeCommit
+    await tab1.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      const db = await WebDB.open({ name, storage: "idb" });
+
+      await db.createTable("todos", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "title", type: "TEXT" },
+        { name: "updated_at", type: "INT32" },
+      ]);
+      await db.createTable("_outbox", [
+        { name: "seq", type: "INT32", primaryKey: true, autoInc: true },
+        { name: "op", type: "TEXT" },
+        { name: "pk", type: "INT32" },
+        { name: "title", type: "TEXT" },
+      ]);
+
+      db.onBeforeCommit(async (cs: any, tx: any) => {
+        if (cs.origin !== "local") return;
+        for (const m of cs.coalesced()) {
+          await tx.insert("_outbox", {
+            op: m.op,
+            pk: m.pk,
+            title: (m.newRow ?? m.oldRow).title,
+          });
+        }
+      });
+
+      await db.checkpoint();
+      (window as any).__syncDb1 = db;
+    }, dbName);
+
+    // 2. Tab 2 opens the same IndexedDB database and subscribes to 'todos'
+    await tab2.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      const db = await WebDB.open({ name, storage: "idb" });
+      (window as any).__syncDb2 = db;
+      (window as any).__tab2WakeupPromise = new Promise((resolve) => {
+        db.subscribe("todos", async (ev: any) => {
+          if (ev.crossTab) {
+            const todos = await db.from("todos").orderBy("id", "asc").toArray();
+            const outbox = await db
+              .from("_outbox")
+              .orderBy("seq", "asc")
+              .toArray();
+            resolve({ event: ev, todos, outbox });
+          }
+        });
+      });
+    }, dbName);
+
+    // 3. Tab 1 executes a local transaction with insert + update coalescing and insert + delete cancellation
+    await tab1.evaluate(async () => {
+      const db = (window as any).__syncDb1;
+      await db.transaction(
+        async (tx: any) => {
+          await tx.insert("todos", {
+            id: 1,
+            title: "Draft 1",
+            updated_at: 100,
+          });
+          await tx.update("todos", 1, {
+            title: "Final 1",
+            updated_at: 200,
+          });
+          await tx.insert("todos", {
+            id: 2,
+            title: "Temporary 2",
+            updated_at: 100,
+          });
+          await tx.delete("todos", 2);
+        },
+        { origin: "local", meta: { batchId: "b-1" } },
+      );
+    });
+
+    // 4. Tab 2 immediately wakes up via BroadcastChannel without polling and sees both todos and outbox!
+    const tab2Result: any = await tab2.evaluate(async () => {
+      return await (window as any).__tab2WakeupPromise;
+    });
+
+    expect(tab2Result.event.crossTab).toBe(true);
+    expect(tab2Result.event.meta).toEqual({ batchId: "b-1" });
+    expect(tab2Result.todos).toEqual([
+      { id: 1, title: "Final 1", updated_at: 200 },
+    ]);
+    expect(tab2Result.outbox).toEqual([
+      { seq: 1, op: "insert", pk: 1, title: "Final 1" },
+    ]);
+
+    // 5. Tab 1 applies remote LWW upsertMany (stale id=1 ignored, new id=3 inserted, outbox untouched)
+    const remoteSyncResult = await tab1.evaluate(async () => {
+      const db = (window as any).__syncDb1;
+      const stats = await db.upsertMany(
+        "todos",
+        [
+          { id: 1, title: "Stale Remote 1", updated_at: 150 },
+          { id: 3, title: "Remote 3", updated_at: 300 },
+        ],
+        {
+          origin: "remote",
+          where: (existing: any, incoming: any) =>
+            incoming.updated_at > existing.updated_at,
+        },
+      );
+      const todos = await db.from("todos").orderBy("id", "asc").toArray();
+      const outbox = await db.from("_outbox").orderBy("seq", "asc").toArray();
+      return { stats, todos, outbox };
+    });
+
+    expect(remoteSyncResult.stats).toEqual({
+      inserted: 1,
+      updated: 0,
+      ignored: 1,
+    });
+    expect(remoteSyncResult.todos).toEqual([
+      { id: 1, title: "Final 1", updated_at: 200 },
+      { id: 3, title: "Remote 3", updated_at: 300 },
+    ]);
+    expect(remoteSyncResult.outbox).toHaveLength(1);
+
+    await context.close();
+  });
 });

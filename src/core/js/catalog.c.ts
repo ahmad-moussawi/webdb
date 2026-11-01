@@ -881,7 +881,13 @@ export function catalog_create_table(
         flags |= ColumnFlag.PRIMARY_KEY;
       if (def.notNull || def.flags?.notNull) flags |= ColumnFlag.NOT_NULL;
       if (def.indexed || def.flags?.indexed) flags |= ColumnFlag.INDEXED;
-      if (def.autoInc || def.flags?.autoInc) flags |= ColumnFlag.AUTO_INC;
+      if (
+        def.autoInc ||
+        def.autoIncrement ||
+        def.flags?.autoInc ||
+        def.flags?.autoIncrement
+      )
+        flags |= ColumnFlag.AUTO_INC;
     }
 
     const col_offset = current_fixed_offset;

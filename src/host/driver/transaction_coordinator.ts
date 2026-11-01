@@ -308,8 +308,8 @@ export class TransactionCoordinator {
     }
   }
 
-  async syncCrossTabState(): Promise<void> {
-    if (!this.queue.hasWebLocks()) return;
+  async syncCrossTabState(force: boolean = false): Promise<void> {
+    if (!force && !this.queue.hasWebLocks()) return;
 
     const walFrameCount = await this.vfs.getWalFrameCount();
     let walTouchedByOtherTab = false;

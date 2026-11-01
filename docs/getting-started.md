@@ -112,7 +112,8 @@ Open `http://localhost:3000/playground/index.html` to run interactive queries, i
 
 ## 5. Architectural Deep Dives
 
-Explore our technical specifications:
+Explore our guides and technical specifications:
+- [Building Offline-First Sync Systems with WebDB](/offline-sync)
 - [Strategic Roadmap & Architectural Vision](/plans/plan)
 - [Prototype ("Walking Skeleton") Specification](/plans/prototype)
 - [Phase 1: Storage & Memory Architecture](/plans/01_storage_memory_arch)

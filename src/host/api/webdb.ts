@@ -46,6 +46,15 @@ import {
   IndexDescriptor,
   InvalidDatabaseError,
   CorruptPageError,
+  TransactionOptions,
+  UpsertOptions,
+  MutationRecord,
+  Changeset,
+  TableChangeEvent,
+  SyncState,
+  BeforeCommitHook,
+  CommitHook,
+  TableSubscriptionCallback,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
@@ -87,14 +96,18 @@ import {
   page_get_cell_count,
   page_get_cell_offset,
   page_insert_row,
+  page_delete_row,
+  page_update_row,
   page_get_next_page_id,
   page_set_next_page_id,
   page_serialize_row,
   page_deserialize_row,
   page_init_index_leaf,
   page_insert_index_leaf_cell,
+  page_delete_index_leaf_cell,
   page_binary_search_index_leaf,
   serialize_composite_key,
+  sql_like_match,
 } from "../../core/index.ts";
 import {
   createVmContext,
@@ -117,6 +130,7 @@ import {
 import {
   ParsedSelectExpr,
   deriveDefaultAlias,
+  evalExprNode,
 } from "../compiler/expr_parser.ts";
 import { QueryPlanner } from "../compiler/planner/index.ts";
 import {
@@ -178,6 +192,23 @@ export class WebDB implements IDatabaseQueryExecutor {
   private tableTailPages: Map<string, number> = new Map();
   private indexTailPages: Map<number, number> = new Map();
 
+  // Sync & Reactive state
+  private beforeCommitHooks: Set<BeforeCommitHook> = new Set();
+  private commitHooks: Set<CommitHook> = new Set();
+  private subscriptions: Set<{
+    tables: Set<string> | "*";
+    callback: TableSubscriptionCallback;
+  }> = new Set();
+  private activeTxChanges: MutationRecord[] = [];
+  private activeTxOrigin: string = "local";
+  private activeTxMeta?: Record<string, any>;
+  private activeTxId: number = 0;
+  private nextAutoTxId: number = 1_000_000;
+  private isRunningBeforeCommit: boolean = false;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private readonly instanceId: string =
+    Math.random().toString(36).slice(2) + Date.now().toString(36);
+
   private constructor(
     vfs: IVfsAdapter,
     io: Io,
@@ -186,6 +217,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     coreMode: "js" | "wasm" = "js",
     wasmCore?: WasmCoreExports,
     planner?: QueryPlanner,
+    dbName?: string,
   ) {
     this.vfs = vfs;
     this.io = io;
@@ -214,6 +246,35 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
     });
+
+    if (typeof BroadcastChannel !== "undefined" && dbName) {
+      const channelName = `webdb_sync_${vfs.name}_${dbName}`;
+      this.broadcastChannel = new BroadcastChannel(channelName);
+      this.broadcastChannel.onmessage = (ev: MessageEvent) => {
+        const data = ev.data;
+        if (!data || data.senderId === this.instanceId) return;
+        const { tables, origin, meta, changeCounter, schemaVersion } = data;
+        this.coordinator.leaseQueue
+          .enqueue(async () => {
+            await this.coordinator.syncCrossTabState(true);
+            this.notifySubscriptions({
+              tables: Array.isArray(tables) ? tables : [],
+              origin: origin ?? "remote",
+              meta,
+              changeCounter:
+                typeof changeCounter === "number"
+                  ? changeCounter
+                  : this.getSyncState().changeCounter,
+              schemaVersion:
+                typeof schemaVersion === "number"
+                  ? schemaVersion
+                  : this.getSyncState().schemaVersion,
+              crossTab: true,
+            });
+          })
+          .catch(() => {});
+      };
+    }
   }
 
   static async open(options: WebDbOptions): Promise<WebDB> {
@@ -310,6 +371,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       coreMode,
       wasmCore,
       options.planner,
+      options.name,
     );
 
     if (options.initialData) {
@@ -1064,7 +1126,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // 5. Re-insert migrated rows
     if (migratedRows.length > 0) {
-      await this._insertManyInternal(tableName, migratedRows);
+      await this._insertManyInternal(tableName, migratedRows, false);
     }
 
     // 6. Restore autoIncNext sequence if needed
@@ -1313,6 +1375,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     rootPageId: number,
     keyType: DataType,
     keyVal: any,
+    excludedRowids?: Set<bigint>,
   ): Promise<boolean> {
     let currIdxPageId = rootPageId;
     while (currIdxPageId !== 0) {
@@ -1322,6 +1385,41 @@ export class WebDB implements IDatabaseQueryExecutor {
       if (cellCount > 0) {
         const search = page_binary_search_index_leaf(view, 0, keyType, keyVal);
         if (search.found) {
+          const cellOff = page_get_cell_offset(view, 0, search.slot_idx);
+          const kLen = view.getUint16(cellOff, true);
+          const foundRowid = view.getBigInt64(cellOff + 2 + kLen, true);
+          if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+            return true;
+          }
+        }
+      }
+      currIdxPageId = page_get_next_page_id(view, 0);
+    }
+    return false;
+  }
+
+  private async deleteFromIndex(
+    rootPageId: number,
+    keyType: DataType,
+    keyVal: any,
+    rowid: bigint,
+  ): Promise<boolean> {
+    let currIdxPageId = rootPageId;
+    while (currIdxPageId !== 0) {
+      const slot = await this.driver.acquirePage(currIdxPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const cellCount = page_get_cell_count(view, 0);
+      if (cellCount > 0) {
+        const search = page_binary_search_index_leaf(
+          view,
+          0,
+          keyType,
+          keyVal,
+          rowid,
+        );
+        if (search.found) {
+          page_delete_index_leaf_cell(view, 0, search.slot_idx);
+          this.pool.markDirty(slot);
           return true;
         }
       }
@@ -1395,22 +1493,570 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
   }
 
-  async insert(tableName: string, row: DbRow): Promise<void> {
-    await this.insertMany(tableName, [row]);
+  private cloneRow(row: DbRow): DbRow {
+    const out: DbRow = {};
+    for (const [k, v] of Object.entries(row)) {
+      out[k] = v instanceof Uint8Array ? v.slice() : v;
+    }
+    return out;
   }
 
-  async insertMany(tableName: string, rows: DbRow[]): Promise<void> {
-    return this.coordinator.leaseQueue.enqueue(
-      () => this._insertManyInternal(tableName, rows),
-      this.currentLeaseId ?? undefined,
+  private valuesEqual(a: any, b: any): boolean {
+    if (a === b) return true;
+    if ((a === null || a === undefined) && (b === null || b === undefined)) {
+      return true;
+    }
+    if (a instanceof Uint8Array && b instanceof Uint8Array) {
+      if (a.byteLength !== b.byteLength) return false;
+      for (let i = 0; i < a.byteLength; i++) {
+        if (a[i] !== b[i]) return false;
+      }
+      return true;
+    }
+    if (
+      (typeof a === "number" && typeof b === "bigint") ||
+      (typeof a === "bigint" && typeof b === "number")
+    ) {
+      return BigInt(a) === BigInt(b);
+    }
+    if (
+      (typeof a === "boolean" && typeof b === "number") ||
+      (typeof a === "number" && typeof b === "boolean")
+    ) {
+      return Number(a) === Number(b);
+    }
+    return false;
+  }
+
+  private extractPrimaryKey(
+    table: TableMeta,
+    row: DbRow,
+  ): DbValue | DbValue[] {
+    const pkCols = table.columns.filter(
+      (c) => (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
     );
+    if (pkCols.length === 1) {
+      return (row[pkCols[0].name] ?? null) as DbValue;
+    }
+    if (pkCols.length > 1) {
+      return pkCols.map((c) => (row[c.name] ?? null) as DbValue);
+    }
+    if (table.columns.length === 1) {
+      return (row[table.columns[0].name] ?? null) as DbValue;
+    }
+    return table.columns.map((c) => (row[c.name] ?? null) as DbValue);
+  }
+
+  private serializePkKey(
+    pk: DbValue | DbValue[] | Record<string, DbValue>,
+  ): string {
+    const formatOne = (v: DbValue): string => {
+      if (v === null || v === undefined) return "null";
+      if (v instanceof Uint8Array) return `b:${Array.from(v).join(",")}`;
+      return `${typeof v}:${String(v)}`;
+    };
+    if (Array.isArray(pk)) {
+      return `[${pk.map(formatOne).join("|")}]`;
+    }
+    if (pk !== null && typeof pk === "object" && !(pk instanceof Uint8Array)) {
+      const keys = Object.keys(pk).sort();
+      return `{${keys.map((k) => `${k}:${formatOne(pk[k])}`).join("|")}}`;
+    }
+    return formatOne(pk as DbValue);
+  }
+
+  private buildChangeset(
+    txId: number,
+    origin: string,
+    meta: Record<string, any> | undefined,
+    changes: MutationRecord[],
+  ): Changeset {
+    const { changeCounter, schemaVersion } = this.getSyncState();
+    const tables = Array.from(new Set(changes.map((c) => c.table)));
+
+    return {
+      txId,
+      origin,
+      meta,
+      changeCounter,
+      schemaVersion,
+      tables,
+      changes,
+      coalesced: (): MutationRecord[] => {
+        const map = new Map<string, MutationRecord>();
+        for (const rec of changes) {
+          const key = `${rec.table.toLowerCase()}::${this.serializePkKey(rec.pk)}`;
+          const prev = map.get(key);
+          if (!prev) {
+            map.set(key, {
+              table: rec.table,
+              op: rec.op,
+              pk: Array.isArray(rec.pk) ? [...rec.pk] : rec.pk,
+              oldRow: rec.oldRow ? this.cloneRow(rec.oldRow) : undefined,
+              newRow: rec.newRow ? this.cloneRow(rec.newRow) : undefined,
+              changedColumns: rec.changedColumns
+                ? [...rec.changedColumns]
+                : undefined,
+            });
+            continue;
+          }
+
+          if (prev.op === "insert" && rec.op === "update") {
+            map.set(key, {
+              table: rec.table,
+              op: "insert",
+              pk: Array.isArray(rec.pk) ? [...rec.pk] : rec.pk,
+              newRow: rec.newRow ? this.cloneRow(rec.newRow) : prev.newRow,
+            });
+          } else if (prev.op === "insert" && rec.op === "delete") {
+            map.delete(key);
+          } else if (prev.op === "update" && rec.op === "update") {
+            const oldRow = prev.oldRow!;
+            const newRow = rec.newRow ? this.cloneRow(rec.newRow) : prev.newRow!;
+            const changedColumns = Object.keys(newRow).filter(
+              (col) => !this.valuesEqual(oldRow[col], newRow[col]),
+            );
+            map.set(key, {
+              table: rec.table,
+              op: "update",
+              pk: Array.isArray(rec.pk) ? [...rec.pk] : rec.pk,
+              oldRow,
+              newRow,
+              changedColumns,
+            });
+          } else if (prev.op === "update" && rec.op === "delete") {
+            map.set(key, {
+              table: rec.table,
+              op: "delete",
+              pk: Array.isArray(prev.pk) ? [...prev.pk] : prev.pk,
+              oldRow: prev.oldRow,
+            });
+          } else if (prev.op === "delete" && rec.op === "insert") {
+            const oldRow = prev.oldRow!;
+            const newRow = rec.newRow ? this.cloneRow(rec.newRow) : {};
+            const changedColumns = Object.keys(newRow).filter(
+              (col) => !this.valuesEqual(oldRow[col], newRow[col]),
+            );
+            map.set(key, {
+              table: rec.table,
+              op: "update",
+              pk: Array.isArray(rec.pk) ? [...rec.pk] : rec.pk,
+              oldRow,
+              newRow,
+              changedColumns,
+            });
+          } else {
+            map.set(key, {
+              table: rec.table,
+              op: rec.op,
+              pk: Array.isArray(rec.pk) ? [...rec.pk] : rec.pk,
+              oldRow: rec.oldRow ? this.cloneRow(rec.oldRow) : undefined,
+              newRow: rec.newRow ? this.cloneRow(rec.newRow) : undefined,
+              changedColumns: rec.changedColumns
+                ? [...rec.changedColumns]
+                : undefined,
+            });
+          }
+        }
+        return Array.from(map.values());
+      },
+    };
+  }
+
+  private notifySubscriptions(event: TableChangeEvent): void {
+    if (event.tables.length === 0 || this.subscriptions.size === 0) return;
+    const lowerChanged = new Set(event.tables.map((t) => t.toLowerCase()));
+    for (const sub of this.subscriptions) {
+      if (sub.tables === "*") {
+        sub.callback(event);
+      } else {
+        for (const t of lowerChanged) {
+          if (sub.tables.has(t)) {
+            sub.callback(event);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  private emitCommitAndSubscriptions(changeset: Changeset): void {
+    if (changeset.changes.length === 0) return;
+
+    for (const hook of this.commitHooks) {
+      hook(changeset);
+    }
+
+    const tables = changeset.tables;
+    const { changeCounter, schemaVersion } = changeset;
+
+    this.notifySubscriptions({
+      tables,
+      origin: changeset.origin,
+      meta: changeset.meta,
+      changeCounter,
+      schemaVersion,
+      crossTab: false,
+      changeset,
+    });
+
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage({
+          senderId: this.instanceId,
+          tables,
+          origin: changeset.origin,
+          meta: changeset.meta,
+          changeCounter,
+          schemaVersion,
+        });
+      } catch {
+        // Ignore broadcast errors
+      }
+    }
+  }
+
+  onBeforeCommit(hook: BeforeCommitHook): () => void {
+    this.beforeCommitHooks.add(hook);
+    return () => {
+      this.beforeCommitHooks.delete(hook);
+    };
+  }
+
+  onCommit(hook: CommitHook): () => void {
+    this.commitHooks.add(hook);
+    return () => {
+      this.commitHooks.delete(hook);
+    };
+  }
+
+  subscribe(
+    tables: string | string[] | "*",
+    callback: TableSubscriptionCallback,
+  ): () => void {
+    const entry = {
+      tables:
+        tables === "*"
+          ? ("*" as const)
+          : new Set(
+              (Array.isArray(tables) ? tables : [tables]).map((t) =>
+                t.toLowerCase(),
+              ),
+            ),
+      callback,
+    };
+    this.subscriptions.add(entry);
+    return () => {
+      this.subscriptions.delete(entry);
+    };
+  }
+
+  getSyncState(): SyncState {
+    const page1View = this.pool.getSlotDataView(0);
+    const header = catalog_read_page1_header(page1View, false);
+    return {
+      changeCounter: header.changeCounter,
+      schemaVersion: header.schemaVersion,
+    };
+  }
+
+  private validateFilterColumns(table: TableMeta, filters: QueryFilter[]): void {
+    const validCols = new Set(table.columns.map((c) => c.name));
+    const checkExpr = (expr: any) => {
+      if (!expr) return;
+      if (expr.type === "col" && expr.name !== "*") {
+        if (!validCols.has(expr.name)) {
+          throw new ColumnNotFoundError(expr.name, table.name);
+        }
+      } else if (expr.type === "binary") {
+        checkExpr(expr.left);
+        checkExpr(expr.right);
+      } else if (expr.type === "fn" && Array.isArray(expr.args)) {
+        for (const a of expr.args) checkExpr(a);
+      }
+    };
+    const checkFilter = (f: QueryFilter) => {
+      if (f.colName && !validCols.has(f.colName)) {
+        throw new ColumnNotFoundError(f.colName, table.name);
+      }
+      if (f.expr) checkExpr(f.expr);
+      if (f.child) checkFilter(f.child);
+      if (f.children) {
+        for (const c of f.children) checkFilter(c);
+      }
+    };
+    for (const f of filters) checkFilter(f);
+  }
+
+  private matchesFilter(
+    table: TableMeta,
+    row: DbRow,
+    f: QueryFilter,
+  ): boolean {
+    switch (f.type) {
+      case "and":
+        return (f.children ?? []).every((c) =>
+          this.matchesFilter(table, row, c),
+        );
+      case "or":
+        return (f.children ?? []).some((c) =>
+          this.matchesFilter(table, row, c),
+        );
+      case "not":
+        return f.child ? !this.matchesFilter(table, row, f.child) : true;
+      case "null": {
+        const val = f.expr
+          ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
+          : row[f.colName!];
+        const isNull = val === null || val === undefined;
+        return f.isNull ? isNull : !isNull;
+      }
+      case "in": {
+        const val = f.expr
+          ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
+          : row[f.colName!];
+        if (val === null || val === undefined) return false;
+        const list = f.values ?? [];
+        const found = list.some((item) => this.valuesEqual(val, item));
+        return f.notIn ? !found : found;
+      }
+      case "expr": {
+        if (!f.expr) return true;
+        const val = evalExprNode(
+          f.expr,
+          row,
+          (name) => this.getUdf(name)?.def.call,
+        );
+        return Boolean(val) && val !== 0;
+      }
+      case "cmp": {
+        const left = f.expr
+          ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
+          : row[f.colName!];
+        const right = f.value;
+        if (
+          left === null ||
+          left === undefined ||
+          right === null ||
+          right === undefined
+        ) {
+          return false;
+        }
+        const op = String(f.op ?? "=")
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, " ");
+        switch (op) {
+          case "=":
+          case "==":
+            return this.valuesEqual(left, right);
+          case "!=":
+          case "<>":
+            return !this.valuesEqual(left, right);
+          case "<":
+            return typeof left === "string" && typeof right === "string"
+              ? left < right
+              : Number(left) < Number(right);
+          case "<=":
+            return typeof left === "string" && typeof right === "string"
+              ? left <= right
+              : Number(left) <= Number(right);
+          case ">":
+            return typeof left === "string" && typeof right === "string"
+              ? left > right
+              : Number(left) > Number(right);
+          case ">=":
+            return typeof left === "string" && typeof right === "string"
+              ? left >= right
+              : Number(left) >= Number(right);
+          case "like":
+            return sql_like_match(String(left), String(right));
+          case "not like":
+            return !sql_like_match(String(left), String(right));
+          case "contains":
+            return String(left).includes(String(right));
+          case "starts_with":
+            return String(left).startsWith(String(right));
+          case "ends_with":
+            return String(left).endsWith(String(right));
+          default:
+            return this.valuesEqual(left, right);
+        }
+      }
+      default:
+        return true;
+    }
+  }
+
+  private matchesFilters(
+    table: TableMeta,
+    row: DbRow,
+    filters: QueryFilter[],
+  ): boolean {
+    for (const f of filters) {
+      if (!this.matchesFilter(table, row, f)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Deletes a sorted list of cell indices on `pageId` while maintaining exact
+   * secondary index `rowid` pointers for both the deleted cells and any surviving
+   * cells on `pageId` whose slot index shifts left.
+   */
+  private async deleteCellsOnDataPageAndShiftIndexes(
+    table: TableMeta,
+    indexes: IndexDescriptor[],
+    pageId: number,
+    deletedCellIndicesAsc: number[],
+    allCellsOnPage: Array<{ cellIdx: number; row: DbRow }>,
+  ): Promise<void> {
+    if (deletedCellIndicesAsc.length === 0) return;
+    const deletedSet = new Set(deletedCellIndicesAsc);
+
+    if (indexes.length > 0) {
+      // 1. Remove index entries for all deleted cells at their original cellIdx
+      for (const delIdx of deletedCellIndicesAsc) {
+        const entry = allCellsOnPage[delIdx];
+        if (!entry) continue;
+        const oldRowid = (BigInt(pageId) << 16n) | BigInt(delIdx);
+        for (const idx of indexes) {
+          const { keyVal, keyType } = this.extractIndexKey(
+            table.columns,
+            idx,
+            entry.row,
+          );
+          if (keyVal !== undefined && keyVal !== null) {
+            await this.deleteFromIndex(
+              idx.rootPageId,
+              keyType,
+              keyVal,
+              oldRowid,
+            );
+          }
+        }
+      }
+
+      // 2. Shift index entries for surviving cells whose slot index moves left
+      let newCellIdx = 0;
+      for (let origIdx = 0; origIdx < allCellsOnPage.length; origIdx++) {
+        if (deletedSet.has(origIdx)) continue;
+        if (newCellIdx !== origIdx) {
+          const survivingRow = allCellsOnPage[origIdx].row;
+          const prevRowid = (BigInt(pageId) << 16n) | BigInt(origIdx);
+          const shiftedRowid = (BigInt(pageId) << 16n) | BigInt(newCellIdx);
+          for (const idx of indexes) {
+            const { keyVal, keyType } = this.extractIndexKey(
+              table.columns,
+              idx,
+              survivingRow,
+            );
+            if (keyVal !== undefined && keyVal !== null) {
+              await this.deleteFromIndex(
+                idx.rootPageId,
+                keyType,
+                keyVal,
+                prevRowid,
+              );
+              await this.insertIntoIndex(
+                idx.rootPageId,
+                keyType,
+                keyVal,
+                shiftedRowid,
+              );
+            }
+          }
+        }
+        newCellIdx++;
+      }
+    }
+
+    // 3. Delete target cells from the data page in descending order of slot index
+    const slot = await this.driver.acquirePage(pageId);
+    const view = this.pool.getSlotDataView(slot);
+    for (let k = deletedCellIndicesAsc.length - 1; k >= 0; k--) {
+      page_delete_row(view, 0, deletedCellIndicesAsc[k]);
+    }
+    this.pool.markDirty(slot);
+  }
+
+  private normalizeWhereOrPkFilters(
+    table: TableMeta,
+    whereOrPk: DbValue | Partial<DbRow>,
+  ): QueryFilter[] {
+    if (
+      whereOrPk !== null &&
+      typeof whereOrPk === "object" &&
+      !(whereOrPk instanceof Uint8Array)
+    ) {
+      const filters: QueryFilter[] = [];
+      for (const [colName, val] of Object.entries(whereOrPk)) {
+        if (val === undefined) continue;
+        if (val === null) {
+          filters.push({ type: "null", colName, isNull: true });
+        } else {
+          filters.push({ type: "cmp", colName, op: "=", value: val });
+        }
+      }
+      return filters;
+    }
+
+    const pkCol = table.columns.find(
+      (c) => (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
+    );
+    if (!pkCol) {
+      throw new Error(
+        `Table "${table.name}" does not have a primary key column for scalar lookup`,
+      );
+    }
+    return [{ type: "cmp", colName: pkCol.name, op: "=", value: whereOrPk }];
+  }
+
+  async insert(
+    tableName: string,
+    row: DbRow,
+    options?: TransactionOptions,
+  ): Promise<void> {
+    await this.insertMany(tableName, [row], options);
+  }
+
+  async insertMany(
+    tableName: string,
+    rows: DbRow[],
+    options?: TransactionOptions,
+  ): Promise<void> {
+    if (!rows || rows.length === 0) return;
+    if (
+      !this.coordinator.isInTransaction() &&
+      this.beforeCommitHooks.size > 0
+    ) {
+      await this.transaction(async (tx) => {
+        await tx._insertManyInternal(tableName, rows, true);
+      }, options);
+      return;
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const inTx = this.coordinator.isInTransaction();
+      const recorded = await this._insertManyInternal(tableName, rows, true);
+      if (!inTx && recorded.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          recorded,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+    }, this.currentLeaseId ?? undefined);
   }
 
   private async _insertManyInternal(
     tableName: string,
     rows: DbRow[],
-  ): Promise<void> {
-    if (!rows || rows.length === 0) return;
+    trackChanges: boolean = true,
+  ): Promise<MutationRecord[]> {
+    if (!rows || rows.length === 0) return [];
     const table = await this._getTableInternal(tableName);
     const page1View = this.pool.getSlotDataView(0);
     const indexes = catalog_list_table_indexes(page1View, table.tableId);
@@ -1432,6 +2078,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     let tentativeAutoInc = table.autoIncNext;
     const preparedRows: Array<{
       row: DbRow;
+      effectiveRow: DbRow;
       rowBytes: Uint8Array;
       assignedAutoInc?: number;
     }> = [];
@@ -1452,7 +2099,14 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       // 2. Tentative Auto-Inc calculation
       let assignedAutoInc: number | undefined;
-      let effectiveRow = origRow;
+      let effectiveRow: DbRow = {};
+      for (const c of table.columns) {
+        if (origRow[c.name] !== undefined) {
+          effectiveRow[c.name] = origRow[c.name];
+        } else {
+          effectiveRow[c.name] = null;
+        }
+      }
       if (
         autoIncCol &&
         (origRow[autoIncCol.name] === undefined ||
@@ -1460,7 +2114,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       ) {
         assignedAutoInc = Number(tentativeAutoInc);
         tentativeAutoInc += 1n;
-        effectiveRow = { ...origRow, [autoIncCol.name]: assignedAutoInc };
+        effectiveRow[autoIncCol.name] = assignedAutoInc;
       }
 
       // 3. Uniqueness constraint probe (intra-batch and existing index pages)
@@ -1498,7 +2152,12 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       // 4. Pre-serialize row (validates row size <= 2048 bytes before any page mutation)
       const rowBytes = page_serialize_row(table.columns, effectiveRow);
-      preparedRows.push({ row: origRow, rowBytes, assignedAutoInc });
+      preparedRows.push({
+        row: origRow,
+        effectiveRow,
+        rowBytes,
+        assignedAutoInc,
+      });
     }
 
     // Commit tentative auto-inc after full batch validation succeeds
@@ -1518,9 +2177,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
     this.tableTailPages.set(tableName, currentPageId);
 
+    const recordedChanges: MutationRecord[] = [];
+
     // Pass 2: Apply validated row insertions to data pages and secondary indexes
     for (let rIdx = 0; rIdx < preparedRows.length; rIdx++) {
-      const { row, rowBytes, assignedAutoInc } = preparedRows[rIdx];
+      const { row, effectiveRow, rowBytes, assignedAutoInc } =
+        preparedRows[rIdx];
       if (autoIncCol && assignedAutoInc !== undefined) {
         row[autoIncCol.name] = assignedAutoInc;
       }
@@ -1580,10 +2242,23 @@ export class WebDB implements IDatabaseQueryExecutor {
         const { keyVal, keyType } = this.extractIndexKey(
           table.columns,
           idx,
-          row,
+          effectiveRow,
         );
         if (keyVal !== undefined && keyVal !== null) {
           await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
+        }
+      }
+
+      if (trackChanges) {
+        const rec: MutationRecord = {
+          table: table.name,
+          op: "insert",
+          pk: this.extractPrimaryKey(table, effectiveRow),
+          newRow: this.cloneRow(effectiveRow),
+        };
+        recordedChanges.push(rec);
+        if (this.coordinator.isInTransaction()) {
+          this.activeTxChanges.push(rec);
         }
       }
     }
@@ -1606,11 +2281,754 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (!this.coordinator.isInTransaction()) {
       await this.driver.flushAllDirty();
     }
+
+    return recordedChanges;
   }
 
-  async transaction<T>(callback: (tx: WebDB) => Promise<T>): Promise<T> {
+  async update(
+    tableName: string,
+    whereOrPk: DbValue | Partial<DbRow>,
+    patch: Partial<DbRow>,
+    options?: TransactionOptions,
+  ): Promise<number> {
+    if (
+      !this.coordinator.isInTransaction() &&
+      this.beforeCommitHooks.size > 0
+    ) {
+      return this.transaction(
+        (tx) => tx.update(tableName, whereOrPk, patch, options),
+        options,
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const table = await this._getTableInternal(tableName);
+      const filters = this.normalizeWhereOrPkFilters(table, whereOrPk);
+      const inTx = this.coordinator.isInTransaction();
+      const { count, changes } = await this._executeUpdateInternal(
+        tableName,
+        filters,
+        patch,
+      );
+      if (!inTx && changes.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          changes,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+      return count;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  async executeUpdate(
+    tableName: string,
+    filters: QueryFilter[],
+    patch: Partial<DbRow>,
+    options?: TransactionOptions,
+  ): Promise<number> {
+    if (
+      !this.coordinator.isInTransaction() &&
+      this.beforeCommitHooks.size > 0
+    ) {
+      return this.transaction(
+        (tx) => tx.executeUpdate(tableName, filters, patch, options),
+        options,
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const inTx = this.coordinator.isInTransaction();
+      const { count, changes } = await this._executeUpdateInternal(
+        tableName,
+        filters,
+        patch,
+      );
+      if (!inTx && changes.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          changes,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+      return count;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  private async _executeUpdateInternal(
+    tableName: string,
+    filters: QueryFilter[],
+    patch: Partial<DbRow>,
+  ): Promise<{ count: number; changes: MutationRecord[] }> {
+    const table = await this._getTableInternal(tableName);
+    this.validateFilterColumns(table, filters);
+
+    const validColMap = new Map(table.columns.map((c) => [c.name, c]));
+    for (const k of Object.keys(patch)) {
+      if (!validColMap.has(k)) {
+        throw new ColumnNotFoundError(k, tableName);
+      }
+    }
+
+    const page1View = this.pool.getSlotDataView(0);
+    const indexes = catalog_list_table_indexes(page1View, table.tableId);
+    const uniqueIndexes = indexes.filter(
+      (idx) => (idx.flags & (IndexFlag.UNIQUE | IndexFlag.PRIMARY)) !== 0,
+    );
+
+    interface PageCellsSnapshot {
+      pageId: number;
+      allCells: Array<{ cellIdx: number; row: DbRow }>;
+      matches: Array<{
+        cellIdx: number;
+        oldRow: DbRow;
+        newRow: DbRow;
+        changedColumns: string[];
+        newRowBytes: Uint8Array;
+      }>;
+    }
+
+    const pageSnapshots: PageCellsSnapshot[] = [];
+    const updatingRowids = new Set<bigint>();
+    let totalMatched = 0;
+
+    // Pass 1: Scan pages, identify matching rows, build newRow, validate NOT NULL & row size
+    let currPageId = table.rootPageId;
+    while (currPageId !== 0) {
+      const slot = await this.driver.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const cellCount = page_get_cell_count(view, 0);
+      const nextPageId = page_get_next_page_id(view, 0);
+
+      const allCells: Array<{ cellIdx: number; row: DbRow }> = [];
+      const matches: PageCellsSnapshot["matches"] = [];
+
+      for (let i = 0; i < cellCount; i++) {
+        const off = page_get_cell_offset(view, 0, i);
+        const row = page_deserialize_row(table.columns, view, off);
+        allCells.push({ cellIdx: i, row });
+
+        if (this.matchesFilters(table, row, filters)) {
+          const newRow: DbRow = { ...row };
+          for (const [k, v] of Object.entries(patch)) {
+            if (v !== undefined) {
+              newRow[k] = v;
+            }
+          }
+
+          // Primary Key NOT NULL check
+          for (const c of table.columns) {
+            if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+              if (newRow[c.name] === null || newRow[c.name] === undefined) {
+                throw new NotNullConstraintError(c.name, tableName);
+              }
+            }
+          }
+
+          const changedColumns = table.columns
+            .map((c) => c.name)
+            .filter((col) => !this.valuesEqual(row[col], newRow[col]));
+          const newRowBytes = page_serialize_row(table.columns, newRow);
+
+          matches.push({
+            cellIdx: i,
+            oldRow: row,
+            newRow,
+            changedColumns,
+            newRowBytes,
+          });
+          updatingRowids.add((BigInt(currPageId) << 16n) | BigInt(i));
+          totalMatched++;
+        }
+      }
+
+      if (matches.length > 0) {
+        pageSnapshots.push({ pageId: currPageId, allCells, matches });
+      }
+      currPageId = nextPageId;
+    }
+
+    if (totalMatched === 0) {
+      return { count: 0, changes: [] };
+    }
+
+    // Pass 2: Validate UNIQUE constraints across all matched rows before mutating any page
+    for (const idx of uniqueIndexes) {
+      const batchSeenKeys = new Set<any>();
+      for (const ps of pageSnapshots) {
+        for (const m of ps.matches) {
+          const { keyVal, keyType } = this.extractIndexKey(
+            table.columns,
+            idx,
+            m.newRow,
+          );
+          if (keyVal !== undefined && keyVal !== null) {
+            const setKey =
+              keyVal instanceof Uint8Array
+                ? Array.from(keyVal).join(",")
+                : keyVal;
+            if (batchSeenKeys.has(setKey)) {
+              throw new UniqueConstraintViolationError(
+                `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+              );
+            }
+            batchSeenKeys.add(setKey);
+
+            const conflict = await this.probeIndexUnique(
+              idx.rootPageId,
+              keyType,
+              keyVal,
+              updatingRowids,
+            );
+            if (conflict) {
+              throw new UniqueConstraintViolationError(
+                `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Pass 3: Apply updates (in-place when fitting on page, or delete + tail-insert on page overflow)
+    const recordedChanges: MutationRecord[] = [];
+    const overflowUpdates: Array<{
+      oldRow: DbRow;
+      newRow: DbRow;
+      changedColumns: string[];
+      newRowBytes: Uint8Array;
+    }> = [];
+
+    for (const ps of pageSnapshots) {
+      const overflowIndicesOnPage: number[] = [];
+
+      for (const m of ps.matches) {
+        const slot = await this.driver.acquirePage(ps.pageId);
+        const view = this.pool.getSlotDataView(slot);
+        const res = page_update_row(
+          view,
+          0,
+          m.cellIdx,
+          m.newRowBytes,
+          this.pool.pageScratchpadOffset,
+        );
+
+        if (res) {
+          this.pool.markDirty(slot);
+          ps.allCells[m.cellIdx].row = m.newRow;
+
+          const rowid = (BigInt(ps.pageId) << 16n) | BigInt(m.cellIdx);
+          for (const idx of indexes) {
+            const oldKey = this.extractIndexKey(table.columns, idx, m.oldRow);
+            const newKey = this.extractIndexKey(table.columns, idx, m.newRow);
+            if (!this.valuesEqual(oldKey.keyVal, newKey.keyVal)) {
+              if (oldKey.keyVal !== undefined && oldKey.keyVal !== null) {
+                await this.deleteFromIndex(
+                  idx.rootPageId,
+                  oldKey.keyType,
+                  oldKey.keyVal,
+                  rowid,
+                );
+              }
+              if (newKey.keyVal !== undefined && newKey.keyVal !== null) {
+                await this.insertIntoIndex(
+                  idx.rootPageId,
+                  newKey.keyType,
+                  newKey.keyVal,
+                  rowid,
+                );
+              }
+            }
+          }
+
+          const rec: MutationRecord = {
+            table: table.name,
+            op: "update",
+            pk: this.extractPrimaryKey(table, m.newRow),
+            oldRow: this.cloneRow(m.oldRow),
+            newRow: this.cloneRow(m.newRow),
+            changedColumns: m.changedColumns,
+          };
+          recordedChanges.push(rec);
+          if (this.coordinator.isInTransaction()) {
+            this.activeTxChanges.push(rec);
+          }
+        } else {
+          overflowIndicesOnPage.push(m.cellIdx);
+          overflowUpdates.push(m);
+        }
+      }
+
+      if (overflowIndicesOnPage.length > 0) {
+        await this.deleteCellsOnDataPageAndShiftIndexes(
+          table,
+          indexes,
+          ps.pageId,
+          overflowIndicesOnPage,
+          ps.allCells,
+        );
+      }
+    }
+
+    // Re-insert any overflowed rows onto the table's tail page
+    if (overflowUpdates.length > 0) {
+      let currentPageId =
+        this.tableTailPages.get(tableName) ?? table.rootPageId;
+      let slot = await this.driver.acquirePage(currentPageId);
+      let view = this.pool.getSlotDataView(slot);
+      while (true) {
+        const nextPageId = page_get_next_page_id(view, 0);
+        if (nextPageId === 0) break;
+        currentPageId = nextPageId;
+        slot = await this.driver.acquirePage(currentPageId);
+        view = this.pool.getSlotDataView(slot);
+      }
+      this.tableTailPages.set(tableName, currentPageId);
+
+      for (const m of overflowUpdates) {
+        slot = await this.driver.acquirePage(currentPageId);
+        view = this.pool.getSlotDataView(slot);
+        let targetPageId = currentPageId;
+        let insertSlot = page_insert_row(
+          view,
+          0,
+          m.newRowBytes,
+          this.pool.pageScratchpadOffset,
+        );
+
+        if (insertSlot === -1) {
+          const prevSlot = slot;
+          this.pool.pinSlot(prevSlot);
+          try {
+            const newPageId = await this.driver.allocateAndPinPage();
+            const newSlot = this.pool.getResidentSlot(newPageId);
+            try {
+              page_set_next_page_id(view, 0, newPageId);
+              this.pool.markDirty(prevSlot);
+
+              const newView = this.pool.getSlotDataView(newSlot);
+              insertSlot = page_insert_row(
+                newView,
+                0,
+                m.newRowBytes,
+                this.pool.pageScratchpadOffset,
+              );
+              this.pool.markDirty(newSlot);
+              currentPageId = newPageId;
+              targetPageId = newPageId;
+              this.tableTailPages.set(tableName, newPageId);
+            } finally {
+              this.pool.unpinSlot(newSlot);
+            }
+          } finally {
+            this.pool.unpinSlot(prevSlot);
+          }
+        } else {
+          this.pool.markDirty(slot);
+        }
+
+        const newRowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
+        for (const idx of indexes) {
+          const { keyVal, keyType } = this.extractIndexKey(
+            table.columns,
+            idx,
+            m.newRow,
+          );
+          if (keyVal !== undefined && keyVal !== null) {
+            await this.insertIntoIndex(
+              idx.rootPageId,
+              keyType,
+              keyVal,
+              newRowid,
+            );
+          }
+        }
+
+        const rec: MutationRecord = {
+          table: table.name,
+          op: "update",
+          pk: this.extractPrimaryKey(table, m.newRow),
+          oldRow: this.cloneRow(m.oldRow),
+          newRow: this.cloneRow(m.newRow),
+          changedColumns: m.changedColumns,
+        };
+        recordedChanges.push(rec);
+        if (this.coordinator.isInTransaction()) {
+          this.activeTxChanges.push(rec);
+        }
+      }
+    }
+
+    // Update Page 1 change counter
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
+
+    return { count: totalMatched, changes: recordedChanges };
+  }
+
+  async delete(
+    tableName: string,
+    whereOrPk: DbValue | Partial<DbRow>,
+    options?: TransactionOptions,
+  ): Promise<number> {
+    if (
+      !this.coordinator.isInTransaction() &&
+      this.beforeCommitHooks.size > 0
+    ) {
+      return this.transaction(
+        (tx) => tx.delete(tableName, whereOrPk, options),
+        options,
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const table = await this._getTableInternal(tableName);
+      const filters = this.normalizeWhereOrPkFilters(table, whereOrPk);
+      const inTx = this.coordinator.isInTransaction();
+      const { count, changes } = await this._executeDeleteInternal(
+        tableName,
+        filters,
+      );
+      if (!inTx && changes.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          changes,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+      return count;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  async executeDelete(
+    tableName: string,
+    filters: QueryFilter[],
+    options?: TransactionOptions,
+  ): Promise<number> {
+    if (
+      !this.coordinator.isInTransaction() &&
+      this.beforeCommitHooks.size > 0
+    ) {
+      return this.transaction(
+        (tx) => tx.executeDelete(tableName, filters, options),
+        options,
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const inTx = this.coordinator.isInTransaction();
+      const { count, changes } = await this._executeDeleteInternal(
+        tableName,
+        filters,
+      );
+      if (!inTx && changes.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          changes,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+      return count;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  private async _executeDeleteInternal(
+    tableName: string,
+    filters: QueryFilter[],
+  ): Promise<{ count: number; changes: MutationRecord[] }> {
+    const table = await this._getTableInternal(tableName);
+    this.validateFilterColumns(table, filters);
+
+    const page1View = this.pool.getSlotDataView(0);
+    const indexes = catalog_list_table_indexes(page1View, table.tableId);
+
+    const recordedChanges: MutationRecord[] = [];
+    let totalDeleted = 0;
+
+    let currPageId = table.rootPageId;
+    while (currPageId !== 0) {
+      const slot = await this.driver.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const cellCount = page_get_cell_count(view, 0);
+      const nextPageId = page_get_next_page_id(view, 0);
+
+      if (cellCount > 0) {
+        const allCells: Array<{ cellIdx: number; row: DbRow }> = [];
+        const deletedIndices: number[] = [];
+
+        for (let i = 0; i < cellCount; i++) {
+          const off = page_get_cell_offset(view, 0, i);
+          const row = page_deserialize_row(table.columns, view, off);
+          allCells.push({ cellIdx: i, row });
+
+          if (this.matchesFilters(table, row, filters)) {
+            deletedIndices.push(i);
+            const rec: MutationRecord = {
+              table: table.name,
+              op: "delete",
+              pk: this.extractPrimaryKey(table, row),
+              oldRow: this.cloneRow(row),
+            };
+            recordedChanges.push(rec);
+            if (this.coordinator.isInTransaction()) {
+              this.activeTxChanges.push(rec);
+            }
+          }
+        }
+
+        if (deletedIndices.length > 0) {
+          totalDeleted += deletedIndices.length;
+          await this.deleteCellsOnDataPageAndShiftIndexes(
+            table,
+            indexes,
+            currPageId,
+            deletedIndices,
+            allCells,
+          );
+        }
+      }
+
+      currPageId = nextPageId;
+    }
+
+    if (totalDeleted === 0) {
+      return { count: 0, changes: [] };
+    }
+
+    const slotIdx = catalog_find_table_slot(page1View, tableName);
+    if (slotIdx !== -1) {
+      const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
+      desc.rowCountEstimate = Math.max(0, desc.rowCountEstimate - totalDeleted);
+      catalog_write_table_descriptor(page1View, slotIdx, desc);
+    }
+    catalog_increment_change_counter(page1View);
+    catalog_update_page1_checksum(page1View);
+    this.pool.markDirty(0);
+
+    if (!this.coordinator.isInTransaction()) {
+      await this.driver.flushAllDirty();
+    }
+
+    return { count: totalDeleted, changes: recordedChanges };
+  }
+
+  async upsert(
+    tableName: string,
+    row: DbRow,
+    options?: UpsertOptions,
+  ): Promise<"inserted" | "updated" | "ignored"> {
+    const res = await this.upsertMany(tableName, [row], options);
+    if (res.inserted > 0) return "inserted";
+    if (res.updated > 0) return "updated";
+    return "ignored";
+  }
+
+  async upsertMany(
+    tableName: string,
+    rows: DbRow[],
+    options?: UpsertOptions,
+  ): Promise<{ inserted: number; updated: number; ignored: number }> {
+    if (!rows || rows.length === 0) {
+      return { inserted: 0, updated: 0, ignored: 0 };
+    }
+
+    if (
+      !this.coordinator.isInTransaction() &&
+      (this.beforeCommitHooks.size > 0 || rows.length > 1)
+    ) {
+      return this.transaction(
+        (tx) => tx._upsertManyInLease(tableName, rows, options),
+        options,
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const inTx = this.coordinator.isInTransaction();
+      const startChanges: MutationRecord[] = [];
+      const res = await this._upsertManyInLease(
+        tableName,
+        rows,
+        options,
+        inTx ? undefined : startChanges,
+      );
+      if (!inTx && startChanges.length > 0) {
+        const changeset = this.buildChangeset(
+          this.nextAutoTxId++,
+          options?.origin ?? "local",
+          options?.meta,
+          startChanges,
+        );
+        this.emitCommitAndSubscriptions(changeset);
+      }
+      return res;
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  private async _upsertManyInLease(
+    tableName: string,
+    rows: DbRow[],
+    options?: UpsertOptions,
+    standaloneCollector?: MutationRecord[],
+  ): Promise<{ inserted: number; updated: number; ignored: number }> {
+    const table = await this._getTableInternal(tableName);
+    const validCols = new Set(table.columns.map((c) => c.name));
+
+    let conflictCols: string[];
+    if (options?.conflictTarget) {
+      conflictCols = Array.isArray(options.conflictTarget)
+        ? options.conflictTarget
+        : [options.conflictTarget];
+      for (const col of conflictCols) {
+        if (!validCols.has(col)) {
+          throw new ColumnNotFoundError(col, tableName);
+        }
+      }
+    } else {
+      conflictCols = table.columns
+        .filter((c) => (c.flags & ColumnFlag.PRIMARY_KEY) !== 0)
+        .map((c) => c.name);
+      if (conflictCols.length === 0) {
+        throw new Error(
+          `Cannot upsert on table "${tableName}" without a primary key or explicit conflictTarget`,
+        );
+      }
+    }
+
+    const mode = options?.mode ?? "merge";
+    let inserted = 0;
+    let updated = 0;
+    let ignored = 0;
+
+    for (const row of rows) {
+      for (const k of Object.keys(row)) {
+        if (!validCols.has(k)) {
+          throw new ColumnNotFoundError(k, tableName);
+        }
+      }
+
+      const hasAllConflictKeys = conflictCols.every(
+        (c) => row[c] !== undefined && row[c] !== null,
+      );
+
+      let existingRow: DbRow | null = null;
+      let conflictFilters: QueryFilter[] = [];
+
+      if (hasAllConflictKeys) {
+        conflictFilters = conflictCols.map((colName) => ({
+          type: "cmp" as const,
+          colName,
+          op: "=" as const,
+          value: row[colName],
+        }));
+        existingRow = await this.findFirstMatchingRow(table, conflictFilters);
+      }
+
+      if (!existingRow) {
+        const insChanges = await this._insertManyInternal(
+          tableName,
+          [row],
+          true,
+        );
+        if (standaloneCollector) {
+          standaloneCollector.push(...insChanges);
+        }
+        inserted++;
+      } else {
+        if (mode === "ignore") {
+          ignored++;
+          continue;
+        }
+        if (options?.where) {
+          const shouldUpdate = options.where(
+            this.cloneRow(existingRow),
+            this.cloneRow(row),
+          );
+          if (!shouldUpdate) {
+            ignored++;
+            continue;
+          }
+        }
+
+        const patch: Partial<DbRow> = {};
+        if (mode === "replace") {
+          for (const c of table.columns) {
+            if (row[c.name] !== undefined) {
+              patch[c.name] = row[c.name];
+            } else if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+              patch[c.name] = existingRow[c.name];
+            } else {
+              patch[c.name] = null;
+            }
+          }
+        } else {
+          for (const [k, v] of Object.entries(row)) {
+            if (v !== undefined) {
+              patch[k] = v;
+            }
+          }
+        }
+
+        const { changes: updChanges } = await this._executeUpdateInternal(
+          tableName,
+          conflictFilters,
+          patch,
+        );
+        if (standaloneCollector) {
+          standaloneCollector.push(...updChanges);
+        }
+        updated++;
+      }
+    }
+
+    return { inserted, updated, ignored };
+  }
+
+  private async findFirstMatchingRow(
+    table: TableMeta,
+    filters: QueryFilter[],
+  ): Promise<DbRow | null> {
+    let currPageId = table.rootPageId;
+    while (currPageId !== 0) {
+      const slot = await this.driver.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      const cellCount = page_get_cell_count(view, 0);
+      const nextPageId = page_get_next_page_id(view, 0);
+
+      for (let i = 0; i < cellCount; i++) {
+        const off = page_get_cell_offset(view, 0, i);
+        const row = page_deserialize_row(table.columns, view, off);
+        if (this.matchesFilters(table, row, filters)) {
+          return row;
+        }
+      }
+      currPageId = nextPageId;
+    }
+    return null;
+  }
+
+  async transaction<T>(
+    callback: (tx: WebDB) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
     const lease = await this.coordinator.begin();
     const leaseId = lease.leaseId;
+    this.activeTxChanges = [];
+    this.activeTxOrigin = options?.origin ?? "local";
+    this.activeTxMeta = options?.meta;
+    this.activeTxId = lease.txId;
 
     const txProxy: WebDB = new Proxy(this, {
       get: (target, prop, receiver) => {
@@ -1618,11 +3036,16 @@ export class WebDB implements IDatabaseQueryExecutor {
           return leaseId;
         }
         if (prop === "transaction") {
-          return async <U>(cb: (nestedTx: WebDB) => Promise<U>): Promise<U> => {
+          return async <U>(
+            cb: (nestedTx: WebDB) => Promise<U>,
+            _nestedOpts?: TransactionOptions,
+          ): Promise<U> => {
             const savepoint = await this.coordinator.captureSavepoint();
+            const savedChangesLen = this.activeTxChanges.length;
             try {
               return await cb(txProxy);
             } catch (err) {
+              this.activeTxChanges.length = savedChangesLen;
               this.tableMetaCache.clear();
               this.tableTailPages.clear();
               this.indexTailPages.clear();
@@ -1653,9 +3076,55 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     try {
       const res = await callback(txProxy);
+
+      if (
+        this.activeTxChanges.length > 0 &&
+        this.beforeCommitHooks.size > 0 &&
+        !this.isRunningBeforeCommit
+      ) {
+        const preCommitChangeset = this.buildChangeset(
+          this.activeTxId,
+          this.activeTxOrigin,
+          this.activeTxMeta,
+          [...this.activeTxChanges],
+        );
+        this.isRunningBeforeCommit = true;
+        try {
+          for (const hook of this.beforeCommitHooks) {
+            await hook(preCommitChangeset, txProxy);
+          }
+        } finally {
+          this.isRunningBeforeCommit = false;
+        }
+      }
+
+      const finalChanges = [...this.activeTxChanges];
+      const finalOrigin = this.activeTxOrigin;
+      const finalMeta = this.activeTxMeta;
+      const finalTxId = this.activeTxId;
+
+      this.activeTxChanges = [];
+      this.activeTxOrigin = "local";
+      this.activeTxMeta = undefined;
+
       await this.coordinator.commit(leaseId);
+
+      if (finalChanges.length > 0) {
+        const committedChangeset = this.buildChangeset(
+          finalTxId,
+          finalOrigin,
+          finalMeta,
+          finalChanges,
+        );
+        this.emitCommitAndSubscriptions(committedChangeset);
+      }
+
       return res;
     } catch (err) {
+      this.activeTxChanges = [];
+      this.activeTxOrigin = "local";
+      this.activeTxMeta = undefined;
+      this.isRunningBeforeCommit = false;
       // Clear caches so rollback doesn't leave stale cached table pointers
       this.tableMetaCache.clear();
       this.tableTailPages.clear();
@@ -2262,6 +3731,13 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async close(): Promise<void> {
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
+    this.beforeCommitHooks.clear();
+    this.commitHooks.clear();
+    this.subscriptions.clear();
     await this.coordinator.close();
     await this.driver.flushAllDirty();
     await this.vfs.close();

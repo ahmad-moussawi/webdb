@@ -45,6 +45,7 @@ export {
   page_init_index_leaf,
   page_compare_index_keys,
   page_insert_index_leaf_cell,
+  page_delete_index_leaf_cell,
   page_binary_search_index_leaf,
   serialize_single_key,
   serialize_composite_key,

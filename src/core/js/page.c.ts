@@ -321,7 +321,13 @@ export function page_compact(
       src_bytes = 0;
     } else {
       const old_offset = page_get_cell_offset(view, page_offset, i as u16);
-      len = page_get_row_length(view, page_offset + old_offset);
+      const p_type = page_get_type(view, page_offset);
+      if (p_type === PAGE_TYPE_INDEX_LEAF) {
+        const k_len = view.getUint16(page_offset + old_offset, true);
+        len = (2 + k_len + 8) as u16;
+      } else {
+        len = page_get_row_length(view, page_offset + old_offset);
+      }
       src_view = view;
       src_bytes = page_offset + old_offset;
     }
@@ -1303,6 +1309,38 @@ export function page_insert_index_leaf_cell(
   page_set_cell_content_offset(view, page_offset, new_content_offset);
 
   return insert_slot;
+}
+
+/**
+ * Deletes an entry at slot_idx from a Secondary Index Leaf Page.
+ */
+export function page_delete_index_leaf_cell(
+  view: DataView,
+  page_offset: number,
+  slot_idx: number,
+): void {
+  const cell_count = page_get_cell_count(view, page_offset);
+  if (slot_idx < 0 || slot_idx >= cell_count) return;
+
+  const cell_offset = page_get_cell_offset(view, page_offset, slot_idx);
+  const k_len = view.getUint16(page_offset + cell_offset, true);
+  const cell_length = 2 + k_len + 8;
+
+  const slot_dir_start = page_offset + PAGE_HEADER_SIZE;
+  const src = slot_dir_start + (slot_idx + 1) * 2;
+  const dst = slot_dir_start + slot_idx * 2;
+  const shift_len = (cell_count - 1 - slot_idx) * 2;
+
+  if (shift_len > 0) {
+    memcpy(view, dst, view, src, shift_len);
+  }
+
+  page_set_cell_count(view, page_offset, cell_count - 1);
+  page_set_free_bytes(
+    view,
+    page_offset,
+    page_get_free_bytes(view, page_offset) + cell_length,
+  );
 }
 
 /**

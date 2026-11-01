@@ -2,6 +2,7 @@ import {
   DbRow,
   AggregateNotAllowedInWhereError,
   JoinType,
+  TransactionOptions,
 } from '../../types/index.js';
 import { MAX_IN_LIST_SIZE } from '../../constants.js';
 import {
@@ -293,6 +294,17 @@ export interface IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options: QueryExecutionOptions,
   ): Promise<DbRow[]>;
+  executeUpdate?(
+    tableName: string,
+    filters: QueryFilter[],
+    patch: Partial<DbRow>,
+    options?: TransactionOptions,
+  ): Promise<number>;
+  executeDelete?(
+    tableName: string,
+    filters: QueryFilter[],
+    options?: TransactionOptions,
+  ): Promise<number>;
 }
 
 function assertNotAggregateInWhere(colOrExpr: any): void {
@@ -1743,5 +1755,22 @@ export class QueryBuilder {
   async first(): Promise<DbRow | null> {
     const rows = await this.limit(1).toArray();
     return rows.length > 0 ? rows[0] : null;
+  }
+
+  async update(
+    patch: Partial<DbRow>,
+    options?: TransactionOptions,
+  ): Promise<number> {
+    if (!this.db.executeUpdate) {
+      throw new Error('Database executor does not support executeUpdate');
+    }
+    return this.db.executeUpdate(this.tableName, this.filters, patch, options);
+  }
+
+  async delete(options?: TransactionOptions): Promise<number> {
+    if (!this.db.executeDelete) {
+      throw new Error('Database executor does not support executeDelete');
+    }
+    return this.db.executeDelete(this.tableName, this.filters, options);
   }
 }

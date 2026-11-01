@@ -317,6 +317,21 @@ WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ah
 - **Invariant:** A transaction holds an exclusive lease on the single active `VmContext` execution slot. If an open transaction remains idle without executing a query, commit, or rollback for **30 seconds**, the Host Transaction Coordinator automatically aborts the transaction, issues an internal `ROLLBACK`, releases the lease, and rejects subsequent operations in that block with `TransactionTimeoutError`.
 - **Rationale:** Prevents dangling transactions (e.g. unhandled Promise rejections, crashed client callbacks, or stalled network requests within transaction blocks) from permanently locking the single-writer FIFO queue and starving other operations.
 
+### 5.5 Low-Level Sync Primitives, High-Level DML & Cross-Tab Reactivity
+
+WebDB provides low-level primitives for building offline-first synchronization engines without baking opinionated network protocols into the core engine:
+
+1. **High-Level DML & Conditional Upserts (`update`, `delete`, `upsert`, `upsertMany`):**
+   - Supports direct [`db.update()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) / [`db.delete()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts), fluent [`QueryBuilder.update()`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts) / [`QueryBuilder.delete()`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts), and idempotent [`db.upsert()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) / [`db.upsertMany()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts).
+   - **Index-Consistent Row Updates & Deletes:** In-place updates preserve physical slot rowids (`(pageId << 16) | cellIdx`) and update only modified secondary index keys. Row deletions and page-overflow updates automatically maintain secondary index slot pointers across the modified 4 KB page.
+   - **Last-Write-Wins (LWW) Conflict Guard:** `UpsertOptions` supports `conflictTarget` (primary key or unique column(s)), `mode` (`'merge' | 'replace' | 'ignore'`), and a conditional `where: (existingRow, incomingRow) => boolean` predicate so stale remote payloads are ignored in a single atomic pass.
+2. **Transactional Change Capture (`onBeforeCommit`, `onCommit`, `Changeset.coalesced()`):**
+   - Every transaction and standalone DML operation accepts [`TransactionOptions`](file:///Users/ahmad/h/webdb/src/types/index.ts) (`{ origin?: 'local' | 'remote' | string, meta?: Record<string, any> }`) and records row-level [`MutationRecord`](file:///Users/ahmad/h/webdb/src/types/index.ts)s (`insert`, `update`, `delete` with `pk`, `oldRow`, `newRow`, and `changedColumns`).
+   - [`changeset.coalesced()`](file:///Users/ahmad/h/webdb/src/types/index.ts) squashes multiple mutations to the same `(table, pk)` within a transaction (`insert + update -> insert`, `update + update -> merged update`, `insert + delete -> omitted`, `update + delete -> delete`) and respects nested savepoint rollbacks.
+   - [`db.onBeforeCommit()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) runs *inside* the active transaction lease before WAL commit, allowing outbox table writes to commit or roll back atomically alongside application data. [`db.onCommit()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) fires after WAL durability to wake up push workers.
+3. **Real-Time Multi-Tab / Worker Notifications (`db.subscribe`, `BroadcastChannel`):**
+   - [`db.subscribe(tables, callback)`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) notifies listeners on local commits (`crossTab: false`) and broadcasts table invalidation events over `BroadcastChannel` (`webdb_sync_<vfs>_<name>`) so other open tabs/workers immediately sync their buffer pool state and notify UI subscribers (`crossTab: true`).
+
 ---
 
 ## 6. Supported Data Types & Conversions

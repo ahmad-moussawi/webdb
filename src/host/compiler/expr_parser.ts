@@ -733,6 +733,41 @@ export function evalExprNode(
       ) {
         return null;
       }
+      if (
+        expr.op === '=' ||
+        expr.op === '!=' ||
+        expr.op === '<' ||
+        expr.op === '<=' ||
+        expr.op === '>' ||
+        expr.op === '>='
+      ) {
+        const cmp =
+          typeof left === 'string' && typeof right === 'string'
+            ? left < right
+              ? -1
+              : left > right
+                ? 1
+                : 0
+            : Number(left) < Number(right)
+              ? -1
+              : Number(left) > Number(right)
+                ? 1
+                : 0;
+        switch (expr.op) {
+          case '=':
+            return cmp === 0 ? 1 : 0;
+          case '!=':
+            return cmp !== 0 ? 1 : 0;
+          case '<':
+            return cmp < 0 ? 1 : 0;
+          case '<=':
+            return cmp <= 0 ? 1 : 0;
+          case '>':
+            return cmp > 0 ? 1 : 0;
+          case '>=':
+            return cmp >= 0 ? 1 : 0;
+        }
+      }
       const numL = Number(left);
       const numR = Number(right);
       switch (expr.op) {

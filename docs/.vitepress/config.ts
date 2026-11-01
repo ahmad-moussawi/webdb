@@ -106,6 +106,10 @@ export default defineConfig({
             text: "Query Planner & Optimization",
             link: "/query-planner",
           },
+          {
+            text: "Offline Sync & Reactivity",
+            link: "/offline-sync",
+          },
         ],
       },
       {

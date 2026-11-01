@@ -148,11 +148,13 @@ export interface ColumnDefinition {
   primaryKey?: boolean;
   notNull?: boolean;
   autoInc?: boolean;
+  autoIncrement?: boolean;
   indexed?: boolean;
   flags?: {
     primaryKey?: boolean;
     notNull?: boolean;
     autoInc?: boolean;
+    autoIncrement?: boolean;
     indexed?: boolean;
   };
 }
@@ -238,6 +240,61 @@ export interface IndexOptions {
   unique?: boolean;
   name?: string;
 }
+
+export interface TransactionOptions {
+  origin?: 'local' | 'remote' | string;
+  meta?: Record<string, any>;
+}
+
+export interface UpsertOptions extends TransactionOptions {
+  conflictTarget?: string | string[];
+  mode?: 'merge' | 'replace' | 'ignore';
+  where?: (existingRow: DbRow, incomingRow: DbRow) => boolean;
+}
+
+export interface MutationRecord {
+  table: string;
+  op: 'insert' | 'update' | 'delete';
+  pk: DbValue | DbValue[] | Record<string, DbValue>;
+  oldRow?: DbRow;
+  newRow?: DbRow;
+  changedColumns?: string[];
+}
+
+export interface Changeset {
+  txId: number;
+  origin: string;
+  meta?: Record<string, any>;
+  changeCounter: number;
+  schemaVersion: number;
+  tables: string[];
+  changes: MutationRecord[];
+  coalesced(): MutationRecord[];
+}
+
+export interface TableChangeEvent {
+  tables: string[];
+  origin: string;
+  meta?: Record<string, any>;
+  changeCounter: number;
+  schemaVersion: number;
+  crossTab: boolean;
+  changeset?: Changeset;
+}
+
+export interface SyncState {
+  changeCounter: number;
+  schemaVersion: number;
+}
+
+export type BeforeCommitHook = (
+  changeset: Changeset,
+  tx: any,
+) => Promise<void> | void;
+
+export type CommitHook = (changeset: Changeset) => void;
+
+export type TableSubscriptionCallback = (event: TableChangeEvent) => void;
 
 export type AlterTableOperation =
   | { type: 'renameTable'; newName: string }
