@@ -6,6 +6,8 @@ import { EditorArea } from './components/Editor/EditorArea';
 import { ResultsPanel } from './components/Results/ResultsPanel';
 import { RowDetailsPanel } from './components/RowDetails/RowDetailsPanel';
 import { NewDbModal } from './components/Modals/NewDbModal';
+import { ImportDbModal } from './components/Modals/ImportDbModal';
+import { AboutModal } from './components/Modals/AboutModal';
 import { ProgressOverlay } from './components/Modals/ProgressOverlay';
 import { Toast } from './components/Toast/Toast';
 import { VerticalSplitter, HorizontalSplitter } from './components/Common/Splitters';
@@ -65,6 +67,8 @@ export const AppContent: React.FC = () => {
         )}
       </div>
       <NewDbModal />
+      <ImportDbModal />
+      <AboutModal />
       <Toast />
     </>
   );

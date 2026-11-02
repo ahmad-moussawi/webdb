@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useStudio } from '../../context/StudioContext';
+import { getRegisteredDbs } from '../../utils/storage';
 import type { VfsType } from '../../types/studio';
 import {
   Database,
@@ -56,7 +57,13 @@ const TEMPLATES: TemplateOption[] = [
 ];
 
 export const NewDbModal: React.FC = () => {
-  const { isNewDbModalOpen, setIsNewDbModalOpen, createDb } = useStudio();
+  const {
+    isNewDbModalOpen,
+    setIsNewDbModalOpen,
+    newDbModalInitialTemplate,
+    createDb,
+    activeDbName,
+  } = useStudio();
   const [dbName, setDbName] = useState<string>('');
   const [vfs, setVfs] = useState<VfsType>('memory');
   const [template, setTemplate] = useState<string>('store_standard');
@@ -70,13 +77,13 @@ export const NewDbModal: React.FC = () => {
       setError(null);
       setTouched(false);
       setVfs('memory');
-      setTemplate('store_standard');
+      setTemplate(newDbModalInitialTemplate || 'store_standard');
       const timer = setTimeout(() => {
         inputRef.current?.focus();
       }, 60);
       return () => clearTimeout(timer);
     }
-  }, [isNewDbModalOpen]);
+  }, [isNewDbModalOpen, newDbModalInitialTemplate]);
 
   useEffect(() => {
     if (!isNewDbModalOpen) return;
@@ -91,9 +98,16 @@ export const NewDbModal: React.FC = () => {
 
   if (!isNewDbModalOpen) return null;
 
+  const existingDbSet = new Set([
+    ...getRegisteredDbs('memory'),
+    ...getRegisteredDbs('idb'),
+    activeDbName,
+  ]);
+
   const rawTrimmed = dbName.trim();
   const cleanName = rawTrimmed.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-  const isValidName = cleanName.length > 0;
+  const isDuplicateName = cleanName.length > 0 && existingDbSet.has(cleanName);
+  const isValidName = cleanName.length > 0 && !isDuplicateName;
 
   const handleNameChange = (val: string) => {
     setDbName(val);
@@ -110,8 +124,16 @@ export const NewDbModal: React.FC = () => {
       return;
     }
 
-    if (!isValidName) {
+    if (!cleanName) {
       setError('Name must contain alphanumeric characters or underscores');
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (isDuplicateName) {
+      setError(
+        `Database "${cleanName}" already exists. Creating a database requires a new name.`,
+      );
       inputRef.current?.focus();
       return;
     }
@@ -160,15 +182,15 @@ export const NewDbModal: React.FC = () => {
             <div className="form-group">
               <div className="modal-label-row">
                 <label htmlFor="modalDbNameInput" className="modal-label">
-                  Database Name
+                  New Database Name
                 </label>
-                <span className="required-badge">Required</span>
+                <span className="required-badge">Required (Must be new)</span>
               </div>
               <input
                 ref={inputRef}
                 id="modalDbNameInput"
                 type="text"
-                className={`modal-input ${touched && !isValidName ? 'input-error' : ''}`}
+                className={`modal-input ${(touched && !isValidName) || isDuplicateName ? 'input-error' : ''}`}
                 value={dbName}
                 onChange={(e) => handleNameChange(e.target.value)}
                 placeholder="e.g. ecommerce_db, analytics_db, sandbox"
@@ -180,7 +202,14 @@ export const NewDbModal: React.FC = () => {
                   Identifier: <code>{cleanName}</code>
                 </div>
               )}
-              {error && <div className="modal-field-error">{error}</div>}
+              {isDuplicateName && (
+                <div className="modal-field-error">
+                  Database &ldquo;{cleanName}&rdquo; already exists. Cannot overwrite an existing database.
+                </div>
+              )}
+              {!isDuplicateName && error && (
+                <div className="modal-field-error">{error}</div>
+              )}
             </div>
 
             {/* 2. Storage Engine (VFS) */}
@@ -244,7 +273,7 @@ export const NewDbModal: React.FC = () => {
             {/* 3. Initial Data Template */}
             <div className="form-group">
               <div className="modal-label-row">
-                <label className="modal-label">Starter Template</label>
+                <label className="modal-label">Starter Dataset Template</label>
               </div>
               <div className="template-cards-grid">
                 {TEMPLATES.map((t) => {
@@ -297,7 +326,13 @@ export const NewDbModal: React.FC = () => {
               id="confirmCreateDbBtn"
               className="btn btn-primary"
               disabled={!isValidName}
-              title={!isValidName ? 'Please enter a database name' : 'Create database'}
+              title={
+                !isValidName
+                  ? isDuplicateName
+                    ? 'Database name already exists'
+                    : 'Please enter a new database name'
+                  : 'Create database'
+              }
               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
               <Plus size={14} />

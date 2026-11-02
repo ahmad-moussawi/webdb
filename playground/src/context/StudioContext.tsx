@@ -53,6 +53,13 @@ interface StudioContextValue {
   setSelectedPageId: (id: number) => void;
   inspectPage: (pageId: number) => void;
   isNewDbModalOpen: boolean;
+  newDbModalInitialTemplate: string;
+  openNewDbModal: (initialTemplate?: string) => void;
+  isImportDbModalOpen: boolean;
+  setIsImportDbModalOpen: (open: boolean) => void;
+  openImportDbModal: () => void;
+  isAboutModalOpen: boolean;
+  setIsAboutModalOpen: (open: boolean) => void;
   seedingProgress: SeedingProgress;
   toastMessage: string | null;
 
@@ -72,7 +79,12 @@ interface StudioContextValue {
 
   // Actions
   openDb: (name: string, storage: VfsType) => Promise<void>;
-  createDb: (name: string, storage: VfsType, templateKey: string) => Promise<void>;
+  createDb: (
+    name: string,
+    storage: VfsType,
+    templateKey: string,
+    initialData?: Uint8Array,
+  ) => Promise<void>;
   refreshSchema: () => Promise<void>;
   executeCode: (codeOverride?: string) => Promise<void>;
   updateActiveCode: (code: string) => void;
@@ -154,6 +166,20 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [selectedPageId, setSelectedPageId] = useState<number>(1);
 
   const [isNewDbModalOpen, setIsNewDbModalOpen] = useState<boolean>(false);
+  const [newDbModalInitialTemplate, setNewDbModalInitialTemplate] =
+    useState<string>('store_standard');
+  const [isImportDbModalOpen, setIsImportDbModalOpen] = useState<boolean>(false);
+
+  const openNewDbModal = useCallback((initialTemplate: string = 'store_standard') => {
+    setNewDbModalInitialTemplate(initialTemplate);
+    setIsNewDbModalOpen(true);
+  }, []);
+
+  const openImportDbModal = useCallback(() => {
+    setIsImportDbModalOpen(true);
+  }, []);
+
+  const [isAboutModalOpen, setIsAboutModalOpen] = useState<boolean>(false);
   const [seedingProgress, setSeedingProgress] = useState<SeedingProgress>({
     visible: false,
     title: '',
@@ -499,30 +525,84 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     openDb(activeDbName, activeStorage, initialCore);
   }, []);
 
-  const createDb = useCallback(async (name: string, storage: VfsType, templateKey: string) => {
-    try {
-      addRegisteredDb(storage, name);
-      await openDb(name, storage);
+  const createDb = useCallback(
+    async (
+      name: string,
+      storage: VfsType,
+      templateKey: string,
+      initialData?: Uint8Array,
+    ) => {
+      try {
+        const allExisting = new Set([
+          ...getRegisteredDbs('memory'),
+          ...getRegisteredDbs('idb'),
+          activeDbName,
+        ]);
+        if (allExisting.has(name)) {
+          throw new Error(
+            `Database "${name}" already exists. Cannot overwrite or import into an existing database.`,
+          );
+        }
 
-      if (templateKey !== 'empty') {
-        // openDb sets db asynchronously, so let's open explicitly
-        const newInst = await WebDB.open({ name, storage, core: coreMode });
-        (window as any).db = newInst;
-        setDb(newInst);
-        await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
-          setSeedingProgress(p);
-        });
-        const meta = await newInst.listTables();
-        setTables(meta);
-        showToast(`Database "${name}" created with ${meta.length} tables (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`);
-      } else {
-        showToast(`Created empty database "${name}" (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`);
+        if (templateKey === 'import_binary' && initialData) {
+          if (db) {
+            try {
+              await db.close();
+            } catch {}
+          }
+          const newInst = await WebDB.open({
+            name,
+            storage,
+            core: coreMode,
+            initialData,
+          });
+          addRegisteredDb(storage, name);
+          (window as any).db = newInst;
+          setDb(newInst);
+          setActiveDbName(name);
+          setActiveStorage(storage);
+          try {
+            localStorage.setItem('webdb_active_storage', storage);
+            localStorage.setItem('webdb_active_db', name);
+          } catch {}
+          const meta = await newInst.listTables();
+          setTables(meta);
+          setStatusText(`READY (${coreMode.toUpperCase()})`);
+          setStatusColor('var(--emerald)');
+          showToast(
+            `Imported database "${name}" (${meta.length} tables, ${initialData.byteLength / 4096} pages) into ${storage === 'memory' ? 'Memory' : 'IndexedDB'}`,
+          );
+          return;
+        }
+
+        addRegisteredDb(storage, name);
+        await openDb(name, storage);
+
+        if (templateKey !== 'empty') {
+          // openDb sets db asynchronously, so let's open explicitly
+          const newInst = await WebDB.open({ name, storage, core: coreMode });
+          (window as any).db = newInst;
+          setDb(newInst);
+          await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
+            setSeedingProgress(p);
+          });
+          const meta = await newInst.listTables();
+          setTables(meta);
+          showToast(
+            `Database "${name}" created with ${meta.length} tables (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`,
+          );
+        } else {
+          showToast(
+            `Created empty database "${name}" (${storage === 'memory' ? 'Memory' : 'IndexedDB'})`,
+          );
+        }
+      } catch (err: any) {
+        console.error('Error creating database:', err);
+        showToast(`Error creating database: ${err?.message || err}`);
       }
-    } catch (err: any) {
-      console.error('Error creating database:', err);
-      showToast(`Error creating database: ${err?.message || err}`);
-    }
-  }, [coreMode, openDb, showToast]);
+    },
+    [activeDbName, coreMode, db, openDb, showToast],
+  );
 
   // Execute User Code
   const executeCode = useCallback(async (codeOverride?: string) => {
@@ -579,7 +659,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         fn = new AsyncFunction('db', 'WebDB', 'console', rawCode);
       }
 
-      let result = await fn(currentDb, WebDB, customConsole);
+      const studioDbProxy = new Proxy(currentDb, {
+        get(target, prop, receiver) {
+          if (prop === 'importBinary') {
+            return async () => {
+              throw new Error(
+                'Cannot import a database into an existing database. Use the "Import DB" button to create a new database from a .webdb file.',
+              );
+            };
+          }
+          const val = Reflect.get(target, prop, receiver);
+          return typeof val === 'function' ? val.bind(target) : val;
+        },
+      });
+
+      let result = await fn(studioDbProxy, WebDB, customConsole);
 
       if (result && typeof result.toArray === 'function') {
         try {
@@ -744,6 +838,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setSelectedPageId,
         inspectPage,
         isNewDbModalOpen,
+        newDbModalInitialTemplate,
+        openNewDbModal,
+        isImportDbModalOpen,
+        setIsImportDbModalOpen,
+        openImportDbModal,
+        isAboutModalOpen,
+        setIsAboutModalOpen,
         seedingProgress,
         toastMessage,
 

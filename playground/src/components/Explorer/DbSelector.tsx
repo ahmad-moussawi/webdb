@@ -4,7 +4,7 @@ import { getRegisteredDbs } from '../../utils/storage';
 import type { VfsType } from '../../types/studio';
 
 export const DbSelector: React.FC = () => {
-  const { activeDbName, activeStorage, openDb, setIsNewDbModalOpen } = useStudio();
+  const { activeDbName, activeStorage, openDb, openNewDbModal } = useStudio();
 
   const memDbs = getRegisteredDbs('memory');
   const idbDbs = getRegisteredDbs('idb');
@@ -56,7 +56,7 @@ export const DbSelector: React.FC = () => {
         className="btn btn-secondary btn-sm"
         title="Create New Database"
         style={{ padding: '0 8px', height: '24px' }}
-        onClick={() => setIsNewDbModalOpen(true)}
+        onClick={() => openNewDbModal('store_standard')}
       >
         + NEW
       </button>

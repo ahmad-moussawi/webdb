@@ -4205,3 +4205,120 @@
         background: #f59e0b;
         color: #000;
       }
+
+      /* ================= DESKTOP MENU BAR ================= */
+      .desktop-menubar {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        margin-left: 8px;
+      }
+
+      .menubar-item-wrapper {
+        position: relative;
+      }
+
+      .menubar-trigger {
+        background: transparent;
+        border: none;
+        color: var(--text-secondary);
+        font-size: 0.74rem;
+        font-weight: 500;
+        padding: 4px 8px;
+        border-radius: var(--radius);
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease;
+        user-select: none;
+        line-height: 1.2;
+      }
+
+      .menubar-trigger:hover,
+      .menubar-trigger.active {
+        background: var(--bg-hover);
+        color: var(--text);
+      }
+
+      .menubar-dropdown {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        min-width: 240px;
+        background: var(--bg-surface);
+        border: 1px solid var(--card-border);
+        border-radius: 6px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+        padding: 4px;
+        z-index: 1200;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .menubar-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        width: 100%;
+        padding: 6px 10px;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font-size: 0.75rem;
+        text-align: left;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background 0.1s ease, color 0.1s ease;
+      }
+
+      .menubar-option:hover:not(:disabled) {
+        background: var(--accent);
+        color: #ffffff;
+      }
+
+      .menubar-option:hover:not(:disabled) .menubar-option-icon,
+      .menubar-option:hover:not(:disabled) .menubar-shortcut {
+        color: rgba(255, 255, 255, 0.9);
+      }
+
+      .menubar-option:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .menubar-option-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .menubar-option-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 15px;
+        color: var(--text-secondary);
+        flex-shrink: 0;
+      }
+
+      .menubar-shortcut {
+        font-size: 0.68rem;
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .menubar-divider {
+        height: 1px;
+        background: var(--border-subtle);
+        margin: 4px 6px;
+      }
+
+      .menubar-section-label {
+        font-size: 0.63rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+        padding: 4px 10px 2px;
+      }
