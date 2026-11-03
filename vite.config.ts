@@ -10,6 +10,11 @@ export default defineConfig({
       rollupTypes: true,
     }),
   ],
+  resolve: {
+    alias: {
+      '@ahmadmoussawi/webdb': resolve(__dirname, 'src/index.ts'),
+    },
+  },
   build: {
     lib: {
       entry: resolve(__dirname, 'src/index.ts'),
