@@ -5,11 +5,14 @@
 Traditional relational databases (PostgreSQL, MySQL) execute queries using a **Volcano Iterator Model** (`Project -> Filter -> Join -> Scan`), where operators form an object tree calling `next() -> Tuple*` recursively.
 
 In WebAssembly and browser runtimes, the Volcano model fails catastrophically when hitting an asynchronous disk miss:
+
 - An engine nested 4–5 C functions deep cannot pause and await an asynchronous OPFS or IndexedDB block read without unwinding the entire C call stack.
 - Runtime solutions like Emscripten's `Asyncify` inject heavy instrumentation, inflating binary size by 40–80 KB and degrading CPU performance by up to 50%.
 
 ### The Solution: Bytecode Virtual Machine (The SQLite VDBE Approach)
+
 WebDB uses a **Bytecode Virtual Machine (VDBE)**:
+
 1. Queries compile into a flat, linear array of numeric bytecode instructions (`Uint8Array`).
 2. The engine loop (`vm_step()`) is a flat `while` loop running a `switch (opcode)`. The call stack is never more than 1 function deep.
 3. When a page fault occurs, the VM sets `status = STATUS_PAGE_FAULT`, records `fault_page_id`, and exits cleanly. All execution state lives in the pre-allocated `VmContext` struct in shared memory.
@@ -20,14 +23,17 @@ WebDB uses a **Bytecode Virtual Machine (VDBE)**:
 ### 1.1 The Pure State Machine Architecture (Core ⟷ Host Communication)
 
 #### The Fundamental Problem
+
 In browser runtimes, disk I/O (Origin Private File System, IndexedDB) is **inherently asynchronous** (`await fileHandle.read(...)`).
 
 However, **WebAssembly / compiled C is strictly synchronous**. C code does not have `await`. A C function cannot block a thread to wait for disk I/O without completely locking the browser tab's UI event loop.
 
 #### The Solution: "Pause by Returning"
+
 Instead of blocking or attempting stack-saving tricks, **C pauses by simply executing a standard function `return` statement**.
 
 To "pause" execution on a cache miss:
+
 1. **C records its state in shared linear memory (`wasmMemory`):**
    - It leaves the instruction pointer (`ctx->pc`) pointing directly at the current instruction (e.g. instruction index `14`).
    - It writes the missing page identifier to `ctx->fault_page_id` (e.g. `42`).
@@ -36,6 +42,7 @@ To "pause" execution on a cache miss:
    The C function call stack unwinds completely to depth 0. Control returns immediately to JavaScript. JavaScript is now completely unblocked and can perform asynchronous disk reads with standard `await`.
 
 #### The Shared Memory Notebook (`VmContext`)
+
 Both JavaScript and C inspect the exact same WebAssembly linear memory (`ArrayBuffer`). The execution state is stored at fixed offset `VM_CONTEXT_OFFSET` (`0x405080`):
 
 ```c
@@ -62,6 +69,7 @@ typedef struct {
 ```
 
 #### Code Walkthrough: How Core (C) Pauses
+
 ```c
 // src/core/c/vm.c (Conceptual C Implementation)
 
@@ -109,10 +117,14 @@ int vm_step(VmContext* ctx, const uint8_t* bytecode, uint32_t bytecode_len) {
 ```
 
 #### Code Walkthrough: How Host (JavaScript) Resumes Execution
+
 ```typescript
 // src/host/driver/io_driver.ts (Host Driver State Machine Orchestrator)
 
-async function stepVmUntilDone(ctx: VmContext, bytecode: Uint8Array): Promise<void> {
+async function stepVmUntilDone(
+  ctx: VmContext,
+  bytecode: Uint8Array,
+): Promise<void> {
   while (true) {
     // 1. Invoke synchronous C engine step
     const status = vm_step(ctxOffset);
@@ -124,7 +136,10 @@ async function stepVmUntilDone(ctx: VmContext, bytecode: Uint8Array): Promise<vo
 
     // 3. Handle Page Fault: missing page must be loaded from VFS
     if (status === VmStatus.PAGE_FAULT) {
-      const missingPageId = read_u32(view, activeFrameOffset + OFFSET_FAULT_PAGE_ID);
+      const missingPageId = read_u32(
+        view,
+        activeFrameOffset + OFFSET_FAULT_PAGE_ID,
+      );
 
       // Asynchronous disk block read (OPFS / IndexedDB)
       const pageBytes = await vfs.readPage(missingPageId);
@@ -153,6 +168,7 @@ async function stepVmUntilDone(ctx: VmContext, bytecode: Uint8Array): Promise<vo
 ```
 
 #### State Machine Sequence Diagram
+
 ```
     JavaScript (Host Layer)                           C / Wasm (Core Layer)
     -----------------------                           ---------------------
@@ -186,71 +202,71 @@ async function stepVmUntilDone(ctx: VmContext, bytecode: Uint8Array): Promise<vo
 
 All opcodes are encoded as packed binary bytes in shared memory. Numerical parameters follow Little-Endian byte ordering:
 
-| Range | Opcode Name | Byte (`uint8`) | Operands | Description & Behavior |
-| :--- | :--- | :---: | :--- | :--- |
-| **Cursor / Scan** | **`OP_HALT`** | `0x00` | None | Terminates `vm_step()`; sets status to `STATUS_DONE`. |
-| | **`OP_OPEN_CURSOR`** | `0x01` | `cursor: uint8`, `root_page: uint32` | Binds cursor slot to root Page ID; checks cache residency; resets cell index to 0. |
-| | **`OP_REWIND`** | `0x02` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at first cell; jumps to `jump_target` if page has 0 cells. |
-| | **`OP_NEXT_ROW`** | `0x03` | `cursor: uint8`, `jump_target: uint16` | Advances cell; follows `next_page_id`; yields `STATUS_PAGE_FAULT` on cache miss; jumps on EOF. |
-| | **`OP_COLUMN_INT`** | `0x04` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 32-bit/64-bit int from row into `r[reg]`; sets NULL if null. |
-| | **`OP_COLUMN_FLOAT`** | `0x05` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 64-bit IEEE float from row into `r[reg]`; sets NULL if null. |
-| | **`OP_COLUMN_TEXT`** | `0x06` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads string byte offset & length from row into `r[reg]`. |
-| | **`OP_COLUMN_BLOB`** | `0x07` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads binary byte slice & length from row into `r[reg]`. |
-| | **`OP_LAST`** | `0x08` | `cursor: uint8`, `jump_target: uint16` | Positions cursor at rightmost leaf cell for reverse B-tree scan. |
-| | **`OP_PREV_ROW`** | `0x09` | `cursor: uint8`, `jump_target: uint16` | Decrements cell; follows `prev_page_id`; yields `STATUS_PAGE_FAULT` on miss; jumps on BOF. |
-| | **`OP_COLUMN_UUID`** | `0x0A` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw UUID binary payload into `r[reg]` (`type = 6`). |
-| | **`OP_COLUMN_ULID`** | `0x0B` | `cursor: uint8`, `col: uint8`, `reg: uint8` | Reads 16-byte raw ULID binary payload into `r[reg]` (`type = 7`). |
-| | **`OP_OPEN_EPHEMERAL`** | `0x0C` | `cursor: uint8`, `num_cols: uint8` | Initializes transient in-memory B-Tree cursor for subquery materialization. |
-| **Logic / Control** | **`OP_IS_NULL`** | `0x10` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if set (`NULL`). |
-| | **`OP_IS_NOT_NULL`** | `0x11` | `cursor: uint8`, `col: uint8`, `jump_target: uint16` | Tests row's Null-Bitmap bit; jumps if clear (not null). |
-| | **`OP_EQ`** | `0x12` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL equality: jumps if `r[A] == r[B]` (both non-null). |
-| | **`OP_NE`** | `0x13` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL inequality: jumps if `r[A] != r[B]` (both non-null). |
-| | **`OP_GT`** | `0x14` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] > r[B]`. |
-| | **`OP_GE`** | `0x15` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] >= r[B]`. |
-| | **`OP_LT`** | `0x16` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] < r[B]`. |
-| | **`OP_LE`** | `0x17` | `regA: uint8`, `regB: uint8`, `jump_target: uint16` | 3VL comparison: jumps if `r[A] <= r[B]`. |
-| | **`OP_JUMP`** | `0x18` | `jump_target: uint16` | Unconditional jump to bytecode target address. |
-| | **`OP_STR_LIKE`** | `0x19` | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16` | 3VL SQL `LIKE`: jumps if `r[Str] LIKE r[Pat]` (`%` and `_` wildcards). |
-| | **`OP_STR_NOT_LIKE`** | `0x1A` | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16` | 3VL SQL `NOT LIKE`: jumps if `r[Str] NOT LIKE r[Pat]`. |
-| | **`OP_STR_CONTAINS`** | `0x1B` | `regStr: uint8`, `regSub: uint8`, `jump_target: uint16` | 3VL substring test: jumps if `r[Str]` contains `r[Sub]`. |
-| | **`OP_STR_STARTS_WITH`** | `0x1C` | `regStr: uint8`, `regPfx: uint8`, `jump_target: uint16` | 3VL prefix test: jumps if `r[Str]` starts with `r[Pfx]`. |
-| | **`OP_STR_ENDS_WITH`** | `0x1D` | `regStr: uint8`, `regSfx: uint8`, `jump_target: uint16` | 3VL suffix test: jumps if `r[Str]` ends with `r[Sfx]`. |
-| **Data / Output** | **`OP_LOAD_INT`** | `0x20` | `reg: uint8`, `val: int32` | Loads literal signed 32-bit int into `r[reg]`. |
-| | **`OP_LOAD_FLOAT`** | `0x21` | `reg: uint8`, `val: float64` | Loads literal 64-bit float into `r[reg]`. |
-| | **`OP_LOAD_TEXT`** | `0x22` | `reg: uint8`, `len: uint16`, `bytes: [len]` | Loads literal UTF-8 string into `r[reg]`. |
-| | **`OP_LOAD_NULL`** | `0x23` | `reg: uint8` | Sets `r[reg] = NULL` (`type = 0`). |
-| | **`OP_EMIT_ROW`** | `0x24` | `cursor: uint8` | Streams raw serialized row from cursor into 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
-| | **`OP_RESULT_ROW`** | `0x25` | `start_reg: uint8`, `num_cols: uint8` | Serializes projected registers into binary row in 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
-| | **`OP_OFFSET`** | `0x26` | `count_reg: uint8`, `jump_target: uint16` | If `r[count_reg] > 0`, decrements counter and jumps to skip emission. |
-| | **`OP_LIMIT`** | `0x27` | `count_reg: uint8`, `jump_target: uint16` | If `r[count_reg] == 0`, jumps to terminate query (`OP_HALT`); decrements counter. |
-| | **`OP_CALL_UDF`** | `0x28` | `udf_id: uint16`, `start_arg_reg: uint8`, `num_args: uint8`, `out_reg: uint8` | Dispatches registered JS UDF function synchronously via Host bridge. |
-| | **`OP_STR_LOWER`** | `0x29` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to lowercase into `r[dest]`. |
-| | **`OP_STR_UPPER`** | `0x2A` | `src_reg: uint8`, `dest_reg: uint8` | Converts string in `r[src]` to uppercase into `r[dest]`. |
-| | **`OP_STR_LENGTH`** | `0x2B` | `src_reg: uint8`, `dest_reg: uint8` | Computes UTF-8 string character/byte length into `r[dest]` (int32). |
-| | **`OP_STR_SUBSTR`** | `0x2C` | `src_reg: uint8`, `start_reg: uint8`, `len_reg: uint8`, `dest_reg: uint8` | Extracts 1-indexed substring into `r[dest]`. |
-| | **`OP_STR_TRIM`** | `0x2D` | `src_reg: uint8`, `dest_reg: uint8` | Strips leading and trailing ASCII whitespace into `r[dest]`. |
-| | **`OP_MATH_ABS`** | `0x2E` | `src_reg: uint8`, `dest_reg: uint8` | Computes absolute value `\|x\|` into `r[dest]`. |
-| | **`OP_MATH_ROUND`** | `0x2F` | `src_reg: uint8`, `dest_reg: uint8` | Rounds float in `r[src]` to nearest integer in `r[dest]`. |
-| **Sorter / Math** | **`OP_SORTER_OPEN`** | `0x30` | `sorter_id: uint8`, `key_info_idx: uint8` | Initializes Sorter in Transient Query Arena with `KeyInfo`. |
-| | **`OP_SORTER_INSERT`** | `0x31` | `sorter_id: uint8`, `start_reg: uint8`, `num_keys: uint8`, `cursor: uint8` | Appends `SorterEntry` (16B) and sort keys in arena. |
-| | **`OP_SORTER_SORT`** | `0x32` | `sorter_id: uint8` | Executes in-place Introsort on `SorterEntry[]`. |
-| | **`OP_SORTER_NEXT`** | `0x33` | `sorter_id: uint8`, `jump_target: uint16` | Yields next sorted row; jumps to emit loop; falls through on EOF. |
-| | **`OP_MATH_FLOOR`** | `0x34` | `src_reg: uint8`, `dest_reg: uint8` | Computes mathematical floor $\lfloor x \rfloor$ into `r[dest]`. |
-| | **`OP_MATH_CEIL`** | `0x35` | `src_reg: uint8`, `dest_reg: uint8` | Computes mathematical ceiling $\lceil x \rceil$ into `r[dest]`. |
-| | **`OP_ADD`** | `0x36` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric addition `r[dest] = r[A] + r[B]`. |
-| | **`OP_SUB`** | `0x37` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric subtraction `r[dest] = r[A] - r[B]`. |
-| | **`OP_MUL`** | `0x38` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric multiplication `r[dest] = r[A] * r[B]`. |
-| | **`OP_DIV`** | `0x39` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL numeric division `r[dest] = r[A] / r[B]` (NULL on zero). |
-| | **`OP_MOD`** | `0x3A` | `regA: uint8`, `regB: uint8`, `dest_reg: uint8` | 3VL integer modulo `r[dest] = r[A] % r[B]`. |
-| | **`OP_ENTER_SUBQUERY`**| `0x3B` | `frame_depth: uint8` | Increments `ctx->depth`, initializing fresh register frame. |
-| | **`OP_RETURN_SUBQUERY`**| `0x3C` | `src_reg: uint8`, `parent_dest_reg: uint8` | Copies result register to parent frame and decrements `ctx->depth`. |
-| **Agg (GROUP BY)** | **`OP_AGG_INIT`** | `0x40` | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `mode: uint8` | Initializes Hash Table in arena (`0x00`) or Stream Aggregation (`0x01`). |
-| | **`OP_AGG_STEP`** | `0x41` | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `val_reg: uint8`, `func_id: uint8` | Updates `AggBucket` accumulators (`COUNT`, `SUM`, `MIN`, `MAX`). |
-| | **`OP_AGG_NEXT`** | `0x42` | `agg_id: uint8`, `out_key_reg: uint8`, `out_acc_reg: uint8`, `jump_target: uint16` | Iterates next group bucket into registers; jumps to emit loop. |
-| | **`OP_AGG_FINAL`** | `0x43` | `sum_reg: uint8`, `count_reg: uint8`, `out_reg: uint8`, `func_id: uint8` | Finalizes aggregate expressions (e.g. `sum / count` for `AVG`). |
-| **DML Mutation** | **`OP_DELETE_ROW`** | `0x50` | `cursor: uint8` | Deletes row via slot directory `memmove` compaction; removes index keys; increments `rows_affected`. |
-| | **`OP_UPDATE_FIELD`** | `0x51` | `cursor: uint8`, `col_idx: uint8`, `val_reg: uint8` | Executes 3-scenario update; updates secondary index; increments `rows_affected`. |
-| | **`OP_INSERT_ROW`** | `0x52` | `cursor: uint8`, `start_reg: uint8`, `num_cols: uint8` | Serializes registers to binary row; inserts into leaf; updates indexes; increments `rows_affected`. |
+| Range               | Opcode Name              | Byte (`uint8`) | Operands                                                                                       | Description & Behavior                                                                                     |
+| :------------------ | :----------------------- | :------------: | :--------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| **Cursor / Scan**   | **`OP_HALT`**            |     `0x00`     | None                                                                                           | Terminates `vm_step()`; sets status to `STATUS_DONE`.                                                      |
+|                     | **`OP_OPEN_CURSOR`**     |     `0x01`     | `cursor: uint8`, `root_page: uint32`                                                           | Binds cursor slot to root Page ID; checks cache residency; resets cell index to 0.                         |
+|                     | **`OP_REWIND`**          |     `0x02`     | `cursor: uint8`, `jump_target: uint16`                                                         | Positions cursor at first cell; jumps to `jump_target` if page has 0 cells.                                |
+|                     | **`OP_NEXT_ROW`**        |     `0x03`     | `cursor: uint8`, `jump_target: uint16`                                                         | Advances cell; follows `next_page_id`; yields `STATUS_PAGE_FAULT` on cache miss; jumps on EOF.             |
+|                     | **`OP_COLUMN_INT`**      |     `0x04`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads 32-bit/64-bit int from row into `r[reg]`; sets NULL if null.                                         |
+|                     | **`OP_COLUMN_FLOAT`**    |     `0x05`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads 64-bit IEEE float from row into `r[reg]`; sets NULL if null.                                         |
+|                     | **`OP_COLUMN_TEXT`**     |     `0x06`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads string byte offset & length from row into `r[reg]`.                                                  |
+|                     | **`OP_COLUMN_BLOB`**     |     `0x07`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads binary byte slice & length from row into `r[reg]`.                                                   |
+|                     | **`OP_LAST`**            |     `0x08`     | `cursor: uint8`, `jump_target: uint16`                                                         | Positions cursor at rightmost leaf cell for reverse B-tree scan.                                           |
+|                     | **`OP_PREV_ROW`**        |     `0x09`     | `cursor: uint8`, `jump_target: uint16`                                                         | Decrements cell; follows `prev_page_id`; yields `STATUS_PAGE_FAULT` on miss; jumps on BOF.                 |
+|                     | **`OP_COLUMN_UUID`**     |     `0x0A`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads 16-byte raw UUID binary payload into `r[reg]` (`type = 6`).                                          |
+|                     | **`OP_COLUMN_ULID`**     |     `0x0B`     | `cursor: uint8`, `col: uint8`, `reg: uint8`                                                    | Reads 16-byte raw ULID binary payload into `r[reg]` (`type = 7`).                                          |
+|                     | **`OP_OPEN_EPHEMERAL`**  |     `0x0C`     | `cursor: uint8`, `num_cols: uint8`                                                             | Initializes transient in-memory B-Tree cursor for subquery materialization.                                |
+| **Logic / Control** | **`OP_IS_NULL`**         |     `0x10`     | `cursor: uint8`, `col: uint8`, `jump_target: uint16`                                           | Tests row's Null-Bitmap bit; jumps if set (`NULL`).                                                        |
+|                     | **`OP_IS_NOT_NULL`**     |     `0x11`     | `cursor: uint8`, `col: uint8`, `jump_target: uint16`                                           | Tests row's Null-Bitmap bit; jumps if clear (not null).                                                    |
+|                     | **`OP_EQ`**              |     `0x12`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL equality: jumps if `r[A] == r[B]` (both non-null).                                                     |
+|                     | **`OP_NE`**              |     `0x13`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL inequality: jumps if `r[A] != r[B]` (both non-null).                                                   |
+|                     | **`OP_GT`**              |     `0x14`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL comparison: jumps if `r[A] > r[B]`.                                                                    |
+|                     | **`OP_GE`**              |     `0x15`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL comparison: jumps if `r[A] >= r[B]`.                                                                   |
+|                     | **`OP_LT`**              |     `0x16`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL comparison: jumps if `r[A] < r[B]`.                                                                    |
+|                     | **`OP_LE`**              |     `0x17`     | `regA: uint8`, `regB: uint8`, `jump_target: uint16`                                            | 3VL comparison: jumps if `r[A] <= r[B]`.                                                                   |
+|                     | **`OP_JUMP`**            |     `0x18`     | `jump_target: uint16`                                                                          | Unconditional jump to bytecode target address.                                                             |
+|                     | **`OP_STR_LIKE`**        |     `0x19`     | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16`                                        | 3VL SQL `LIKE`: jumps if `r[Str] LIKE r[Pat]` (`%` and `_` wildcards).                                     |
+|                     | **`OP_STR_NOT_LIKE`**    |     `0x1A`     | `regStr: uint8`, `regPat: uint8`, `jump_target: uint16`                                        | 3VL SQL `NOT LIKE`: jumps if `r[Str] NOT LIKE r[Pat]`.                                                     |
+|                     | **`OP_STR_CONTAINS`**    |     `0x1B`     | `regStr: uint8`, `regSub: uint8`, `jump_target: uint16`                                        | 3VL substring test: jumps if `r[Str]` contains `r[Sub]`.                                                   |
+|                     | **`OP_STR_STARTS_WITH`** |     `0x1C`     | `regStr: uint8`, `regPfx: uint8`, `jump_target: uint16`                                        | 3VL prefix test: jumps if `r[Str]` starts with `r[Pfx]`.                                                   |
+|                     | **`OP_STR_ENDS_WITH`**   |     `0x1D`     | `regStr: uint8`, `regSfx: uint8`, `jump_target: uint16`                                        | 3VL suffix test: jumps if `r[Str]` ends with `r[Sfx]`.                                                     |
+| **Data / Output**   | **`OP_LOAD_INT`**        |     `0x20`     | `reg: uint8`, `val: int32`                                                                     | Loads literal signed 32-bit int into `r[reg]`.                                                             |
+|                     | **`OP_LOAD_FLOAT`**      |     `0x21`     | `reg: uint8`, `val: float64`                                                                   | Loads literal 64-bit float into `r[reg]`.                                                                  |
+|                     | **`OP_LOAD_TEXT`**       |     `0x22`     | `reg: uint8`, `len: uint16`, `bytes: [len]`                                                    | Loads literal UTF-8 string into `r[reg]`.                                                                  |
+|                     | **`OP_LOAD_NULL`**       |     `0x23`     | `reg: uint8`                                                                                   | Sets `r[reg] = NULL` (`type = 0`).                                                                         |
+|                     | **`OP_EMIT_ROW`**        |     `0x24`     | `cursor: uint8`                                                                                | Streams raw serialized row from cursor into 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full.       |
+|                     | **`OP_RESULT_ROW`**      |     `0x25`     | `start_reg: uint8`, `num_cols: uint8`                                                          | Serializes projected registers into binary row in 64KB Result Buffer; yields `STATUS_BUFFER_FULL` if full. |
+|                     | **`OP_OFFSET`**          |     `0x26`     | `count_reg: uint8`, `jump_target: uint16`                                                      | If `r[count_reg] > 0`, decrements counter and jumps to skip emission.                                      |
+|                     | **`OP_LIMIT`**           |     `0x27`     | `count_reg: uint8`, `jump_target: uint16`                                                      | If `r[count_reg] == 0`, jumps to terminate query (`OP_HALT`); decrements counter.                          |
+|                     | **`OP_CALL_UDF`**        |     `0x28`     | `udf_id: uint16`, `start_arg_reg: uint8`, `num_args: uint8`, `out_reg: uint8`                  | Dispatches registered JS UDF function synchronously via Host bridge.                                       |
+|                     | **`OP_STR_LOWER`**       |     `0x29`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Converts string in `r[src]` to lowercase into `r[dest]`.                                                   |
+|                     | **`OP_STR_UPPER`**       |     `0x2A`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Converts string in `r[src]` to uppercase into `r[dest]`.                                                   |
+|                     | **`OP_STR_LENGTH`**      |     `0x2B`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Computes UTF-8 string character/byte length into `r[dest]` (int32).                                        |
+|                     | **`OP_STR_SUBSTR`**      |     `0x2C`     | `src_reg: uint8`, `start_reg: uint8`, `len_reg: uint8`, `dest_reg: uint8`                      | Extracts 1-indexed substring into `r[dest]`.                                                               |
+|                     | **`OP_STR_TRIM`**        |     `0x2D`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Strips leading and trailing ASCII whitespace into `r[dest]`.                                               |
+|                     | **`OP_MATH_ABS`**        |     `0x2E`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Computes absolute value `\|x\|` into `r[dest]`.                                                            |
+|                     | **`OP_MATH_ROUND`**      |     `0x2F`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Rounds float in `r[src]` to nearest integer in `r[dest]`.                                                  |
+| **Sorter / Math**   | **`OP_SORTER_OPEN`**     |     `0x30`     | `sorter_id: uint8`, `key_info_idx: uint8`                                                      | Initializes Sorter in Transient Query Arena with `KeyInfo`.                                                |
+|                     | **`OP_SORTER_INSERT`**   |     `0x31`     | `sorter_id: uint8`, `start_reg: uint8`, `num_keys: uint8`, `cursor: uint8`                     | Appends `SorterEntry` (16B) and sort keys in arena.                                                        |
+|                     | **`OP_SORTER_SORT`**     |     `0x32`     | `sorter_id: uint8`                                                                             | Executes in-place Introsort on `SorterEntry[]`.                                                            |
+|                     | **`OP_SORTER_NEXT`**     |     `0x33`     | `sorter_id: uint8`, `jump_target: uint16`                                                      | Yields next sorted row; jumps to emit loop; falls through on EOF.                                          |
+|                     | **`OP_MATH_FLOOR`**      |     `0x34`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Computes mathematical floor $\lfloor x \rfloor$ into `r[dest]`.                                            |
+|                     | **`OP_MATH_CEIL`**       |     `0x35`     | `src_reg: uint8`, `dest_reg: uint8`                                                            | Computes mathematical ceiling $\lceil x \rceil$ into `r[dest]`.                                            |
+|                     | **`OP_ADD`**             |     `0x36`     | `regA: uint8`, `regB: uint8`, `dest_reg: uint8`                                                | 3VL numeric addition `r[dest] = r[A] + r[B]`.                                                              |
+|                     | **`OP_SUB`**             |     `0x37`     | `regA: uint8`, `regB: uint8`, `dest_reg: uint8`                                                | 3VL numeric subtraction `r[dest] = r[A] - r[B]`.                                                           |
+|                     | **`OP_MUL`**             |     `0x38`     | `regA: uint8`, `regB: uint8`, `dest_reg: uint8`                                                | 3VL numeric multiplication `r[dest] = r[A] * r[B]`.                                                        |
+|                     | **`OP_DIV`**             |     `0x39`     | `regA: uint8`, `regB: uint8`, `dest_reg: uint8`                                                | 3VL numeric division `r[dest] = r[A] / r[B]` (NULL on zero).                                               |
+|                     | **`OP_MOD`**             |     `0x3A`     | `regA: uint8`, `regB: uint8`, `dest_reg: uint8`                                                | 3VL integer modulo `r[dest] = r[A] % r[B]`.                                                                |
+|                     | **`OP_ENTER_SUBQUERY`**  |     `0x3B`     | `frame_depth: uint8`                                                                           | Increments `ctx->depth`, initializing fresh register frame.                                                |
+|                     | **`OP_RETURN_SUBQUERY`** |     `0x3C`     | `src_reg: uint8`, `parent_dest_reg: uint8`                                                     | Copies result register to parent frame and decrements `ctx->depth`.                                        |
+| **Agg (GROUP BY)**  | **`OP_AGG_INIT`**        |     `0x40`     | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `mode: uint8`                      | Initializes Hash Table in arena (`0x00`) or Stream Aggregation (`0x01`).                                   |
+|                     | **`OP_AGG_STEP`**        |     `0x41`     | `agg_id: uint8`, `start_key_reg: uint8`, `num_keys: uint8`, `val_reg: uint8`, `func_id: uint8` | Updates `AggBucket` accumulators (`COUNT`, `SUM`, `MIN`, `MAX`).                                           |
+|                     | **`OP_AGG_NEXT`**        |     `0x42`     | `agg_id: uint8`, `out_key_reg: uint8`, `out_acc_reg: uint8`, `jump_target: uint16`             | Iterates next group bucket into registers; jumps to emit loop.                                             |
+|                     | **`OP_AGG_FINAL`**       |     `0x43`     | `sum_reg: uint8`, `count_reg: uint8`, `out_reg: uint8`, `func_id: uint8`                       | Finalizes aggregate expressions (e.g. `sum / count` for `AVG`).                                            |
+| **DML Mutation**    | **`OP_DELETE_ROW`**      |     `0x50`     | `cursor: uint8`                                                                                | Deletes row via slot directory `memmove` compaction; removes index keys; increments `rows_affected`.       |
+|                     | **`OP_UPDATE_FIELD`**    |     `0x51`     | `cursor: uint8`, `col_idx: uint8`, `val_reg: uint8`                                            | Executes 3-scenario update; updates secondary index; increments `rows_affected`.                           |
+|                     | **`OP_INSERT_ROW`**      |     `0x52`     | `cursor: uint8`, `start_reg: uint8`, `num_cols: uint8`                                         | Serializes registers to binary row; inserts into leaf; updates indexes; increments `rows_affected`.        |
 
 ### 2.1 The Register File & Tagged Union Architecture
 
@@ -272,6 +288,7 @@ typedef struct {
 ```
 
 #### Register Characteristics & Supported Types:
+
 1. **Zero-Heap Numeric Storage:** Numbers reside directly in the `val` union (`val.i32`, `val.i64`, `val.f64`). Numeric comparisons execute in pure CPU registers without heap allocations or JS wrapper objects.
 2. **Zero-Copy TEXT & BLOB References:** For variable-length data, `type = 4 (TEXT)` or `5 (BLOB)` records the byte length in `len` and points `str_offset` directly to the raw UTF-8 / binary bytes residing inside the slotted page cache slot or query arena. String comparisons read directly from shared memory via `memcmp` without copying string bytes into registers.
 3. **Fixed-Length Binary UUID & ULID Types:** `type = 6 (UUID)` and `type = 7 (ULID)` represent binary 16-byte identifiers (`len = 16`). `str_offset` points directly to the 16 bytes in page storage or literal arena memory. Lexicographical comparisons operate directly via 16-byte `memcmp`.
@@ -295,7 +312,9 @@ typedef struct {
 ```
 
 #### Slot Resolution Invariant:
+
 Whenever an instruction navigates to a `page_id` (`OP_OPEN_CURSOR`, `OP_NEXT_ROW`, `OP_PREV_ROW`):
+
 1. The VM probes the hash table using `buf_pool_get_resident_slot(page_id)`.
 2. **Hit:** `slot_idx` is updated in the cursor, and cell access proceeds immediately at `slot_idx * PAGE_SIZE`.
 3. **Miss:** The VM sets `frame->fault_page_id = page_id`, sets `frame->status = STATUS_PAGE_FAULT`, and immediately returns without advancing `pc`.
@@ -304,22 +323,23 @@ Whenever an instruction navigates to a `page_id` (`OP_OPEN_CURSOR`, `OP_NEXT_ROW
 
 The status field in each `VmFrame` communicates execution state between Core and Host:
 
-| Code (`uint32`) | Identifier | Meaning | Host Action Required |
-| :---: | :--- | :--- | :--- |
-| `0` | **`STATUS_RUNNING`** | VM instruction execution is currently in progress. | Internal VM state. |
-| `1` | **`STATUS_DONE`** | Query completed successfully. | Read rows/mutations, release locks. |
-| `2` | **`STATUS_PAGE_FAULT`** | Missing page encountered during scan/seek. | Read `fault_page_id`, load from VFS into cache slot, re-invoke `vm_step()`. |
-| `3` | **`STATUS_BUFFER_FULL`** | 64KB Result Buffer is full of serialized rows. | Drain rows to JS objects, reset `result_offset = 0`, re-invoke `vm_step()`. |
-| `4` | **`STATUS_ERROR`** | Internal engine execution error occurred. | Inspect error code, reject query Promise. |
-| `5` | **`STATUS_TIMEOUT`** | Instruction cycle limit (10,000,000 cycles) exceeded. | Abort query with `QueryTimeoutError`. |
-| `6` | **`STATUS_ERR_ARENA_EXHAUSTED`** | Transient Query Arena exceeded `maxQueryMemory` (16MB). | Reject query with `QueryArenaExhaustedError`. |
-| `7` | **`STATUS_ERR_INVALID_BYTECODE`** | Corrupt opcode or jump target out-of-bounds. | Abort query with `InvalidBytecodeError`. |
+| Code (`uint32`) | Identifier                        | Meaning                                                 | Host Action Required                                                        |
+| :-------------: | :-------------------------------- | :------------------------------------------------------ | :-------------------------------------------------------------------------- |
+|       `0`       | **`STATUS_RUNNING`**              | VM instruction execution is currently in progress.      | Internal VM state.                                                          |
+|       `1`       | **`STATUS_DONE`**                 | Query completed successfully.                           | Read rows/mutations, release locks.                                         |
+|       `2`       | **`STATUS_PAGE_FAULT`**           | Missing page encountered during scan/seek.              | Read `fault_page_id`, load from VFS into cache slot, re-invoke `vm_step()`. |
+|       `3`       | **`STATUS_BUFFER_FULL`**          | 64KB Result Buffer is full of serialized rows.          | Drain rows to JS objects, reset `result_offset = 0`, re-invoke `vm_step()`. |
+|       `4`       | **`STATUS_ERROR`**                | Internal engine execution error occurred.               | Inspect error code, reject query Promise.                                   |
+|       `5`       | **`STATUS_TIMEOUT`**              | Instruction cycle limit (10,000,000 cycles) exceeded.   | Abort query with `QueryTimeoutError`.                                       |
+|       `6`       | **`STATUS_ERR_ARENA_EXHAUSTED`**  | Transient Query Arena exceeded `maxQueryMemory` (16MB). | Reject query with `QueryArenaExhaustedError`.                               |
+|       `7`       | **`STATUS_ERR_INVALID_BYTECODE`** | Corrupt opcode or jump target out-of-bounds.            | Abort query with `InvalidBytecodeError`.                                    |
 
 ### 2.4 Native String Operations & Pattern Matching
 
 To eliminate Wasm ⟷ JS context switches and prevent Garbage Collection churn during table scans, string filters and transformations execute directly in native C/Wasm with zero JS object allocations.
 
 #### A. SQL `LIKE` Pattern Matching (`OP_STR_LIKE`, `OP_STR_NOT_LIKE`)
+
 - **Wildcard Semantics:**
   - `%` matches any sequence of zero or more characters.
   - `_` matches exactly one character.
@@ -328,10 +348,12 @@ To eliminate Wasm ⟷ JS context switches and prevent Garbage Collection churn d
 - **3VL Invariant:** If either `r[regStr]` or `r[regPat]` is `NULL`, the result evaluates to `UNKNOWN` $\to$ falls through without jumping.
 
 #### B. Substring & Prefix/Suffix Branching (`OP_STR_CONTAINS`, `OP_STR_STARTS_WITH`, `OP_STR_ENDS_WITH`)
+
 - Operates directly over evaluation registers `r[regStr]` and `r[regArg]`.
 - Jumps to `jump_target` on match; falls through on mismatch or when either operand is `NULL`.
 
 #### C. Scalar String Transformations (`OP_STR_LOWER`, `OP_STR_UPPER`, `OP_STR_LENGTH`, `OP_STR_SUBSTR`)
+
 - **`OP_STR_LOWER` / `OP_STR_UPPER`:** In-place or destination register case transformation.
 - **`OP_STR_LENGTH`:** Computes UTF-8 character length into destination register as an `int32`.
 - **`OP_STR_SUBSTR`:** Extracts a 1-indexed SQL substring `SUBSTR(str, start, length)` into `dest_reg`. If `r[str]` or `r[start]` is `NULL`, `dest_reg` is set to `NULL`.
@@ -343,15 +365,17 @@ To eliminate Wasm ⟷ JS context switches and prevent Garbage Collection churn d
 In SQL and WebDB, `NULL` represents missing or unknown data. Register comparison opcodes (`OP_EQ`, `OP_NE`, `OP_GT`, `OP_GE`, `OP_LT`, `OP_LE`) strictly adhere to **Three-Valued Logic**:
 
 ### 3.1 Truth Table for Register Comparisons:
-| Register A (`r[A]`) | Register B (`r[B]`) | Comparison (`=`, `!=`, `<`, `>`) | 3VL Result | Jump Behavior |
-| :---: | :---: | :---: | :---: | :--- |
-| `10` | `20` | `r[A] < r[B]` | `TRUE` | **Jumps** to `jump_target` |
-| `20` | `10` | `r[A] < r[B]` | `FALSE` | Falls through |
-| `NULL` | `20` | Any operator | **`UNKNOWN`** | **Falls through** (does NOT jump) |
-| `20` | `NULL` | Any operator | **`UNKNOWN`** | **Falls through** (does NOT jump) |
-| `NULL` | `NULL` | `=` or `!=` | **`UNKNOWN`** | **Falls through** (does NOT jump) |
+
+| Register A (`r[A]`) | Register B (`r[B]`) | Comparison (`=`, `!=`, `<`, `>`) |  3VL Result   | Jump Behavior                     |
+| :-----------------: | :-----------------: | :------------------------------: | :-----------: | :-------------------------------- |
+|        `10`         |        `20`         |          `r[A] < r[B]`           |    `TRUE`     | **Jumps** to `jump_target`        |
+|        `20`         |        `10`         |          `r[A] < r[B]`           |    `FALSE`    | Falls through                     |
+|       `NULL`        |        `20`         |           Any operator           | **`UNKNOWN`** | **Falls through** (does NOT jump) |
+|        `20`         |       `NULL`        |           Any operator           | **`UNKNOWN`** | **Falls through** (does NOT jump) |
+|       `NULL`        |       `NULL`        |           `=` or `!=`            | **`UNKNOWN`** | **Falls through** (does NOT jump) |
 
 ### 3.2 Distinctness (`IS` vs `=`)
+
 - For `IS NULL` and `IS NOT NULL`, the compiler emits dedicated opcodes `OP_IS_NULL` and `OP_IS_NOT_NULL` that test the row's binary Null-Bitmap directly without register comparison traps.
 - SQLite `a IS b` distinctness comparison treats two `NULL` values as matching (`TRUE`).
 
@@ -376,18 +400,23 @@ The Bytecode VM does not materialize whole result sets in memory. Instead, it op
 ```
 
 ### 4.1 Record Framing Format (`0x408080..0x41807F`, 64 KB)
+
 Rows are packed contiguously into the Output Result Buffer using length-prefixed binary framing:
+
 - `[record_length: uint16]` (2 bytes, Little-Endian)
 - `[record_bytes: uint8[record_length]]` (raw serialized binary row payload)
 
 ### 4.2 Emission Opcodes
+
 1. **`OP_EMIT_ROW (0x24, cursor: uint8)`**:
    Copies the raw serialized record currently focused under `cursor` directly from its page cache slot into the Result Buffer.
 2. **`OP_RESULT_ROW (0x25, start_reg: uint8, num_cols: uint8)`**:
    Serializes `num_cols` projected registers (`start_reg .. start_reg + num_cols - 1`) into a dynamic binary row with Null-Bitmap and variable-offset table directly into the Result Buffer.
 
 ### 4.3 Buffer Full Invariant
+
 If adding the next row requires `result_offset + 2 + record_len > 65,536` bytes:
+
 - The VM leaves `frame->pc` positioned at the emission instruction (or current loop cycle).
 - The VM sets `frame->status = STATUS_BUFFER_FULL`.
 - `vm_step()` returns `STATUS_BUFFER_FULL`.
@@ -406,7 +435,9 @@ The Transient Query Arena (`0x430000..Ceiling`, default 16 MB, configurable via 
 When grouping by unindexed expressions or arbitrary column subsets, WebDB accumulates group buckets in an **Open-Addressing Hash Table** allocated directly inside the Transient Query Arena.
 
 #### A. AggBucket Layout (40 Bytes, 8-Byte Aligned)
+
 Each distinct group occupies a contiguous 40-byte bucket:
+
 ```c
 typedef struct {
     uint32_t hash;          // FNV-1a 32-bit hash of grouping keys (0 = EMPTY bucket marker)
@@ -421,6 +452,7 @@ typedef struct {
 ```
 
 #### B. Hash Table Lifecycle & Dynamic Resizing
+
 1. **`OP_AGG_INIT (0x40)`:**
    - Allocates an initial array of **1,024 `AggBucket`s** ($1024 \times 40\text{ B} = 40.96\text{ KB}$) at `ctx->arena_offset`.
    - Clears bucket hashes to `0` (`EMPTY`).
@@ -446,12 +478,14 @@ typedef struct {
    - Emits rows into the 64KB Result Buffer and jumps to the emission loop until all buckets are emitted.
 
 #### C. SQLite-Compatible Grouping & NULL Semantics
-* **`NULL` Group Keys:** SQL treats `NULL` values in grouping columns as distinct from non-nulls, but identical to each other. All rows with `NULL` group keys collapse into a single group bucket.
-* **Max Grouping Columns:** Grouping supports at most **8 columns** per query. Exceeding 8 columns throws `TooManyGroupByColumnsError`.
+
+- **`NULL` Group Keys:** SQL treats `NULL` values in grouping columns as distinct from non-nulls, but identical to each other. All rows with `NULL` group keys collapse into a single group bucket.
+- **Max Grouping Columns:** Grouping supports at most **8 columns** per query. Exceeding 8 columns throws `TooManyGroupByColumnsError`.
 
 ### 5.2 Stream Aggregation Optimization ($O(1)$ Memory)
 
 When grouping by an indexed column (or after data has been sorted via `OP_SORTER_SORT`), the compiler emits a **Stream Aggregation loop** in place of a hash table:
+
 1. Emits `OP_AGG_INIT` in stream mode (`mode = 0x01`), bypassing hash table allocation entirely.
 2. The VM maintains only a single group's accumulator registers in memory.
 3. As the cursor scans ordered rows:
@@ -464,7 +498,9 @@ When grouping by an indexed column (or after data has been sorted via `OP_SORTER
 When a query contains an `ORDER BY` clause that cannot be satisfied by an existing B+Tree index, WebDB executes a full in-memory Introsort inside the Transient Query Arena.
 
 #### A. KeyInfo Descriptor & Hard 8-Column Sort Ceiling
+
 Sorting supports multiple columns with independent directions and SQLite NULL collations:
+
 ```c
 typedef struct {
     uint8_t num_keys;        // Number of sort keys: 1..8 (STRICT MAXIMUM: 8 columns)
@@ -479,7 +515,9 @@ typedef struct {
 > Compiling a query with $> 8$ sort keys throws `TooManyOrderByColumnsError`. This guarantees that `KeyInfo` fits in a compact 18-byte fixed struct and multi-key comparison loops remain unrolled and SIMD/cache-friendly.
 
 #### B. SorterEntry Layout (16 Bytes)
+
 Each row passing query filters is packed into the arena as a 16-byte `SorterEntry`, followed by its extracted key registers:
+
 ```c
 typedef struct {
     uint32_t keys_offset;    // Arena byte offset to Register keys[num_keys]
@@ -490,6 +528,7 @@ typedef struct {
 ```
 
 #### C. Sorter Execution Lifecycle
+
 1. **`OP_SORTER_OPEN (0x30)`:** Allocates a contiguous dynamic array of `SorterEntry` at `ctx->arena_offset`.
 2. **`OP_SORTER_INSERT (0x31)`:**
    - Reads `num_keys` values from registers `start_reg .. start_reg + num_keys - 1`.
@@ -512,6 +551,7 @@ typedef struct {
 ### 5.4 Index-Driven Reverse Walk (`ORDER BY col DESC`)
 
 When sorting on a single indexed column in descending order (`orderBy(indexed_col, 'desc')`), the compiler avoids allocating sorter buffers entirely:
+
 1. Emits **`OP_LAST (0x08)`** on the secondary index cursor, positioning the cursor directly at the rightmost leaf cell of the B+Tree.
 2. Emits **`OP_PREV_ROW (0x09)`** in place of `OP_NEXT_ROW`, walking leftward across leaf pages via page sibling pointers (`prev_page_id`).
 3. Streams rows in reverse in $O(1)$ memory without touching the Transient Query Arena.
@@ -521,12 +561,14 @@ When sorting on a single indexed column in descending order (`orderBy(indexed_co
 WebDB executes all data modification operations through the VDBE step loop using dedicated mutation opcodes:
 
 #### A. Tracking Affected Rows (`ctx->frames[ctx->depth].rows_affected`)
+
 - Each `VmFrame` embeds `uint32_t rows_affected` at byte offset `24..27` within the frame (absolute address `0x4050A0` for root frame 0: `0x405080 + 8 + 24`).
 - Initialized to `0` at query execution start.
 - Incremented every time a row is modified or deleted: `ctx->frames[ctx->depth].rows_affected++`.
 - When `OP_HALT` is reached, the host retrieves `{ rowsAffected: ctx->frames[ctx->depth].rows_affected }`.
 
 #### B. `OP_DELETE_ROW (0x50)` Execution
+
 1. **Physical Deletion & Compaction:** Invokes slotted-page cell deletion on the active cell pointed to by `cursor` using the contiguous slot directory `memmove` compaction defined in `01_storage_memory_arch.md` §4.2.
 2. **Secondary Index Cleanup:** If the table has secondary indexes, extracts the indexed values from the target row and deletes the corresponding `(indexed_value, rowid)` leaf cells from the index B+Tree (`0x0A`).
 3. **Dirty Page Tracking:** Sets the dirty bit for the current cache slot in `dirty_mask`.
@@ -534,6 +576,7 @@ WebDB executes all data modification operations through the VDBE step loop using
 5. **Counter:** Increments `ctx->frames[ctx->depth].rows_affected++`.
 
 #### C. `OP_UPDATE_FIELD (0x51)` Execution
+
 1. **Target Inspection:** Reads `cursor`, `col_idx`, and updated value from `r[val_reg]`.
 2. **Index Maintenance:** If `col_idx` is indexed, removes the old `(old_val, rowid)` entry from the secondary index B+Tree and inserts `(new_val, rowid)`.
 3. **3-Scenario Slotted Page Update:**
@@ -544,6 +587,7 @@ WebDB executes all data modification operations through the VDBE step loop using
 5. **Counter:** Increments `ctx->frames[ctx->depth].rows_affected++`.
 
 #### D. `OP_INSERT_ROW (0x52)` Execution
+
 1. **Record Serialization:** Packs `num_cols` registers (`start_reg .. start_reg + num_cols - 1`) into a binary row record with dynamic Null-Bitmap and var-offset table.
 2. **Row Size Guard:** Enforces the 2,048-byte hard ceiling (`RowSizeLimitExceededError`).
 3. **Slotted Page Insertion:** Inserts record into the table B+Tree leaf under `cursor`. If free space is insufficient, triggers B+Tree leaf split (`0x0D`), creating a new page and updating parent interior nodes (`0x05`).
@@ -567,7 +611,9 @@ Projected Cols:  OP_OPEN_CURSOR -> OP_REWIND -> [Loop: OP_COLUMN_xxx -> OP_RESUL
 ```
 
 #### A. Full Table Scan (`SELECT *`)
+
 When all columns are requested without transformation, the engine streams records directly from cache slots without unpacking fields into registers:
+
 ```
 addr  opcode           p1  p2   p3   comment
 0000  OP_OPEN_CURSOR   0   1    0    ; Open Cursor 0 on root page 1
@@ -578,7 +624,9 @@ addr  opcode           p1  p2   p3   comment
 ```
 
 #### B. Column Projection (`SELECT id, name`)
+
 When specific columns are selected, the compiler extracts fields into contiguous registers and emits them via `OP_RESULT_ROW`:
+
 ```
 addr  opcode           p1  p2   p3   comment
 0000  OP_OPEN_CURSOR   0   1    0    ; Open Cursor 0 on table root page
@@ -597,7 +645,9 @@ addr  opcode           p1  p2   p3   comment
 `WHERE` conditions compile into register load and comparison opcodes positioned immediately after cursor cell positioning, guarding the emission instruction.
 
 #### A. Single Predicate (`WHERE age > 21`)
+
 Non-matching rows jump directly to the loop advance (`OP_NEXT_ROW`), skipping projection:
+
 ```
 addr  opcode           p1  p2   p3   comment
 0008  OP_COLUMN_INT    0   2    1    ; r[1] = col 2 (age)
@@ -682,7 +732,9 @@ Depending on whether a `LIMIT` clause is present and within bounds, the engine a
 ```
 
 #### A. Full In-Arena Sorter Pipeline (No LIMIT or Large Limits)
+
 When sorting an unbounded result set or when `requested_k > MAX_TOPK_HEAP_LIMIT`:
+
 ```
 Phase 1 (Collect): OP_SORTER_OPEN -> [Scan: Read Keys -> OP_SORTER_INSERT -> OP_NEXT_ROW]
                                                     │ (EOF reached)
@@ -690,6 +742,7 @@ Phase 2 (Sort):    OP_SORTER_SORT (In-place Introsort on SorterEntry array, O(N 
                                                     │
 Phase 3 (Stream):  [Emit Loop: OP_SORTER_NEXT -> OP_RESULT_ROW / OP_EMIT_ROW] -> OP_HALT
 ```
+
 - **Phase 1 (Collect):** Every row matching the query filters is copied into the Transient Query Arena as a `SorterEntry` with its sort keys.
 - **Phase 2 (Sort):** When the table scan finishes, `OP_SORTER_SORT` runs an in-place Introsort (quicksort switching to heapsort on deep recursion) over all $N$ entries in $O(N \log N)$ time.
 - **Phase 3 (Stream):** `OP_SORTER_NEXT` yields sorted rows sequentially into the 64KB Result Buffer.
@@ -724,8 +777,8 @@ Sorting $1,000,000$ rows simply to return the top $10$ rows is an immense waste 
 
 2. **The "Worst-Element" Root Invariant:**
    The heap is organized as a **Max-Heap** (relative to the desired sort order). The root element (`sorter.entries[0]`) always stores the **worst candidate currently qualifying for the top $K$**:
-   - For an `ASC` query (`ORDER BY score ASC LIMIT 10`), the root is the *maximum* score among the current top 10.
-   - For a `DESC` query (`ORDER BY score DESC LIMIT 10`), the root is the *minimum* score among the current top 10.
+   - For an `ASC` query (`ORDER BY score ASC LIMIT 10`), the root is the _maximum_ score among the current top 10.
+   - For a `DESC` query (`ORDER BY score DESC LIMIT 10`), the root is the _minimum_ score among the current top 10.
 
 3. **$O(1)$ Early Discard:**
    Once $K$ rows have accumulated in the heap, any incoming candidate row is compared against the root (`entries[0]`):
@@ -747,6 +800,7 @@ export const MAX_TOPK_HEAP_LIMIT = 4096;
 
 > [!IMPORTANT]
 > **Why `MAX_TOPK_HEAP_LIMIT = 4096`?**
+>
 > 1. **Cache Locality vs Tree Depth:**
 >    For $K \le 4096$, the binary heap tree has depth $\le 12$ ($\log_2(4096) = 12$). Every sift-down requires at most 12 comparisons, and the entire `SorterEntry` array ($4096 \times 16\text{ B} = 64\text{ KB}$) fits entirely within the CPU's **L1/L2 cache**.
 > 2. **Branch Misprediction & Quicksort Crossover:**
@@ -757,6 +811,7 @@ export const MAX_TOPK_HEAP_LIMIT = 4096;
 ---
 
 #### D. Bytecode Walkthrough: `ORDER BY salary DESC LIMIT 5`
+
 ```
 addr  opcode           p1  p2   p3   comment
 0000  OP_SORTER_OPEN   0   0    0    ; Open Sorter 0 with KeyInfo 0 (limit=5, max_k=5)
@@ -780,6 +835,7 @@ addr  opcode           p1  p2   p3   comment
 ### 6.5 `LIMIT` & `OFFSET` Pagination
 
 Pagination uses hardware-style countdown registers initialized before the scan loop:
+
 - **`OP_OFFSET (0x26, count_reg: uint8, jump_target: uint16)`**: If `r[count_reg] > 0`, decrements `r[count_reg]` and jumps to `jump_target` (bypassing `OP_RESULT_ROW` / `OP_EMIT_ROW`).
 - **`OP_LIMIT (0x27, count_reg: uint8, jump_target: uint16)`**: Checks if `r[count_reg] == 0`. If 0, jumps to `jump_target` (which points to `OP_HALT`), terminating the query early. Otherwise decrements `r[count_reg]` and proceeds to emission.
 
@@ -808,22 +864,22 @@ To guarantee optimal performance and seamless composability across subqueries an
 
 The VM natively implements standard SQL functions over registers:
 
-| Category | Function | Opcode | Operands | Register Transformation |
-| :--- | :--- | :---: | :--- | :--- |
-| **String** | `UPPER(s)` | `OP_STR_UPPER` (`0x2A`) | `src, dest` | `r[dest] = UPPER(r[src])` |
-| | `LOWER(s)` | `OP_STR_LOWER` (`0x29`) | `src, dest` | `r[dest] = LOWER(r[src])` |
-| | `LENGTH(s)` | `OP_STR_LENGTH` (`0x2B`) | `src, dest` | `r[dest] = character_length(r[src])` |
-| | `SUBSTR(s, p, l)` | `OP_STR_SUBSTR` (`0x2C`) | `src, start, len, dest` | `r[dest] = substring(r[src], r[start], r[len])` |
-| | `TRIM(s)` | `OP_STR_TRIM` (`0x2D`) | `src, dest` | `r[dest] = trim_whitespace(r[src])` |
-| **Math** | `ABS(x)` | `OP_MATH_ABS` (`0x2E`) | `src, dest` | `r[dest] = \|r[src]\|` |
-| | `ROUND(x)` | `OP_MATH_ROUND` (`0x2F`) | `src, dest` | `r[dest] = round(r[src])` |
-| | `FLOOR(x)` | `OP_MATH_FLOOR` (`0x34`) | `src, dest` | `r[dest] = floor(r[src])` |
-| | `CEIL(x)` | `OP_MATH_CEIL` (`0x35`) | `src, dest` | `r[dest] = ceil(r[src])` |
-| **Arithmetic**| `+` | `OP_ADD` (`0x36`) | `regA, regB, dest` | `r[dest] = r[A] + r[B]` |
-| | `-` | `OP_SUB` (`0x37`) | `regA, regB, dest` | `r[dest] = r[A] - r[B]` |
-| | `*` | `OP_MUL` (`0x38`) | `regA, regB, dest` | `r[dest] = r[A] * r[B]` |
-| | `/` | `OP_DIV` (`0x39`) | `regA, regB, dest` | `r[dest] = r[A] / r[B]` (NULL if `r[B] == 0`) |
-| | `%` | `OP_MOD` (`0x3A`) | `regA, regB, dest` | `r[dest] = r[A] % r[B]` |
+| Category       | Function          |          Opcode          | Operands                | Register Transformation                         |
+| :------------- | :---------------- | :----------------------: | :---------------------- | :---------------------------------------------- |
+| **String**     | `UPPER(s)`        | `OP_STR_UPPER` (`0x2A`)  | `src, dest`             | `r[dest] = UPPER(r[src])`                       |
+|                | `LOWER(s)`        | `OP_STR_LOWER` (`0x29`)  | `src, dest`             | `r[dest] = LOWER(r[src])`                       |
+|                | `LENGTH(s)`       | `OP_STR_LENGTH` (`0x2B`) | `src, dest`             | `r[dest] = character_length(r[src])`            |
+|                | `SUBSTR(s, p, l)` | `OP_STR_SUBSTR` (`0x2C`) | `src, start, len, dest` | `r[dest] = substring(r[src], r[start], r[len])` |
+|                | `TRIM(s)`         |  `OP_STR_TRIM` (`0x2D`)  | `src, dest`             | `r[dest] = trim_whitespace(r[src])`             |
+| **Math**       | `ABS(x)`          |  `OP_MATH_ABS` (`0x2E`)  | `src, dest`             | `r[dest] = \|r[src]\|`                          |
+|                | `ROUND(x)`        | `OP_MATH_ROUND` (`0x2F`) | `src, dest`             | `r[dest] = round(r[src])`                       |
+|                | `FLOOR(x)`        | `OP_MATH_FLOOR` (`0x34`) | `src, dest`             | `r[dest] = floor(r[src])`                       |
+|                | `CEIL(x)`         | `OP_MATH_CEIL` (`0x35`)  | `src, dest`             | `r[dest] = ceil(r[src])`                        |
+| **Arithmetic** | `+`               |    `OP_ADD` (`0x36`)     | `regA, regB, dest`      | `r[dest] = r[A] + r[B]`                         |
+|                | `-`               |    `OP_SUB` (`0x37`)     | `regA, regB, dest`      | `r[dest] = r[A] - r[B]`                         |
+|                | `*`               |    `OP_MUL` (`0x38`)     | `regA, regB, dest`      | `r[dest] = r[A] * r[B]`                         |
+|                | `/`               |    `OP_DIV` (`0x39`)     | `regA, regB, dest`      | `r[dest] = r[A] / r[B]` (NULL if `r[B] == 0`)   |
+|                | `%`               |    `OP_MOD` (`0x3A`)     | `regA, regB, dest`      | `r[dest] = r[A] % r[B]`                         |
 
 ---
 
@@ -832,11 +888,15 @@ The VM natively implements standard SQL functions over registers:
 Because scalar functions operate on generic register indices, the compiler can place them in any clause pipeline:
 
 #### 1. In `SELECT` (Projections)
+
 Computes output fields into result registers immediately prior to row emission:
+
 ```sql
 SELECT upper(name), floor(score) FROM students;
 ```
+
 Bytecode:
+
 ```
 OP_COLUMN_TEXT  0  1  1       ; r[1] = students.name
 OP_COLUMN_FLOAT 0  2  2       ; r[2] = students.score
@@ -846,11 +906,15 @@ OP_RESULT_ROW   3  2  0       ; Emit [r[3], r[4]]
 ```
 
 #### 2. In `WHERE` (Filter Predicates)
+
 Computes dynamic values before executing jump comparisons:
+
 ```sql
 WHERE lower(email) = 'user@example.com' AND abs(balance) > 100
 ```
+
 Bytecode:
+
 ```
 OP_COLUMN_TEXT  0  2  1       ; r[1] = email
 OP_STR_LOWER    1  2  0       ; r[2] = lower(r[1])
@@ -863,11 +927,15 @@ OP_LE           5  6  skip    ; If abs(balance) <= 100, skip row
 ```
 
 #### 3. In `ORDER BY` (Sorting Expressions)
+
 Computes sorting keys into temporary registers before inserting into the Sorter:
+
 ```sql
 ORDER BY length(name) DESC, round(score) ASC
 ```
+
 Bytecode:
+
 ```
 OP_COLUMN_TEXT  0  1  1       ; r[1] = name
 OP_STR_LENGTH   1  2  0       ; r[2] = length(name)  [Key 0]
@@ -877,11 +945,15 @@ OP_SORTER_INSERT 0 2  2  0    ; Insert sorter entry with 2 keys starting at r[2]
 ```
 
 #### 4. In `GROUP BY` (Grouping Expressions)
+
 Groups rows by computed expressions instead of raw columns:
+
 ```sql
 GROUP BY substr(created_at, 1, 7)  -- Group by Year-Month "YYYY-MM"
 ```
+
 Bytecode:
+
 ```
 OP_COLUMN_TEXT  0  3  1       ; r[1] = created_at
 OP_LOAD_INT     2  1  0       ; r[2] = 1 (start)
@@ -891,11 +963,15 @@ OP_AGG_STEP     0  4  1  ...  ; Accumulate bucket under key r[4]
 ```
 
 #### 5. In `HAVING` (Post-Aggregation Filtering)
+
 Evaluates expressions on finalized aggregate buckets before emitting:
+
 ```sql
 HAVING count(*) * 10 > 500
 ```
+
 Bytecode:
+
 ```
 OP_AGG_NEXT     0  1  2  ...  ; r[2] = count(*)
 OP_LOAD_INT     3  10 0       ; r[3] = 10
@@ -911,15 +987,18 @@ OP_LE           4  5  skip_bucket ; If count * 10 <= 500, skip bucket
 WebDB supports custom JavaScript and TypeScript functions via `OP_CALL_UDF (0x28)`.
 
 #### A. Registration API
+
 Applications register custom functions on the `WebDB` instance:
+
 ```typescript
-db.registerFunction('hash_token', {
+db.registerFunction("hash_token", {
   deterministic: true,
   call: (val: string, row?: DbRow) => sha256(val),
 });
 ```
 
 #### B. Execution Bridge (`OP_CALL_UDF`)
+
 ```
 Core (Wasm / C)                                   Host (JavaScript)
 ───────────────                                   ─────────────────
@@ -934,6 +1013,7 @@ Advances pc += 5 to next opcode
 ```
 
 #### C. Determinism & Optimizations
+
 - **Deterministic Functions (`deterministic: true`)**: If all arguments to a deterministic function are literals (e.g. `hash_token('static_salt')`), the query compiler evaluates the function once at **compile time** (constant folding) and emits `OP_LOAD_TEXT` instead of invoking `OP_CALL_UDF` on every row during table scan.
 - **Non-Deterministic Functions (e.g. `random()`, `now()`)**: Must execute on every row iteration.
 
@@ -943,26 +1023,35 @@ Advances pc += 5 to next opcode
 
 > [!NOTE]
 > **V1 Scope Clarification:**
-> **Schema-level generated columns** (`CREATE TABLE ... col AS (expr) STORED / VIRTUAL`) are **not supported in V1** and are documented in [`docs/plans/future_extensions_roadmap.md`](file:///Users/ahmad/h/webdb/docs/plans/future_extensions_roadmap.md#L467-L560) §10.
+> **Schema-level generated columns** (`CREATE TABLE ... col AS (expr) STORED / VIRTUAL`) are **not supported in V1** and are documented in [`docs/plans/future_extensions_roadmap.md`](./future_extensions_roadmap.md#L467-L560) §10.
 > In V1, all computed columns are **query-level dynamic expressions** evaluated on the fly in the VDBE register pipeline.
 
 Query-level computed expressions allow queries to transform, combine, and project dynamic values (e.g., `score * 2 AS double_score`, `upper(name) AS upper_name`, `floor(price * 0.9) AS discounted_price`).
 
 #### A. Expression Construction & Unified AST (`ExprNode`)
-Expressions are authored in two equivalent, supported syntaxes (documented in [`docs/plans/query_builder_api_and_grammar.md`](file:///Users/ahmad/h/webdb/docs/plans/query_builder_api_and_grammar.md#L274-L364) §4.4):
+
+Expressions are authored in two equivalent, supported syntaxes (documented in [`docs/plans/query_builder_api_and_grammar.md`](./query_builder_api_and_grammar.md#L274-L364) §4.4):
+
 1. **Standalone Helper Functions (Drizzle style)**: `fn.floor(col('score').mul(2).add(10)).as('adjusted_score')`
 2. **SQL String Expressions**: `'floor(score * 2 + 10) as adjusted_score'` (parsed via Pratt micro-parser)
 
 Both syntaxes compile into the same unified internal AST node (`ExprNode`):
+
 ```typescript
 export type ExprNode =
-  | { type: 'col'; name: string }
-  | { type: 'literal'; value: number | string | boolean | null }
-  | { type: 'binary'; op: '+' | '-' | '*' | '/' | '%'; left: ExprNode; right: ExprNode }
-  | { type: 'fn'; name: string; args: ExprNode[] };
+  | { type: "col"; name: string }
+  | { type: "literal"; value: number | string | boolean | null }
+  | {
+      type: "binary";
+      op: "+" | "-" | "*" | "/" | "%";
+      left: ExprNode;
+      right: ExprNode;
+    }
+  | { type: "fn"; name: string; args: ExprNode[] };
 ```
 
 #### B. Expression Tree Compilation & Register Life Cycle
+
 The VDBE compiler decomposes the `ExprNode` AST into a post-order sequence of binary and unary register opcodes:
 
 ```
@@ -977,6 +1066,7 @@ Expression: floor(score * 2 + 10) AS adjusted_score
 ```
 
 Bytecode emitted:
+
 ```
 OP_COLUMN_FLOAT  0  2  0    ; r[0] = score
 OP_LOAD_INT      1  2  0    ; r[1] = 2
@@ -987,6 +1077,7 @@ OP_MATH_FLOOR    4  5  0    ; r[5] = floor((score * 2) + 10)  <- Final Result
 ```
 
 #### B. Computed Expressions Across Different Clauses
+
 Because the VDBE evaluates expressions in registers, dynamic computations compose seamlessly across all query clauses:
 
 1. **In `SELECT` (Projections)**:
@@ -1010,11 +1101,13 @@ Because the VDBE evaluates expressions in registers, dynamic computations compos
    ```
 5. **In Derived Subqueries (`FROM (SELECT ...)`)**:
    When an inner query outputs a computed column `adjusted_score`, the outer query can reference it directly:
+
    ```sql
    SELECT adjusted_score * 1.05 FROM (
      SELECT floor(score * 2) AS adjusted_score FROM students
    ) WHERE adjusted_score > 50
    ```
+
    - If **flattened**, the expression is inlined: `(floor(score * 2)) * 1.05`.
    - If **materialized**, the computed value is stored in the ephemeral B-Tree cell and read by the outer query as a regular column.
 
@@ -1043,6 +1136,7 @@ When a query selects from a subquery (`FROM (SELECT ...)`), WebDB uses two archi
 ### 8.1 The Multi-Frame Subquery Stack (`VmContext.depth`)
 
 The engine maintains an 8-frame execution stack (`ctx->frames[0..7]`, total 10,248 bytes in shared memory):
+
 1. **Frame Push (`OP_ENTER_SUBQUERY`, `ctx->depth++`)**:
    - Activates a completely fresh 64-register namespace and 16 cursor slots.
    - Preserves all parent registers and cursors without risking register clobbering.
@@ -1069,6 +1163,7 @@ WHERE total_payroll > 100000;
 ```
 
 #### Bytecode Execution Walkthrough:
+
 ```
 ; === Phase 1: Inner Subquery Materialization ===
 0000  OP_OPEN_EPHEMERAL 1   2   0    ; Open Ephemeral Cursor 1 with 2 columns
@@ -1100,6 +1195,7 @@ Whenever a derived table contains only linear projections and filters, materiali
 The query planner automatically **inlines** inner expressions into the outer query:
 
 #### Example Query:
+
 ```sql
 SELECT name, score * 2
 FROM (
@@ -1111,12 +1207,14 @@ WHERE score >= 60;
 ```
 
 #### Flattening Transformation Steps:
+
 1. **Alias Substitution**: The outer query references to `name` and `score` are substituted with the inner query expressions:
    - Outer `name` $\to$ Inner `upper(name)`
    - Outer `score * 2` $\to$ Inner `floor(score) * 2`
 2. **Predicate Merging**: Outer filter `score >= 60` merges with inner filter `active = 1`:
    - `WHERE active = 1 AND floor(score) >= 60`
 3. **Optimized Unified Query**:
+
 ```sql
 SELECT upper(name) AS name, floor(score) * 2 AS score
 FROM students
@@ -1124,6 +1222,7 @@ WHERE active = 1 AND floor(score) >= 60;
 ```
 
 #### Resulting Bytecode (Zero Ephemeral Tables, Single Streaming Pass):
+
 ```
 addr  opcode           p1  p2   p3   comment
 0000  OP_OPEN_CURSOR   0   1    0    ; Open students table cursor
@@ -1145,7 +1244,9 @@ addr  opcode           p1  p2   p3   comment
 0056  OP_NEXT_ROW      0   8    0    ; Loop scan
 0060  OP_HALT          0   0    0    ; Done
 ```
+
 **Benefits:**
+
 - **Zero Temporary Memory:** Bypasses ephemeral B-Tree and Transient Arena allocations.
 - **Single-Pass Stream:** Rows stream directly into the 64KB Result Buffer in $O(1)$ space.
 - **Cache Friendly:** Evaluates directly inside registers without writing and re-reading memory pages.
@@ -1154,18 +1255,18 @@ addr  opcode           p1  p2   p3   comment
 
 ## 9. Exhaustive Edge Cases & Failure Modes
 
-* [ ] **Infinite Loop Guard:** Malformed bytecode loops jumping backward indefinitely must be trapped by a maximum instruction cycle counter (e.g. 10,000,000 cycles per step call) yielding `STATUS_TIMEOUT`.
-* [ ] **Invalid Jump Offset:** Any jump target pointing outside the `[0, bytecode.byteLength]` range must halt with `STATUS_ERR_INVALID_BYTECODE`.
-* [ ] **Register Index Out-of-Bounds:** Register index $\ge 64$ must be rejected at compile time with `TooManyRegistersError`.
-* [ ] **Sort Column Ceiling Exceeded:** Queries with $> 8$ sort keys must throw `TooManyOrderByColumnsError` at compile time.
-* [ ] **Group By Column Ceiling Exceeded:** Queries with $> 8$ grouping keys must throw `TooManyGroupByColumnsError` at compile time.
-* [ ] **Cursor Slot Exhaustion:** Opening more than 16 cursors in a single frame must throw `TooManyCursorsError` at compile time.
-* [ ] **Subquery Nesting Overflow:** Correlated subquery nesting deeper than 7 levels (`ctx->depth` attempting to exceed 7) must throw `SubqueryNestingTooDeepError` at compile time.
-* [ ] **Frame Depth Underflow:** `ctx->depth--` when already at 0 must halt with `STATUS_ERR_INVALID_BYTECODE` (guard against malformed subquery pop opcodes).
-* [ ] **Zero-Length Text/Blob Emission:** Emitting empty strings `""` or 0-byte BLOBs must encode length 0 without corrupting buffer framing.
-* [ ] **Ephemeral Cursor ID Collisions:** Ephemeral cursors must occupy distinct cursor indices from base table cursors ($0 \le \text{cursor} < 16$).
-* [ ] **Divide by Zero in Expression Opcode:** `OP_DIV` and `OP_MOD` with divisor 0 must produce `NULL` (`type = 0`) instead of crashing or generating IEEE `Infinity`/`NaN`.
-* [ ] **UDF Exception Propagation:** Exceptions thrown inside JS UDF callbacks must be caught by the Host bridge, setting `ctx->status = STATUS_ERROR` and reporting the JavaScript error stack to the caller.
+- [ ] **Infinite Loop Guard:** Malformed bytecode loops jumping backward indefinitely must be trapped by a maximum instruction cycle counter (e.g. 10,000,000 cycles per step call) yielding `STATUS_TIMEOUT`.
+- [ ] **Invalid Jump Offset:** Any jump target pointing outside the `[0, bytecode.byteLength]` range must halt with `STATUS_ERR_INVALID_BYTECODE`.
+- [ ] **Register Index Out-of-Bounds:** Register index $\ge 64$ must be rejected at compile time with `TooManyRegistersError`.
+- [ ] **Sort Column Ceiling Exceeded:** Queries with $> 8$ sort keys must throw `TooManyOrderByColumnsError` at compile time.
+- [ ] **Group By Column Ceiling Exceeded:** Queries with $> 8$ grouping keys must throw `TooManyGroupByColumnsError` at compile time.
+- [ ] **Cursor Slot Exhaustion:** Opening more than 16 cursors in a single frame must throw `TooManyCursorsError` at compile time.
+- [ ] **Subquery Nesting Overflow:** Correlated subquery nesting deeper than 7 levels (`ctx->depth` attempting to exceed 7) must throw `SubqueryNestingTooDeepError` at compile time.
+- [ ] **Frame Depth Underflow:** `ctx->depth--` when already at 0 must halt with `STATUS_ERR_INVALID_BYTECODE` (guard against malformed subquery pop opcodes).
+- [ ] **Zero-Length Text/Blob Emission:** Emitting empty strings `""` or 0-byte BLOBs must encode length 0 without corrupting buffer framing.
+- [ ] **Ephemeral Cursor ID Collisions:** Ephemeral cursors must occupy distinct cursor indices from base table cursors ($0 \le \text{cursor} < 16$).
+- [ ] **Divide by Zero in Expression Opcode:** `OP_DIV` and `OP_MOD` with divisor 0 must produce `NULL` (`type = 0`) instead of crashing or generating IEEE `Infinity`/`NaN`.
+- [ ] **UDF Exception Propagation:** Exceptions thrown inside JS UDF callbacks must be caught by the Host bridge, setting `ctx->status = STATUS_ERROR` and reporting the JavaScript error stack to the caller.
 
 ---
 

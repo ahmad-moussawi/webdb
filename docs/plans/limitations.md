@@ -8,28 +8,28 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 
 ## 1. Summary of System Limitations
 
-| Category        | Parameter                             |                  V1 Limit                  | Error Thrown / Behavior on Breach                   |
-| :-------------- | :------------------------------------ | :----------------------------------------: | :-------------------------------------------------- |
-| **Storage**     | Page Size                             |            `4,096 bytes` (4 KB)            | Rigid physical constant.                            |
-| **Storage**     | Maximum Row Size                      |               `2,048 bytes`                | `RowSizeLimitExceededError` (compile/insert time)   |
-| **Storage**     | Maximum Database Size                 |             `16 TB` (physical)             | Browser Storage Quota Exceeded (OS/device limit)    |
-| **Storage**     | Maximum Tables per DB                 | `16 tables` (Page 1) / $\infty$ (chained)  | `CatalogFullError` (forward-compatible to $\infty$) |
-| **Storage**     | Maximum Columns per Table             |               `256 columns`                | `TooManyColumnsError` (DDL time)                    |
-| **Storage**     | Maximum Identifier Length             |              `64 characters`               | `IdentifierTooLongError` (DDL time)                 |
-| **VM**          | Register File Size                    |  `64 registers per frame` (`r[0]..r[63]`)  | `TooManyRegistersError` (compile time)              |
-| **VM**          | Active Cursor Slots                   |   `16 cursors per frame` (`c[0]..c[15]`)   | `TooManyCursorsError` (compile time)                |
-| **VM**          | Subquery Nesting Depth                |  `8 frames` (depth 0..7, correlated only)  | `SubqueryNestingTooDeepError` (compile time)        |
-| **VM**          | Output Result Buffer                  |                  `64 KB`                   | Yields `STATUS_BUFFER_FULL` (chunked streaming)     |
-| **VM**          | Transient Query Arena Ceiling         |      `16 MB` (default, configurable)       | `QueryArenaExhaustedError` (fail-fast OOM)          |
-| **Query**       | Maximum Sort Columns (`ORDER BY`)     |                `8 columns`                 | `TooManyOrderByColumnsError`                        |
-| **Query**       | Maximum Group By Columns (`GROUP BY`) |                `8 columns`                 | `TooManyGroupByColumnsError`                        |
-| **Query**       | Secondary Indexes                     | `8 indexes` (Page 1), up to `8 columns` each | `TooManyIndexesError` (DDL time)                    |
-| **DDL**         | Schema Mutations (`ALTER TABLE`)      | $O(1)$ rename; transactional table rebuild (`ADD`/`DROP COLUMN`) | `CannotDropColumnError`, `NotNullConstraintError`   |
-| **Query**       | Table Joins                           |     Up to `16 tables` per query level      | `TooManyCursorsError` if > 16 cursors needed        |
-| **Query**       | Subqueries                            | Correlated depth ≤ 7; sequential unlimited | `SubqueryNestingTooDeepError` (compile time)        |
-| **Query**       | Client-Side Projections (`projectRow`)| Terminal execution only (not in subqueries)| VM executes native bytecode; JS projections bypassed|
-| **Concurrency** | Concurrent Writers                    |         `1 writer` (Web Locks API)         | Serialized in FIFO order via browser locks          |
-| **Concurrency** | Active Transactions per Connection    |  `1 top-level` (nested via savepoints)     |Queued via `ExclusiveLeaseQueue`; `tx.transaction()` uses savepoints |
+| Category        | Parameter                              |                             V1 Limit                             | Error Thrown / Behavior on Breach                                    |
+| :-------------- | :------------------------------------- | :--------------------------------------------------------------: | :------------------------------------------------------------------- |
+| **Storage**     | Page Size                              |                       `4,096 bytes` (4 KB)                       | Rigid physical constant.                                             |
+| **Storage**     | Maximum Row Size                       |                          `2,048 bytes`                           | `RowSizeLimitExceededError` (compile/insert time)                    |
+| **Storage**     | Maximum Database Size                  |                        `16 TB` (physical)                        | Browser Storage Quota Exceeded (OS/device limit)                     |
+| **Storage**     | Maximum Tables per DB                  |            `16 tables` (Page 1) / $\infty$ (chained)             | `CatalogFullError` (forward-compatible to $\infty$)                  |
+| **Storage**     | Maximum Columns per Table              |                          `256 columns`                           | `TooManyColumnsError` (DDL time)                                     |
+| **Storage**     | Maximum Identifier Length              |                         `64 characters`                          | `IdentifierTooLongError` (DDL time)                                  |
+| **VM**          | Register File Size                     |             `64 registers per frame` (`r[0]..r[63]`)             | `TooManyRegistersError` (compile time)                               |
+| **VM**          | Active Cursor Slots                    |              `16 cursors per frame` (`c[0]..c[15]`)              | `TooManyCursorsError` (compile time)                                 |
+| **VM**          | Subquery Nesting Depth                 |             `8 frames` (depth 0..7, correlated only)             | `SubqueryNestingTooDeepError` (compile time)                         |
+| **VM**          | Output Result Buffer                   |                             `64 KB`                              | Yields `STATUS_BUFFER_FULL` (chunked streaming)                      |
+| **VM**          | Transient Query Arena Ceiling          |                 `16 MB` (default, configurable)                  | `QueryArenaExhaustedError` (fail-fast OOM)                           |
+| **Query**       | Maximum Sort Columns (`ORDER BY`)      |                           `8 columns`                            | `TooManyOrderByColumnsError`                                         |
+| **Query**       | Maximum Group By Columns (`GROUP BY`)  |                           `8 columns`                            | `TooManyGroupByColumnsError`                                         |
+| **Query**       | Secondary Indexes                      |           `8 indexes` (Page 1), up to `8 columns` each           | `TooManyIndexesError` (DDL time)                                     |
+| **DDL**         | Schema Mutations (`ALTER TABLE`)       | $O(1)$ rename; transactional table rebuild (`ADD`/`DROP COLUMN`) | `CannotDropColumnError`, `NotNullConstraintError`                    |
+| **Query**       | Table Joins                            |                Up to `16 tables` per query level                 | `TooManyCursorsError` if > 16 cursors needed                         |
+| **Query**       | Subqueries                             |            Correlated depth ≤ 7; sequential unlimited            | `SubqueryNestingTooDeepError` (compile time)                         |
+| **Query**       | Client-Side Projections (`projectRow`) |           Terminal execution only (not in subqueries)            | VM executes native bytecode; JS projections bypassed                 |
+| **Concurrency** | Concurrent Writers                     |                    `1 writer` (Web Locks API)                    | Serialized in FIFO order via browser locks                           |
+| **Concurrency** | Active Transactions per Connection     |              `1 top-level` (nested via savepoints)               | Queued via `ExclusiveLeaseQueue`; `tx.transaction()` uses savepoints |
 
 ---
 
@@ -195,19 +195,20 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 
 - **Supported in V1:** Both single-column (`createIndex(tableName, 'col')`) and composite multi-column (`createIndex(tableName, ['col1', 'col2'])`, up to **8 columns per index**) B+Tree indexes, with optional uniqueness enforcement (`{ unique: true }`).
 - **Page 1 Capacity:** Page 1 pre-allocates **8 `IndexDescriptor` slots** (128 bytes each at bytes `2148..3171`), shared across automatic primary key indexes (`pk_<table>`) and user-defined secondary indexes (`TooManyIndexesError` if exceeded):
-    ```c
-    typedef struct {
-        uint16_t index_id;              // Numeric index ID (1..65535)                    (offset 0..1,   2B)
-        uint16_t table_id;              // Owning table numeric identifier                (offset 2..3,   2B)
-        uint32_t root_page_id;          // Index B+Tree root Page ID (0 if unallocated)   (offset 4..7,   4B)
-        uint8_t  column_count;          // Number of indexed columns (1=single, 2..8=comp)(offset 8,     1B)
-        uint8_t  flags;                 // 0x1=UNIQUE, 0x2=PRIMARY, 0x4=SPATIAL/VECTOR    (offset 9,     1B)
-        uint16_t column_indices[8];     // 0-indexed column IDs participating in index   (offset 10..25,16B)
-        uint8_t  col_directions[8];     // Sort order per column (0=ASC, 1=DESC)          (offset 26..33, 8B)
-        char     name[64];              // Index identifier name (null-padded UTF-8)      (offset 34..97,64B)
-        uint8_t  _reserved[30];         // Reserved for partial index filters / stats     (offset 98..127,30B)
-    } IndexDescriptor;                  // Exact size: 128 bytes (128 % 8 = 0, power of 2)
-    ```
+  ```c
+  typedef struct {
+      uint16_t index_id;              // Numeric index ID (1..65535)                    (offset 0..1,   2B)
+      uint16_t table_id;              // Owning table numeric identifier                (offset 2..3,   2B)
+      uint32_t root_page_id;          // Index B+Tree root Page ID (0 if unallocated)   (offset 4..7,   4B)
+      uint8_t  column_count;          // Number of indexed columns (1=single, 2..8=comp)(offset 8,     1B)
+      uint8_t  flags;                 // 0x1=UNIQUE, 0x2=PRIMARY, 0x4=SPATIAL/VECTOR    (offset 9,     1B)
+      uint16_t column_indices[8];     // 0-indexed column IDs participating in index   (offset 10..25,16B)
+      uint8_t  col_directions[8];     // Sort order per column (0=ASC, 1=DESC)          (offset 26..33, 8B)
+      char     name[64];              // Index identifier name (null-padded UTF-8)      (offset 34..97,64B)
+      uint8_t  _reserved[30];         // Reserved for partial index filters / stats     (offset 98..127,30B)
+  } IndexDescriptor;                  // Exact size: 128 bytes (128 % 8 = 0, power of 2)
+  ```
+
   - **Single-Column Execution:** Populates `column_count = 1` and `column_indices[0] = col_idx`, storing typed `(indexed_value, rowid)` entries.
   - **Composite Index Execution:** Populates `column_count = 2..8` and `column_indices[0..N-1]`, serializing composite tuples into order-preserving binary keys via `serialize_composite_key`.
 
@@ -273,7 +274,7 @@ WebDB V1 supports both uncorrelated and correlated subqueries via its **8-frame 
 
 ### 4.8 Schema Mutations (`ALTER TABLE`)
 
-WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) and dedicated DDL methods (`renameTable`, `renameColumn`, `addColumn`, `dropColumn`), split into two architectural pathways:
+WebDB supports dynamic schema mutations via [`db.alterTable()`](./src/host/api/webdb.ts) and dedicated DDL methods (`renameTable`, `renameColumn`, `addColumn`, `dropColumn`), split into two architectural pathways:
 
 1. **$O(1)$ Metadata-Only Mutations (`renameTable`, `renameColumn`):**
    - **Mechanism:** Directly updates the fixed 64-byte UTF-8 `name` field inside `TableDescriptor` (on Page 1) or `ColumnMeta` (on the table's dedicated Column Catalog Page `0x0C`), increments `schema_version`, and recomputes page CRC32 checksums in $O(1)$ time with zero data or index page rewrites.
@@ -288,7 +289,7 @@ WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ah
 
 ### 4.9 Client-Side Projection (`projectRow`) & Subquery Boundary Limitation
 
-- **Current V1 Architecture:** Terminal queries executed through the Query Builder (via `.toArray()` or `.first()`) run an in-memory post-processor [`projectRow`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts). This handles JavaScript-side scalar expression evaluation, client-side UDF execution, column aliasing, and fallback formatting on the raw result rows returned by the VDBE VM.
+- **Current V1 Architecture:** Terminal queries executed through the Query Builder (via `.toArray()` or `.first()`) run an in-memory post-processor [`projectRow`](./src/host/api/query_builder.ts). This handles JavaScript-side scalar expression evaluation, client-side UDF execution, column aliasing, and fallback formatting on the raw result rows returned by the VDBE VM.
 - **Subquery Invariant / Limitation:** Subqueries (such as derived tables in `FROM (subquery)`, scalar subqueries, or `IN (subquery)` filters) compile and execute strictly within the core VDBE virtual machine and bytecode frames. Consequently, any projection logic, expression transforms, or custom aliases handled exclusively in JavaScript `projectRow` are **not** evaluated or accessible within subquery contexts. Subqueries only have access to raw columns and native VM registers emitted by bytecode.
 - **Resolution Roadmap:** Full composability will be achieved by lowering all scalar functions and expressions directly into VDBE bytecode opcodes (`OP_STR_*`, `OP_MATH_*`, `OP_ADD`, `OP_CALL_UDF`, etc.) during compilation, eliminating the need for client-side JavaScript row interception.
 
@@ -304,7 +305,7 @@ WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ah
 
 ### 5.2 Serialized Top-Level Transactions & Nested Savepoints
 
-- **Invariant:** A single `WebDB` instance serializes concurrent top-level `db.transaction()` calls in FIFO order via [`ExclusiveLeaseQueue`](file:///Users/ahmad/h/webdb/src/host/driver/transaction_coordinator.ts).
+- **Invariant:** A single `WebDB` instance serializes concurrent top-level `db.transaction()` calls in FIFO order via [`ExclusiveLeaseQueue`](./src/host/driver/transaction_coordinator.ts).
 - **Nested Savepoints:** Calling `tx.transaction(async (nestedTx) => ...)` inside an active transaction captures an in-memory and WAL savepoint (`captureSavepoint` / `restoreSavepoint`), allowing inner blocks to roll back independently without aborting the outer transaction.
 
 ### 5.3 WAL Auto-Checkpoint Threshold (256 Frames / 100 Committed Transactions)
@@ -322,15 +323,15 @@ WebDB supports dynamic schema mutations via [`db.alterTable()`](file:///Users/ah
 WebDB provides low-level primitives for building offline-first synchronization engines without baking opinionated network protocols into the core engine:
 
 1. **High-Level DML & Conditional Upserts (`update`, `delete`, `upsert`, `upsertMany`):**
-   - Supports direct [`db.update()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) / [`db.delete()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts), fluent [`QueryBuilder.update()`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts) / [`QueryBuilder.delete()`](file:///Users/ahmad/h/webdb/src/host/api/query_builder.ts), and idempotent [`db.upsert()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) / [`db.upsertMany()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts).
+   - Supports direct [`db.update()`](./src/host/api/webdb.ts) / [`db.delete()`](./src/host/api/webdb.ts), fluent [`QueryBuilder.update()`](./src/host/api/query_builder.ts) / [`QueryBuilder.delete()`](./src/host/api/query_builder.ts), and idempotent [`db.upsert()`](./src/host/api/webdb.ts) / [`db.upsertMany()`](./src/host/api/webdb.ts).
    - **Index-Consistent Row Updates & Deletes:** In-place updates preserve physical slot rowids (`(pageId << 16) | cellIdx`) and update only modified secondary index keys. Row deletions and page-overflow updates automatically maintain secondary index slot pointers across the modified 4 KB page.
    - **Last-Write-Wins (LWW) Conflict Guard:** `UpsertOptions` supports `conflictTarget` (primary key or unique column(s)), `mode` (`'merge' | 'replace' | 'ignore'`), and a conditional `where: (existingRow, incomingRow) => boolean` predicate so stale remote payloads are ignored in a single atomic pass.
 2. **Transactional Change Capture (`onBeforeCommit`, `onCommit`, `Changeset.coalesced()`):**
-   - Every transaction and standalone DML operation accepts [`TransactionOptions`](file:///Users/ahmad/h/webdb/src/types/index.ts) (`{ origin?: 'local' | 'remote' | string, meta?: Record<string, any> }`) and records row-level [`MutationRecord`](file:///Users/ahmad/h/webdb/src/types/index.ts)s (`insert`, `update`, `delete` with `pk`, `oldRow`, `newRow`, and `changedColumns`).
-   - [`changeset.coalesced()`](file:///Users/ahmad/h/webdb/src/types/index.ts) squashes multiple mutations to the same `(table, pk)` within a transaction (`insert + update -> insert`, `update + update -> merged update`, `insert + delete -> omitted`, `update + delete -> delete`) and respects nested savepoint rollbacks.
-   - [`db.onBeforeCommit()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) runs *inside* the active transaction lease before WAL commit, allowing outbox table writes to commit or roll back atomically alongside application data. [`db.onCommit()`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) fires after WAL durability to wake up push workers.
+   - Every transaction and standalone DML operation accepts [`TransactionOptions`](./src/types/index.ts) (`{ origin?: 'local' | 'remote' | string, meta?: Record<string, any> }`) and records row-level [`MutationRecord`](./src/types/index.ts)s (`insert`, `update`, `delete` with `pk`, `oldRow`, `newRow`, and `changedColumns`).
+   - [`changeset.coalesced()`](./src/types/index.ts) squashes multiple mutations to the same `(table, pk)` within a transaction (`insert + update -> insert`, `update + update -> merged update`, `insert + delete -> omitted`, `update + delete -> delete`) and respects nested savepoint rollbacks.
+   - [`db.onBeforeCommit()`](./src/host/api/webdb.ts) runs _inside_ the active transaction lease before WAL commit, allowing outbox table writes to commit or roll back atomically alongside application data. [`db.onCommit()`](./src/host/api/webdb.ts) fires after WAL durability to wake up push workers.
 3. **Real-Time Multi-Tab / Worker Notifications (`db.subscribe`, `BroadcastChannel`):**
-   - [`db.subscribe(tables, callback)`](file:///Users/ahmad/h/webdb/src/host/api/webdb.ts) notifies listeners on local commits (`crossTab: false`) and broadcasts table invalidation events over `BroadcastChannel` (`webdb_sync_<vfs>_<name>`) so other open tabs/workers immediately sync their buffer pool state and notify UI subscribers (`crossTab: true`).
+   - [`db.subscribe(tables, callback)`](./src/host/api/webdb.ts) notifies listeners on local commits (`crossTab: false`) and broadcasts table invalidation events over `BroadcastChannel` (`webdb_sync_<vfs>_<name>`) so other open tabs/workers immediately sync their buffer pool state and notify UI subscribers (`crossTab: true`).
 
 ---
 
@@ -355,20 +356,20 @@ WebDB provides low-level primitives for building offline-first synchronization e
 
 ## 7. Comparison Matrix: WebDB V1 vs. SQLite Defaults
 
-| Specification Metric              |              WebDB V1              |       SQLite Default       | Architectural Trade-Off in WebDB                            |
-| :-------------------------------- | :--------------------------------: | :------------------------: | :---------------------------------------------------------- |
-| **Engine Footprint**              |             `< 100 KB`             |     `~800 KB - 1.5 MB`     | Zero SQL parser in engine, ultra-lean VDBE.                 |
-| **Page Size**                     |             Rigid 4 KB             | Configurable (512B - 64KB) | Deterministic memory layout for browser cache.              |
-| **Max Row Size**                  |           `2,048 bytes`            |   `1,000,000,000 bytes`    | Eliminates overflow page complexity in V1.                  |
-| **Tables per Database**           |  `16 tables` (Page 1) / $\infty$   |   Unlimited ($2^{31}-1$)   | $O(1)$ 128B descriptors; forward-compatible link.           |
-| **Columns per Table**             |           `256 columns`            |      `2,000 columns`       | Dedicated catalog pages; dynamic 32-byte Null-Bitmap.       |
-| **Max Identifier Length**         |          `64 characters`           | Unlimited (no fixed limit) | Standard SQL length (`char name[64]`); zero string parsing. |
-| **Sort Columns (`ORDER BY`)**     |            `8 columns`             |         Unlimited          | Compact 18B key descriptor; unrolled comparisons.           |
-| **Grouping Columns (`GROUP BY`)** |            `8 columns`             |         Unlimited          | Compact 40B `AggBucket`; unrolled key comparisons.          |
-| **Secondary Indexes**             | Up to 8 indexes (1..8 cols each)   |   Multi-column composite   | Fixed 128B `IndexDescriptor` slots on Page 1.               |
-| **Schema Mutations (`ALTER`)**    | $O(1)$ rename; atomic rebuild `ADD`/`DROP` | $O(1)$ `ADD`; rebuild `DROP` | Compact Null-Bitmap + fixed-slice offsets rebuilt in WAL tx.|
-| **Virtual Registers**             |   `64 per frame` (8-frame stack)   |    Unlimited (dynamic)     | Static 1,024B inline per frame; per-level isolation.        |
-| **Subquery Nesting**              |       Depth ≤ 7 (correlated)       |         Unlimited          | 8-frame fixed stack; sequential subqueries unlimited.       |
-| **Table Joins**                   | Up to 16 tables (16 cursors/frame) |         Unlimited          | One cursor per table; 16-cursor frame ceiling.              |
-| **Query Arena Ceiling**           |  `16 MB` (default, configurable)   |    Bound by host memory    | Safe default for mobile tabs; configurable up to 2 GB.      |
-| **Concurrency Model**             |     Web Locks (Single Writer)      |  POSIX / Win32 file locks  | Native browser multi-tab serialization.                     |
+| Specification Metric              |                  WebDB V1                  |        SQLite Default        | Architectural Trade-Off in WebDB                             |
+| :-------------------------------- | :----------------------------------------: | :--------------------------: | :----------------------------------------------------------- |
+| **Engine Footprint**              |                 `< 100 KB`                 |      `~800 KB - 1.5 MB`      | Zero SQL parser in engine, ultra-lean VDBE.                  |
+| **Page Size**                     |                 Rigid 4 KB                 |  Configurable (512B - 64KB)  | Deterministic memory layout for browser cache.               |
+| **Max Row Size**                  |               `2,048 bytes`                |    `1,000,000,000 bytes`     | Eliminates overflow page complexity in V1.                   |
+| **Tables per Database**           |      `16 tables` (Page 1) / $\infty$       |    Unlimited ($2^{31}-1$)    | $O(1)$ 128B descriptors; forward-compatible link.            |
+| **Columns per Table**             |               `256 columns`                |       `2,000 columns`        | Dedicated catalog pages; dynamic 32-byte Null-Bitmap.        |
+| **Max Identifier Length**         |              `64 characters`               |  Unlimited (no fixed limit)  | Standard SQL length (`char name[64]`); zero string parsing.  |
+| **Sort Columns (`ORDER BY`)**     |                `8 columns`                 |          Unlimited           | Compact 18B key descriptor; unrolled comparisons.            |
+| **Grouping Columns (`GROUP BY`)** |                `8 columns`                 |          Unlimited           | Compact 40B `AggBucket`; unrolled key comparisons.           |
+| **Secondary Indexes**             |      Up to 8 indexes (1..8 cols each)      |    Multi-column composite    | Fixed 128B `IndexDescriptor` slots on Page 1.                |
+| **Schema Mutations (`ALTER`)**    | $O(1)$ rename; atomic rebuild `ADD`/`DROP` | $O(1)$ `ADD`; rebuild `DROP` | Compact Null-Bitmap + fixed-slice offsets rebuilt in WAL tx. |
+| **Virtual Registers**             |       `64 per frame` (8-frame stack)       |     Unlimited (dynamic)      | Static 1,024B inline per frame; per-level isolation.         |
+| **Subquery Nesting**              |           Depth ≤ 7 (correlated)           |          Unlimited           | 8-frame fixed stack; sequential subqueries unlimited.        |
+| **Table Joins**                   |     Up to 16 tables (16 cursors/frame)     |          Unlimited           | One cursor per table; 16-cursor frame ceiling.               |
+| **Query Arena Ceiling**           |      `16 MB` (default, configurable)       |     Bound by host memory     | Safe default for mobile tabs; configurable up to 2 GB.       |
+| **Concurrency Model**             |         Web Locks (Single Writer)          |   POSIX / Win32 file locks   | Native browser multi-tab serialization.                      |

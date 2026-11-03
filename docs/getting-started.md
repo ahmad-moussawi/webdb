@@ -1,127 +1,131 @@
 # Getting Started with WebDB
 
-Welcome to **WebDB**, an ultra-lean, browser-native relational database engine.
+**WebDB** is an ultra-lightweight (`< 50 KB`), browser-native relational database engine. It gives you relational tables, secondary indexes, joins, aggregations, ACID transactions, and real-time multi-tab reactivity—without multi-megabyte Wasm bundles or complex server headers (`COOP`/`COEP`).
+
+---
+
+## When Should You Use WebDB?
+
+WebDB is built for client-side and local-first web applications that outgrow `localStorage` or raw `IndexedDB` cursors:
+
+- **Offline-First & Local-First Apps:** Persist user data locally in **IndexedDB** or **OPFS**, mutate records offline inside ACID transactions, and sync changes in the background when online.
+- **Complex Client-Side Filtering, Sorting & Joins:** Replace slow in-memory array loops or awkward IndexedDB cursor code with a fluent, indexed query builder.
+- **Multi-Tab Web Applications:** Coordinate reads, writes, and live UI updates across multiple open browser tabs and Web Workers automatically.
+- **Instant Cold-Start Caching:** Hydrate a full relational database from a binary snapshot (`Uint8Array`) in milliseconds without parsing large JSON payloads.
 
 ---
 
 ## 1. Installation
 
-> [!NOTE]
-> WebDB is currently in active development. You can test the working vertical slice prototype directly from source.
+Install `@ahmadmoussawi/webdb` using your preferred package manager:
 
 ```bash
-# Clone the repository
-git clone https://github.com/ahmad-moussawi/webdb.git
-cd webdb
+# npm
+npm install @ahmadmoussawi/webdb@alpha
 
-# Install dependencies
-npm install
+# pnpm
+pnpm add @ahmadmoussawi/webdb@alpha
 
-# Build TypeScript output
-npm run build
-
-# Run test suite
-npm test
+# yarn
+yarn add @ahmadmoussawi/webdb@alpha
 ```
+
+> [!TIP]
+> **Zero Server Configuration Required:** Unlike desktop database ports that rely on `SharedArrayBuffer` and `pthread` shims, WebDB works on any static host (Vercel, Netlify, Cloudflare Pages, GitHub Pages, S3) without `Cross-Origin-Opener-Policy` (`COOP`) or `Cross-Origin-Embedder-Policy` (`COEP`) headers.
 
 ---
 
-## 2. Quickstart Example
+## 2. Quickstart Walkthrough
 
-Here is how to create a database, define a table, insert records, and execute queries:
+Here is a complete, runnable example showing how to open a database, define a schema, insert data, run queries, and use transactions:
 
 ```typescript
 import { WebDB } from '@ahmadmoussawi/webdb';
 
-// 1. Open a database (in-memory or persistent IndexedDB)
-const db = await WebDB.open({
-  name: 'my_app_db',
-  storage: 'idb', // 'memory' or 'idb'
-});
+async function main() {
+  // 1. Open a persistent database (uses IndexedDB in the browser, or memory in Node/tests)
+  const db = await WebDB.open({
+    name: 'my_task_app',
+    storage: typeof indexedDB !== 'undefined' ? 'idb' : 'memory',
+  });
 
-// 2. Define schema (encoded directly onto Page 1 Binary Master Table)
-await db.createTable('users', [
-  { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
-  { name: 'name', type: 'TEXT', flags: { notNull: true } },
-  { name: 'age', type: 'INT32' },
-  { name: 'salary', type: 'FLOAT64' },
-]);
+  // 2. Create a table with typed columns
+  await db.createTable('tasks', [
+    { name: 'id', type: 'UUID', primaryKey: true },
+    { name: 'title', type: 'TEXT', notNull: true },
+    { name: 'priority', type: 'INT32' },
+    { name: 'done', type: 'INT32' }, // 0 = false, 1 = true
+  ]);
 
-// 3. Insert records
-await db.insert('users', { id: 1, name: 'Alice', age: 30, salary: 140000 });
-await db.insert('users', { id: 2, name: 'Bob', age: 22, salary: 85000 });
-await db.insert('users', { id: 3, name: 'Charlie', age: 35, salary: null });
+  // Create an index to speed up filtering and sorting by priority
+  await db.createIndex('tasks', 'priority');
 
-// 4. Query with filters, ordering, and limits
-const results = await db.from('users')
-  .where('age', '>', 25)
-  .whereNotNull('salary')
-  .orderBy('salary', 'desc')
-  .limit(10)
-  .toArray();
+  // 3. Insert single or multiple rows
+  await db.insert('tasks', {
+    id: crypto.randomUUID(),
+    title: 'Design database schema',
+    priority: 1,
+    done: 1,
+  });
 
-console.table(results);
+  await db.insertMany('tasks', [
+    { id: crypto.randomUUID(), title: 'Write API documentation', priority: 3, done: 0 },
+    { id: crypto.randomUUID(), title: 'Add offline sync worker', priority: 2, done: 0 },
+  ]);
+
+  // 4. Query records using the fluent Query Builder
+  const pendingHighPriority = await db
+    .from('tasks')
+    .select('id', 'title', 'priority')
+    .where('done', '=', 0)
+    .where('priority', '>=', 2)
+    .orderBy('priority', 'desc')
+    .limit(10)
+    .toArray();
+
+  console.table(pendingHighPriority);
+
+  // 5. Update and delete records
+  await db
+    .from('tasks')
+    .where('title', '=', 'Write API documentation')
+    .update({ done: 1 });
+
+  // 6. Wrap multi-step operations in an ACID transaction
+  await db.transaction(async (tx) => {
+    await tx.insert('tasks', {
+      id: crypto.randomUUID(),
+      title: 'Ship release v1.0',
+      priority: 3,
+      done: 0,
+    });
+    await tx.delete('tasks', { done: 1 });
+  });
+
+  // 7. Close the database connection when finished
+  await db.close();
+}
+
+main();
 ```
 
 ---
 
-## 3. Query Plan Inspection (`.explain()`)
+## 3. Try WebDB Live in Your Browser
 
-To inspect the VDBE bytecode generated by your query:
+Want to experiment with queries and inspect how WebDB stores data before writing any code?
 
-```typescript
-const explainInfo = await db.from('users')
-  .where('age', '>', 25)
-  .whereNotNull('salary')
-  .explain();
-
-console.log(explainInfo.assembly);
-```
-
-This outputs the disassembled bytecode with memory addresses, opcodes, registers, and comments:
-
-```
-ADDR     OPCODE             P1           P2                   P3         COMMENT
------------------------------------------------------------------------------------------------
-0x0000   OP_LOAD_INT        r[1]         25                              Load literal int 25 into r[1]
-0x0006   OP_OPEN_CURSOR     c[0]         page=2                          Open cursor 0 on root page 2 ('users')
-0x000c   OP_REWIND          c[0]         0x0028                          Rewind cursor to first row; jump to 0x0028 if empty
-0x0010   OP_COLUMN_INT      c[0]         2 ('age')            r[0]       Read 'age' as INT into r[0]
-0x0013   OP_GT              r[0]         r[1]                 0x001b     If r[0] > r[1] -> jump to 0x001b
-0x0018   OP_JUMP            0x0021                                       Unconditional jump to 0x0021
-0x001b   OP_IS_NULL         c[0]         3 ('salary')         0x0021     If 'salary' IS NULL -> jump to 0x0021
-0x001f   OP_EMIT_ROW        c[0]                                         Row passed all filters -> emit to Output Result Buffer
-0x0021   OP_NEXT_ROW        c[0]         0x0028                          Advance cursor to next row; jump to 0x0028 if EOF
-0x0025   OP_JUMP            0x0010                                       Unconditional jump to 0x0010
-0x0028   OP_HALT                                                         Halt VM execution (STATUS_DONE)
-```
+- [**Launch Studio IDE Playground →**](/playground/) — Interactive in-browser IDE with live table explorer, query editor, and query plan inspector.
+- [**Run In-Browser Benchmarks →**](/benchmark/) — Compare WebDB throughput and latency against Raw JS Arrays, Native IndexedDB, and SQLite WASM on your own hardware.
 
 ---
 
-## 4. Interactive Browser Playground
+## 4. Next Steps
 
-To explore WebDB visually in your browser:
+Follow the guides below to explore WebDB's capabilities:
 
-```bash
-npm run playground
-```
-
-Open `http://localhost:3000/playground/index.html` to run interactive queries, inspect live page slot allocations, and view the bytecode disassembler in real time.
-
----
-
-## 5. Architectural Deep Dives
-
-Explore our guides and technical specifications:
-- [Building Offline-First Sync Systems with WebDB](/offline-sync)
-- [Strategic Roadmap & Architectural Vision](/plans/plan)
-- [Prototype ("Walking Skeleton") Specification](/plans/prototype)
-- [Phase 1: Storage & Memory Architecture](/plans/01_storage_memory_arch)
-- [Phase 2: Components & V1 Scope Boundary](/plans/02_components_v1_scope)
-- [Phase 3: VDBE Execution Engine](/plans/03_vdbe_execution_engine)
-- [Phase 4: Transactions, ACID & WAL](/plans/04_transactions_acid_wal)
-- [Phase 5: JavaScript UDF Support](/plans/05_javascript_udf_support)
-- [Phase 6: Strict C-Style Rules (V1)](/plans/06_c_style_rules_v1)
-- [Phase 7: Multi-Tab Coordination](/plans/07_concurrency_multitab_coordination)
-- [Phase 8: V2 C/Wasm Build Pipeline](/plans/08_v2_c_wasm_build_pipeline)
-- [Phase 9: QA & Differential Testing](/plans/09_qa_verification_differential_testing)
+- [**Storage Backends & Configuration**](/guides/storage-and-configuration) — Choose between IndexedDB (`idb`), Origin Private File System (`opfs`), and In-Memory (`memory`) storage.
+- [**Tables, Columns & Data Types**](/guides/schema-and-types) — Learn about supported column types (`UUID`, `ULID`, `INT32`, `INT64`, `FLOAT64`, `TEXT`, `BLOB`), auto-incrementing keys, and constraints.
+- [**Inserting, Updating & Deleting Data**](/guides/mutations) — Perform single and bulk inserts, updates, deletes, and conflict-aware `upsert` operations.
+- [**Querying Data**](/guides/querying) — Filter, search text, sort, and paginate your data with the fluent Query Builder.
+- [**Transactions, Reactivity & Offline Sync**](/offline-sync) — Subscribe to live cross-tab changes and synchronize local data with a remote backend.

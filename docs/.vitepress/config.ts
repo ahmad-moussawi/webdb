@@ -26,7 +26,7 @@ gtag('config', 'G-SK750XLF2Y');`,
 export default defineConfig({
   title: "WebDB",
   description:
-    "Ultra-lean browser-native relational database engine with 4KB slotted pages and VDBE execution",
+    "Ultra-lean browser-native relational database engine with persistent OPFS & IndexedDB storage, ACID transactions, and fluent queries",
   base: "/webdb/",
   lastUpdated: true,
   ...(siteHostname
@@ -71,71 +71,120 @@ export default defineConfig({
 
     nav: [
       { text: "Getting Started", link: "/getting-started" },
-      { text: "Roadmap & Plans", link: "/plans/plan" },
+      { text: "Use Cases", link: "/guides/use-cases" },
+      { text: "API Reference", link: "/reference/api-reference" },
       { text: "Studio IDE", link: "/playground/", target: "_self" },
       { text: "Benchmarks", link: "/benchmark/", target: "_self" },
-      // { text: 'Future Extensions', link: '/plans/future_extensions_roadmap' },
-      // { text: 'Limitations', link: '/plans/limitations' },
-      // {
-      //   text: 'Phase Specs',
-      //   items: [
-      //     { text: '01: Storage & Memory', link: '/plans/01_storage_memory_arch' },
-      //     { text: '02: Components & Scope', link: '/plans/02_components_v1_scope' },
-      //     { text: '03: VDBE Execution Engine', link: '/plans/03_vdbe_execution_engine' },
-      //     { text: '04: Transactions & WAL', link: '/plans/04_transactions_acid_wal' },
-      //     { text: '05: JavaScript UDFs', link: '/plans/05_javascript_udf_support' },
-      //     { text: '06: Strict C-Style Rules', link: '/plans/06_c_style_rules_v1' },
-      //     { text: '07: Multi-Tab Concurrency', link: '/plans/07_concurrency_multitab_coordination' },
-      //     { text: '08: V2 C/Wasm Pipeline', link: '/plans/08_v2_c_wasm_build_pipeline' },
-      //     { text: '09: QA & Verification', link: '/plans/09_qa_verification_differential_testing' },
-      //   ],
-      // },
       { text: "GitHub", link: "https://github.com/ahmad-moussawi/webdb" },
     ],
 
     sidebar: [
       {
-        text: "Guide",
+        text: "Getting Started",
         items: [
-          { text: "Getting Started", link: "/getting-started" },
+          { text: "Introduction & Quick Start", link: "/getting-started" },
           {
-            text: "Query Builder API & Grammar",
-            link: "/plans/query_builder_api_and_grammar",
-          },
-          {
-            text: "Query Planner & Optimization",
-            link: "/query-planner",
-          },
-          {
-            text: "Offline Sync & Reactivity",
-            link: "/offline-sync",
+            text: "Storage Backends & Config",
+            link: "/guides/storage-and-configuration",
           },
         ],
       },
       {
-        text: "Architecture & Strategy",
+        text: "Schema & Data Modeling",
+        items: [
+          {
+            text: "Tables, Columns & Data Types",
+            link: "/guides/schema-and-types",
+          },
+          {
+            text: "Indexes & Unique Constraints",
+            link: "/guides/indexes",
+          },
+          {
+            text: "Migrations & ALTER TABLE",
+            link: "/guides/migrations-and-alter-table",
+          },
+        ],
+      },
+      {
+        text: "Writing & Querying Data",
+        items: [
+          {
+            text: "Insert, Update, Delete & Upsert",
+            link: "/guides/mutations",
+          },
+          {
+            text: "Querying Data (SELECT & WHERE)",
+            link: "/guides/querying",
+          },
+          {
+            text: "Joins, GROUP BY & Aggregations",
+            link: "/guides/joins-and-aggregations",
+          },
+          {
+            text: "Expressions, Functions & UDFs",
+            link: "/guides/expressions-and-functions",
+          },
+        ],
+      },
+      {
+        text: "Transactions, Reactivity & Sync",
+        items: [
+          {
+            text: "Transactions & Savepoints",
+            link: "/guides/transactions",
+          },
+          {
+            text: "Reactivity & Offline Sync",
+            link: "/offline-sync",
+          },
+          {
+            text: "Binary Snapshots & Backups",
+            link: "/guides/snapshots-and-backups",
+          },
+        ],
+      },
+      {
+        text: "Performance & Recipes",
+        items: [
+          {
+            text: "Query Performance & .explain()",
+            link: "/query-planner",
+          },
+          {
+            text: "Common Use Cases & Recipes",
+            link: "/guides/use-cases",
+          },
+        ],
+      },
+      {
+        text: "Reference",
+        items: [
+          {
+            text: "Complete API Reference",
+            link: "/reference/api-reference",
+          },
+          {
+            text: "Error Handling & System Limits",
+            link: "/reference/errors-and-limits",
+          },
+        ],
+      },
+      {
+        text: "Engine Internals & Specs",
+        collapsed: true,
         items: [
           { text: "Strategic Master Plan", link: "/plans/plan" },
           { text: 'Prototype ("Walking Skeleton")', link: "/plans/prototype" },
           {
-            text: "Query Builder API & Grammar",
+            text: "Query Builder Grammar Spec",
             link: "/plans/query_builder_api_and_grammar",
-          },
-          {
-            text: "Query Planner Architecture",
-            link: "/query-planner",
           },
           { text: "System Limits & Invariants", link: "/plans/limitations" },
           {
-            text: "Future Extensions & Search Roadmap",
+            text: "Future Extensions Roadmap",
             link: "/plans/future_extensions_roadmap",
           },
-        ],
-      },
-      {
-        text: "Phase Specifications",
-        collapsed: false,
-        items: [
           {
             text: "Phase 1: Storage & Memory",
             link: "/plans/01_storage_memory_arch",

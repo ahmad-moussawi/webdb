@@ -265,8 +265,8 @@ const copyCode = () => {
           </svg>
           <span>Benchmarks</span>
         </a>
-        <a :href="withBase('/plans/plan')" class="btn btn-secondary">
-          <span>View Specs</span>
+        <a :href="withBase('/getting-started')" class="btn btn-secondary">
+          <span>Read Docs</span>
         </a>
         <a
           href="https://github.com/ahmad-moussawi/webdb"
@@ -1615,8 +1615,8 @@ const copyCode = () => {
               />
             </svg>
           </a>
-          <a :href="withBase('/plans/plan')" class="btn btn-secondary">
-            <span>READ SPECS</span>
+          <a :href="withBase('/getting-started')" class="btn btn-secondary">
+            <span>READ DOCS</span>
           </a>
         </div>
       </div>

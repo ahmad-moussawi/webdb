@@ -79,7 +79,8 @@ export type QueryFilterType =
   | "and"
   | "or"
   | "not"
-  | "in";
+  | "in"
+  | "exists";
 
 export interface QueryFilter {
   type: QueryFilterType;
@@ -89,6 +90,8 @@ export interface QueryFilter {
   value?: any;
   values?: any[];
   notIn?: boolean;
+  subquery?: any;
+  notExists?: boolean;
   expr?: ExprNode;
   children?: QueryFilter[]; // for 'and', 'or'
   child?: QueryFilter; // for 'not'
@@ -355,6 +358,7 @@ export function normalizeFilter(filter: QueryFilter): QueryFilter {
       return {
         type: "null",
         colName: child.colName,
+        expr: child.expr,
         isNull: !child.isNull,
       };
     }
@@ -556,6 +560,33 @@ function emitLeafJumpOnTrue(
   }
 
   if (filter.type === "null") {
+    if (filter.expr) {
+      const regCol = leafIdx * 2;
+      let tempReg = 50;
+      const allocReg = () => {
+        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+        return tempReg++;
+      };
+      emitExpression(
+        filter.expr,
+        table,
+        emitter,
+        0,
+        regCol,
+        allocReg,
+        udfNameMap,
+        undefined,
+        all,
+      );
+      if (filter.isNull) {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+      } else {
+        emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
+      }
+      emitter.emitUint8(regCol);
+      truePatches.push(emitter.emitUint16(0));
+      return;
+    }
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
@@ -787,6 +818,33 @@ function emitLeafJumpOnFalse(
   }
 
   if (filter.type === "null") {
+    if (filter.expr) {
+      const regCol = leafIdx * 2;
+      let tempReg = 50;
+      const allocReg = () => {
+        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
+        return tempReg++;
+      };
+      emitExpression(
+        filter.expr,
+        table,
+        emitter,
+        0,
+        regCol,
+        allocReg,
+        udfNameMap,
+        undefined,
+        all,
+      );
+      if (filter.isNull) {
+        emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
+      } else {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+      }
+      emitter.emitUint8(regCol);
+      falsePatches.push(emitter.emitUint16(0));
+      return;
+    }
     if (!filter.colName) {
       throw new Error(`Filter leaf node missing colName`);
     }
@@ -2410,6 +2468,15 @@ export function chooseIndexScan(
       } else if (
         isIndexAlignedWithOrderBy(cand.index, table, orderBy, equalityCols)
       ) {
+        if (cand.scanType === "multi_point" && cand.inValues) {
+          const dir = orderBy[0].direction === "desc" ? -1 : 1;
+          cand.inValues.sort((a, b) => {
+            if (typeof a === "number" && typeof b === "number") {
+              return (a - b) * dir;
+            }
+            return String(a).localeCompare(String(b)) * dir;
+          });
+        }
         cand.satisfiesOrderBy = true;
       }
     }

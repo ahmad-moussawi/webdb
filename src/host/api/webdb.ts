@@ -3058,8 +3058,8 @@ export class WebDB implements IDatabaseQueryExecutor {
           return () => this.checkpoint();
         }
         if (prop === "from") {
-          return (tableName: string) => {
-            const qb = new QueryBuilder(txProxy, tableName);
+          return (tableOrSubquery: string | QueryBuilder) => {
+            const qb = new QueryBuilder(txProxy, tableOrSubquery);
             if (target.planner) {
               qb.withPlanner(target.planner);
             }
@@ -3198,8 +3198,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     return map;
   }
 
-  from(tableName: string): QueryBuilder {
-    return new QueryBuilder(this, tableName);
+  from(tableOrSubquery: string | QueryBuilder): QueryBuilder {
+    return new QueryBuilder(this, tableOrSubquery);
   }
 
   async explainQuery(
