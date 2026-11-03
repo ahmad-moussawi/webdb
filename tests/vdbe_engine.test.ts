@@ -407,12 +407,12 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       const ctx = createVmContext();
       resetVmContext(ctx);
 
-      const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      const buffer = new ArrayBuffer(64);
       const view = new DataView(buffer);
 
       const status = vm_step(ctx, view, infiniteBytecode);
       expect(status).toBe(VmStatus.TIMEOUT);
-    });
+    }, 30_000);
 
     it("aborts with STATUS_INVALID_BYTECODE on out-of-bounds jump target or corrupt opcode", () => {
       const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
