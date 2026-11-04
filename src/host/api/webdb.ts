@@ -296,6 +296,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       Math.max(slotCount, DEFAULT_SLOT_COUNT),
       maxQueryMemory,
     );
+    const coreMode = options.core ?? "js";
+    let wasmCore: WasmCoreExports | undefined;
+    if (coreMode === "wasm") {
+      wasmCore = createWasmCore(
+        memory,
+        options.wasmBinary ? new Uint8Array(options.wasmBinary) : undefined,
+      );
+    }
+
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({
       io,
@@ -353,15 +362,6 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
       coordinator.recordDiskPage1State();
     });
-
-    const coreMode = options.core ?? "js";
-    let wasmCore: WasmCoreExports | undefined;
-    if (coreMode === "wasm") {
-      wasmCore = createWasmCore(
-        memory,
-        options.wasmBinary ? new Uint8Array(options.wasmBinary) : undefined,
-      );
-    }
 
     const dbInstance = new WebDB(
       vfs,

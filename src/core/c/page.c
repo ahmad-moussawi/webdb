@@ -116,7 +116,13 @@ void page_compact(uint32_t page_offset, uint32_t scratchpad_offset) {
     uint32_t src_bytes = 0;
 {
       uint32_t old_offset = page_get_cell_offset(page_offset, i);
-      len = page_get_row_length(page_offset + old_offset);
+      uint32_t p_type = page_get_type(page_offset);
+      if (p_type == PAGE_TYPE_INDEX_LEAF) {
+        uint32_t k_len = load_u16((const void *)(uintptr_t)(page_offset + old_offset));
+        len = (2 + k_len + 8);
+      } else {
+        len = page_get_row_length(page_offset + old_offset);
+      }
       src_view = 0;
       src_bytes = page_offset + old_offset;
     }

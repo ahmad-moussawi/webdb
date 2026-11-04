@@ -9,7 +9,10 @@ import {
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
   DIRTY_MASK_OFFSET,
+  ALIGNMENT_PADDING_OFFSET,
+  TRANSIENT_ARENA_OFFSET,
   createWasmMemory,
+  MemoryVfsAdapter,
   WebDB,
   DataType,
 } from "../src/index.ts";
@@ -191,6 +194,75 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       expect(bytes[1]).toBe(0x61);
       expect(bytes[2]).toBe(0x73);
       expect(bytes[3]).toBe(0x6d);
+    });
+
+    it("does not overwrite Buffer Pool Slot 16 (0x10000 / Page 17) on reopen with core: 'wasm'", async () => {
+      const vfs = new MemoryVfsAdapter();
+
+      // 1. Open DB and create 8 tables so Table 8 ("currency_rates") has colCatalogPageId = 17 (Slot 16 at 0x10000)
+      const db1 = await WebDB.open({ name: "repro", vfs, core: "wasm" });
+
+      for (let i = 1; i <= 7; i++) {
+        await db1.createTable(`t_${i}`, [
+          { name: "id", type: "ULID", flags: { notNull: true } },
+        ]);
+      }
+
+      await db1.createTable("currency_rates", [
+        { name: "id", type: "ULID", flags: { notNull: true } },
+        { name: "currency", type: "TEXT", flags: { notNull: true } },
+      ]);
+
+      await db1.insert("currency_rates", {
+        id: "01HV8G7K3D4N5P6Q7R8S9T0V1W",
+        currency: "USD",
+      });
+
+      await db1.close();
+
+      // 2. Reopen the same VFS with core: 'wasm' (simulating page reload)
+      const db2 = await WebDB.open({ name: "repro", vfs, core: "wasm" });
+
+      const meta = await db2.getTable("currency_rates");
+      expect(meta.colCatalogPageId).toBe(17);
+      expect(meta.columns).toHaveLength(2);
+      expect(meta.columns.map((c) => c.name)).toEqual(["id", "currency"]);
+
+      // 3. Query referencing a column on currency_rates succeeds
+      const rows = await db2.from("currency_rates").orderBy("id", "desc").toArray();
+      expect(rows).toEqual([
+        { id: "01HV8G7K3D4N5P6Q7R8S9T0V1W", currency: "USD" },
+      ]);
+
+      await db2.close();
+    });
+
+    it("places Wasm stack and .rodata/.bss strictly inside ALIGNMENT_PADDING (0x421080..0x42FFFF)", () => {
+      const cleanMem = createWasmMemory();
+      const core = createWasmCore(cleanMem);
+      const u8 = new Uint8Array(cleanMem.buffer);
+
+      // Verify zero bytes were modified across all 1024 page slots (0..0x3FFFFF) and pool/VM buffers (0x400000..0x42107F)
+      let nonZeroBeforePadding = 0;
+      for (let i = 0; i < ALIGNMENT_PADDING_OFFSET; i++) {
+        if (u8[i] !== 0) {
+          nonZeroBeforePadding++;
+          break;
+        }
+      }
+      expect(nonZeroBeforePadding).toBe(0);
+
+      // Verify .rodata is present inside ALIGNMENT_PADDING..TRANSIENT_ARENA_OFFSET
+      let nonZeroInPadding = 0;
+      for (let i = ALIGNMENT_PADDING_OFFSET; i < TRANSIENT_ARENA_OFFSET; i++) {
+        if (u8[i] !== 0) {
+          nonZeroInPadding++;
+        }
+      }
+      expect(nonZeroInPadding).toBeGreaterThan(0);
+
+      // Verify __stack_pointer is placed at 0x42D000 inside ALIGNMENT_PADDING
+      expect(core.exports.__stack_pointer.value).toBe(0x42d000);
     });
   });
 });

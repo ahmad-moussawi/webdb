@@ -27,8 +27,9 @@ static void init_crc_table(void) {
 uint32_t compute_crc32(const uint8_t * data, uint32_t length) {
   init_crc_table();
   uint32_t crc = 4294967295;
+  const uint8_t * bytes = data;
   for (uint32_t i = 0; i < length; i++) {
-    crc = CRC_TABLE[(crc ^ data[i]) & 255] ^ (((uint32_t)(crc) >> 8));
+    crc = CRC_TABLE[(crc ^ (bytes)[i]) & 255] ^ (((uint32_t)(crc) >> 8));
   }
   return (uint32_t)((crc ^ 4294967295));
 }

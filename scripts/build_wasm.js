@@ -56,13 +56,17 @@ if (wasmOpt) {
   console.log("wasm-opt not found; skipping binaryen post-optimization step.");
 }
 
-// 1. Ensure layouts and C headers are fresh
-console.log("Generating layouts and C headers...");
-execSync(`node "${path.join(__dirname, "generate_layouts.js")}"`, { stdio: "inherit" });
+const compileOnly = process.argv.includes("--compile-only");
 
-// 2. Transpile TypeScript core modules to C
-console.log("Transpiling TypeScript core modules to freestanding C...");
-execSync(`npx vite-node "${path.join(__dirname, "transpiler", "index.ts")}" --all --write`, { stdio: "inherit" });
+if (!compileOnly) {
+  // 1. Ensure layouts and C headers are fresh
+  console.log("Generating layouts and C headers...");
+  execSync(`"${process.execPath}" "${path.join(__dirname, "generate_layouts.js")}"`, { stdio: "inherit" });
+
+  // 2. Transpile TypeScript core modules to C
+  console.log("Transpiling TypeScript core modules to freestanding C...");
+  execSync(`"${process.execPath}" "${path.join(rootDir, "node_modules", ".bin", "vite-node")}" "${path.join(__dirname, "transpiler", "index.ts")}" --all --write`, { stdio: "inherit" });
+}
 
 const cSource = path.join(rootDir, "src", "core", "c", "webdb_core.c");
 const distDir = path.join(rootDir, "dist");
@@ -76,6 +80,9 @@ const outWasm = path.join(distDir, "webdb_core.wasm");
 const coreWasm = path.join(wasmDir, "webdb_core.wasm");
 
 // 2. Compile with clang targeting wasm32
+// Place Wasm C stack (49,024B: 0x421080..0x42D000) and .rodata/.data/.bss (0x42D000..0x42FFFF)
+// inside the reserved ALIGNMENT_PADDING region (0x421080..0x42FFFF) so Wasm never collides
+// with Buffer Pool page slots (0x000000..0x3FFFFF) or metadata regions (0x400000..0x42107F).
 console.log("Compiling C core to WebAssembly (wasm32-nostdlib)...");
 const compileCmd = [
   `"${clang}"`,
@@ -87,6 +94,7 @@ const compileCmd = [
   "-Wl,--import-memory",
   "-Wl,--export-dynamic",
   "-Wl,--lto-O3",
+  "-Wl,-z,stack-size=4378624",
   `-I "${path.join(rootDir, "src", "core", "c")}"`,
   `-o "${rawWasm}"`,
   `"${cSource}"`,

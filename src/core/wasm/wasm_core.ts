@@ -92,6 +92,9 @@ export function createWasmCore(
   });
 
   const exp = instance.exports as Record<string, any>;
+  if (exp.__stack_pointer && typeof exp.__stack_pointer === "object" && "value" in exp.__stack_pointer) {
+    exp.__stack_pointer.value = 0x42D000;
+  }
 
   const getAbsOffset = (view: DataView | Uint8Array, offset: number = 0) => {
     return view.byteOffset + offset;

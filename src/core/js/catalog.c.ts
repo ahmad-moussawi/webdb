@@ -88,9 +88,9 @@ function init_crc_table(): void {
 export function compute_crc32(data: const_u8_ptr, length: u32): u32 {
   init_crc_table();
   let crc = 0xffffffff;
-  const bytes = data as Uint8Array;
+  const bytes: const_u8_ptr = data;
   for (let i = 0; i < length; i++) {
-    crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+    crc = CRC_TABLE[(crc ^ (bytes as Uint8Array)[i]) & 0xff] ^ (crc >>> 8);
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
