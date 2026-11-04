@@ -277,16 +277,22 @@ export function downloadSqlFile(filename: string, content: string): void {
 }
 
 /**
- * Triggers a browser download of a WebDB binary image as a .webdb file
+ * Triggers a browser download of a WebDB binary image as a .webdb or .webdb.gz file
  */
 export function downloadBinaryDbFile(filename: string, bytes: Uint8Array): void {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
-  const blob = new Blob([copy.buffer], { type: "application/octet-stream" });
+  const isGz = filename.endsWith(".gz");
+  const blob = new Blob([copy.buffer], {
+    type: isGz ? "application/gzip" : "application/octet-stream",
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.endsWith(".webdb") ? filename : `${filename}.webdb`;
+  a.download =
+    filename.endsWith(".webdb") || filename.endsWith(".webdb.gz")
+      ? filename
+      : `${filename}.webdb`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

@@ -7,6 +7,14 @@ import {
   UniqueConstraintViolationError,
   TableNotFoundError,
 } from '../src/types/index.js';
+import {
+  compressGzip,
+  decompressIfNeeded,
+  isGzipBytes,
+  deriveDbNameFromSource,
+  isRemoteDbParam,
+  buildShareablePlaygroundUrl,
+} from '../playground/src/utils/binaryLoader.js';
 
 describe('Binary Database Export & Import (tests/binary_export_import.test.ts)', () => {
   it('1. Round-trip exportBinary() and importBinary() preserves tables, all data types, indexes, and autoInc sequences', async () => {
@@ -226,6 +234,67 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
     expect(rows).toEqual([{ id: 1, val: 'untouched' }]);
 
     await db.close();
+  });
+
+  it('4. Gzip compression (.webdb.gz) round-trip and Studio remote URL helpers', async () => {
+    const srcDb = await WebDB.open({ name: 'gz_source', storage: 'memory' });
+    await srcDb.createTable('products', [
+      { name: 'id', type: 'INT32', primaryKey: true },
+      { name: 'title', type: 'TEXT' },
+    ]);
+    await srcDb.insertMany('products', [
+      { id: 1, title: 'Mechanical Keyboard' },
+      { id: 2, title: 'Ultrawide Monitor' },
+    ]);
+
+    const rawBytes = await srcDb.exportBinary();
+    await srcDb.close();
+
+    // Compress to .webdb.gz
+    const gzBytes = await compressGzip(rawBytes);
+    expect(isGzipBytes(gzBytes)).toBe(true);
+    expect(gzBytes.byteLength).toBeLessThan(rawBytes.byteLength);
+
+    // Decompress .webdb.gz and open in WebDB
+    const decompressed = await decompressIfNeeded(gzBytes);
+    expect(decompressed.wasCompressed).toBe(true);
+    expect(decompressed.bytes.byteLength).toBe(rawBytes.byteLength);
+
+    // Passing uncompressed bytes to decompressIfNeeded is a no-op
+    const passthrough = await decompressIfNeeded(rawBytes);
+    expect(passthrough.wasCompressed).toBe(false);
+    expect(passthrough.bytes.byteLength).toBe(rawBytes.byteLength);
+
+    const importedDb = await WebDB.open({
+      name: 'gz_restored',
+      storage: 'memory',
+      initialData: decompressed.bytes,
+    });
+    const rows = await importedDb.from('products').orderBy('id', 'asc').toArray();
+    expect(rows).toEqual([
+      { id: 1, title: 'Mechanical Keyboard' },
+      { id: 2, title: 'Ultrawide Monitor' },
+    ]);
+    await importedDb.close();
+
+    // Verify URL helpers
+    expect(isRemoteDbParam('https://example.com/files/db.webdb.gz')).toBe(true);
+    expect(isRemoteDbParam('https://example.com/files/db.webdb')).toBe(true);
+    expect(isRemoteDbParam('/assets/sample.webdb.gz')).toBe(true);
+    expect(isRemoteDbParam('ecommerce_db')).toBe(false);
+
+    expect(deriveDbNameFromSource('https://example.com/files/db.webdb.gz')).toBe('db');
+    expect(deriveDbNameFromSource('my-store-2026.webdb.gz')).toBe('my_store_2026');
+
+    expect(
+      buildShareablePlaygroundUrl({
+        remoteUrl: 'https://example.com/files/db.webdb.gz',
+        core: 'wasm',
+        storage: 'memory',
+      }),
+    ).toBe(
+      'https://ahmad-moussawi.github.io/webdb/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory',
+    );
   });
 });
 

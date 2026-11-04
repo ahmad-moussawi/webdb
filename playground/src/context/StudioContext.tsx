@@ -23,11 +23,20 @@ import {
 } from '../utils/storage';
 import { seedDatabaseTemplate } from '../utils/seeder';
 import { SNIPPETS } from '../constants/snippets';
+import {
+  fetchRemoteWebDb,
+  isRemoteDbParam,
+  deriveDbNameFromSource,
+  buildShareablePlaygroundUrl,
+} from '../utils/binaryLoader';
+
+export type ImportModalSourceMode = 'file' | 'url';
 
 interface StudioContextValue {
   db: any;
   activeDbName: string;
   activeStorage: VfsType;
+  activeRemoteUrl: string | null;
   coreMode: CoreEngineMode;
   setCoreMode: (mode: CoreEngineMode) => Promise<void>;
   tables: TableMeta[];
@@ -56,8 +65,12 @@ interface StudioContextValue {
   newDbModalInitialTemplate: string;
   openNewDbModal: (initialTemplate?: string) => void;
   isImportDbModalOpen: boolean;
+  importModalInitialMode: ImportModalSourceMode;
   setIsImportDbModalOpen: (open: boolean) => void;
-  openImportDbModal: () => void;
+  openImportDbModal: (initialMode?: ImportModalSourceMode) => void;
+  isExportDbModalOpen: boolean;
+  setIsExportDbModalOpen: (open: boolean) => void;
+  openExportDbModal: () => void;
   isAboutModalOpen: boolean;
   setIsAboutModalOpen: (open: boolean) => void;
   seedingProgress: SeedingProgress;
@@ -84,6 +97,13 @@ interface StudioContextValue {
     storage: VfsType,
     templateKey: string,
     initialData?: Uint8Array,
+    remoteUrl?: string,
+  ) => Promise<void>;
+  openRemoteDb: (
+    url: string,
+    storage: VfsType,
+    customName?: string,
+    coreModeOverride?: CoreEngineMode,
   ) => Promise<void>;
   refreshSchema: () => Promise<void>;
   executeCode: (codeOverride?: string) => Promise<void>;
@@ -120,6 +140,50 @@ function getInitialCoreMode(): CoreEngineMode {
   return 'js';
 }
 
+function getInitialStorageMode(): VfsType {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const storageParam = params.get('storage')?.toLowerCase();
+    if (storageParam === 'memory' || storageParam === 'idb') {
+      return storageParam;
+    }
+    const dbParam = params.get('db');
+    if (dbParam && isRemoteDbParam(dbParam)) {
+      return 'memory';
+    }
+    try {
+      const stored = localStorage.getItem('webdb_active_storage');
+      if (stored === 'memory' || stored === 'idb') return stored;
+    } catch {}
+  }
+  return 'memory';
+}
+
+function updateBrowserUrlParams(options: {
+  core: CoreEngineMode;
+  remoteUrl?: string | null;
+  storage?: VfsType;
+}) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (options.remoteUrl) {
+      const nextUrl = buildShareablePlaygroundUrl({
+        remoteUrl: options.remoteUrl,
+        core: options.core,
+        storage: options.storage || 'memory',
+      });
+      window.history.replaceState({}, '', nextUrl);
+    } else {
+      const url = new URL(window.location.href);
+      url.searchParams.set('core', options.core);
+      url.searchParams.delete('db');
+      url.searchParams.delete('storage');
+      url.searchParams.delete('name');
+      window.history.replaceState({}, '', url.toString());
+    }
+  } catch {}
+}
+
 export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [db, setDb] = useState<any>(null);
   const [activeDbName, setActiveDbName] = useState<string>(() => {
@@ -129,13 +193,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return 'ecommerce_db';
     }
   });
-  const [activeStorage, setActiveStorage] = useState<VfsType>(() => {
-    try {
-      return (localStorage.getItem('webdb_active_storage') as VfsType) || 'memory';
-    } catch {
-      return 'memory';
-    }
-  });
+  const [activeStorage, setActiveStorage] = useState<VfsType>(() => getInitialStorageMode());
+  const [activeRemoteUrl, setActiveRemoteUrl] = useState<string | null>(null);
   const [coreMode, setCoreModeState] = useState<CoreEngineMode>(() => getInitialCoreMode());
 
   const [tables, setTables] = useState<TableMeta[]>([]);
@@ -169,14 +228,22 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [newDbModalInitialTemplate, setNewDbModalInitialTemplate] =
     useState<string>('store_standard');
   const [isImportDbModalOpen, setIsImportDbModalOpen] = useState<boolean>(false);
+  const [importModalInitialMode, setImportModalInitialMode] =
+    useState<ImportModalSourceMode>('file');
 
   const openNewDbModal = useCallback((initialTemplate: string = 'store_standard') => {
     setNewDbModalInitialTemplate(initialTemplate);
     setIsNewDbModalOpen(true);
   }, []);
 
-  const openImportDbModal = useCallback(() => {
+  const openImportDbModal = useCallback((initialMode: ImportModalSourceMode = 'file') => {
+    setImportModalInitialMode(initialMode);
     setIsImportDbModalOpen(true);
+  }, []);
+
+  const [isExportDbModalOpen, setIsExportDbModalOpen] = useState<boolean>(false);
+  const openExportDbModal = useCallback(() => {
+    setIsExportDbModalOpen(true);
   }, []);
 
   const [isAboutModalOpen, setIsAboutModalOpen] = useState<boolean>(false);
@@ -436,7 +503,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [db]);
 
   // Open Database with fallback
-  const openDb = useCallback(async (name: string, storage: VfsType, coreModeOverride?: CoreEngineMode) => {
+  const openDb = useCallback(async (
+    name: string,
+    storage: VfsType,
+    coreModeOverride?: CoreEngineMode,
+    initialData?: Uint8Array,
+    preserveRemoteUrl?: string | null,
+  ) => {
     const activeCore = coreModeOverride ?? coreMode;
     setStatusText(`OPENING DB (${activeCore.toUpperCase()})...`);
     setStatusColor('#f59e0b');
@@ -449,11 +522,23 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     try {
-      const instance = await WebDB.open({ name, storage, core: activeCore });
+      const instance = await WebDB.open({
+        name,
+        storage,
+        core: activeCore,
+        initialData,
+      });
       (window as any).db = instance;
       setDb(instance);
       setActiveDbName(name);
       setActiveStorage(storage);
+      const nextRemoteUrl = preserveRemoteUrl !== undefined ? preserveRemoteUrl : null;
+      setActiveRemoteUrl(nextRemoteUrl);
+      updateBrowserUrlParams({
+        core: activeCore,
+        remoteUrl: nextRemoteUrl,
+        storage,
+      });
 
       try {
         localStorage.setItem('webdb_active_storage', storage);
@@ -467,7 +552,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setStatusColor('var(--emerald)');
 
       // If standard ecommerce db is completely empty, seed standard template
-      if (meta.length === 0 && name === 'ecommerce_db') {
+      if (meta.length === 0 && name === 'ecommerce_db' && !initialData) {
         await seedDatabaseTemplate(instance, name, 'store_standard', (prog) => {
           setSeedingProgress(prog);
         });
@@ -479,6 +564,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       showToast(`Fallback: Opened ecommerce_db on Memory (${activeCore})`);
       setActiveStorage('memory');
       setActiveDbName('ecommerce_db');
+      setActiveRemoteUrl(null);
+      updateBrowserUrlParams({ core: activeCore, remoteUrl: null });
 
       const fallbackInstance = await WebDB.open({ name: 'ecommerce_db', storage: 'memory', core: activeCore });
       (window as any).db = fallbackInstance;
@@ -503,26 +590,173 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     try {
       localStorage.setItem('webdb_active_core', mode);
     } catch {}
-    if (typeof window !== 'undefined') {
-      const url = new URL(window.location.href);
-      url.searchParams.set('core', mode);
-      window.history.replaceState({}, '', url.toString());
-    }
     showToast(`Switched engine core to ${mode === 'wasm' ? 'WebAssembly (C)' : 'JavaScript'}`);
-    await openDb(activeDbName, activeStorage, mode);
-  }, [activeDbName, activeStorage, openDb, showToast]);
 
-  // Initialize DB on mount
+    // Preserve in-memory database image across JS <-> WASM engine switches
+    let memorySnapshot: Uint8Array | undefined;
+    if (activeStorage === 'memory' && db && typeof db.exportBinary === 'function') {
+      try {
+        memorySnapshot = await db.exportBinary();
+      } catch {}
+    }
+
+    await openDb(activeDbName, activeStorage, mode, memorySnapshot, activeRemoteUrl);
+  }, [activeDbName, activeRemoteUrl, activeStorage, db, openDb, showToast]);
+
+  // Open a remote .webdb or .webdb.gz database from a URL
+  const openRemoteDb = useCallback(
+    async (
+      url: string,
+      storage: VfsType,
+      customName?: string,
+      coreModeOverride?: CoreEngineMode,
+    ) => {
+      const activeCore = coreModeOverride ?? coreMode;
+      const trimmedUrl = url.trim();
+      setStatusText('FETCHING REMOTE DB...');
+      setStatusColor('#3b82f6');
+      setSeedingProgress({
+        visible: true,
+        title: 'Loading Remote Database',
+        step: `Downloading ${trimmedUrl}...`,
+        current: 0,
+        total: 100,
+      });
+
+      try {
+        const isUrlGz = /\.gz($|\?)/i.test(trimmedUrl);
+        const loaded = await fetchRemoteWebDb(trimmedUrl, (loadedBytes, totalBytes) => {
+          const kb = Math.round(loadedBytes / 1024);
+          const totalKb = Math.max(kb, Math.round(totalBytes / 1024));
+          setSeedingProgress({
+            visible: true,
+            title: 'Loading Remote Database',
+            step: isUrlGz
+              ? `Downloading & decompressing (${kb} KB)...`
+              : `Downloading (${kb} KB)...`,
+            current: kb || 1,
+            total: totalKb || 100,
+          });
+        });
+
+        const cleanName =
+          (customName || loaded.suggestedName)
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9_]/g, '_') || 'remote_db';
+
+        setSeedingProgress({
+          visible: true,
+          title: 'Loading Remote Database',
+          step: `Importing ${loaded.pageCount.toLocaleString()} pages into ${storage === 'memory' ? 'Memory' : 'IndexedDB'}...`,
+          current: loaded.pageCount,
+          total: loaded.pageCount,
+        });
+
+        if (db) {
+          try {
+            await db.close();
+          } catch {}
+        }
+
+        const newInst = await WebDB.open({
+          name: cleanName,
+          storage,
+          core: activeCore,
+          initialData: loaded.bytes,
+        });
+
+        addRegisteredDb(storage, cleanName);
+        (window as any).db = newInst;
+        setDb(newInst);
+        setActiveDbName(cleanName);
+        setActiveStorage(storage);
+        setActiveRemoteUrl(trimmedUrl);
+        updateBrowserUrlParams({
+          core: activeCore,
+          remoteUrl: trimmedUrl,
+          storage,
+        });
+
+        try {
+          localStorage.setItem('webdb_active_storage', storage);
+          localStorage.setItem('webdb_active_db', cleanName);
+          localStorage.setItem('webdb_active_core', activeCore);
+        } catch {}
+
+        const meta = await newInst.listTables();
+        setTables(meta);
+        setSeedingProgress((prev) => ({ ...prev, visible: false }));
+        setStatusText(`READY (${activeCore.toUpperCase()})`);
+        setStatusColor('var(--emerald)');
+
+        // If the remote database doesn't have a "products" table and the first tab still has the default welcome query,
+        // update tab-1 to query the first table of the remote database so the user can run it right away.
+        if (meta.length > 0 && !meta.some((t: TableMeta) => t.name === 'products')) {
+          const firstTable = meta[0].name;
+          const sampleQuery = `// Remote Database: ${cleanName}\n// Query rows from "${firstTable}"\nreturn db.from("${firstTable}")\n  .limit(25);`;
+          setTabs((prev) => {
+            if (
+              prev.length === 1 &&
+              prev[0].id === 'tab-1' &&
+              prev[0].code.includes('db.from("products")')
+            ) {
+              const updated = [{ ...prev[0], code: sampleQuery }];
+              tabsRef.current = updated;
+              return updated;
+            }
+            return prev;
+          });
+        }
+
+        const sizeKb = (loaded.bytes.byteLength / 1024).toFixed(1);
+        const gzNote = loaded.wasCompressed
+          ? ` (decompressed from ${(loaded.compressedByteLength / 1024).toFixed(1)} KB .gz)`
+          : '';
+        showToast(
+          `Opened remote database "${cleanName}" (${meta.length} tables, ${loaded.pageCount} pages, ${sizeKb} KB${gzNote}) in ${storage === 'memory' ? 'Memory' : 'IndexedDB'}`,
+        );
+      } catch (err: any) {
+        setSeedingProgress((prev) => ({ ...prev, visible: false }));
+        console.error('Failed to open remote database:', err);
+        showToast(`Remote DB Error: ${err?.message || err}`);
+        // Fall back to default database so the Studio remains usable
+        await openDb(activeDbName, activeStorage, activeCore);
+      }
+    },
+    [activeDbName, activeStorage, coreMode, db, openDb, showToast],
+  );
+
+  // Initialize DB on mount (supports ?core=wasm&db=https://...&storage=memory)
   useEffect(() => {
     const initialCore = getInitialCoreMode();
+    const initialStorage = getInitialStorageMode();
+
     if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const dbParam = params.get('db')?.trim();
+      const customNameParam = params.get('name')?.trim();
+
+      if (dbParam && isRemoteDbParam(dbParam)) {
+        void openRemoteDb(dbParam, initialStorage, customNameParam, initialCore);
+        return;
+      }
+
+      if (dbParam) {
+        const cleanLocalName =
+          deriveDbNameFromSource(dbParam) || activeDbName;
+        addRegisteredDb(initialStorage, cleanLocalName);
+        void openDb(cleanLocalName, initialStorage, initialCore);
+        return;
+      }
+
       const url = new URL(window.location.href);
       if (!url.searchParams.has('core')) {
         url.searchParams.set('core', initialCore);
         window.history.replaceState({}, '', url.toString());
       }
     }
-    openDb(activeDbName, activeStorage, initialCore);
+    void openDb(activeDbName, initialStorage, initialCore);
   }, []);
 
   const createDb = useCallback(
@@ -531,6 +765,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       storage: VfsType,
       templateKey: string,
       initialData?: Uint8Array,
+      remoteUrl?: string,
     ) => {
       try {
         const allExisting = new Set([
@@ -561,6 +796,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setDb(newInst);
           setActiveDbName(name);
           setActiveStorage(storage);
+          const nextRemote = remoteUrl ? remoteUrl.trim() : null;
+          setActiveRemoteUrl(nextRemote);
+          updateBrowserUrlParams({
+            core: coreMode,
+            remoteUrl: nextRemote,
+            storage,
+          });
           try {
             localStorage.setItem('webdb_active_storage', storage);
             localStorage.setItem('webdb_active_db', name);
@@ -570,7 +812,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setStatusText(`READY (${coreMode.toUpperCase()})`);
           setStatusColor('var(--emerald)');
           showToast(
-            `Imported database "${name}" (${meta.length} tables, ${initialData.byteLength / 4096} pages) into ${storage === 'memory' ? 'Memory' : 'IndexedDB'}`,
+            `${nextRemote ? 'Opened remote' : 'Imported'} database "${name}" (${meta.length} tables, ${initialData.byteLength / 4096} pages) into ${storage === 'memory' ? 'Memory' : 'IndexedDB'}`,
           );
           return;
         }
@@ -813,6 +1055,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         db,
         activeDbName,
         activeStorage,
+        activeRemoteUrl,
         coreMode,
         setCoreMode,
         tables,
@@ -841,8 +1084,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         newDbModalInitialTemplate,
         openNewDbModal,
         isImportDbModalOpen,
+        importModalInitialMode,
         setIsImportDbModalOpen,
         openImportDbModal,
+        isExportDbModalOpen,
+        setIsExportDbModalOpen,
+        openExportDbModal,
         isAboutModalOpen,
         setIsAboutModalOpen,
         seedingProgress,
@@ -863,6 +1110,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         openDb,
         createDb,
+        openRemoteDb,
         refreshSchema,
         executeCode,
         updateActiveCode,

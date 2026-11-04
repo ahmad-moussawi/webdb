@@ -2,9 +2,10 @@ import React from 'react';
 import { useStudio } from '../../context/StudioContext';
 import { getRegisteredDbs } from '../../utils/storage';
 import type { VfsType } from '../../types/studio';
+import { Globe } from 'lucide-react';
 
 export const DbSelector: React.FC = () => {
-  const { activeDbName, activeStorage, openDb, openNewDbModal } = useStudio();
+  const { activeDbName, activeStorage, openDb, openNewDbModal, openImportDbModal } = useStudio();
 
   const memDbs = getRegisteredDbs('memory');
   const idbDbs = getRegisteredDbs('idb');
@@ -50,6 +51,16 @@ export const DbSelector: React.FC = () => {
           ))}
         </optgroup>
       </select>
+
+      <button
+        id="openRemoteDbQuickBtn"
+        className="btn btn-secondary btn-sm"
+        title="Open Remote or Import Database (.webdb / .webdb.gz)"
+        style={{ padding: '0 6px', height: '24px' }}
+        onClick={() => openImportDbModal('url')}
+      >
+        <Globe size={12} />
+      </button>
 
       <button
         id="openNewDbModalBtn"

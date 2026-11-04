@@ -8,7 +8,6 @@ import {
   PanelRight,
   Download,
   Upload,
-  HardDriveDownload,
   Plus,
   FilePlus,
   X,
@@ -26,19 +25,14 @@ import {
   Terminal,
   Table,
   Info,
+  Globe,
 } from 'lucide-react';
-import {
-  exportDatabaseToSql,
-  downloadSqlFile,
-  downloadBinaryDbFile,
-} from '../../utils/sqlExporter';
 
 type MenuKey = 'file' | 'edit' | 'view' | 'database' | 'help' | null;
 
 export const TopBar: React.FC = () => {
   const {
     db,
-    activeDbName,
     coreMode,
     setCoreMode,
     showToast,
@@ -53,6 +47,7 @@ export const TopBar: React.FC = () => {
     toggleResults,
     openNewDbModal,
     openImportDbModal,
+    openExportDbModal,
     openNewTab,
     closeTab,
     activeTabId,
@@ -67,8 +62,6 @@ export const TopBar: React.FC = () => {
   } = useStudio();
 
   const [openMenu, setOpenMenu] = useState<MenuKey>(null);
-  const [isExporting, setIsExporting] = useState<boolean>(false);
-  const [isExportingBinary, setIsExportingBinary] = useState<boolean>(false);
   const menuBarRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -97,48 +90,6 @@ export const TopBar: React.FC = () => {
   const closeMenuAndRun = (action: () => void | Promise<void>) => {
     setOpenMenu(null);
     void action();
-  };
-
-  const handleExportBinary = async () => {
-    if (!db || typeof db.exportBinary !== 'function') {
-      showToast('No active database to export.');
-      return;
-    }
-    setIsExportingBinary(true);
-    try {
-      const bytes: Uint8Array = await db.exportBinary();
-      downloadBinaryDbFile(`${activeDbName}.webdb`, bytes);
-      const kb = (bytes.byteLength / 1024).toFixed(1);
-      const pages = bytes.byteLength / 4096;
-      showToast(`Exported ${activeDbName}.webdb (${kb} KB, ${pages} pages)`);
-    } catch (err: any) {
-      showToast(`Binary export failed: ${err?.message || 'Unknown error'}`);
-    } finally {
-      setIsExportingBinary(false);
-    }
-  };
-
-  const handleExportSql = async () => {
-    if (!db) {
-      showToast('No active database to export.');
-      return;
-    }
-    setIsExporting(true);
-    try {
-      showToast('Generating SQLite dump...');
-      const { sql, tableCount, rowCount } = await exportDatabaseToSql(
-        db,
-        activeDbName,
-      );
-      downloadSqlFile(`${activeDbName}.sqlite.sql`, sql);
-      showToast(
-        `Exported ${tableCount} table(s) (${rowCount} rows) to ${activeDbName}.sqlite.sql`,
-      );
-    } catch (err: any) {
-      showToast(`Export failed: ${err?.message || 'Unknown error'}`);
-    } finally {
-      setIsExporting(false);
-    }
   };
 
   const handleCopyQuery = async () => {
@@ -270,14 +221,29 @@ export const TopBar: React.FC = () => {
                   id="importBinaryMenuBtn"
                   className="menubar-option"
                   onClick={() =>
-                    closeMenuAndRun(() => openImportDbModal())
+                    closeMenuAndRun(() => openImportDbModal('file'))
                   }
                 >
                   <span className="menubar-option-left">
                     <span className="menubar-option-icon">
                       <Upload size={14} />
                     </span>
-                    <span>Import Database (.webdb)...</span>
+                    <span>Import Database (.webdb / .gz)...</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  id="openRemoteDbMenuBtn"
+                  className="menubar-option"
+                  onClick={() =>
+                    closeMenuAndRun(() => openImportDbModal('url'))
+                  }
+                >
+                  <span className="menubar-option-left">
+                    <span className="menubar-option-icon">
+                      <Globe size={14} />
+                    </span>
+                    <span>Open Remote Database (URL)...</span>
                   </span>
                 </button>
 
@@ -310,42 +276,18 @@ export const TopBar: React.FC = () => {
                 </button>
 
                 <div className="menubar-divider" />
-                <div className="menubar-section-label">Export Active DB</div>
 
                 <button
                   type="button"
-                  id="exportBinaryBtn"
+                  id="openExportModalMenuBtn"
                   className="menubar-option"
-                  disabled={isExportingBinary}
-                  onClick={() => closeMenuAndRun(handleExportBinary)}
-                >
-                  <span className="menubar-option-left">
-                    <span className="menubar-option-icon">
-                      <HardDriveDownload size={14} />
-                    </span>
-                    <span>
-                      {isExportingBinary
-                        ? 'Exporting Binary...'
-                        : 'Export Binary Database (.webdb)'}
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  id="exportSqlBtn"
-                  className="menubar-option"
-                  disabled={isExporting}
-                  onClick={() => closeMenuAndRun(handleExportSql)}
+                  onClick={() => closeMenuAndRun(openExportDbModal)}
                 >
                   <span className="menubar-option-left">
                     <span className="menubar-option-icon">
                       <Download size={14} />
                     </span>
-                    <span>
-                      {isExporting
-                        ? 'Exporting SQL...'
-                        : 'Export SQLite Dump (.sql)'}
-                    </span>
+                    <span>Export Database...</span>
                   </span>
                 </button>
               </div>
