@@ -422,8 +422,15 @@ export class WebDB implements IDatabaseQueryExecutor {
     return this;
   }
 
-  private validateIdentifier(identifier: string, label: string = "Identifier"): void {
-    if (!identifier || typeof identifier !== "string" || identifier.length === 0) {
+  private validateIdentifier(
+    identifier: string,
+    label: string = "Identifier",
+  ): void {
+    if (
+      !identifier ||
+      typeof identifier !== "string" ||
+      identifier.length === 0
+    ) {
       throw new Error(`${label} cannot be empty`);
     }
     if (identifier.length > MAX_NAME_LENGTH) {
@@ -461,7 +468,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         throw new ColumnAlreadyExistsError(col.name, name);
       }
       seenColNames.add(col.name);
-      const flagsNum = typeof (col as any).flags === "number" ? (col as any).flags : 0;
+      const flagsNum =
+        typeof (col as any).flags === "number" ? (col as any).flags : 0;
       if (
         col.primaryKey ||
         col.flags?.primaryKey ||
@@ -478,7 +486,9 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const needsTableOverflowPage =
       catalog_find_free_table_slot(page1View) === -1 ? 1 : 0;
-    const numCatPages = Math.ceil(columns.length / MAX_COLUMNS_PER_CATALOG_PAGE);
+    const numCatPages = Math.ceil(
+      columns.length / MAX_COLUMNS_PER_CATALOG_PAGE,
+    );
     const needsPkIndexPage = hasPk ? 1 : 0;
     const totalPagesToAllocate =
       1 + numCatPages + needsPkIndexPage + needsTableOverflowPage;
@@ -863,7 +873,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       return table;
     }
 
-    if (table.columns.some((c, idx) => idx !== colIdx && c.name === newColumnName)) {
+    if (
+      table.columns.some((c, idx) => idx !== colIdx && c.name === newColumnName)
+    ) {
       throw new ColumnAlreadyExistsError(newColumnName, tableName);
     }
 
@@ -1577,10 +1589,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     return false;
   }
 
-  private extractPrimaryKey(
-    table: TableMeta,
-    row: DbRow,
-  ): DbValue | DbValue[] {
+  private extractPrimaryKey(table: TableMeta, row: DbRow): DbValue | DbValue[] {
     const pkCols = table.columns.filter(
       (c) => (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
     );
@@ -1661,7 +1670,9 @@ export class WebDB implements IDatabaseQueryExecutor {
             map.delete(key);
           } else if (prev.op === "update" && rec.op === "update") {
             const oldRow = prev.oldRow!;
-            const newRow = rec.newRow ? this.cloneRow(rec.newRow) : prev.newRow!;
+            const newRow = rec.newRow
+              ? this.cloneRow(rec.newRow)
+              : prev.newRow!;
             const changedColumns = Object.keys(newRow).filter(
               (col) => !this.valuesEqual(oldRow[col], newRow[col]),
             );
@@ -1807,7 +1818,9 @@ export class WebDB implements IDatabaseQueryExecutor {
    */
   liveQuery<T = DbRow[]>(
     queryFn: LiveQueryFn<T>,
-    callbackOrOptions?: ((data: T, state: LiveQueryState<T>) => void) | LiveQueryOptions<T>,
+    callbackOrOptions?:
+      | ((data: T, state: LiveQueryState<T>) => void)
+      | LiveQueryOptions<T>,
     options?: LiveQueryOptions<T>,
   ): LiveQueryController<T> {
     const isCallback = typeof callbackOrOptions === "function";
@@ -1829,7 +1842,10 @@ export class WebDB implements IDatabaseQueryExecutor {
     };
   }
 
-  private validateFilterColumns(table: TableMeta, filters: QueryFilter[]): void {
+  private validateFilterColumns(
+    table: TableMeta,
+    filters: QueryFilter[],
+  ): void {
     const validCols = new Set(table.columns.map((c) => c.name));
     const checkExpr = (expr: any) => {
       if (!expr) return;
@@ -1857,11 +1873,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     for (const f of filters) checkFilter(f);
   }
 
-  private matchesFilter(
-    table: TableMeta,
-    row: DbRow,
-    f: QueryFilter,
-  ): boolean {
+  private matchesFilter(table: TableMeta, row: DbRow, f: QueryFilter): boolean {
     switch (f.type) {
       case "and":
         return (f.children ?? []).every((c) =>
@@ -2168,7 +2180,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       // 2. Tentative Auto-Inc calculation
       let assignedAutoInc: number | undefined;
-      let effectiveRow: DbRow = {};
+      const effectiveRow: DbRow = {};
       for (const c of table.columns) {
         if (origRow[c.name] !== undefined) {
           effectiveRow[c.name] = origRow[c.name];
