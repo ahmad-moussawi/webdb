@@ -324,7 +324,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       await recoverFromWal(vfs);
 
       // Check if Page 1 exists in storage
-      const page1Data = await vfs.readPage(1);
+      const [page1Data] = await vfs.readPages([1]);
       if (!page1Data) {
         // Initialize Page 1 in slot 0
         catalog_init_page1(driver.getSlotDataView(0));
@@ -3596,6 +3596,24 @@ export class WebDB implements IDatabaseQueryExecutor {
       catalog_update_page1_checksum(outPage1View, 0);
 
       // Copy Pages 2..totalPages
+      const missingPageIds: number[] = [];
+      for (let p = 2; p <= totalPages; p++) {
+        if (
+          this.pool.getResidentSlot(p) === -1 &&
+          !this.coordinator.hasSpilledPage(p)
+        ) {
+          missingPageIds.push(p);
+        }
+      }
+      const diskPages =
+        missingPageIds.length > 0
+          ? await this.vfs.readPages(missingPageIds)
+          : [];
+      const diskPageMap = new Map<number, Uint8Array | null>();
+      for (let i = 0; i < missingPageIds.length; i++) {
+        diskPageMap.set(missingPageIds[i], diskPages[i] ?? null);
+      }
+
       for (let p = 2; p <= totalPages; p++) {
         const offset = (p - 1) * PAGE_SIZE;
         const slice = out.subarray(offset, offset + PAGE_SIZE);
@@ -3606,7 +3624,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         } else if (this.coordinator.hasSpilledPage(p)) {
           slice.set(this.coordinator.getSpilledPage(p)!);
         } else {
-          const diskPage = await this.vfs.readPage(p);
+          const diskPage = diskPageMap.get(p);
           if (diskPage) {
             slice.set(diskPage);
           }
@@ -3707,7 +3725,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.pool.clearDirty(0);
 
       await this.vfs.writePages(pagesToWrite);
-      await this.vfs.flush();
+      await this.vfs.flush?.();
       await this.coordinator.resetWalAfterImport();
 
       this.tableMetaCache.clear();
@@ -3740,6 +3758,6 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.subscriptions.clear();
     await this.coordinator.close();
     await this.driver.flushAllDirty();
-    await this.vfs.close();
+    await this.vfs.close?.();
   }
 }

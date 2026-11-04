@@ -41,36 +41,25 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
     return this.dbPromise;
   }
 
-  async readPage(pageId: number): Promise<Uint8Array | null> {
+  async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
+    if (pageIds.length === 0) return [];
     const db = await this.getDb();
-    return new Promise<Uint8Array | null>((resolve, reject) => {
+    return new Promise<Array<Uint8Array | null>>((resolve, reject) => {
       const tx = db.transaction('pages', 'readonly');
       const store = tx.objectStore('pages');
-      const request = store.get(pageId);
+      const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
 
-      request.onsuccess = () => {
-        const result = request.result;
-        if (!result) {
-          resolve(null);
-        } else {
-          resolve(result instanceof Uint8Array ? result : new Uint8Array(result));
-        }
-      };
-      request.onerror = () => reject(request.error);
-    });
-  }
+      for (let i = 0; i < pageIds.length; i++) {
+        const request = store.get(pageIds[i]);
+        request.onsuccess = () => {
+          const result = request.result;
+          if (result) {
+            results[i] = result instanceof Uint8Array ? result : new Uint8Array(result);
+          }
+        };
+      }
 
-  async writePage(pageId: number, data: Uint8Array): Promise<void> {
-    const db = await this.getDb();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction('pages', 'readwrite');
-      const store = tx.objectStore('pages');
-      // Store a clone of the byte slice
-      const copy = new Uint8Array(data.byteLength);
-      copy.set(data);
-      store.put(copy, pageId);
-
-      tx.oncomplete = () => resolve();
+      tx.oncomplete = () => resolve(results);
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
@@ -145,25 +134,6 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
-    });
-  }
-
-  async readWalFrame(frameIndex: number): Promise<Uint8Array | null> {
-    const db = await this.getDb();
-    return new Promise<Uint8Array | null>((resolve, reject) => {
-      const tx = db.transaction('wal_frames', 'readonly');
-      const store = tx.objectStore('wal_frames');
-      const request = store.get(frameIndex);
-
-      request.onsuccess = () => {
-        const result = request.result;
-        if (!result) {
-          resolve(null);
-        } else {
-          resolve(result instanceof Uint8Array ? result : new Uint8Array(result));
-        }
-      };
-      request.onerror = () => reject(request.error);
     });
   }
 

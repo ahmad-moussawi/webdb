@@ -151,7 +151,7 @@ export async function recoverFromWal(vfs: IVfsAdapter): Promise<RecoveryResult> 
   }
 
   // Step 5: Flush main storage and truncate WAL
-  await vfs.flush();
+  await vfs.flush?.();
   await vfs.truncateWal(0);
 
   return {

@@ -39,44 +39,55 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     }
   }
 
-  async readPage(pageId: number): Promise<Uint8Array | null> {
+  async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
+    if (pageIds.length === 0) return [];
     await this.initHandles();
-    const offset = (pageId - 1) * 4096;
 
     if (this.dbSyncHandle) {
       const size = this.dbSyncHandle.getSize();
-      if (offset + 4096 > size) return null;
-      const buffer = new Uint8Array(4096);
-      this.dbSyncHandle.read(buffer, { at: offset });
-      return buffer;
+      return pageIds.map((pageId) => {
+        const offset = (pageId - 1) * 4096;
+        if (offset + 4096 > size) return null;
+        const buffer = new Uint8Array(4096);
+        this.dbSyncHandle.read(buffer, { at: offset });
+        return buffer;
+      });
     }
 
     const file = await this.dbFileHandle!.getFile();
-    if (offset + 4096 > file.size) return null;
-    const slice = file.slice(offset, offset + 4096);
-    const arrayBuf = await slice.arrayBuffer();
-    return new Uint8Array(arrayBuf);
+    const results: Array<Uint8Array | null> = [];
+    for (const pageId of pageIds) {
+      const offset = (pageId - 1) * 4096;
+      if (offset + 4096 > file.size) {
+        results.push(null);
+      } else {
+        const slice = file.slice(offset, offset + 4096);
+        const arrayBuf = await slice.arrayBuffer();
+        results.push(new Uint8Array(arrayBuf));
+      }
+    }
+    return results;
   }
 
-  async writePage(pageId: number, data: Uint8Array): Promise<void> {
+  async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
+    if (pages.length === 0) return;
     await this.initHandles();
-    const offset = (pageId - 1) * 4096;
 
     if (this.dbSyncHandle) {
-      this.dbSyncHandle.write(data, { at: offset });
+      for (const { pageId, data } of pages) {
+        const offset = (pageId - 1) * 4096;
+        this.dbSyncHandle.write(data, { at: offset });
+      }
       return;
     }
 
     const writable = await (this.dbFileHandle as any).createWritable({ keepExistingData: true });
-    await writable.seek(offset);
-    await writable.write(data);
-    await writable.close();
-  }
-
-  async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
     for (const { pageId, data } of pages) {
-      await this.writePage(pageId, data);
+      const offset = (pageId - 1) * 4096;
+      await writable.seek(offset);
+      await writable.write(data);
     }
+    await writable.close();
   }
 
   async flush(): Promise<void> {
@@ -126,33 +137,33 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     await writable.close();
   }
 
-  async readWalFrame(frameIndex: number): Promise<Uint8Array | null> {
-    await this.initHandles();
-    const offset = 32 + (frameIndex * 4128);
-    if (this.walSyncHandle) {
-      const size = this.walSyncHandle.getSize();
-      if (offset >= size) return null;
-      const readLen = Math.min(4128, size - offset);
-      const frame = new Uint8Array(readLen);
-      this.walSyncHandle.read(frame, { at: offset });
-      return frame;
-    }
-    const file = await this.walFileHandle!.getFile();
-    if (offset >= file.size) return null;
-    const readLen = Math.min(4128, file.size - offset);
-    const slice = file.slice(offset, offset + readLen);
-    return new Uint8Array(await slice.arrayBuffer());
-  }
-
   async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
+    await this.initHandles();
     const frames: Uint8Array[] = [];
     let idx = startFrameIndex;
     const limit = maxFrames !== undefined ? startFrameIndex + maxFrames : Infinity;
 
+    if (this.walSyncHandle) {
+      const size = this.walSyncHandle.getSize();
+      while (idx < limit) {
+        const offset = 32 + idx * 4128;
+        if (offset >= size) break;
+        const readLen = Math.min(4128, size - offset);
+        const frame = new Uint8Array(readLen);
+        this.walSyncHandle.read(frame, { at: offset });
+        frames.push(frame);
+        idx++;
+      }
+      return frames;
+    }
+
+    const file = await this.walFileHandle!.getFile();
     while (idx < limit) {
-      const frame = await this.readWalFrame(idx);
-      if (!frame) break;
-      frames.push(frame);
+      const offset = 32 + idx * 4128;
+      if (offset >= file.size) break;
+      const readLen = Math.min(4128, file.size - offset);
+      const slice = file.slice(offset, offset + readLen);
+      frames.push(new Uint8Array(await slice.arrayBuffer()));
       idx++;
     }
     return frames;
@@ -185,7 +196,7 @@ export class OpfsVfsAdapter implements IVfsAdapter {
 
   async truncateWal(frameIndex: number): Promise<void> {
     await this.initHandles();
-    const newSize = frameIndex === 0 ? 0 : 32 + (frameIndex * 4128);
+    const newSize = frameIndex === 0 ? 0 : 32 + frameIndex * 4128;
     if (this.walSyncHandle) {
       this.walSyncHandle.truncate(newSize);
       return;

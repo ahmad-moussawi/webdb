@@ -153,36 +153,86 @@ const db = await WebDB.open({
 
 ## 5. Custom VFS Adapters (`vfs`)
 
-If you want to store 4 KB pages in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote HTTP CDN), you can pass a custom object implementing [`IVfsAdapter`](./src/host/storage/vfs.ts):
+If you want to store 4 KB database pages and Write-Ahead Log (WAL) frames in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote storage service), implement a class conforming to [`IVfsAdapter`](./src/host/storage/vfs.ts).
+
+`IVfsAdapter` uses batch page/frame methods (`readPages`, `writePages`, `readWalFrames`, `appendWalFrames`) so implementations only need to handle arrays of pages and frames—avoiding duplicate single-item methods—while lifecycle/fsync hooks (`flush`, `flushWal`, `close`, `isSynchronous`) are optional:
 
 ```typescript
 import { WebDB, type IVfsAdapter } from "@ahmadmoussawi/webdb";
 
-const customVfs: IVfsAdapter = {
-  name: "custom-storage",
-  async readPage(pageId: number): Promise<Uint8Array | null> {
-    // Return 4096-byte Uint8Array for pageId, or null if not yet written
-    return null;
-  },
-  async writePage(pageId: number, data: Uint8Array): Promise<void> {
-    // Persist 4096-byte page
-  },
+class CustomVfsAdapter implements IVfsAdapter {
+  readonly name = "memory" as const; // 'memory' | 'opfs' | 'idb'
+  readonly isSynchronous = false;
+
+  // --- Main Database Pages (4,096 bytes each, 1-indexed pageId) ---
+  async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
+    // Return 4096-byte Uint8Array for each pageId (or null if not yet written)
+    return pageIds.map(() => null);
+  }
+
   async writePages(
     pages: Array<{ pageId: number; data: Uint8Array }>,
   ): Promise<void> {
-    for (const p of pages) {
-      await this.writePage(p.pageId, p.data);
-    }
-  },
-  async flush(): Promise<void> {},
-  async close(): Promise<void> {},
-};
+    // Persist each 4096-byte page at p.pageId
+  }
+
+  async truncate(pageCount: number): Promise<void> {
+    // Remove any stored pages with pageId > pageCount
+  }
+
+  // --- Write-Ahead Log (32-byte header + 4,128-byte frames, 0-indexed) ---
+  async readWalHeader(): Promise<Uint8Array | null> {
+    // Return 32-byte WAL header, or null if WAL is empty
+    return null;
+  }
+
+  async writeWalHeader(header: Uint8Array): Promise<void> {
+    // Persist 32-byte WAL header
+  }
+
+  async readWalFrames(
+    startFrameIndex: number,
+    maxFrames?: number,
+  ): Promise<Uint8Array[]> {
+    // Return consecutive 4128-byte WAL frames starting from startFrameIndex
+    return [];
+  }
+
+  async appendWalFrames(frames: Uint8Array[]): Promise<void> {
+    // Append one or more 4128-byte WAL frames to the end of the log
+  }
+
+  async truncateWal(frameIndex: number): Promise<void> {
+    // Truncate WAL to frameIndex frames (0 resets/clears the WAL after checkpoint)
+  }
+
+  async getWalFrameCount(): Promise<number> {
+    // Return current number of frames in the WAL
+    return 0;
+  }
+
+  // --- Optional Lifecycle & Durability Hooks ---
+  async flush(): Promise<void> {
+    // Optional: fsync main page storage
+  }
+
+  async flushWal(): Promise<void> {
+    // Optional: fsync WAL storage on transaction commit
+  }
+
+  async close(): Promise<void> {
+    // Optional: release underlying file/storage handles
+  }
+}
 
 const db = await WebDB.open({
   name: "custom_db",
-  vfs: customVfs,
+  vfs: new CustomVfsAdapter(),
 });
 ```
+
+> [!TIP]
+> **Extending `MemoryVfsAdapter`:** If you are building a read-only adapter or an in-memory adapter that periodically syncs pages to a remote backend, you can subclass `MemoryVfsAdapter` (exported from `@ahmadmoussawi/webdb`) so all WAL and page methods work out of the box, and only override the methods you need.
 
 ---
 

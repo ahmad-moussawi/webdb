@@ -126,7 +126,7 @@ export class Io {
     }
 
     const read_promise = (async () => {
-      const disk_page = await this.vfs.readPage(pageId);
+      const [disk_page] = await this.vfs.readPages([pageId]);
       const slot_offset = slotIdx * PAGE_SIZE;
 
       if (disk_page) {
@@ -203,7 +203,9 @@ export class Io {
     if (this.coordinator) {
       this.coordinator.onDirectPageWrite(pageId, write_snapshot);
     }
-    const write_promise = this.vfs.writePage(pageId, write_snapshot);
+    const write_promise = this.vfs.writePages([
+      { pageId, data: write_snapshot },
+    ]);
     this.in_flight_flushes.set(pageId, write_promise);
     try {
       await write_promise;
@@ -254,6 +256,6 @@ export class Io {
    * Durably flushes pending VFS adapter writes.
    */
   async flush(): Promise<void> {
-    await this.vfs.flush();
+    await this.vfs.flush?.();
   }
 }

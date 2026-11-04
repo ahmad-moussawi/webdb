@@ -150,15 +150,14 @@ const renderedLines = computed(() => {
 });
 
 const customVfsSnippet = `class CloudflareKvVfs {
-  
-  async readPage(id) {
-    return await kv.get("p" + id);
+  async readPages(ids) {
+    return Promise.all(ids.map((id) => kv.get("p" + id)));
   }
 
-  async writePage(id, bytes) {
-    await kv.put("p" + id, bytes);
+  async writePages(pages) {
+    for (const p of pages) await kv.put("p" + p.pageId, p.data);
   }
-
+  // + WAL frame methods
 }`;
 
 const highlightedCustomVfs = computed(() => {
@@ -1098,11 +1097,11 @@ const copyCode = () => {
             <h3 class="vfs-title">Build Your Own VFS Layer in Minutes</h3>
             <p class="vfs-desc">
               WebDB decouples the query engine completely from physical disk
-              I/O. Implementing a custom storage layer is as simple as defining
-              two asynchronous methods: <code>readPage(pageId)</code> and
-              <code>writePage(pageId, buffer)</code>. Easily connect WebDB to
-              Cloudflare KV, Durable Objects, WebRTC peer swarms, or custom
-              encrypted stores without touching engine internals.
+              I/O. Implement the clean asynchronous <code>IVfsAdapter</code>
+              interface—batching 4 KB pages via <code>readPages()</code> and
+              <code>writePages()</code> alongside WAL frame methods—to connect
+              WebDB to Cloudflare KV, Durable Objects, WebRTC peer swarms, or
+              custom encrypted stores without touching engine internals.
             </p>
           </div>
           <div class="vfs-custom-code">

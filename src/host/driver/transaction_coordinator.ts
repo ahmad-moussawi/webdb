@@ -340,7 +340,7 @@ export class TransactionCoordinator {
       this.expectedWalFrameCount = 0;
     }
 
-    const diskPage1 = await this.vfs.readPage(1);
+    const [diskPage1] = await this.vfs.readPages([1]);
     if (diskPage1) {
       const diskView = new DataView(diskPage1.buffer, diskPage1.byteOffset, diskPage1.byteLength);
       const diskChangeCounter = diskView.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
@@ -625,7 +625,7 @@ export class TransactionCoordinator {
 
     // Durably write WAL frames
     await this.vfs.appendWalFrames(framesToAppend);
-    await this.vfs.flushWal();
+    await this.vfs.flushWal?.();
     const currentFrames = await this.vfs.getWalFrameCount();
     this.expectedWalFrameCount = currentFrames;
 
@@ -779,7 +779,7 @@ export class TransactionCoordinator {
     }
 
     // 4. Durably flush main storage
-    await this.vfs.flush();
+    await this.vfs.flush?.();
 
     // 5. Strictly AFTER flush succeeds, reset WAL to 0 and clear in-memory WAL page cache
     await this.vfs.truncateWal(0);

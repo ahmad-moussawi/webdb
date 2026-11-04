@@ -351,12 +351,14 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     await driver.freePage(2);
     expect(driver.isDirty(slot2)).toBe(false);
 
-    // Spy on vfs.writePage to verify that evicting slot 2 does NOT trigger a second writePage for page 2!
+    // Spy on vfs.writePages to verify that evicting slot 2 does NOT trigger a second write for page 2!
     let writeCountForPage2 = 0;
-    const originalWritePage = vfs.writePage.bind(vfs);
-    vfs.writePage = async (pageId: number, data: Uint8Array) => {
-      if (pageId === 2) writeCountForPage2++;
-      return originalWritePage(pageId, data);
+    const originalWritePages = vfs.writePages.bind(vfs);
+    vfs.writePages = async (pages: Array<{ pageId: number; data: Uint8Array }>) => {
+      for (const p of pages) {
+        if (p.pageId === 2) writeCountForPage2++;
+      }
+      return originalWritePages(pages);
     };
 
     // Fill the cache to evict slot 2 with page 4 and page 5
@@ -391,10 +393,12 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
 
     // Track any VFS writes to page 2
     let writeCountForPage2 = 0;
-    const originalWritePage = vfs.writePage.bind(vfs);
-    vfs.writePage = async (pageId: number, data: Uint8Array) => {
-      if (pageId === 2) writeCountForPage2++;
-      return originalWritePage(pageId, data);
+    const originalWritePages = vfs.writePages.bind(vfs);
+    vfs.writePages = async (pages: Array<{ pageId: number; data: Uint8Array }>) => {
+      for (const p of pages) {
+        if (p.pageId === 2) writeCountForPage2++;
+      }
+      return originalWritePages(pages);
     };
 
     // 4. Force eviction by acquiring new pages (e.g. 3 and 4)
@@ -423,14 +427,14 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
 
     let readCount = 0;
-    const origReadPage = vfs.readPage.bind(vfs);
-    vfs.readPage = async (pageId: number) => {
-      if (pageId === 5) {
+    const origReadPages = vfs.readPages.bind(vfs);
+    vfs.readPages = async (pageIds: number[]) => {
+      if (pageIds.includes(5)) {
         readCount++;
         // Introduce small async delay to test concurrency window
         await new Promise((r) => setTimeout(r, 10));
       }
-      return origReadPage(pageId);
+      return origReadPages(pageIds);
     };
 
     // Trigger 5 concurrent acquires for page 5
@@ -466,12 +470,12 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
       releaseRead3 = r;
     });
 
-    const origReadPage = vfs.readPage.bind(vfs);
-    vfs.readPage = async (pageId: number) => {
-      if (pageId === 3) {
+    const origReadPages = vfs.readPages.bind(vfs);
+    vfs.readPages = async (pageIds: number[]) => {
+      if (pageIds.includes(3)) {
         await read3Promise;
       }
-      return origReadPage(pageId);
+      return origReadPages(pageIds);
     };
 
     // Task A starts acquiring page 3 (evicts page 2, selects slot 1, begins read)
@@ -602,12 +606,12 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
       releaseWrite = r;
     });
 
-    const origWritePage = vfs.writePage.bind(vfs);
-    vfs.writePage = async (pageId: number, data: Uint8Array) => {
-      if (pageId === 2) {
+    const origWritePages = vfs.writePages.bind(vfs);
+    vfs.writePages = async (pages: Array<{ pageId: number; data: Uint8Array }>) => {
+      if (pages.some((p) => p.pageId === 2)) {
         await writeGate;
       }
-      return origWritePage(pageId, data);
+      return origWritePages(pages);
     };
 
     // Start flushSlot(slot2)
@@ -644,13 +648,15 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
       releaseWrite = r;
     });
 
-    const origWritePage = vfs.writePage.bind(vfs);
-    vfs.writePage = async (pageId: number, data: Uint8Array) => {
-      if (pageId === 2) {
-        capturedData = data;
-        await writeGate;
+    const origWritePages = vfs.writePages.bind(vfs);
+    vfs.writePages = async (pages: Array<{ pageId: number; data: Uint8Array }>) => {
+      for (const p of pages) {
+        if (p.pageId === 2) {
+          capturedData = p.data;
+          await writeGate;
+        }
       }
-      return origWritePage(pageId, data);
+      return origWritePages(pages);
     };
 
     const flushPromise = driver.flushSlot(slot2);

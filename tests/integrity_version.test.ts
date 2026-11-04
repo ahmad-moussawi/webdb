@@ -25,10 +25,10 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     await driver.flushSlot(slot);
 
     // Tamper with page 2 in VFS storage: flip 1 byte
-    const storedPage = await vfs.readPage(2);
+    const [storedPage] = await vfs.readPages([2]);
     expect(storedPage).not.toBeNull();
     storedPage![100] ^= 0x01; // Bit flip!
-    await vfs.writePage(2, storedPage!);
+    await vfs.writePages([{ pageId: 2, data: storedPage! }]);
 
     // Create a new BufferPoolDriver to force reading from VFS
     const newMemory = createWasmMemory(32);
@@ -46,10 +46,10 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     await db.close();
 
     // Tamper with Page 1 in VFS (e.g. byte 120 in TableDescriptor area)
-    const page1Bytes = await vfs.readPage(1);
+    const [page1Bytes] = await vfs.readPages([1]);
     expect(page1Bytes).not.toBeNull();
     page1Bytes![120] ^= 0xAA; // Tamper
-    await vfs.writePage(1, page1Bytes!);
+    await vfs.writePages([{ pageId: 1, data: page1Bytes! }]);
 
     // Reopen with corrupted Page 1 must throw CorruptPageError
     await expect(
@@ -63,14 +63,14 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     await db.close();
 
     // Modify Page 1 header in VFS: min_read_version = 99 (bytes 10..11)
-    const page1Bytes = await vfs.readPage(1);
+    const [page1Bytes] = await vfs.readPages([1]);
     const view = new DataView(page1Bytes!.buffer, page1Bytes!.byteOffset);
     view.setUint16(10, 99, true); // min_read_version = 99
     // Zero out checksum and recompute so checksum validation passes and version check triggers
     view.setUint32(28, 0, true);
     const checksum = computePage1Checksum(page1Bytes!);
     view.setUint32(28, checksum, true);
-    await vfs.writePage(1, page1Bytes!);
+    await vfs.writePages([{ pageId: 1, data: page1Bytes! }]);
 
     // Reopen must throw UnsupportedFormatVersionError
     await expect(
@@ -85,7 +85,7 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     await db.close();
 
     // Modify Page 1 header: file_format_version = 2 (bytes 8..9), min_read_version = 1 (bytes 10..11)
-    const page1Bytes = await vfs.readPage(1);
+    const [page1Bytes] = await vfs.readPages([1]);
     const view = new DataView(page1Bytes!.buffer, page1Bytes!.byteOffset);
     view.setUint16(8, 2, true); // file_format_version = 2
     view.setUint16(10, 1, true); // min_read_version = 1
@@ -93,7 +93,7 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     view.setUint32(28, 0, true);
     const checksum = computePage1Checksum(page1Bytes!);
     view.setUint32(28, checksum, true);
-    await vfs.writePage(1, page1Bytes!);
+    await vfs.writePages([{ pageId: 1, data: page1Bytes! }]);
 
     // Reopen must succeed
     const db2 = await WebDB.open({ name: 'test_compat_version', vfs });

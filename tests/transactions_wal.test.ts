@@ -170,7 +170,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.writeWalHeader(walHeader);
 
       // Fetch base page data from vfs
-      const pageData = await vfs.readPage(rootPageId);
+      const [pageData] = await vfs.readPages([rootPageId]);
       expect(pageData).not.toBeNull();
 
       const pageCopyTx1 = new Uint8Array(pageData!);
@@ -228,7 +228,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       expect(await vfs.getWalFrameCount()).toBe(0);
 
       // Verify that page in storage has Tx 1 data (0xAA) and NOT Tx 2 uncommitted data (0xFF)
-      const diskPage = await vfs.readPage(rootPageId);
+      const [diskPage] = await vfs.readPages([rootPageId]);
       expect(diskPage![100]).toBe(0xAA);
 
       await recoveredDb.close();
@@ -243,7 +243,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await db.checkpoint();
 
       // Read intact Page 1
-      const intactPage1 = await vfs.readPage(1);
+      const [intactPage1] = await vfs.readPages([1]);
       expect(intactPage1).not.toBeNull();
 
       await db.close();
@@ -253,7 +253,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       const corruptedPage1 = new Uint8Array(intactPage1!);
       corruptedPage1[0] = 0x00; // destroy magic
       corruptedPage1[28] = 0x00; // corrupt checksum
-      await vfs.writePage(1, corruptedPage1);
+      await vfs.writePages([{ pageId: 1, data: corruptedPage1 }]);
 
       // But WAL contains the intact committed Page 1
       const walHeader = encodeWalFileHeader({ checkpointSeq: 1 });
@@ -291,7 +291,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       expect(rows[0]).toMatchObject({ id: 1, secret: 'top_secret' });
 
       // Disk Page 1 has been restored with valid checksum
-      const restoredPage1 = await vfs.readPage(1);
+      const [restoredPage1] = await vfs.readPages([1]);
       expect(computePage1Checksum(restoredPage1!)).toBe(
         new DataView(restoredPage1!.buffer, restoredPage1!.byteOffset).getUint32(28, true),
       );
@@ -742,7 +742,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       const table = await db.getTable('audit');
       const rootPageId = table.rootPageId;
-      const basePage = await vfs.readPage(rootPageId);
+      const [basePage] = await vfs.readPages([rootPageId]);
       await db.close();
 
       // Case A: Corrupt WAL file header while .db is intact (e.g. power loss while creating .wal header)
@@ -815,7 +815,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.appendWalFrames([f1, f2, fStaleData, fStaleCommit]);
 
       const dbAfterStaleSeq = await WebDB.open({ vfs });
-      const recoveredPage = await vfs.readPage(rootPageId);
+      const [recoveredPage] = await vfs.readPages([rootPageId]);
       // Must have replayed Tx 1 (0x11) and halted before out-of-sequence Tx 2 (0x99)
       expect(recoveredPage![100]).toBe(0x11);
       await dbAfterStaleSeq.close();

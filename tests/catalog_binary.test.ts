@@ -15,10 +15,10 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
     await db.close();
 
     // Corrupt byte 0 of Page 1 in the VFS
-    const page1Bytes = await vfs.readPage(1);
+    const [page1Bytes] = await vfs.readPages([1]);
     expect(page1Bytes).not.toBeNull();
     page1Bytes![0] = 0xFF; // Corrupt 'W'
-    await vfs.writePage(1, page1Bytes!);
+    await vfs.writePages([{ pageId: 1, data: page1Bytes! }]);
 
     // Reopen must throw InvalidDatabaseError
     await expect(
