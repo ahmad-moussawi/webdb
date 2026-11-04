@@ -1,6 +1,6 @@
 # Getting Started with WebDB
 
-**WebDB** is an ultra-lightweight (`< 50 KB`), browser-native relational database engine. It gives you relational tables, secondary indexes, joins, aggregations, ACID transactions, and real-time multi-tab reactivity—without multi-megabyte Wasm bundles or complex server headers (`COOP`/`COEP`).
+**WebDB** is an ultra-lightweight (`< 100 KB` bundle, `~13 KB` Wasm core), browser-native relational database engine. It gives you relational tables, secondary indexes, joins, aggregations, ACID transactions, and real-time multi-tab reactivity—without multi-megabyte Wasm bundles or complex server headers (`COOP`/`COEP`).
 
 ---
 

@@ -12,10 +12,12 @@ The primary objective is to guarantee **absolute memory safety, deterministic ex
 ### 1.2 Source Code Directory Structure (Host vs. Core Separation)
 
 WebDB enforces a strict physical separation of source code across two primary layers:
+
 1. **Host Layer (`src/host/`):** Written in modern TypeScript. Manages asynchronous browser APIs, user promises, compiler AST emission, VFS disk drivers (OPFS / IndexedDB), and the async event loop driver that steps the VM and handles page faults.
 2. **Core Engine (`src/core/`):** Deterministic, zero-dynamic-allocation byte manipulation engine. Structured with two subfolders:
    - `src/core/js/`: **Phase 1 Reference Engine** written in strict C-style TypeScript/JavaScript. Implements the buffer pool cache management (pin/unpin, Clock eviction, `0x401000` page table), slotted page packing, B+Tree traversal, and synchronous VDBE opcode loop using flat pointer arithmetic. To be ported 1:1 to C.
    - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean (<50 KB) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
+   - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean (~13 KB Wasm core, <100 KB bundle) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
 
 ```
 src/
@@ -132,6 +134,7 @@ Offset (Hex)          Size        Region Name                  Purpose
 - Cleared monotonically during checkpoint execution when pages are durably written to the main `.db` file.
 
 > **Bit Manipulation Details:**
+>
 > - `byte_idx = i >> 3`: Shifting slot index $i$ right by 3 bits computes integer division by 8 ($\lfloor i / 8 \rfloor$), identifying which byte in the bitmask array holds slot $i$'s status (e.g., slots $0..7 \to$ byte 0, slots $8..15 \to$ byte 1).
 > - `mask = 1 << (i & 7)`: The bitwise AND `i & 7` isolates the remainder modulo 8 ($i \pmod 8$, from 0 to 7). Shifting `1` left by this position creates a mask with a single bit set (`0b00000001` to `0b10000000`).
 > - **Standard Operations:**
@@ -274,11 +277,13 @@ WebDB enforces a strict architectural boundary between **Core Cache Management**
 ### 3.3 State-Machine Driven Cache Access Protocol
 
 #### 1. Cache Hit Path (Synchronous Core, ~5ns, 0 FFI Crossings)
+
 1. Core probes the binary open-addressing `page_to_slot` hash table at `0x401000` with target `page_id`.
 2. Hash table returns resident `slot_idx`.
 3. Core sets `ref_bits[slot_idx] = 1`, binds active cursor to `slot_idx`, and immediately proceeds with row reading/writing in the 4KB page.
 
 #### 2. Cache Miss Path (`STATUS_PAGE_FAULT` Yield)
+
 1. `page_to_slot` lookup returns `0xFFFFFFFF` (page not resident).
 2. Core executes the **Clock Sweep Algorithm** internally to select candidate slot $S$:
    - If an unallocated slot exists (`slot_to_page[S] == 0`), slot $S$ is selected immediately.
@@ -299,6 +304,7 @@ WebDB enforces a strict architectural boundary between **Core Cache Management**
 6. Core returns status `2` to the caller, pausing execution cleanly at current `pc`.
 
 #### 3. Host Asynchronous I/O Resolution Loop (`src/host/driver/`)
+
 1. Host checks `vm_step()` status; detects `STATUS_PAGE_FAULT`.
 2. **Victim Flush (if dirty):** If `ctx.flush_page_id > 0`, Host writes 4KB block from memory offset $S \times 4096$ to WAL / storage via `IVfsAdapter.writePage()`, then clears dirty bit in `dirty_mask`.
 3. **Target Read:** Host reads 4KB block for `ctx.fault_page_id` from `IVfsAdapter.readPage()` directly into memory offset $S \times 4096$.
@@ -980,7 +986,6 @@ typedef struct {
 - **Cross-Page Column Index Mapping (for `IndexDescriptor.column_indices[]`):** For a 256-column table, a compiler resolving `column_indices[k] = col_idx` to a `ColumnMeta` pointer must use paging arithmetic to find the correct catalog page and in-page slot:
   $$\text{page\_chain\_idx} = \lfloor \text{col\_idx} / 56 \rfloor, \quad \text{col\_idx\_in\_page} = \text{col\_idx} \bmod 56$$
   For example, `col_idx = 73` resolves to catalog chain page 1 (columns 56..111), in-page entry 17: `page_ptr = 16 + 17 × 72`.
-
 
 ### 6.3 Engine Version Compatibility & Fail-Fast Handshake
 

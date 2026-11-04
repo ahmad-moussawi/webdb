@@ -1,6 +1,6 @@
 # Error Handling & System Limits
 
-To guarantee fast startup, predictable memory usage on mobile browsers, and a `< 50 KB` footprint, WebDB enforces clear boundaries and throws strongly-typed error classes that you can catch in your application code.
+To guarantee fast startup, predictable memory usage on mobile browsers, and a `< 100 KB` footprint (`~13 KB` Wasm core), WebDB enforces clear boundaries and throws strongly-typed error classes that you can catch in your application code.
 
 ---
 

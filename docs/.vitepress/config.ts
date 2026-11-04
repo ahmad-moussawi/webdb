@@ -70,13 +70,10 @@ export default defineConfig({
     siteTitle: "WebDB",
 
     nav: [
-      { text: "Getting Started", link: "/getting-started" },
-      { text: "Live Queries", link: "/guides/live-queries-and-frameworks" },
-      { text: "Use Cases", link: "/guides/use-cases" },
-      { text: "API Reference", link: "/reference/api-reference" },
+      { text: "Docs", link: "/getting-started" },
+      { text: "API", link: "/reference/api-reference" },
       { text: "Studio IDE", link: "/playground/", target: "_self" },
       { text: "Benchmarks", link: "/benchmark/", target: "_self" },
-      { text: "GitHub", link: "https://github.com/ahmad-moussawi/webdb" },
     ],
 
     sidebar: [

@@ -12,7 +12,7 @@ For over a decade, browser data storage has been caught between two unsatisfacto
 
 ### The WebDB Vision
 **WebDB** is designed from first principles for the modern web platform:
-1. **Ultra-Lean Binary Footprint:** Engineered to compile into **<50 KB of WebAssembly** (<20 KB gzipped) in Phase 2.
+1. **Ultra-Lean Binary Footprint:** Engineered to compile into a **~13 KB WebAssembly core** (`< 100 KB` total bundle) in Phase 2.
 2. **Web-Native Symbiosis:** Rather than compiling bloated C libraries for dates, regexes, unicode tokenization, cryptography, or locking, WebDB delegates directly to native browser APIs (`Intl.Segmenter`, `crypto.subtle`, `navigator.locks`, `Date`, and `RegExp`) via synchronous User Defined Functions (UDFs).
 3. **Dual First-Class Storage:** Co-equal support for high-performance **Origin Private File System (OPFS)** via synchronous access handles and **IndexedDB** for universal compatibility (Safari, iOS WebViews, Private Browsing).
 4. **Two-Phase Evolutionary Architecture:**
@@ -169,7 +169,7 @@ The implementation of WebDB is organized into 9 self-contained, sequentially ver
 * **Core Decisions:**
   * Standalone compilation via Clang/Emscripten with flags tuned for minimal binary size (`-Os`, `-flto`, `--no-entry`).
   * Exclusion of standard C runtime bloat: zero `libc` overhead, zero custom memory allocators (using WebDB's static buffer pool).
-  * Strict binary size ceiling: **<50 KB total uncompressed Wasm** (<20 KB gzipped).
+  * Strict binary size ceiling: **~13 KB Wasm core** (`< 100 KB` total bundle).
 * 📖 *Full Technical Specification:* [08_v2_c_wasm_build_pipeline.md](./08_v2_c_wasm_build_pipeline.md)
 
 ### Phase 9: QA, Differential Testing & Verification
