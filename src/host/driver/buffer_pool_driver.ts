@@ -137,6 +137,7 @@ export class BufferPoolDriver {
 
     this.wasmMemory = memory;
     this.buffer = this.wasmMemory.buffer;
+    (this.buffer as any).__webdbPool = this;
     this.view = new DataView(this.buffer);
     this.uint8 = new Uint8Array(this.buffer);
 

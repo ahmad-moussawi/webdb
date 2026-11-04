@@ -411,27 +411,195 @@ export function catalog_parse_data_type(type_str: string): DataType {
 }
 
 // ============================================================================
-// 3. Table Descriptor & Master Table Accessors (Page 1)
+// 3. Table Descriptor & Master Table Accessors (Page 1 & Overflow Pages)
 // ============================================================================
 
+export const MAX_DESCRIPTORS_PER_OVERFLOW_PAGE = 31; // floor((4096 - 16) / 128) = 31
+export const CATALOG_PAGE_FLAG_TABLE_OVERFLOW = 1;
+export const CATALOG_PAGE_FLAG_INDEX_OVERFLOW = 2;
+
+export function catalog_resolve_page_view(
+  page1_view: DataView,
+  page_id: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): DataView | null {
+  if (page_id <= 1) return page1_view;
+  if (pager) {
+    const bytes = pager.getPageBytes(page_id);
+    if (bytes && bytes.byteLength >= PAGE_SIZE) {
+      return new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
+    }
+  }
+  const pool = (page1_view.buffer as any)?.__webdbPool;
+  if (pool && typeof pool.getResidentSlot === "function") {
+    const slot = pool.getResidentSlot(page_id);
+    if (slot !== -1) {
+      return pool.getSlotDataView(slot);
+    }
+  }
+  if (page1_view.buffer.byteLength >= page_id * PAGE_SIZE) {
+    return new DataView(
+      page1_view.buffer,
+      (page_id - 1) * PAGE_SIZE,
+      PAGE_SIZE,
+    );
+  }
+  return null;
+}
+
+export function catalog_mark_overflow_page_dirty(
+  page1_view: DataView,
+  page_id: number,
+  page_view: DataView,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { markPageDirty?(pageId: number): void },
+): void {
+  const bytes = new Uint8Array(
+    page_view.buffer,
+    page_view.byteOffset,
+    PAGE_SIZE,
+  );
+  const chk = computePageChecksum(bytes);
+  page_view.setUint32(12, chk, true);
+  if (pager?.markPageDirty) {
+    pager.markPageDirty(page_id);
+  }
+  const pool = (page1_view.buffer as any)?.__webdbPool;
+  if (pool && typeof pool.getResidentSlot === "function") {
+    const slot = pool.getResidentSlot(page_id);
+    if (slot !== -1) {
+      pool.markDirty(slot);
+    }
+  }
+}
+
+export function catalog_get_table_slot_capacity(
+  page1_view: DataView,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): number {
+  let total = MAX_TABLES_PAGE1;
+  let page_id = page1_view.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true);
+  while (page_id !== 0) {
+    const pv = catalog_resolve_page_view(page1_view, page_id, pager);
+    if (!pv) break;
+    total += MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
+    page_id = pv.getUint32(8, true);
+  }
+  return total;
+}
+
+export function catalog_locate_table_slot(
+  page1_view: DataView,
+  slot_idx: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): { view: DataView; offset: number; pageId: number } | null {
+  if (slot_idx < 0) return null;
+  if (slot_idx < MAX_TABLES_PAGE1) {
+    return {
+      view: page1_view,
+      offset: MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE,
+      pageId: 1,
+    };
+  }
+  const overflow_idx = slot_idx - MAX_TABLES_PAGE1;
+  const chain_hop = Math.floor(overflow_idx / MAX_DESCRIPTORS_PER_OVERFLOW_PAGE);
+  const in_page_slot = overflow_idx % MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
+  let page_id = page1_view.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true);
+  for (let h = 0; h < chain_hop; h++) {
+    if (page_id === 0) return null;
+    const pv = catalog_resolve_page_view(page1_view, page_id, pager);
+    if (!pv) return null;
+    page_id = pv.getUint32(8, true);
+  }
+  if (page_id === 0) return null;
+  const target_view = catalog_resolve_page_view(page1_view, page_id, pager);
+  if (!target_view) return null;
+  return {
+    view: target_view,
+    offset: CATALOG_PAGE_HEADER_SIZE + in_page_slot * TABLE_DESCRIPTOR_SIZE,
+    pageId: page_id,
+  };
+}
+
+export function catalog_append_table_overflow_page(
+  page1_view: DataView,
+  new_page_id: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: {
+    getPageBytes(pageId: number): Uint8Array;
+    markPageDirty?(pageId: number): void;
+  },
+): number {
+  const start_slot_idx = catalog_get_table_slot_capacity(page1_view, pager);
+  const new_view = catalog_resolve_page_view(page1_view, new_page_id, pager);
+  if (!new_view) return -1;
+
+  catalog_init_page(new_view, 0, 0, start_slot_idx, 0);
+  new_view.setUint8(1, CATALOG_PAGE_FLAG_TABLE_OVERFLOW);
+  catalog_mark_overflow_page_dirty(page1_view, new_page_id, new_view, pager);
+
+  const first_overflow_id = page1_view.getUint32(
+    HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+    true,
+  );
+  if (first_overflow_id === 0) {
+    page1_view.setUint32(
+      HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+      new_page_id,
+      true,
+    );
+  } else {
+    let cur_id = first_overflow_id;
+    while (cur_id !== 0) {
+      const cur_view = catalog_resolve_page_view(page1_view, cur_id, pager);
+      if (!cur_view) break;
+      const next_id = cur_view.getUint32(8, true);
+      if (next_id === 0) {
+        cur_view.setUint32(8, new_page_id, true);
+        catalog_mark_overflow_page_dirty(page1_view, cur_id, cur_view, pager);
+        break;
+      }
+      cur_id = next_id;
+    }
+  }
+
+  return start_slot_idx;
+}
+
 /**
- * Reads a TableDescriptor from Page 1 by slot index (0..15).
+ * Reads a TableDescriptor from Page 1 (or chained overflow catalog page) by slot index.
  */
 export function catalog_read_table_descriptor(
   view: DataView,
   slot_idx: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): TableDescriptor | null {
-  const offset = MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
-  const table_id = view.getUint16(offset + 0, true);
+  const loc = catalog_locate_table_slot(view, slot_idx, pager);
+  if (!loc) return null;
+  const { view: target_view, offset } = loc;
+
+  const table_id = target_view.getUint16(offset + 0, true);
   if (table_id === 0) return null;
 
-  const column_count = view.getUint16(offset + 2, true);
-  const root_page_id = view.getUint32(offset + 4, true);
-  const col_catalog_page_id = view.getUint32(offset + 8, true);
-  const name = catalog_read_fixed_string(view, offset + 12, MAX_NAME_LENGTH);
-  const flags = view.getUint32(offset + 76, true);
-  const row_count_estimate = view.getUint32(offset + 80, true);
-  const auto_inc_next = view.getBigUint64(offset + 84, true);
+  const column_count = target_view.getUint16(offset + 2, true);
+  const root_page_id = target_view.getUint32(offset + 4, true);
+  const col_catalog_page_id = target_view.getUint32(offset + 8, true);
+  const name = catalog_read_fixed_string(target_view, offset + 12, MAX_NAME_LENGTH);
+  const flags = target_view.getUint32(offset + 76, true);
+  const row_count_estimate = target_view.getUint32(offset + 80, true);
+  const auto_inc_next = target_view.getBigUint64(offset + 84, true);
+
+  const pk_root_page_id = target_view.getUint32(offset + 92, true);
+  const pk_column_count = target_view.getUint8(offset + 96);
+  const pk_flags = target_view.getUint8(offset + 97);
+  const pk_column_indices: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    pk_column_indices.push(target_view.getUint16(offset + 98 + i * 2, true));
+  }
 
   return {
     tableId: table_id,
@@ -442,40 +610,102 @@ export function catalog_read_table_descriptor(
     flags,
     rowCountEstimate: row_count_estimate,
     autoIncNext: auto_inc_next,
+    pkRootPageId: pk_root_page_id > 0 ? pk_root_page_id : undefined,
+    pkColumnCount: pk_root_page_id > 0 ? pk_column_count : undefined,
+    pkFlags: pk_root_page_id > 0 ? pk_flags : undefined,
+    pkColumnIndices: pk_root_page_id > 0 ? pk_column_indices : undefined,
   };
 }
 
 /**
- * Writes a TableDescriptor into Page 1 at the specified slot index (0..15).
+ * Writes a TableDescriptor into Page 1 (or chained overflow catalog page) at the specified slot index.
  */
 export function catalog_write_table_descriptor(
   view: DataView,
   slot_idx: number,
   desc: TableDescriptor,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: {
+    getPageBytes(pageId: number): Uint8Array;
+    markPageDirty?(pageId: number): void;
+  },
 ): void {
-  const offset = MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
-  view.setUint16(offset + 0, desc.tableId, true);
-  view.setUint16(offset + 2, desc.columnCount, true);
-  view.setUint32(offset + 4, desc.rootPageId, true);
-  view.setUint32(offset + 8, desc.colCatalogPageId, true);
-  catalog_write_fixed_string(view, offset + 12, desc.name, MAX_NAME_LENGTH);
-  view.setUint32(offset + 76, desc.flags, true);
-  view.setUint32(offset + 80, desc.rowCountEstimate, true);
-  view.setBigUint64(offset + 84, desc.autoIncNext, true);
-  // Clear reserved 36 bytes (92..127)
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
+  const loc = catalog_locate_table_slot(view, slot_idx, pager);
+  if (!loc) {
+    throw new Error(`Invalid table descriptor slot ${slot_idx}`);
+  }
+  const { view: target_view, offset, pageId } = loc;
+
+  target_view.setUint16(offset + 0, desc.tableId, true);
+  target_view.setUint16(offset + 2, desc.columnCount, true);
+  target_view.setUint32(offset + 4, desc.rootPageId, true);
+  target_view.setUint32(offset + 8, desc.colCatalogPageId, true);
+  catalog_write_fixed_string(target_view, offset + 12, desc.name, MAX_NAME_LENGTH);
+  target_view.setUint32(offset + 76, desc.flags, true);
+  target_view.setUint32(offset + 80, desc.rowCountEstimate, true);
+  target_view.setBigUint64(offset + 84, desc.autoIncNext, true);
+  // Clear reserved 36 bytes (92..127), then populate embedded PK index metadata if present
+  const uint8 = new Uint8Array(target_view.buffer, target_view.byteOffset);
   uint8.fill(0, offset + 92, offset + TABLE_DESCRIPTOR_SIZE);
+  if (desc.pkRootPageId && desc.pkRootPageId > 0) {
+    target_view.setUint32(offset + 92, desc.pkRootPageId, true);
+    target_view.setUint8(offset + 96, desc.pkColumnCount ?? 1);
+    target_view.setUint8(
+      offset + 97,
+      desc.pkFlags ?? (IndexFlag.PRIMARY | IndexFlag.UNIQUE),
+    );
+    for (let i = 0; i < 8; i++) {
+      target_view.setUint16(
+        offset + 98 + i * 2,
+        desc.pkColumnIndices?.[i] ?? 0,
+        true,
+      );
+    }
+  }
+  if (pageId > 1) {
+    catalog_mark_overflow_page_dirty(view, pageId, target_view, pager);
+  }
+}
+
+export function catalog_get_table_pk_index(
+  desc: TableDescriptor,
+): IndexDescriptor | null {
+  if (
+    desc.pkRootPageId &&
+    desc.pkRootPageId > 0 &&
+    desc.pkColumnCount &&
+    desc.pkColumnCount > 0 &&
+    ((desc.pkFlags ?? (IndexFlag.PRIMARY | IndexFlag.UNIQUE)) &
+      IndexFlag.PRIMARY) !==
+      0
+  ) {
+    return {
+      indexId: 0x8000 + desc.tableId,
+      tableId: desc.tableId,
+      rootPageId: desc.pkRootPageId,
+      columnCount: desc.pkColumnCount,
+      flags: desc.pkFlags ?? (IndexFlag.PRIMARY | IndexFlag.UNIQUE),
+      columnIndices: desc.pkColumnIndices
+        ? [...desc.pkColumnIndices]
+        : [0, 0, 0, 0, 0, 0, 0, 0],
+      colDirections: [0, 0, 0, 0, 0, 0, 0, 0],
+      name: `pk_${desc.name}`,
+    };
+  }
+  return null;
 }
 
 /**
- * Finds a TableDescriptor by name in Page 1, or null if not found.
+ * Finds a TableDescriptor by name in Page 1 (or overflow pages), or null if not found.
  */
 export function catalog_find_table_by_name(
   view: DataView,
   table_name: string,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): TableDescriptor | null {
-  const slot = catalog_find_table_slot(view, table_name);
-  return slot !== -1 ? catalog_read_table_descriptor(view, slot) : null;
+  const slot = catalog_find_table_slot(view, table_name, pager);
+  return slot !== -1 ? catalog_read_table_descriptor(view, slot, pager) : null;
 }
 
 /**
@@ -484,9 +714,12 @@ export function catalog_find_table_by_name(
 export function catalog_find_table_slot(
   view: DataView,
   table_name: string,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): number {
-  for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = catalog_read_table_descriptor(view, i);
+  const total_slots = catalog_get_table_slot_capacity(view, pager);
+  for (let i = 0; i < total_slots; i++) {
+    const desc = catalog_read_table_descriptor(view, i, pager);
     if (
       desc &&
       (desc.flags & TableFlag.ACTIVE) !== 0 &&
@@ -499,32 +732,46 @@ export function catalog_find_table_slot(
 }
 
 /**
- * @export_c
- * Finds the first free slot index in Page 1's TableDescriptor array.
+ * Finds the first free slot index in Page 1's TableDescriptor array (or existing overflow pages).
  */
 export function catalog_find_free_table_slot(
   view: DataView,
   page1_offset: u32 = 0,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): i32 {
   for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const offset = page1_offset + MASTER_TABLE_OFFSET + i * TABLE_DESCRIPTOR_SIZE;
+    const offset =
+      page1_offset + MASTER_TABLE_OFFSET + i * TABLE_DESCRIPTOR_SIZE;
     const table_id = view.getUint16(offset, true);
     if (table_id === 0) {
       return i;
+    }
+  }
+  if (page1_offset === 0) {
+    const total_slots = catalog_get_table_slot_capacity(view, pager);
+    for (let i = MAX_TABLES_PAGE1; i < total_slots; i++) {
+      const loc = catalog_locate_table_slot(view, i, pager);
+      if (loc && loc.view.getUint16(loc.offset, true) === 0) {
+        return i;
+      }
     }
   }
   return -1;
 }
 
 /**
- * Lists all active tables defined on Page 1.
+ * Lists all active tables defined on Page 1 and chained overflow pages.
  */
 export function catalog_list_table_descriptors(
   view: DataView,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): TableDescriptor[] {
   const tables: TableDescriptor[] = [];
-  for (let i = 0; i < MAX_TABLES_PAGE1; i++) {
-    const desc = catalog_read_table_descriptor(view, i);
+  const total_slots = catalog_get_table_slot_capacity(view, pager);
+  for (let i = 0; i < total_slots; i++) {
+    const desc = catalog_read_table_descriptor(view, i, pager);
     if (desc && (desc.flags & TableFlag.ACTIVE) !== 0) {
       tables.push(desc);
     }
@@ -533,39 +780,145 @@ export function catalog_list_table_descriptors(
 }
 
 // ============================================================================
-// 4. Index Descriptor Accessors (Page 1: bytes 2148..3171)
+// 4. Index Descriptor Accessors (Page 1: bytes 2148..3171 & Overflow Pages)
 // ============================================================================
 
+export function catalog_get_index_slot_capacity(
+  page1_view: DataView,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): number {
+  let total = MAX_INDEXES_PAGE1;
+  let page_id = page1_view.getUint32(
+    HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+    true,
+  );
+  while (page_id !== 0) {
+    const pv = catalog_resolve_page_view(page1_view, page_id, pager);
+    if (!pv) break;
+    total += MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
+    page_id = pv.getUint32(8, true);
+  }
+  return total;
+}
+
+export function catalog_locate_index_slot(
+  page1_view: DataView,
+  slot_idx: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): { view: DataView; offset: number; pageId: number } | null {
+  if (slot_idx < 0) return null;
+  if (slot_idx < MAX_INDEXES_PAGE1) {
+    return {
+      view: page1_view,
+      offset: INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE,
+      pageId: 1,
+    };
+  }
+  const overflow_idx = slot_idx - MAX_INDEXES_PAGE1;
+  const chain_hop = Math.floor(overflow_idx / MAX_DESCRIPTORS_PER_OVERFLOW_PAGE);
+  const in_page_slot = overflow_idx % MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
+  let page_id = page1_view.getUint32(
+    HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+    true,
+  );
+  for (let h = 0; h < chain_hop; h++) {
+    if (page_id === 0) return null;
+    const pv = catalog_resolve_page_view(page1_view, page_id, pager);
+    if (!pv) return null;
+    page_id = pv.getUint32(8, true);
+  }
+  if (page_id === 0) return null;
+  const target_view = catalog_resolve_page_view(page1_view, page_id, pager);
+  if (!target_view) return null;
+  return {
+    view: target_view,
+    offset: CATALOG_PAGE_HEADER_SIZE + in_page_slot * INDEX_DESCRIPTOR_SIZE,
+    pageId: page_id,
+  };
+}
+
+export function catalog_append_index_overflow_page(
+  page1_view: DataView,
+  new_page_id: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: {
+    getPageBytes(pageId: number): Uint8Array;
+    markPageDirty?(pageId: number): void;
+  },
+): number {
+  const start_slot_idx = catalog_get_index_slot_capacity(page1_view, pager);
+  const new_view = catalog_resolve_page_view(page1_view, new_page_id, pager);
+  if (!new_view) return -1;
+
+  catalog_init_page(new_view, 0, 0, start_slot_idx, 0);
+  new_view.setUint8(1, CATALOG_PAGE_FLAG_INDEX_OVERFLOW);
+  catalog_mark_overflow_page_dirty(page1_view, new_page_id, new_view, pager);
+
+  const first_overflow_id = page1_view.getUint32(
+    HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+    true,
+  );
+  if (first_overflow_id === 0) {
+    page1_view.setUint32(
+      HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+      new_page_id,
+      true,
+    );
+  } else {
+    let cur_id = first_overflow_id;
+    while (cur_id !== 0) {
+      const cur_view = catalog_resolve_page_view(page1_view, cur_id, pager);
+      if (!cur_view) break;
+      const next_id = cur_view.getUint32(8, true);
+      if (next_id === 0) {
+        cur_view.setUint32(8, new_page_id, true);
+        catalog_mark_overflow_page_dirty(page1_view, cur_id, cur_view, pager);
+        break;
+      }
+      cur_id = next_id;
+    }
+  }
+
+  return start_slot_idx;
+}
+
 /**
- * Reads an IndexDescriptor from Page 1 by slot index.
+ * Reads an IndexDescriptor from Page 1 (or chained overflow page) by slot index.
  */
 export function catalog_read_index_descriptor(
   view: DataView,
   slot_idx: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): IndexDescriptor | null {
-  const offset = INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
-  const index_id = view.getUint16(offset + 0, true);
+  const loc = catalog_locate_index_slot(view, slot_idx, pager);
+  if (!loc) return null;
+  const { view: target_view, offset } = loc;
+
+  const index_id = target_view.getUint16(offset + 0, true);
 
   if (index_id === 0) return null;
 
-  const table_id = view.getUint16(offset + 2, true);
-  const root_page_id = view.getUint32(offset + 4, true);
-  const column_count = view.getUint8(offset + 8);
-  const flags = view.getUint8(offset + 9);
+  const table_id = target_view.getUint16(offset + 2, true);
+  const root_page_id = target_view.getUint32(offset + 4, true);
+  const column_count = target_view.getUint8(offset + 8);
+  const flags = target_view.getUint8(offset + 9);
 
   const column_indices: number[] = [];
 
   for (let i = 0; i < 8; i++) {
-    column_indices.push(view.getUint16(offset + 10 + i * 2, true));
+    column_indices.push(target_view.getUint16(offset + 10 + i * 2, true));
   }
 
   const col_directions: number[] = [];
 
   for (let i = 0; i < 8; i++) {
-    col_directions.push(view.getUint8(offset + 26 + i));
+    col_directions.push(target_view.getUint8(offset + 26 + i));
   }
 
-  const name = catalog_read_fixed_string(view, offset + 34, MAX_NAME_LENGTH);
+  const name = catalog_read_fixed_string(target_view, offset + 34, MAX_NAME_LENGTH);
 
   return {
     indexId: index_id,
@@ -580,80 +933,143 @@ export function catalog_read_index_descriptor(
 }
 
 /**
- * Writes an IndexDescriptor into Page 1 at the specified slot index.
+ * Writes an IndexDescriptor into Page 1 (or chained overflow page) at the specified slot index.
  */
 export function catalog_write_index_descriptor(
   view: DataView,
   slot_idx: number,
   desc: IndexDescriptor,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: {
+    getPageBytes(pageId: number): Uint8Array;
+    markPageDirty?(pageId: number): void;
+  },
 ): void {
-  const offset = INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
+  const loc = catalog_locate_index_slot(view, slot_idx, pager);
+  if (!loc) {
+    throw new Error(`Invalid index descriptor slot ${slot_idx}`);
+  }
+  const { view: target_view, offset, pageId } = loc;
 
-  view.setUint16(offset + 0, desc.indexId, true);
-  view.setUint16(offset + 2, desc.tableId, true);
-  view.setUint32(offset + 4, desc.rootPageId, true);
-  view.setUint8(offset + 8, desc.columnCount);
-  view.setUint8(offset + 9, desc.flags);
+  target_view.setUint16(offset + 0, desc.indexId, true);
+  target_view.setUint16(offset + 2, desc.tableId, true);
+  target_view.setUint32(offset + 4, desc.rootPageId, true);
+  target_view.setUint8(offset + 8, desc.columnCount);
+  target_view.setUint8(offset + 9, desc.flags);
 
   for (let i = 0; i < 8; i++) {
-    view.setUint16(offset + 10 + i * 2, desc.columnIndices[i] ?? 0, true);
+    target_view.setUint16(offset + 10 + i * 2, desc.columnIndices[i] ?? 0, true);
   }
 
   for (let i = 0; i < 8; i++) {
-    view.setUint8(offset + 26 + i, desc.colDirections[i] ?? 0);
+    target_view.setUint8(offset + 26 + i, desc.colDirections[i] ?? 0);
   }
 
-  catalog_write_fixed_string(view, offset + 34, desc.name, MAX_NAME_LENGTH);
+  catalog_write_fixed_string(target_view, offset + 34, desc.name, MAX_NAME_LENGTH);
 
-  const uint8 = new Uint8Array(view.buffer, view.byteOffset);
+  const uint8 = new Uint8Array(target_view.buffer, target_view.byteOffset);
   uint8.fill(0, offset + 98, offset + INDEX_DESCRIPTOR_SIZE);
+
+  if (pageId > 1) {
+    catalog_mark_overflow_page_dirty(view, pageId, target_view, pager);
+  }
 }
 
 export const MAX_INDEXES_PAGE1 = 8;
 
 /**
- * @export_c
+ * Finds the first free slot index in Page 1's IndexDescriptor array (or existing overflow pages).
  */
 export function catalog_find_free_index_slot(
   view: DataView,
   page1_offset: u32 = 0,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): i32 {
   for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
     const offset = page1_offset + INDEX_CATALOG_OFFSET + i * INDEX_DESCRIPTOR_SIZE;
     const index_id = view.getUint16(offset + 0, true);
     if (index_id === 0) return i;
   }
+  if (page1_offset === 0) {
+    const total_slots = catalog_get_index_slot_capacity(view, pager);
+    for (let i = MAX_INDEXES_PAGE1; i < total_slots; i++) {
+      const loc = catalog_locate_index_slot(view, i, pager);
+      if (loc && loc.view.getUint16(loc.offset, true) === 0) {
+        return i;
+      }
+    }
+  }
   return -1;
 }
 
 /**
- * Finds an IndexDescriptor by name in Page 1.
+ * Finds an IndexDescriptor by name in Page 1, overflow pages, or embedded table PK indexes.
  */
 export function catalog_find_index_by_name(
   view: DataView,
   name: string,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): { slotIdx: number; desc: IndexDescriptor } | null {
   const target = name.toLowerCase();
-  for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
-    const desc = catalog_read_index_descriptor(view, i);
+  const total_idx_slots = catalog_get_index_slot_capacity(view, pager);
+  for (let i = 0; i < total_idx_slots; i++) {
+    const desc = catalog_read_index_descriptor(view, i, pager);
     if (desc && desc.name.toLowerCase() === target) {
       return { slotIdx: i, desc };
+    }
+  }
+  const total_table_slots = catalog_get_table_slot_capacity(view, pager);
+  for (let t = 0; t < total_table_slots; t++) {
+    const t_desc = catalog_read_table_descriptor(view, t, pager);
+    if (t_desc && (t_desc.flags & TableFlag.ACTIVE) !== 0) {
+      const pk_idx = catalog_get_table_pk_index(t_desc);
+      if (pk_idx && pk_idx.name.toLowerCase() === target) {
+        return { slotIdx: -(t + 1), desc: pk_idx };
+      }
     }
   }
   return null;
 }
 
 /**
- * Lists all index descriptors for a table.
+ * Lists all index descriptors for a table (including embedded primary key index and secondary indexes).
  */
 export function catalog_list_table_indexes(
   view: DataView,
   table_id: number,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
 ): IndexDescriptor[] {
   const indexes: IndexDescriptor[] = [];
-  for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
-    const desc = catalog_read_index_descriptor(view, i);
+  let has_embedded_pk = false;
+
+  // Check table descriptor for embedded PK index
+  const candidate_slot = table_id - 1;
+  let table_desc =
+    candidate_slot >= 0
+      ? catalog_read_table_descriptor(view, candidate_slot, pager)
+      : null;
+  if (!table_desc || table_desc.tableId !== table_id) {
+    const all_tables = catalog_list_table_descriptors(view, pager);
+    table_desc = all_tables.find((t) => t.tableId === table_id) ?? null;
+  }
+  if (table_desc && (table_desc.flags & TableFlag.ACTIVE) !== 0) {
+    const pk_idx = catalog_get_table_pk_index(table_desc);
+    if (pk_idx) {
+      indexes.push(pk_idx);
+      has_embedded_pk = true;
+    }
+  }
+
+  const total_idx_slots = catalog_get_index_slot_capacity(view, pager);
+  for (let i = 0; i < total_idx_slots; i++) {
+    const desc = catalog_read_index_descriptor(view, i, pager);
     if (desc && desc.tableId === table_id) {
+      if (has_embedded_pk && (desc.flags & IndexFlag.PRIMARY) !== 0) {
+        continue;
+      }
       indexes.push(desc);
     }
   }
@@ -661,8 +1077,36 @@ export function catalog_list_table_indexes(
 }
 
 /**
- * @export_c
+ * Lists all active index descriptors across all tables in the database.
  */
+export function catalog_list_all_indexes(
+  view: DataView,
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  pager?: { getPageBytes(pageId: number): Uint8Array },
+): IndexDescriptor[] {
+  const all_indexes: IndexDescriptor[] = [];
+  const active_tables = catalog_list_table_descriptors(view, pager);
+  const seen_table_ids = new Set<number>();
+
+  for (const t of active_tables) {
+    seen_table_ids.add(t.tableId);
+    const t_indexes = catalog_list_table_indexes(view, t.tableId, pager);
+    for (const idx of t_indexes) {
+      all_indexes.push(idx);
+    }
+  }
+
+  const total_idx_slots = catalog_get_index_slot_capacity(view, pager);
+  for (let i = 0; i < total_idx_slots; i++) {
+    const desc = catalog_read_index_descriptor(view, i, pager);
+    if (desc && !seen_table_ids.has(desc.tableId)) {
+      all_indexes.push(desc);
+    }
+  }
+
+  return all_indexes;
+}
+
 export function catalog_delete_index_descriptor(
   view: DataView,
   page1_offset: u32,
@@ -672,15 +1116,24 @@ export function catalog_delete_index_descriptor(
     slot_idx = page1_offset;
     page1_offset = 0;
   }
-  if (slot_idx >= MAX_INDEXES_PAGE1) return -1;
-  const offset = page1_offset + INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
-  memset(view, offset, 0, INDEX_DESCRIPTOR_SIZE);
-  return 0;
+  if (slot_idx < MAX_INDEXES_PAGE1) {
+    const offset =
+      page1_offset + INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
+    memset(view, offset, 0, INDEX_DESCRIPTOR_SIZE);
+    return 0;
+  }
+  if (page1_offset === 0) {
+    const loc = catalog_locate_index_slot(view, slot_idx);
+    if (!loc) return -1;
+    memset(loc.view, loc.offset, 0, INDEX_DESCRIPTOR_SIZE);
+    if (loc.pageId > 1) {
+      catalog_mark_overflow_page_dirty(view, loc.pageId, loc.view);
+    }
+    return 0;
+  }
+  return -1;
 }
 
-/**
- * @export_c
- */
 export function catalog_delete_table_descriptor(
   view: DataView,
   page1_offset: u32,
@@ -690,10 +1143,22 @@ export function catalog_delete_table_descriptor(
     slot_idx = page1_offset;
     page1_offset = 0;
   }
-  if (slot_idx >= MAX_TABLES_PAGE1) return -1;
-  const offset = page1_offset + MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
-  memset(view, offset, 0, TABLE_DESCRIPTOR_SIZE);
-  return 0;
+  if (slot_idx < MAX_TABLES_PAGE1) {
+    const offset =
+      page1_offset + MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
+    memset(view, offset, 0, TABLE_DESCRIPTOR_SIZE);
+    return 0;
+  }
+  if (page1_offset === 0) {
+    const loc = catalog_locate_table_slot(view, slot_idx);
+    if (!loc) return -1;
+    memset(loc.view, loc.offset, 0, TABLE_DESCRIPTOR_SIZE);
+    if (loc.pageId > 1) {
+      catalog_mark_overflow_page_dirty(view, loc.pageId, loc.view);
+    }
+    return 0;
+  }
+  return -1;
 }
 
 // ============================================================================
@@ -836,15 +1301,26 @@ export function catalog_create_table(
   }
 
   // Check if table already exists
-  if (catalog_find_table_slot(page1_view, name) !== -1) {
+  if (catalog_find_table_slot(page1_view, name, pager) !== -1) {
     throw new TableAlreadyExistsError(name);
   }
 
-  // Find free slot in Page 1 TableDescriptor slots
-  const slot_idx = catalog_find_free_table_slot(page1_view);
+  // Find free slot in Page 1 (or existing overflow pages); allocate overflow page if needed
+  let slot_idx = catalog_find_free_table_slot(page1_view, 0, pager);
 
   if (slot_idx === -1) {
-    throw new TooManyTablesError(MAX_TABLES_PAGE1, MAX_TABLES_PAGE1);
+    const overflow_page_id = pager.allocateNewPage();
+    if (!overflow_page_id || overflow_page_id <= 1) {
+      throw new TooManyTablesError(MAX_TABLES_PAGE1 + 1, MAX_TABLES_PAGE1);
+    }
+    slot_idx = catalog_append_table_overflow_page(
+      page1_view,
+      overflow_page_id,
+      pager,
+    );
+    if (slot_idx === -1) {
+      throw new TooManyTablesError(MAX_TABLES_PAGE1 + 1, MAX_TABLES_PAGE1);
+    }
   }
 
   const table_id = slot_idx + 1;
@@ -954,7 +1430,45 @@ export function catalog_create_table(
 
   const first_catalog_page_id = catalog_page_ids[0];
 
-  // Write TableDescriptor into Page 1
+  // Auto-create primary key index if PRIMARY_KEY columns are defined
+  const pk_cols: ColumnMeta[] = [];
+  for (let i = 0; i < columns.length; i++) {
+    if ((columns[i].flags & ColumnFlag.PRIMARY_KEY) !== 0) {
+      pk_cols.push(columns[i]);
+    }
+  }
+
+  let pk_root_page_id = 0;
+  let pk_col_count = 0;
+  let pk_flags = 0;
+  const pk_col_indices = [0, 0, 0, 0, 0, 0, 0, 0];
+
+  if (pk_cols.length > 0) {
+    pk_root_page_id = pager.allocateNewPage();
+    const index_root_bytes = pager.getPageBytes(pk_root_page_id);
+    const index_root_view = new DataView(
+      index_root_bytes.buffer,
+      index_root_bytes.byteOffset,
+    );
+    page_init_index_leaf(index_root_view, 0, 0);
+    pager.markPageDirty(pk_root_page_id);
+
+    pk_col_count = Math.min(pk_cols.length, 8);
+    pk_flags = IndexFlag.PRIMARY | IndexFlag.UNIQUE;
+    for (let k = 0; k < pk_col_count; k++) {
+      const pk_col_name = pk_cols[k].name;
+      let matched_idx = 0;
+      for (let c = 0; c < columns.length; c++) {
+        if (columns[c].name === pk_col_name) {
+          matched_idx = c;
+          break;
+        }
+      }
+      pk_col_indices[k] = matched_idx;
+    }
+  }
+
+  // Write TableDescriptor into Page 1 (or overflow table catalog page)
   const desc: TableDescriptor = {
     tableId: table_id,
     columnCount: total_cols,
@@ -964,63 +1478,19 @@ export function catalog_create_table(
     flags: TableFlag.ACTIVE,
     rowCountEstimate: 0,
     autoIncNext: 1n,
+    pkRootPageId: pk_root_page_id > 0 ? pk_root_page_id : undefined,
+    pkColumnCount: pk_root_page_id > 0 ? pk_col_count : undefined,
+    pkFlags: pk_root_page_id > 0 ? pk_flags : undefined,
+    pkColumnIndices: pk_root_page_id > 0 ? pk_col_indices : undefined,
   };
 
-  catalog_write_table_descriptor(page1_view, slot_idx, desc);
-
-  // Auto-create primary key index if PRIMARY_KEY columns are defined
-  const pk_cols: ColumnMeta[] = [];
-  for (let i = 0; i < columns.length; i++) {
-    if ((columns[i].flags & ColumnFlag.PRIMARY_KEY) !== 0) {
-      pk_cols.push(columns[i]);
-    }
-  }
-
-  if (pk_cols.length > 0) {
-    const index_slot = catalog_find_free_index_slot(page1_view);
-    if (index_slot !== -1) {
-      const index_root_page_id = pager.allocateNewPage();
-      const index_root_bytes = pager.getPageBytes(index_root_page_id);
-      const index_root_view = new DataView(
-        index_root_bytes.buffer,
-        index_root_bytes.byteOffset,
-      );
-      page_init_index_leaf(index_root_view, 0, 0);
-      pager.markPageDirty(index_root_page_id);
-
-      const col_indices = [0, 0, 0, 0, 0, 0, 0, 0];
-      const col_directions = [0, 0, 0, 0, 0, 0, 0, 0];
-      for (let k = 0; k < pk_cols.length && k < 8; k++) {
-        const pk_col_name = pk_cols[k].name;
-        let matched_idx = -1;
-        for (let c = 0; c < columns.length; c++) {
-          if (columns[c].name === pk_col_name) {
-            matched_idx = c;
-            break;
-          }
-        }
-        col_indices[k] = matched_idx;
-      }
-
-      const pk_desc: IndexDescriptor = {
-        indexId: index_slot + 1,
-        tableId: table_id,
-        rootPageId: index_root_page_id,
-        columnCount: pk_cols.length,
-        flags: IndexFlag.PRIMARY | IndexFlag.UNIQUE,
-        columnIndices: col_indices,
-        colDirections: col_directions,
-        name: `pk_${name}`,
-      };
-      catalog_write_index_descriptor(page1_view, index_slot, pk_desc);
-    }
-  }
+  catalog_write_table_descriptor(page1_view, slot_idx, desc, pager);
 
   catalog_increment_schema_version(page1_view);
   catalog_increment_change_counter(page1_view);
   catalog_update_page1_checksum(page1_view);
 
-  const indexes = catalog_list_table_indexes(page1_view, table_id);
+  const indexes = catalog_list_table_indexes(page1_view, table_id, pager);
   const primary_key: string[] = [];
   for (let i = 0; i < pk_cols.length; i++) {
     primary_key.push(pk_cols[i].name);
@@ -1043,13 +1513,13 @@ export function catalog_load_table_meta(
   pager: { getPageBytes(pageId: number): Uint8Array },
   table_name: string,
 ): TableMeta {
-  const slot_idx = catalog_find_table_slot(page1_view, table_name);
+  const slot_idx = catalog_find_table_slot(page1_view, table_name, pager);
 
   if (slot_idx === -1) {
     throw new TableNotFoundError(table_name);
   }
 
-  const desc = catalog_read_table_descriptor(page1_view, slot_idx)!;
+  const desc = catalog_read_table_descriptor(page1_view, slot_idx, pager)!;
   const columns: ColumnMeta[] = [];
 
   let current_cat_page_id = desc.colCatalogPageId;
@@ -1069,7 +1539,7 @@ export function catalog_load_table_meta(
     current_cat_page_id = header.nextColCatalogPageId;
   }
 
-  const indexes = catalog_list_table_indexes(page1_view, desc.tableId);
+  const indexes = catalog_list_table_indexes(page1_view, desc.tableId, pager);
   const primary_key: string[] = [];
   for (let i = 0; i < columns.length; i++) {
     if ((columns[i].flags & ColumnFlag.PRIMARY_KEY) !== 0) {
@@ -1086,14 +1556,14 @@ export function catalog_load_table_meta(
 }
 
 /**
- * Loads all active tables and their full schemas from Page 1.
+ * Loads all active tables and their full schemas from Page 1 and chained overflow pages.
  */
 export function catalog_load_all_tables(
   page1_view: DataView,
   // eslint-disable-next-line @typescript-eslint/naming-convention
   pager: { getPageBytes(pageId: number): Uint8Array },
 ): TableMeta[] {
-  const descriptors = catalog_list_table_descriptors(page1_view);
+  const descriptors = catalog_list_table_descriptors(page1_view, pager);
   const tables: TableMeta[] = [];
   for (let i = 0; i < descriptors.length; i++) {
     tables.push(

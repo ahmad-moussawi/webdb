@@ -13,6 +13,8 @@ import {
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_INDEX_LEAF,
   PAGE_TYPE_LEAF_DATA,
+  HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+  HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
 } from "../../constants.ts";
 import {
   ColumnDefinition,
@@ -83,6 +85,9 @@ import {
   catalog_write_column_meta,
   catalog_map_column_location,
   catalog_list_table_indexes,
+  catalog_list_all_indexes,
+  catalog_get_index_slot_capacity,
+  catalog_append_index_overflow_page,
   catalog_find_index_by_name,
   catalog_find_free_index_slot,
   catalog_write_index_descriptor,
@@ -240,18 +245,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.tableTailPages.clear();
       this.indexTailPages.clear();
 
-      const tableDescriptors = catalog_list_table_descriptors(
-        this.driver.getSlotDataView(0),
-      );
-      for (const desc of tableDescriptors) {
-        let catPageId = desc.colCatalogPageId;
-        while (catPageId !== 0) {
-          const slot = await this.driver.acquireAndPinPage(catPageId);
-          const view = this.driver.getSlotDataView(slot);
-          const header = catalog_read_page_header(view, 0);
-          catPageId = header.nextColCatalogPageId;
-        }
-      }
+      await WebDB.pinAllCatalogPages(this.driver);
     });
 
     if (typeof BroadcastChannel !== "undefined" && dbName) {
@@ -353,19 +347,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         // Validate Page 1 header & checksum
         catalog_read_page1_header(driver.getSlotDataView(0), true);
 
-        // Section 6.2: Pre-load and permanently pin all column catalog pages for active tables
-        const tableDescriptors = catalog_list_table_descriptors(
-          driver.getSlotDataView(0),
-        );
-        for (const desc of tableDescriptors) {
-          let catPageId = desc.colCatalogPageId;
-          while (catPageId !== 0) {
-            const slot = await driver.acquireAndPinPage(catPageId);
-            const view = driver.getSlotDataView(slot);
-            const header = catalog_read_page_header(view, 0);
-            catPageId = header.nextColCatalogPageId;
-          }
-        }
+        // Section 6.2: Pre-load and permanently pin all overflow & column catalog pages for active tables
+        await WebDB.pinAllCatalogPages(driver);
       }
       coordinator.recordDiskPage1State();
     });
@@ -386,6 +369,48 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     return dbInstance;
+  }
+
+  private static async pinAllCatalogPages(
+    driver: BufferPoolDriver,
+  ): Promise<void> {
+    const page1View = driver.getSlotDataView(0);
+
+    // 1. Pin chained table descriptor overflow catalog pages
+    let tableCatPageId = page1View.getUint32(
+      HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+      true,
+    );
+    while (tableCatPageId !== 0) {
+      const slot = await driver.acquireAndPinPage(tableCatPageId);
+      const view = driver.getSlotDataView(slot);
+      const header = catalog_read_page_header(view, 0);
+      tableCatPageId = header.nextColCatalogPageId;
+    }
+
+    // 2. Pin chained index descriptor overflow catalog pages
+    let idxCatPageId = page1View.getUint32(
+      HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+      true,
+    );
+    while (idxCatPageId !== 0) {
+      const slot = await driver.acquireAndPinPage(idxCatPageId);
+      const view = driver.getSlotDataView(slot);
+      const header = catalog_read_page_header(view, 0);
+      idxCatPageId = header.nextColCatalogPageId;
+    }
+
+    // 3. Pin column catalog pages for all active tables
+    const tableDescriptors = catalog_list_table_descriptors(page1View);
+    for (const desc of tableDescriptors) {
+      let catPageId = desc.colCatalogPageId;
+      while (catPageId !== 0) {
+        const slot = await driver.acquireAndPinPage(catPageId);
+        const view = driver.getSlotDataView(slot);
+        const header = catalog_read_page_header(view, 0);
+        catPageId = header.nextColCatalogPageId;
+      }
+    }
   }
 
   getPlanner(): QueryPlanner | undefined {
@@ -450,14 +475,13 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (catalog_find_table_slot(page1View, name) !== -1) {
       throw new TableAlreadyExistsError(name);
     }
-    if (catalog_find_free_table_slot(page1View) === -1) {
-      throw new TooManyTablesError(MAX_TABLES_PAGE1, MAX_TABLES_PAGE1);
-    }
 
+    const needsTableOverflowPage =
+      catalog_find_free_table_slot(page1View) === -1 ? 1 : 0;
     const numCatPages = Math.ceil(columns.length / MAX_COLUMNS_PER_CATALOG_PAGE);
-    const needsPkIndexPage =
-      hasPk && catalog_find_free_index_slot(page1View) !== -1 ? 1 : 0;
-    const totalPagesToAllocate = 1 + numCatPages + needsPkIndexPage;
+    const needsPkIndexPage = hasPk ? 1 : 0;
+    const totalPagesToAllocate =
+      1 + numCatPages + needsPkIndexPage + needsTableOverflowPage;
 
     const preAllocatedPages: number[] = [];
     for (let i = 0; i < totalPagesToAllocate; i++) {
@@ -672,8 +696,15 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
 
-    // 1. Cascade drop all indexes belonging to this table
-    for (let slot = 0; slot < MAX_INDEXES_PAGE1; slot++) {
+    // 1a. Free embedded primary key index tree if present
+    if (desc.pkRootPageId && desc.pkRootPageId > 1) {
+      await this.freeTableTreePages(desc.pkRootPageId);
+      this.indexTailPages.delete(desc.pkRootPageId);
+    }
+
+    // 1b. Cascade drop all secondary indexes belonging to this table (across Page 1 & overflow pages)
+    const totalIdxSlots = catalog_get_index_slot_capacity(page1View);
+    for (let slot = 0; slot < totalIdxSlots; slot++) {
       const idx = catalog_read_index_descriptor(page1View, slot);
       if (
         idx &&
@@ -683,7 +714,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             .startsWith(`idx_${tableName.toLowerCase()}_`) ||
           idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)
       ) {
-        if (idx.rootPageId > 1) {
+        if (idx.rootPageId > 1 && idx.rootPageId !== desc.pkRootPageId) {
           await this.freeTableTreePages(idx.rootPageId);
           this.indexTailPages.delete(idx.rootPageId);
         }
@@ -761,7 +792,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     // Update auto-generated PK and secondary index names belonging to this table
     const oldPkName = `pk_${oldName}`;
     const oldIdxPrefix = `idx_${oldName}_`;
-    for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
+    const totalIdxSlots = catalog_get_index_slot_capacity(page1View);
+    for (let i = 0; i < totalIdxSlots; i++) {
       const idx = catalog_read_index_descriptor(page1View, i);
       if (idx && idx.tableId === desc.tableId) {
         let updatedName: string | null = null;
@@ -1218,11 +1250,6 @@ export class WebDB implements IDatabaseQueryExecutor {
       throw new IndexAlreadyExistsError(duplicateColIndex.name || indexName);
     }
 
-    const freeSlot = catalog_find_free_index_slot(page1View);
-    if (freeSlot === -1) {
-      throw new TooManyIndexesError(MAX_INDEXES_PAGE1, MAX_INDEXES_PAGE1);
-    }
-
     // Allocate and initialize index root page
     const indexRootPageId = await this.driver.allocateAndPinPage();
     const indexSlot = this.pool.getResidentSlot(indexRootPageId);
@@ -1278,7 +1305,17 @@ export class WebDB implements IDatabaseQueryExecutor {
       currentPageId = nextPageId;
     }
 
-    // Write index descriptor into Page 1 catalog
+    let freeSlot = catalog_find_free_index_slot(page1View);
+    if (freeSlot === -1) {
+      const overflowPageId = await this.driver.allocateAndPinPage();
+      freeSlot = catalog_append_index_overflow_page(page1View, overflowPageId);
+      if (freeSlot === -1) {
+        throw new TooManyIndexesError(MAX_INDEXES_PAGE1 + 1, MAX_INDEXES_PAGE1);
+      }
+      this.pool.markDirty(0);
+    }
+
+    // Write index descriptor into catalog (Page 1 or overflow catalog page)
     const column_indices = [0, 0, 0, 0, 0, 0, 0, 0];
     const col_directions = [0, 0, 0, 0, 0, 0, 0, 0];
     for (let k = 0; k < colIndices.length && k < 8; k++) {
@@ -1328,7 +1365,19 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.indexTailPages.delete(found.desc.rootPageId);
     }
 
-    catalog_delete_index_descriptor(page1View, found.slotIdx);
+    if (found.slotIdx >= 0) {
+      catalog_delete_index_descriptor(page1View, found.slotIdx);
+    } else {
+      const tSlot = -found.slotIdx - 1;
+      const tDesc = catalog_read_table_descriptor(page1View, tSlot);
+      if (tDesc) {
+        tDesc.pkRootPageId = undefined;
+        tDesc.pkColumnCount = undefined;
+        tDesc.pkFlags = undefined;
+        tDesc.pkColumnIndices = undefined;
+        catalog_write_table_descriptor(page1View, tSlot, tDesc);
+      }
+    }
     catalog_increment_schema_version(page1View);
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
@@ -1347,14 +1396,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         const table = await this._getTableInternal(tableName);
         return catalog_list_table_indexes(page1View, table.tableId);
       }
-      const allIndexes: IndexDescriptor[] = [];
-      for (let i = 0; i < MAX_INDEXES_PAGE1; i++) {
-        const desc = catalog_read_index_descriptor(page1View, i);
-        if (desc) {
-          allIndexes.push(desc);
-        }
-      }
-      return allIndexes;
+      return catalog_list_all_indexes(page1View);
     }, this.currentLeaseId ?? undefined);
   }
 
@@ -3760,18 +3802,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.indexTailPages.clear();
       this.vmCtx.table = null;
 
-      const tableDescriptors = catalog_list_table_descriptors(
-        this.pool.getSlotDataView(0),
-      );
-      for (const desc of tableDescriptors) {
-        let catPageId = desc.colCatalogPageId;
-        while (catPageId !== 0) {
-          const slot = await this.driver.acquireAndPinPage(catPageId);
-          const view = this.pool.getSlotDataView(slot);
-          const catHeader = catalog_read_page_header(view, 0);
-          catPageId = catHeader.nextColCatalogPageId;
-        }
-      }
+      await WebDB.pinAllCatalogPages(this.driver);
     });
   }
 

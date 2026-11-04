@@ -7,8 +7,24 @@ import {
   IndexAlreadyExistsError,
   ColumnNotFoundError,
   TooManyIndexesError,
+  TooManyTablesError,
   TableNotFoundError,
 } from "../src/types/index.js";
+import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
+import {
+  HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+  HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+  MAX_INDEXES_PAGE1,
+  MAX_TABLES_PAGE1,
+  PAGE_SIZE,
+} from "../src/constants.js";
+import {
+  catalog_init_page1,
+  catalog_create_table,
+  catalog_read_table_descriptor,
+  catalog_write_table_descriptor,
+  catalog_write_index_descriptor,
+} from "../src/core/index.js";
 
 describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("creates single-column and composite secondary indexes with default and custom names", async () => {
@@ -210,7 +226,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
     expect(allIndexes).toHaveLength(0);
   });
 
-  it("validates invalid column names, duplicate index names, and index limits", async () => {
+  it("validates invalid column names, duplicate index names, and seamless index overflow beyond 8 slots", async () => {
     const db = await WebDB.open({ name: "test_idx_ddl_8", storage: "memory" });
 
     await db.createTable("t", [
@@ -237,15 +253,25 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
       IndexAlreadyExistsError,
     );
 
-    // Max indexes limit (Page 1 has 8 slots total: 1 taken by pk_t, 1 by my_idx -> 6 remaining)
+    // Fill remaining Page 1 index slots and overflow into chained index catalog pages
     for (let i = 2; i <= 7; i++) {
       await db.createIndex("t", `c${i}`, { name: `idx_${i}` });
     }
 
-    // 9th index should exceed limit
+    // Creating 8th, 9th, and 10th secondary indexes succeeds seamlessly
     await expect(
-      db.createIndex("t", ["c1", "c2"], { name: "idx_overflow" }),
-    ).rejects.toThrow(TooManyIndexesError);
+      db.createIndex("t", ["c1", "c2"], { name: "idx_8" }),
+    ).resolves.not.toThrow();
+    await expect(
+      db.createIndex("t", ["c2", "c3"], { name: "idx_overflow_9" }),
+    ).resolves.not.toThrow();
+    await expect(
+      db.createIndex("t", ["c3", "c4"], { name: "idx_overflow_10" }),
+    ).resolves.not.toThrow();
+
+    const allIndexes = await db.listIndexes("t");
+    // pk_t + my_idx + idx_2..idx_7 (6) + idx_8 + idx_overflow_9 + idx_overflow_10 = 11 indexes
+    expect(allIndexes).toHaveLength(11);
   });
 
   it("covers basic index creation: validates descriptor fields, rootPageId, column indices and flags", async () => {
@@ -537,6 +563,392 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
 
     // Dropping table should cascade cleanly without double-freeing the manual drop
     await expect(db.dropTable("items")).resolves.not.toThrow();
+  });
+
+  it("embeds primaryKey indexes in TableDescriptor so PKs never consume secondary index slots or get silently dropped", async () => {
+    const db = await WebDB.open({
+      name: "test_pk_embedded_no_silent_drop",
+      storage: "memory",
+    });
+
+    // 1. Fill all 8 secondary index slots on Page 1 first
+    await db.createTable("seed_table", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "c1", type: "INT32" },
+      { name: "c2", type: "INT32" },
+      { name: "c3", type: "INT32" },
+      { name: "c4", type: "INT32" },
+      { name: "c5", type: "INT32" },
+      { name: "c6", type: "INT32" },
+      { name: "c7", type: "INT32" },
+      { name: "c8", type: "INT32" },
+    ]);
+    for (let i = 1; i <= 8; i++) {
+      await db.createIndex("seed_table", `c${i}`, { name: `idx_seed_${i}` });
+    }
+
+    // Verify all 8 Page 1 secondary index slots are used, and no index overflow page was needed yet
+    const page1View = (db as any).pool.getSlotDataView(0);
+    expect(
+      page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true),
+    ).toBe(0);
+
+    // 2. Now create 15 more tables on Page 1 (total 16 tables on Page 1), ALL with primaryKey: true
+    for (let t = 2; t <= 16; t++) {
+      const tbl = await db.createTable(`tbl_${t}`, [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "val", type: "TEXT" },
+      ]);
+      // Every single table MUST have its pk_<tableName> index created (never silently dropped!)
+      expect(tbl.indexes).toBeDefined();
+      expect(tbl.indexes!.some((idx) => idx.name === `pk_tbl_${t}`)).toBe(true);
+
+      // Verify PK uniqueness enforcement works on every single table
+      await db.insert(`tbl_${t}`, { id: 100, val: "first" });
+      await expect(
+        db.insert(`tbl_${t}`, { id: 100, val: "duplicate" }),
+      ).rejects.toThrow(UniqueConstraintViolationError);
+
+      // Verify PK index lookup works
+      const row = await db.from(`tbl_${t}`).where("id", "=", 100).first();
+      expect(row).toEqual({ id: 100, val: "first" });
+    }
+
+    // All 16 tables + 16 PK indexes + 8 secondary indexes fit on Page 1 with 0 catalog overflow pages!
+    expect(
+      page1View.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true),
+    ).toBe(0);
+    expect(
+      page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true),
+    ).toBe(0);
+
+    const allIndexes = await db.listIndexes();
+    expect(allIndexes).toHaveLength(24); // 16 PK indexes + 8 secondary indexes
+  });
+
+  it("chains multiple Index Catalog Overflow Pages (NEXT_INDEX_CATALOG_PAGE_ID) for 50+ secondary indexes with persistence, rename, drop & binary import/export", async () => {
+    const vfs = new MemoryVfsAdapter();
+    const db = await WebDB.open({ name: "test_50_indexes_overflow", vfs });
+
+    // Create 5 tables, each with 12 columns (id + c1..c10 + extra)
+    for (let t = 1; t <= 5; t++) {
+      const cols = [{ name: "id", type: "INT32" as const, primaryKey: true }];
+      for (let c = 1; c <= 10; c++) {
+        cols.push({ name: `c${c}`, type: "INT32" as const, primaryKey: false });
+      }
+      await db.createTable(`t${t}`, cols);
+      await db.insert(`t${t}`, {
+        id: 1,
+        c1: 10,
+        c2: 20,
+        c3: 30,
+        c4: 40,
+        c5: 50,
+        c6: 60,
+        c7: 70,
+        c8: 80,
+        c9: 90,
+        c10: 100,
+      });
+    }
+
+    // Create 50 secondary indexes (10 per table) -> spans Page 1 (8) + Overflow Page A (31) + Overflow Page B (11)
+    for (let t = 1; t <= 5; t++) {
+      for (let c = 1; c <= 10; c++) {
+        await db.createIndex(`t${t}`, `c${c}`, {
+          name: `idx_t${t}_c${c}`,
+          unique: c === 10, // c10 index is unique
+        });
+      }
+    }
+
+    const page1View = (db as any).pool.getSlotDataView(0);
+    const firstIdxOverflowPageId = page1View.getUint32(
+      HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+      true,
+    );
+    expect(firstIdxOverflowPageId).toBeGreaterThan(1);
+
+    // Total indexes = 5 PK indexes + 50 secondary indexes = 55
+    const allIndexes = await db.listIndexes();
+    expect(allIndexes).toHaveLength(55);
+
+    // Verify uniqueness enforcement on an index stored in the 2nd overflow page (t5.c10 is the 50th secondary index)
+    await expect(
+      db.insert("t5", {
+        id: 2,
+        c1: 1,
+        c2: 2,
+        c3: 3,
+        c4: 4,
+        c5: 5,
+        c6: 6,
+        c7: 7,
+        c8: 8,
+        c9: 9,
+        c10: 100, // duplicate c10!
+      }),
+    ).rejects.toThrow(UniqueConstraintViolationError);
+
+    // Drop an index in the overflow region and recreate it (verifying slot reuse)
+    await db.dropIndex("idx_t5_c5");
+    expect(await db.listIndexes("t5")).toHaveLength(10); // 1 PK + 9 secondary
+    await db.createIndex("t5", "c5", { name: "idx_t5_c5" });
+    expect(await db.listIndexes("t5")).toHaveLength(11);
+
+    // Export binary and import into a fresh DB instance
+    const binary = await db.exportBinary();
+    const dbImported = await WebDB.open({
+      name: "test_50_indexes_imported",
+      storage: "memory",
+      initialData: binary,
+    });
+    expect(await dbImported.listIndexes()).toHaveLength(55);
+    await expect(
+      dbImported.insert("t5", { id: 3, c10: 100 }),
+    ).rejects.toThrow(UniqueConstraintViolationError);
+    await dbImported.close();
+
+    // Close and reopen from VFS
+    await db.close();
+    const dbReopened = await WebDB.open({ name: "test_50_indexes_overflow", vfs });
+    expect(await dbReopened.listIndexes()).toHaveLength(55);
+    const row = await dbReopened.from("t5").where("c9", "=", 90).first();
+    expect(row?.id).toBe(1);
+
+    // Drop table t5 and verify all 11 of its indexes (1 PK + 10 secondary on overflow pages) are cleaned up
+    await dbReopened.dropTable("t5");
+    expect(await dbReopened.listIndexes()).toHaveLength(44);
+    await dbReopened.close();
+  });
+
+  it("chains multiple Table Catalog Overflow Pages (NEXT_CATALOG_PAGE_ID) for 55+ tables with full DDL, DML, persistence & binary export/import", async () => {
+    const vfs = new MemoryVfsAdapter();
+    const db = await WebDB.open({ name: "test_55_tables_overflow", vfs });
+
+    // Create 55 tables (16 on Page 1 + 31 on Overflow Page 1 + 8 on Overflow Page 2), each with a PK and secondary index
+    for (let i = 1; i <= 55; i++) {
+      await db.createTable(`table_${i}`, [
+        { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
+        { name: "code", type: "TEXT" },
+        { name: "amount", type: "INT32" },
+      ]);
+      await db.createIndex(`table_${i}`, "code", { unique: true });
+      await db.insert(`table_${i}`, { code: `CODE_${i}`, amount: i * 10 });
+    }
+
+    const page1View = (db as any).pool.getSlotDataView(0);
+    expect(
+      page1View.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true),
+    ).toBeGreaterThan(1);
+    expect(
+      page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true),
+    ).toBeGreaterThan(1);
+
+    const tables = await db.listTables();
+    expect(tables).toHaveLength(55);
+    const indexes = await db.listIndexes();
+    expect(indexes).toHaveLength(110); // 55 PK indexes + 55 secondary unique indexes
+
+    // Test renameTable, addColumn, dropColumn on table_55 (in the 2nd table overflow page)
+    await db.renameTable("table_55", "table_55_renamed");
+    await db.addColumn("table_55_renamed", { name: "note", type: "TEXT" }, { defaultValue: "ok" });
+    const r55 = await db.from("table_55_renamed").where("code", "=", "CODE_55").first();
+    expect(r55).toEqual({ id: 1, code: "CODE_55", amount: 550, note: "ok" });
+
+    // Rename back
+    await db.renameTable("table_55_renamed", "table_55");
+
+    // Drop table_25 (in 1st overflow page) and create table_56 (reusing slot 25)
+    await db.dropTable("table_25");
+    expect(await db.listTables()).toHaveLength(54);
+    await db.createTable("table_56", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "name", type: "TEXT" },
+    ]);
+    expect(await db.listTables()).toHaveLength(55);
+
+    // Close and reopen from VFS
+    await db.close();
+    const db2 = await WebDB.open({ name: "test_55_tables_overflow", vfs });
+    expect(await db2.listTables()).toHaveLength(55);
+    const row50 = await db2.from("table_50").where("id", "=", 1).first();
+    expect(row50).toEqual({ id: 1, code: "CODE_50", amount: 500 });
+
+    // Enforce PK and unique index on table_50 after reopen
+    await expect(
+      db2.insert("table_50", { id: 1, code: "NEW_CODE", amount: 1 }),
+    ).rejects.toThrow(UniqueConstraintViolationError);
+    await expect(
+      db2.insert("table_50", { id: 2, code: "CODE_50", amount: 1 }),
+    ).rejects.toThrow(UniqueConstraintViolationError);
+
+    await db2.close();
+  });
+
+  it("formats TooManyTablesError and TooManyIndexesError with accurate count (limit + 1 instead of limit)", () => {
+    const idxErr = new TooManyIndexesError(MAX_INDEXES_PAGE1 + 1, MAX_INDEXES_PAGE1);
+    expect(idxErr.message).toBe(
+      "Too many indexes: 9 exceeds maximum limit of 8 indexes on Page 1",
+    );
+
+    const tblErr = new TooManyTablesError(MAX_TABLES_PAGE1 + 1, MAX_TABLES_PAGE1);
+    expect(tblErr.message).toBe(
+      "Too many tables: 17 exceeds maximum limit of 16 tables on Page 1",
+    );
+
+    // Also verify low-level catalog_create_table throws 17 exceeds 16 when pager cannot allocate overflow page
+    const page1Buf = new ArrayBuffer(PAGE_SIZE);
+    const page1View = new DataView(page1Buf);
+    catalog_init_page1(page1View);
+    let nextPage = 2;
+    const pages = new Map<number, Uint8Array>();
+    let allowOverflow = true;
+    const mockPager = {
+      allocateNewPage: () => {
+        if (!allowOverflow) return 0;
+        const id = nextPage++;
+        pages.set(id, new Uint8Array(PAGE_SIZE));
+        return id;
+      },
+      getPageBytes: (id: number) => {
+        if (!pages.has(id)) pages.set(id, new Uint8Array(PAGE_SIZE));
+        return pages.get(id)!;
+      },
+      markPageDirty: () => {},
+    };
+
+    for (let i = 1; i <= 16; i++) {
+      catalog_create_table(page1View, mockPager, `t_${i}`, [
+        { name: "id", type: "INT32" },
+      ]);
+    }
+
+    allowOverflow = false;
+    expect(() =>
+      catalog_create_table(page1View, mockPager, "t_17", [
+        { name: "id", type: "INT32" },
+      ]),
+    ).toThrow("Too many tables: 17 exceeds maximum limit of 16 tables on Page 1");
+  });
+
+  it("cleanly rolls back overflow table and index catalog page allocations when a transaction aborts", async () => {
+    const db = await WebDB.open({
+      name: "test_tx_rollback_overflow_catalog",
+      storage: "memory",
+    });
+
+    // Create 16 tables and 8 secondary indexes to fill Page 1 exactly
+    for (let i = 1; i <= 16; i++) {
+      await db.createTable(`base_${i}`, [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "c1", type: "INT32" },
+        { name: "c2", type: "INT32" },
+      ]);
+    }
+    for (let i = 1; i <= 8; i++) {
+      await db.createIndex(`base_${i}`, "c1", { name: `idx_base_${i}` });
+    }
+
+    const page1View = (db as any).pool.getSlotDataView(0);
+    expect(page1View.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true)).toBe(0);
+    expect(page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true)).toBe(0);
+
+    // Start a transaction that allocates overflow pages for tables 17..20 and indexes 9..12, then aborts
+    await expect(
+      db.transaction(async (tx) => {
+        for (let i = 17; i <= 20; i++) {
+          await tx.createTable(`tx_tbl_${i}`, [
+            { name: "id", type: "INT32", primaryKey: true },
+            { name: "val", type: "TEXT" },
+          ]);
+          await tx.createIndex(`tx_tbl_${i}`, "val", { name: `idx_tx_${i}` });
+        }
+        throw new Error("Simulated migration failure");
+      }),
+    ).rejects.toThrow("Simulated migration failure");
+
+    // Verify Page 1 overflow pointers were rolled back to 0 and count is back to 16 tables / 24 indexes
+    expect(page1View.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true)).toBe(0);
+    expect(page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true)).toBe(0);
+    expect(await db.listTables()).toHaveLength(16);
+    expect(await db.listIndexes()).toHaveLength(24);
+
+    // Now run a committed transaction that creates tables 17..20 and indexes 9..12
+    await db.transaction(async (tx) => {
+      for (let i = 17; i <= 20; i++) {
+        await tx.createTable(`committed_tbl_${i}`, [
+          { name: "id", type: "INT32", primaryKey: true },
+          { name: "val", type: "TEXT" },
+        ]);
+        await tx.createIndex(`committed_tbl_${i}`, "val", {
+          name: `idx_committed_${i}`,
+          unique: true,
+        });
+        await tx.insert(`committed_tbl_${i}`, { id: i, val: `V_${i}` });
+      }
+    });
+
+    expect(await db.listTables()).toHaveLength(20);
+    expect(await db.listIndexes()).toHaveLength(32); // 20 PKs + 12 secondary
+    const row20 = await db.from("committed_tbl_20").where("val", "=", "V_20").first();
+    expect(row20).toEqual({ id: 20, val: "V_20" });
+  });
+
+  it("maintains backward compatibility with legacy databases that stored pk_<table> in IndexDescriptor slots", async () => {
+    const db = await WebDB.open({
+      name: "test_legacy_pk_slot_compat",
+      storage: "memory",
+    });
+
+    const tbl = await db.createTable("legacy_items", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "sku", type: "TEXT" },
+    ]);
+
+    // Convert legacy_items in-place to simulate an older v0.1.4 database:
+    // Move pkRootPageId out of TableDescriptor (offset 92..113) into Page 1 IndexDescriptor slot 0
+    const page1View = (db as any).pool.getSlotDataView(0);
+    const desc = catalog_read_table_descriptor(page1View, 0)!;
+    const pkRootPageId = desc.pkRootPageId!;
+    desc.pkRootPageId = undefined;
+    desc.pkColumnCount = undefined;
+    desc.pkFlags = undefined;
+    desc.pkColumnIndices = undefined;
+    catalog_write_table_descriptor(page1View, 0, desc);
+
+    catalog_write_index_descriptor(page1View, 0, {
+      indexId: 1,
+      tableId: tbl.tableId,
+      rootPageId: pkRootPageId,
+      columnCount: 1,
+      flags: IndexFlag.PRIMARY | IndexFlag.UNIQUE,
+      columnIndices: [0, 0, 0, 0, 0, 0, 0, 0],
+      colDirections: [0, 0, 0, 0, 0, 0, 0, 0],
+      name: "pk_legacy_items",
+    });
+    (db as any).tableMetaCache.clear();
+
+    // Verify listIndexes still finds pk_legacy_items without duplication
+    const indexes = await db.listIndexes("legacy_items");
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0].name).toBe("pk_legacy_items");
+
+    // Verify PK uniqueness and lookup still work on legacy table
+    await db.insert("legacy_items", { id: 10, sku: "A" });
+    await expect(
+      db.insert("legacy_items", { id: 10, sku: "B" }),
+    ).rejects.toThrow(UniqueConstraintViolationError);
+
+    // Verify renameTable updates legacy pk_<table> slot
+    await db.renameTable("legacy_items", "legacy_renamed");
+    const renamedIndexes = await db.listIndexes("legacy_renamed");
+    expect(renamedIndexes).toHaveLength(1);
+    expect(renamedIndexes[0].name).toBe("pk_legacy_renamed");
+
+    // Verify dropTable cleans up legacy pk_<table> slot
+    await db.dropTable("legacy_renamed");
+    expect(await db.listIndexes()).toHaveLength(0);
   });
 });
 

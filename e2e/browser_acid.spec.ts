@@ -755,4 +755,190 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     await context.close();
   });
+
+  // ============================================================================
+  // TEST 9: Catalog Overflow (>16 Tables & >8 Indexes) Across Multi-Tab Sync & WAL Recovery
+  // ============================================================================
+  test("9. Catalog Overflow (>16 Tables & >8 Secondary Indexes): Multi-Tab Sync & WAL Crash Recovery", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const tab1 = await context.newPage();
+    const tab2 = await context.newPage();
+
+    await Promise.all([tab1.goto(baseUrl), tab2.goto(baseUrl)]);
+    await Promise.all([
+      tab1.waitForFunction(() => (window as any).__harnessReady === true),
+      tab2.waitForFunction(() => (window as any).__harnessReady === true),
+    ]);
+
+    const dbName = `e2e_catalog_overflow_${Date.now()}`;
+
+    // 1. Open the database in both tabs BEFORE overflowing Page 1 catalog limits
+    await tab1.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      (window as any).__overflowDb1 = await WebDB.open({
+        name,
+        storage: "idb",
+        bufferPoolPages: 256,
+      });
+    }, dbName);
+
+    await tab2.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      (window as any).__overflowDb2 = await WebDB.open({
+        name,
+        storage: "idb",
+        bufferPoolPages: 256,
+      });
+    }, dbName);
+
+    // 2. In Tab 1, run migrations creating 22 tables (exceeding 16 on Page 1), each with a PK,
+    //    plus 14 secondary unique indexes (exceeding 8 on Page 1), and insert rows.
+    await tab1.evaluate(async () => {
+      const db = (window as any).__overflowDb1;
+      await db.transaction(async (tx: any) => {
+        for (let t = 1; t <= 22; t++) {
+          const tableName = `pos_table_${t}`;
+          await tx.createTable(tableName, [
+            { name: "id", type: "INT32", primaryKey: true },
+            { name: "code", type: "TEXT", maxLength: 32 },
+            { name: "amount", type: "INT32" },
+          ]);
+          if (t <= 14) {
+            await tx.createIndex(tableName, ["code"], {
+              name: `idx_${tableName}_code`,
+              unique: true,
+            });
+          }
+          await tx.insert(tableName, {
+            id: t * 10,
+            code: `CODE-${t}`,
+            amount: t * 100,
+          });
+        }
+      });
+    });
+
+    // 3. Verify Tab 2 automatically pins the newly chained table & index overflow catalog pages
+    //    via cross-tab invalidation and can query & enforce unique constraints on overflow tables/indexes!
+    const tab2Verification = await tab2.evaluate(async () => {
+      const db = (window as any).__overflowDb2;
+      // Query table #22 (lives on table overflow catalog page) — triggers cross-tab reload & pinning
+      const row22 = await db
+        .from("pos_table_22")
+        .where("id", "=", 220)
+        .first();
+      const tables = await db.listTables();
+      // Query table #14 via secondary index #14 (lives on index overflow catalog page)
+      const row14ByIndex = await db
+        .from("pos_table_14")
+        .where("code", "=", "CODE-14")
+        .first();
+
+      let duplicatePkCaught = false;
+      try {
+        await db.insert("pos_table_22", { id: 220, code: "DUP-PK", amount: 0 });
+      } catch {
+        duplicatePkCaught = true;
+      }
+
+      let duplicateSecIdxCaught = false;
+      try {
+        await db.insert("pos_table_14", { id: 999, code: "CODE-14", amount: 0 });
+      } catch {
+        duplicateSecIdxCaught = true;
+      }
+
+      return {
+        tableCount: tables.length,
+        row22,
+        row14ByIndex,
+        duplicatePkCaught,
+        duplicateSecIdxCaught,
+      };
+    });
+
+    expect(tab2Verification.tableCount).toBe(22);
+    expect(tab2Verification.row22).toEqual({
+      id: 220,
+      code: "CODE-22",
+      amount: 2200,
+    });
+    expect(tab2Verification.row14ByIndex).toEqual({
+      id: 140,
+      code: "CODE-14",
+      amount: 1400,
+    });
+    expect(tab2Verification.duplicatePkCaught).toBe(true);
+    expect(tab2Verification.duplicateSecIdxCaught).toBe(true);
+
+    // 4. Simulate abrupt crash of both tabs without closing DB (testing WAL recovery + catalog overflow re-pinning)
+    await tab1.close();
+    await tab2.close();
+
+    const tab3 = await context.newPage();
+    await tab3.goto(baseUrl);
+    await tab3.waitForFunction(() => (window as any).__harnessReady === true);
+
+    const recoveryVerification = await tab3.evaluate(async (name) => {
+      const WebDB = (window as any).WebDB;
+      const db = await WebDB.open({
+        name,
+        storage: "idb",
+        bufferPoolPages: 256,
+      });
+
+      const tables = await db.listTables();
+      const idx14 = await db.listIndexes("pos_table_14");
+      const idx22 = await db.listIndexes("pos_table_22");
+      const row1 = await db
+        .from("pos_table_1")
+        .where("id", "=", 10)
+        .first();
+      const row22 = await db
+        .from("pos_table_22")
+        .where("id", "=", 220)
+        .first();
+      const row14ByIndex = await db
+        .from("pos_table_14")
+        .where("code", "=", "CODE-14")
+        .first();
+
+      await db.close();
+      return {
+        tableCount: tables.length,
+        idx14Names: idx14.map((i: any) => i.name).sort(),
+        idx22Names: idx22.map((i: any) => i.name).sort(),
+        row1,
+        row22,
+        row14ByIndex,
+      };
+    }, dbName);
+
+    expect(recoveryVerification.tableCount).toBe(22);
+    expect(recoveryVerification.idx14Names).toEqual([
+      "idx_pos_table_14_code",
+      "pk_pos_table_14",
+    ]);
+    expect(recoveryVerification.idx22Names).toEqual(["pk_pos_table_22"]);
+    expect(recoveryVerification.row1).toEqual({
+      id: 10,
+      code: "CODE-1",
+      amount: 100,
+    });
+    expect(recoveryVerification.row22).toEqual({
+      id: 220,
+      code: "CODE-22",
+      amount: 2200,
+    });
+    expect(recoveryVerification.row14ByIndex).toEqual({
+      id: 140,
+      code: "CODE-14",
+      amount: 1400,
+    });
+
+    await context.close();
+  });
 });

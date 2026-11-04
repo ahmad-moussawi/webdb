@@ -175,6 +175,10 @@ export interface TableDescriptor {
   flags: number;
   rowCountEstimate: number;
   autoIncNext: bigint;
+  pkRootPageId?: number;
+  pkColumnCount?: number;
+  pkFlags?: number;
+  pkColumnIndices?: number[];
 }
 
 export interface IndexDescriptor {
