@@ -128,7 +128,7 @@ function highlightCode(code: string, tab: string): string {
 
   // Method Names
   html = html.replace(
-    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open|readPage|writePage|get|put)\b(?=\()/g,
+    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open|readPage|writePage|get|put|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|ref|signal|injectWebDB|useWebDB|provideWebDB)\b(?=\()/g,
     `<span class="hl-fn">$1</span>`,
   );
 
@@ -197,6 +197,124 @@ const copyCode = () => {
   copyStatus.value = true;
   setTimeout(() => (copyStatus.value = false), 2000);
 };
+
+type FrameworkTab = "react" | "vue" | "angular" | "vanilla";
+const activeFrameworkTab = ref<FrameworkTab>("react");
+
+const frameworkMeta: Record<
+  FrameworkTab,
+  { label: string; pkg: string; size: string; file: string }
+> = {
+  react: {
+    label: "React",
+    pkg: "@ahmadmoussawi/webdb/react",
+    size: "0.72 KB gzip",
+    file: "TodoList.tsx",
+  },
+  vue: {
+    label: "Vue 3",
+    pkg: "@ahmadmoussawi/webdb/vue",
+    size: "0.93 KB gzip",
+    file: "TodoList.vue",
+  },
+  angular: {
+    label: "Angular",
+    pkg: "@ahmadmoussawi/webdb/angular",
+    size: "0.96 KB gzip",
+    file: "todo-list.component.ts",
+  },
+  vanilla: {
+    label: "Plain JS / TS",
+    pkg: "@ahmadmoussawi/webdb",
+    size: "Built-in",
+    file: "live-query.ts",
+  },
+};
+
+const frameworkSnippets: Record<FrameworkTab, string> = {
+  react: `import { useLiveQuery } from "@ahmadmoussawi/webdb/react";
+
+export function OrderDashboard({ status }: { status: string }) {
+  // Automatically tracks 'orders' + joined 'customers' table!
+  // Re-renders on local writes OR commits from other browser tabs.
+  const { data: orders, isLoading, error } = useLiveQuery(
+    () =>
+      db
+        .from("orders")
+        .join("customers", "orders.customer_id", "=", "customers.id")
+        .where("orders.status", "=", status)
+        .orderBy("orders.id", "desc"),
+    [status],
+    { initialData: [] }
+  );
+
+  if (isLoading) return <p>Loading live orders...</p>;
+  return <OrderTable rows={orders} />;
+}`,
+  vue: `import { ref } from "vue";
+import { useLiveQuery } from "@ahmadmoussawi/webdb/vue";
+
+const statusFilter = ref("active");
+
+// Returns reactive Vue Refs & cleans up automatically onScopeDispose
+const { data: todos, isLoading, error } = useLiveQuery(
+  () =>
+    db
+      .from("todos")
+      .where("status", "=", statusFilter.value)
+      .orderBy("priority", "desc"),
+  [statusFilter], // Re-runs when statusFilter Ref or 'todos' table changes
+  { initialData: [] }
+);`,
+  angular: `import { Component, signal } from "@angular/core";
+import { injectWebDB, liveQuerySignal, liveQuery$ } from "@ahmadmoussawi/webdb/angular";
+
+@Component({
+  selector: "app-todos",
+  template: \`
+    @for (todo of todos.data(); track todo.id) {
+      <li>{{ todo.title }}</li>
+    }
+  \`,
+})
+export class TodosComponent {
+  private db = injectWebDB();
+  status = signal("open");
+
+  // Tracks Angular Signals + WebDB tables & cleans up via DestroyRef
+  todos = liveQuerySignal(
+    () => this.db.from("todos").where("status", "=", this.status()),
+    { initialData: [] }
+  );
+}`,
+  vanilla: `import { WebDB } from "@ahmadmoussawi/webdb";
+
+// 1. Chain .live() directly onto any QueryBuilder
+const sub = db
+  .from("todos")
+  .where("done", "=", 0)
+  .orderBy("id", "desc")
+  .live((rows) => renderTodos(rows));
+
+// 2. Or consume live updates with standard Async Iteration (for await...of)
+for await (const rows of db.from("todos").where("done", "=", 0).live()) {
+  renderTodos(rows);
+}`,
+};
+
+const renderedFrameworkLines = computed(() => {
+  return highlightCode(
+    frameworkSnippets[activeFrameworkTab.value],
+    activeFrameworkTab.value,
+  ).split("\n");
+});
+
+const copyFrameworkStatus = ref(false);
+const copyFrameworkCode = () => {
+  navigator.clipboard.writeText(frameworkSnippets[activeFrameworkTab.value]);
+  copyFrameworkStatus.value = true;
+  setTimeout(() => (copyFrameworkStatus.value = false), 2000);
+};
 </script>
 
 <template>
@@ -226,8 +344,9 @@ const copyCode = () => {
 
       <p class="hero-lead">
         An ultra-lean &lt;50 KB WebAssembly engine with true SQL power,
-        type-safe queries, and instant persistence over OPFS &amp; IndexedDB.
-        Zero server roundtrips, no complex headers.
+        reactive live queries for <strong>React, Vue, Angular &amp; JS</strong>,
+        and instant persistence over OPFS &amp; IndexedDB. Zero server
+        roundtrips, no complex headers.
       </p>
 
       <div class="hero-actions">
@@ -921,6 +1040,26 @@ const copyCode = () => {
                 </div>
               </td>
             </tr>
+
+            <tr>
+              <td class="row-feature">
+                <span class="feature-title">Reactive UI &amp; Frameworks</span>
+              </td>
+              <td class="cell-legacy">
+                <div class="val-warn">Manual Polling / DIY Wrappers</div>
+                <div class="val-sub">
+                  Requires third-party event buses and manual table invalidation
+                </div>
+              </td>
+              <td class="cell-webdb">
+                <div class="val-good">First-Class Live Queries</div>
+                <div class="val-sub">
+                  Zero-bloat <code>&lt; 1 KB</code> adapters for
+                  <strong>React, Vue, Angular &amp; JS</strong> with auto-tracked
+                  <code>JOIN</code>s &amp; cross-tab sync
+                </div>
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1387,6 +1526,126 @@ const copyCode = () => {
             encryption.
           </p>
         </div>
+      </div>
+    </section>
+
+    <!-- SECTION 6B: REACTIVE LIVE QUERIES & FRAMEWORK INTEGRATIONS -->
+    <section class="section-box framework-live-section">
+      <div class="showcase-header">
+        <div class="showcase-badge">
+          <span class="showcase-dot"></span>
+          REACTIVE UI &amp; MULTI-TAB SYNC
+        </div>
+        <h2 class="section-heading">
+          Live Queries for React, Vue, Angular &amp; Plain JS
+        </h2>
+        <p class="section-sub">
+          Bind relational queries directly to your UI components. WebDB
+          automatically tracks every table accessed by your query—including
+          <code>JOIN</code>s and nested subqueries—and pushes instant updates
+          across components and open browser tabs with
+          <strong>zero bundle bloat</strong>.
+        </p>
+      </div>
+
+      <!-- 3 SELLING POINT PILLARS FOR LIVE QUERIES -->
+      <div class="fw-pillars-grid">
+        <div class="fw-pillar-card">
+          <div class="fw-pillar-badge">AUTO-TRACKED</div>
+          <h3 class="fw-pillar-title">Smart Table &amp; JOIN Tracking</h3>
+          <p class="fw-pillar-desc">
+            No manual table lists required. WebDB inspects your
+            <code>QueryBuilder</code> AST (base tables, <code>JOIN</code>s, and
+            subqueries) and only re-runs when a relevant table changes.
+          </p>
+        </div>
+
+        <div class="fw-pillar-card">
+          <div class="fw-pillar-badge">&lt; 1 KB SUBPATHS</div>
+          <h3 class="fw-pillar-title">Zero Core Bundle Bloat</h3>
+          <p class="fw-pillar-desc">
+            Framework hooks live in dedicated tree-shakeable subpath exports
+            (<code>/react</code>, <code>/vue</code>, <code>/angular</code>).
+            Your core bundle never pays for frameworks you don't use.
+          </p>
+        </div>
+
+        <div class="fw-pillar-card">
+          <div class="fw-pillar-badge">MULTI-TAB NATIVE</div>
+          <h3 class="fw-pillar-title">Instant Cross-Tab Reactivity</h3>
+          <p class="fw-pillar-desc">
+            Mutations in another browser tab or Web Worker automatically sync
+            via <code>BroadcastChannel</code>, invalidate stale cache pages, and
+            update your live UI hooks in real time.
+          </p>
+        </div>
+      </div>
+
+      <!-- INTERACTIVE FRAMEWORK CODE SHOWCASE -->
+      <div class="terminal-box fw-terminal-box">
+        <div class="terminal-bar">
+          <div class="tab-list">
+            <button
+              :class="['tab-btn', { active: activeFrameworkTab === 'react' }]"
+              @click="activeFrameworkTab = 'react'"
+            >
+              React
+            </button>
+            <button
+              :class="['tab-btn', { active: activeFrameworkTab === 'vue' }]"
+              @click="activeFrameworkTab = 'vue'"
+            >
+              Vue 3
+            </button>
+            <button
+              :class="['tab-btn', { active: activeFrameworkTab === 'angular' }]"
+              @click="activeFrameworkTab = 'angular'"
+            >
+              Angular
+            </button>
+            <button
+              :class="['tab-btn', { active: activeFrameworkTab === 'vanilla' }]"
+              @click="activeFrameworkTab = 'vanilla'"
+            >
+              Plain JS / TS
+            </button>
+          </div>
+
+          <div class="fw-bar-right">
+            <span class="fw-pkg-pill">
+              <code>{{ frameworkMeta[activeFrameworkTab].pkg }}</code>
+              <span class="fw-size-tag">{{
+                frameworkMeta[activeFrameworkTab].size
+              }}</span>
+            </span>
+            <button class="copy-btn" @click="copyFrameworkCode">
+              {{ copyFrameworkStatus ? "COPIED ✓" : "COPY" }}
+            </button>
+          </div>
+        </div>
+
+        <div class="terminal-body">
+          <div class="code-lines">
+            <div
+              v-for="(line, index) in renderedFrameworkLines"
+              :key="index"
+              class="code-line"
+            >
+              <span class="line-num">{{ index + 1 }}</span>
+              <span class="line-content" v-html="line || '&nbsp;'"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fw-docs-link-row">
+        <a
+          :href="withBase('/guides/live-queries-and-frameworks')"
+          class="btn btn-secondary"
+        >
+          <span>Explore Live Queries &amp; Framework Guide</span>
+          <span class="btn-arrow">→</span>
+        </a>
       </div>
     </section>
 
@@ -3839,6 +4098,104 @@ code {
     justify-content: center;
     padding: 0.8rem 1.5rem;
     min-height: 44px;
+  }
+}
+
+/* ============================================================================
+   REACTIVE LIVE QUERIES & FRAMEWORK INTEGRATIONS SECTION
+   ============================================================================ */
+.fw-pillars-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+  margin-bottom: 1.75rem;
+}
+
+.fw-pillar-card {
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  padding: 1.35rem 1.4rem;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.fw-pillar-card:hover {
+  border-color: var(--vp-c-brand-1);
+}
+
+.fw-pillar-badge {
+  display: inline-block;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  padding: 0.2rem 0.55rem;
+  margin-bottom: 0.75rem;
+}
+
+.fw-pillar-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+  margin: 0 0 0.5rem 0;
+  line-height: 1.3;
+}
+
+.fw-pillar-desc {
+  font-size: 0.88rem;
+  color: var(--vp-c-text-2);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.fw-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-right: 0.5rem;
+}
+
+.fw-pkg-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.74rem;
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.25rem 0.65rem;
+}
+
+.fw-pkg-pill code {
+  color: #e2e8f0;
+  font-size: 0.74rem;
+  background: transparent;
+  padding: 0;
+}
+
+.fw-size-tag {
+  color: #34d399;
+  font-weight: 600;
+  font-size: 0.68rem;
+  padding-left: 0.45rem;
+  border-left: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.fw-docs-link-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+
+@media (max-width: 900px) {
+  .fw-pillars-grid {
+    grid-template-columns: 1fr;
+  }
+  .fw-pkg-pill {
+    display: none;
   }
 }
 </style>

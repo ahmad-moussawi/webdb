@@ -30,9 +30,10 @@
 
 - 🪶 **Tiny Footprint (&lt;50 KB Wasm):** Up to 90%+ smaller than ported desktop SQLite or Postgres (PGlite) builds.
 - ⚡ **True Relational Power:** Fast filtering, indexing, aggregations, multi-column sorting, and joins—replacing cumbersome IndexedDB cursor queries.
+- 📡 **Reactive Live Queries (React, Vue, Angular &amp; Plain JS):** First-class UI bindings (`< 1 KB` subpath exports) with automatic table dependency tracking across `JOIN`s, subqueries, and open browser tabs.
 - 🔄 **Async VFS by Heart:** Built from the ground up for asynchronous browser storage—clean non-blocking page faults with zero Emscripten `Asyncify` stack hacks or slow workarounds.
 - 🌐 **Embraces the Web Platform:** Uses the browser instead of fighting it—delegating to native `crypto.subtle`, `Intl`, `RegExp`, `Date`, and Web Locks rather than packing redundant C libraries into Wasm.
-- 💾 **Reliable Offline Persistence:** First-class storage with high-speed **OPFS** (desktop & workers) and **IndexedDB** (Safari, mobile WebViews, private browsing).
+- 💾 **Reliable Offline Persistence:** First-class storage with high-speed **OPFS** (desktop &amp; workers) and **IndexedDB** (Safari, mobile WebViews, private browsing).
 - 🔌 **Zero Configuration:** Works everywhere out of the box with zero `COOP`/`COEP` header headaches.
 
 ---
@@ -209,6 +210,49 @@ async function main() {
 }
 
 main();
+```
+
+---
+
+## 📡 Reactive Live Queries (React, Vue, Angular & Plain JS)
+
+WebDB provides zero-bundle-bloat subpath exports (`< 1 KB` gzipped each) that automatically track every table read by your query—including `JOIN`s and nested subqueries—and push live updates whenever those tables change locally or from another browser tab:
+
+```typescript
+// 1. Plain JavaScript / TypeScript (@ahmadmoussawi/webdb)
+const live = db
+  .from("users")
+  .where("score", ">=", 90)
+  .orderBy("score", "desc")
+  .live((topUsers) => renderLeaderboard(topUsers));
+
+// Or consume as an AsyncIterable:
+for await (const topUsers of db.from("users").where("score", ">=", 90).live()) {
+  renderLeaderboard(topUsers);
+}
+
+// 2. React (@ahmadmoussawi/webdb/react)
+import { useLiveQuery } from "@ahmadmoussawi/webdb/react";
+const { data: users, isLoading } = useLiveQuery(
+  () => db.from("users").where("age", ">=", minAge).orderBy("score", "desc"),
+  [minAge],
+  { initialData: [] }
+);
+
+// 3. Vue 3 (@ahmadmoussawi/webdb/vue)
+import { useLiveQuery } from "@ahmadmoussawi/webdb/vue";
+const { data: users, isLoading } = useLiveQuery(
+  () => db.from("users").where("age", ">=", minAgeRef.value).orderBy("score", "desc"),
+  [minAgeRef],
+  { initialData: [] }
+);
+
+// 4. Angular Signals & RxJS (@ahmadmoussawi/webdb/angular)
+import { liveQuerySignal, liveQuery$ } from "@ahmadmoussawi/webdb/angular";
+users = liveQuerySignal(
+  () => db.from("users").where("age", ">=", this.minAge()).orderBy("score", "desc"),
+  { initialData: [] }
+);
 ```
 
 ---

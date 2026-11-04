@@ -71,6 +71,7 @@ export default defineConfig({
 
     nav: [
       { text: "Getting Started", link: "/getting-started" },
+      { text: "Live Queries", link: "/guides/live-queries-and-frameworks" },
       { text: "Use Cases", link: "/guides/use-cases" },
       { text: "API Reference", link: "/reference/api-reference" },
       { text: "Studio IDE", link: "/playground/", target: "_self" },
@@ -130,6 +131,10 @@ export default defineConfig({
       {
         text: "Transactions, Reactivity & Sync",
         items: [
+          {
+            text: "Live Queries (React, Vue, Angular, JS)",
+            link: "/guides/live-queries-and-frameworks",
+          },
           {
             text: "Transactions & Savepoints",
             link: "/guides/transactions",

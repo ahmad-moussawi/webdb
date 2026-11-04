@@ -81,3 +81,23 @@ async function restoreFromFileInput(db: WebDB, file: File) {
 > [!WARNING]
 > `db.importBinary()` cannot be called *inside* an active `db.transaction()` block. Call it directly on the top-level `db` instance.
 
+---
+
+## 4. Opening Remote & Compressed (`.webdb.gz`) Snapshots in WebDB Studio
+
+The [**WebDB Studio Playground**](/playground/) natively supports exporting and importing both raw `.webdb` images and gzip-compressed `.webdb.gz` snapshots (which typically compress 4 KB slotted pages by **70–90%** using the browser's native `CompressionStream` / `DecompressionStream`).
+
+You can also create **shareable external links** that directly open a remote `.webdb` or `.webdb.gz` file inside the Studio IDE via URL query parameters:
+
+```
+https://ahmad-moussawi.github.io/webdb/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory
+```
+
+| URL Parameter | Values | Description |
+| :--- | :--- | :--- |
+| **`db`** | `https://...` | Direct URL to a CORS-enabled `.webdb` or `.webdb.gz` binary snapshot. |
+| **`core`** | `wasm` \| `js` | Execution engine mode (defaults to `wasm`). |
+| **`storage`** | `memory` \| `idb` \| `opfs` | Storage backend where the remote snapshot should be mounted. |
+| **`name`** | `string` | Optional local database name override. |
+
+

@@ -128,4 +128,5 @@ Follow the guides below to explore WebDB's capabilities:
 - [**Tables, Columns & Data Types**](/guides/schema-and-types) — Learn about supported column types (`UUID`, `ULID`, `INT32`, `INT64`, `FLOAT64`, `TEXT`, `BLOB`), auto-incrementing keys, and constraints.
 - [**Inserting, Updating & Deleting Data**](/guides/mutations) — Perform single and bulk inserts, updates, deletes, and conflict-aware `upsert` operations.
 - [**Querying Data**](/guides/querying) — Filter, search text, sort, and paginate your data with the fluent Query Builder.
+- [**Reactive Live Queries (React, Vue, Angular & Plain JS)**](/guides/live-queries-and-frameworks) — Bind queries directly to your UI with automatic table dependency tracking and zero bundle bloat.
 - [**Transactions, Reactivity & Offline Sync**](/offline-sync) — Subscribe to live cross-tab changes and synchronize local data with a remote backend.

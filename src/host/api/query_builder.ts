@@ -29,6 +29,13 @@ import {
   ExpressionBuilder,
   deriveDefaultAlias,
 } from '../compiler/expr_parser.js';
+import {
+  notifyLiveQueryTableRead,
+  liveQuery,
+  type LiveQueryController,
+  type LiveQueryOptions,
+  type LiveQueryState,
+} from './live_query.js';
 
 export type SelectFunction =
   | 'count'
@@ -464,8 +471,10 @@ export class QueryBuilder {
       this.sourceSubquery = tableOrSubquery;
       this.tableName = '__subquery__';
       this.assertSubqueryDepth();
+      notifyLiveQueryTableRead(this.db, tableOrSubquery.getReferencedTables());
     } else {
       this.tableName = tableOrSubquery;
+      notifyLiveQueryTableRead(this.db, tableOrSubquery);
     }
   }
 
@@ -473,8 +482,54 @@ export class QueryBuilder {
     return { subquery: this, as: alias };
   }
 
+  getDb(): IDatabaseQueryExecutor {
+    return this.db;
+  }
+
   getTableName(): string {
     return this.tableName;
+  }
+
+  getReferencedTables(): string[] {
+    const tables = new Set<string>();
+    const collectFromQb = (qb: QueryBuilder | undefined) => {
+      if (!qb) return;
+      if (qb.tableName && qb.tableName !== '__subquery__') {
+        tables.add(qb.tableName);
+      }
+      if (qb.sourceSubquery) {
+        collectFromQb(qb.sourceSubquery);
+      }
+      for (const j of qb.joins) {
+        if (j.table) tables.add(j.table);
+      }
+      for (const f of qb.selectFields) {
+        if (f.subquery && isQueryBuilder(f.subquery)) {
+          collectFromQb(f.subquery);
+        }
+      }
+      const collectFromFilter = (filter: QueryFilter | undefined) => {
+        if (!filter) return;
+        if (filter.subquery && isQueryBuilder(filter.subquery)) {
+          collectFromQb(filter.subquery);
+        }
+        if (filter.value && isQueryBuilder(filter.value)) {
+          collectFromQb(filter.value);
+        }
+        if (filter.child) {
+          collectFromFilter(filter.child);
+        }
+        if (filter.children) {
+          for (const c of filter.children) {
+            collectFromFilter(c);
+          }
+        }
+      };
+      for (const f of qb.filters) collectFromFilter(f);
+      for (const f of qb.havingFilters) collectFromFilter(f);
+    };
+    collectFromQb(this);
+    return Array.from(tables);
   }
 
   getSourceSubquery(): QueryBuilder | undefined {
@@ -2142,7 +2197,7 @@ export class QueryBuilder {
       });
       if (flattened.orderKeys[0]?.colName) {
         flattened.sortCol = flattened.orderKeys[0].colName!;
-        flattened.sortDir = flattened.orderKeys[0].direction;
+        flattened.sortDir = flattened.orderKeys[0].direction ?? 'asc';
       }
     } else if (!hasOuterAggsOrGrouping && inner.orderKeys.length > 0) {
       flattened.orderKeys = inner.orderKeys.map((k) => ({ ...k }));
@@ -3215,6 +3270,7 @@ export class QueryBuilder {
 
   async toArray(): Promise<DbRow[]> {
     this.assertSubqueryDepth();
+    notifyLiveQueryTableRead(this.db, this.getReferencedTables());
 
     // 1. Derived table (`db.from(subquery)`)
     if (this.sourceSubquery) {
@@ -3417,6 +3473,33 @@ export class QueryBuilder {
   async first(): Promise<DbRow | null> {
     const rows = await this.limit(1).toArray();
     return rows.length > 0 ? rows[0] : null;
+  }
+
+  /**
+   * Turns this query into a reactive LiveQueryController that automatically
+   * re-executes whenever any table referenced by the query (including JOINs
+   * and subqueries) is modified locally or from another tab/worker.
+   *
+   * @example
+   * ```ts
+   * const live = db
+   *   .from('todos')
+   *   .where('completed', '=', false)
+   *   .live((rows) => render(rows));
+   *
+   * // Later:
+   * live.destroy();
+   * ```
+   */
+  live<T = DbRow[]>(
+    callbackOrOptions?: ((rows: T, state: LiveQueryState<T>) => void) | LiveQueryOptions<T>,
+    options?: LiveQueryOptions<T>,
+  ): LiveQueryController<T> {
+    return liveQuery<T>(
+      () => this.clone(this.db).toArray() as unknown as Promise<T>,
+      callbackOrOptions,
+      options,
+    );
   }
 
   async update(

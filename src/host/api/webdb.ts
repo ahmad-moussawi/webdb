@@ -140,6 +140,13 @@ import {
   type QueryExecutionOptions,
   type JoinClause,
 } from "./query_builder.ts";
+import {
+  liveQuery,
+  type LiveQueryController,
+  type LiveQueryOptions,
+  type LiveQueryState,
+  type LiveQueryFn,
+} from "./live_query.ts";
 
 export interface UdfDefinition {
   deterministic?: boolean;
@@ -1749,6 +1756,26 @@ export class WebDB implements IDatabaseQueryExecutor {
     return () => {
       this.subscriptions.delete(entry);
     };
+  }
+
+  /**
+   * Creates a reactive LiveQueryController bound to this WebDB instance.
+   * Automatically tracks accessed tables (or uses `options.tables`) and re-runs
+   * `queryFn` whenever those tables change locally or across tabs.
+   */
+  liveQuery<T = DbRow[]>(
+    queryFn: LiveQueryFn<T>,
+    callbackOrOptions?: ((data: T, state: LiveQueryState<T>) => void) | LiveQueryOptions<T>,
+    options?: LiveQueryOptions<T>,
+  ): LiveQueryController<T> {
+    const isCallback = typeof callbackOrOptions === "function";
+    const resolvedOptions: LiveQueryOptions<T> = {
+      db: this,
+      ...(isCallback ? options : callbackOrOptions),
+    };
+    return isCallback
+      ? liveQuery<T>(queryFn, callbackOrOptions, resolvedOptions)
+      : liveQuery<T>(queryFn, resolvedOptions);
   }
 
   getSyncState(): SyncState {

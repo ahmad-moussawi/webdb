@@ -43,6 +43,28 @@ jobs:
       - name: Build production bundle & types
         run: npm run build
 
+      - name: Verify core and framework subpath export artifacts
+        run: |
+          for f in \
+            dist/webdb.js \
+            dist/webdb.umd.cjs \
+            dist/index.d.ts \
+            dist/react.js \
+            dist/react.cjs \
+            dist/react.d.ts \
+            dist/angular.js \
+            dist/angular.cjs \
+            dist/angular.d.ts \
+            dist/vue.js \
+            dist/vue.cjs \
+            dist/vue.d.ts; do
+            if [ ! -s "$f" ]; then
+              echo "Error: Missing or empty build artifact: $f"
+              exit 1
+            fi
+          done
+          echo "All core and subpath export artifacts verified."
+
       - name: Install Playwright Chromium for E2E tests
         run: npx playwright install --with-deps chromium
 

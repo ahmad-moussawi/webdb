@@ -30,6 +30,41 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/webdb.js",
       "require": "./dist/webdb.umd.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    },
+    "./angular": {
+      "types": "./dist/angular.d.ts",
+      "import": "./dist/angular.js",
+      "require": "./dist/angular.cjs"
+    },
+    "./vue": {
+      "types": "./dist/vue.d.ts",
+      "import": "./dist/vue.js",
+      "require": "./dist/vue.cjs"
+    }
+  },
+  "peerDependencies": {
+    "@angular/core": ">=16.0.0",
+    "react": ">=18.0.0",
+    "rxjs": ">=7.0.0",
+    "vue": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@angular/core": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "rxjs": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
     }
   },
   "files": [
@@ -41,7 +76,7 @@
     "transpile:c": "vite-node scripts/transpiler/index.ts --all --write",
     "build:wasm": "node scripts/build_wasm.js",
     "prebuild": "node scripts/generate_layouts.js",
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.adapters.config.ts",
     "prepack": "npm run build",
     "pretest": "node scripts/generate_layouts.js",
     "test": "vitest run tests",

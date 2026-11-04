@@ -85,6 +85,7 @@ import {
 | **`db.onBeforeCommit`**   | `onBeforeCommit(hook: (changeset: Changeset, tx: WebDB) => Promise<void> \| void): () => void`    | Registers a pre-commit hook inside the active transaction lease. Returns an unsubscribe function.        |
 | **`db.onCommit`**         | `onCommit(hook: (changeset: Changeset) => void): () => void`                                      | Registers a post-commit hook fired after WAL durability. Returns an unsubscribe function.                |
 | **`db.subscribe`**        | `subscribe(tables: string \| string[] \| '*', cb: (event: TableChangeEvent) => void): () => void` | Subscribes to local and cross-tab (`BroadcastChannel`) table mutations. Returns an unsubscribe function. |
+| **`db.liveQuery`**        | `liveQuery<T>(queryFn: LiveQueryFn<T>, cbOrOpts?: ..., opts?: LiveQueryOptions<T>): LiveQueryController<T>` | Creates a reactive live query bound to `db` that automatically tracks accessed tables and re-executes on change. |
 | **`db.getSyncState`**     | `getSyncState(): { changeCounter: number; schemaVersion: number }`                                | Returns current Page 1 `changeCounter` and `schemaVersion`.                                              |
 | **`db.registerFunction`** | `registerFunction(name: string, def: UdfDefinition \| ((...args: any[]) => any)): this`           | Registers a custom synchronous JavaScript UDF callable in queries.                                       |
 
@@ -142,6 +143,49 @@ import {
 | **`.withPlanner(planner)`**                 | Overrides the query planner for this specific query.                                                |
 | **`.toArray()`**                            | Executes the query and returns `Promise<DbRow[]>`.                                                  |
 | **`.first()`**                              | Executes with `limit(1)` and returns `Promise<DbRow \| null>`.                                      |
+| **`.live(callbackOrOptions?, options?)`**   | Turns the query into a reactive `LiveQueryController<T>` (supports `.onData()`, `.destroy()`, and `for await...of`). |
 | **`.update(patch, options?)`**              | Updates all rows matching the query's `WHERE` filters and returns `Promise<number>`.                |
 | **`.delete(options?)`**                     | Deletes all rows matching the query's `WHERE` filters and returns `Promise<number>`.                |
 | **`.explain()`**                            | Compiles and returns `Promise<ExplainOutput>` (`plan`, `bytecodeSize`, `instructions`, `assembly`). |
+
+---
+
+## 3. Reactive Live Queries & Framework Subpath Exports
+
+See the [**Reactive Live Queries Guide**](/guides/live-queries-and-frameworks) for complete usage examples.
+
+### Core / Plain JavaScript (`@ahmadmoussawi/webdb`)
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`liveQuery`** | `liveQuery<T>(queryFn: LiveQueryFn<T>, callbackOrOptions?, options?): LiveQueryController<T>` | Creates a reactive live query (and optionally subscribes a data callback). Also supports `for await (const data of liveQuery(...))`. |
+| **`createLiveQuery`** | `createLiveQuery<T>(queryFn: LiveQueryFn<T>, options?: LiveQueryOptions<T>): LiveQueryController<T>` | Low-level controller returning `{ getState, subscribe, onData, refresh, destroy, [Symbol.asyncIterator] }`. |
+
+### React (`@ahmadmoussawi/webdb/react`)
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`useLiveQuery`** | `useLiveQuery<T>(queryFn, deps?, options?): UseLiveQueryResult<T>` | React hook returning `{ data, isLoading, error, lastUpdated, lastEvent, refresh }`. |
+| **`useLiveQueryData`** | `useLiveQueryData<T>(queryFn, deps?, defaultValue?, options?): T \| undefined` | Concise React hook returning `data` directly (or `defaultValue` while loading). |
+| **`WebDBProvider`** | `WebDBProvider({ db, children })` | React Context Provider for sharing a `WebDB` instance across components. |
+| **`useWebDB`** | `useWebDB(): WebDB` | Returns the `WebDB` instance from the nearest `<WebDBProvider>` (or `useOptionalWebDB()` for nullable). |
+
+### Vue 3 (`@ahmadmoussawi/webdb/vue`)
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`useLiveQuery`** | `useLiveQuery<T>(queryFn, depsOrOptions?, options?): UseVueLiveQueryReturn<T>` | Vue 3 composable returning readonly `Ref`s (`{ data, isLoading, error, lastUpdated, lastEvent, refresh, stop }`) with automatic `onScopeDispose` cleanup. |
+| **`useLiveQueryData`** | `useLiveQueryData<T>(queryFn, deps?, defaultValue?, options?): Readonly<ShallowRef<T \| undefined>>` | Concise Vue 3 composable returning a single readonly `Ref<T \| undefined>`. |
+| **`provideWebDB`** | `provideWebDB(db: WebDB, app?): WebDB` | Provides a `WebDB` instance in a Vue component `setup()` or on a Vue `app` instance. |
+| **`useWebDB`** | `useWebDB(): WebDB` | Injects the provided `WebDB` instance (or `useOptionalWebDB()` for nullable). |
+
+### Angular (`@ahmadmoussawi/webdb/angular`)
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`liveQuerySignal`** | `liveQuerySignal<T>(queryFn, options?): LiveQuerySignal<T>` | Angular Signal helper returning `{ data, isLoading, error, state, refresh, destroy }`. Automatically tracks Signals read in `queryFn` and cleans up via `DestroyRef`. |
+| **`liveQuery$`** | `liveQuery$<T>(queryFn, options?): Observable<T>` | Cold RxJS `Observable<T>` that emits fresh results on table mutations and unsubscribes on teardown. |
+| **`liveQueryState$`** | `liveQueryState$<T>(queryFn, options?): Observable<LiveQueryState<T>>` | Cold RxJS `Observable<LiveQueryState<T>>` emitting full state transitions. |
+| **`provideWebDB`** | `provideWebDB(dbOrFactory: WebDB \| (() => WebDB)): EnvironmentProviders` | Provides a `WebDB` instance in an Angular `ApplicationConfig` or route config. |
+| **`injectWebDB`** | `injectWebDB(): WebDB` | Injects the configured `WebDB` instance via `WEBDB_TOKEN`. |
+

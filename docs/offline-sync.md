@@ -1,7 +1,10 @@
 
 # Reactivity, Multi-Tab Events & Offline Sync
 
-WebDB is built for **local-first and offline-capable web applications**. It gives you reactive table subscriptions (`db.subscribe()`) that work across browser tabs and Web Workers, along with transactional change-tracking hooks (`onBeforeCommit`, `onCommit`) and conflict-aware upserts (`upsertMany`) to connect your local database to any REST, GraphQL, or WebSocket backend.
+WebDB is built for **local-first and offline-capable web applications**. It gives you reactive live queries and table subscriptions (`db.subscribe()`) that work across browser tabs and Web Workers, along with transactional change-tracking hooks (`onBeforeCommit`, `onCommit`) and conflict-aware upserts (`upsertMany`) to connect your local database to any REST, GraphQL, or WebSocket backend.
+
+> [!TIP]
+> **Using React, Vue, Angular, or Plain JS UI bindings?** Check out the [**Reactive Live Queries Guide**](/guides/live-queries-and-frameworks) for zero-bloat framework hooks (`@ahmadmoussawi/webdb/react`, `@ahmadmoussawi/webdb/vue`, `@ahmadmoussawi/webdb/angular`) and chainable `.live()` queries that automatically track accessed tables and `JOIN`s.
 
 ---
 
