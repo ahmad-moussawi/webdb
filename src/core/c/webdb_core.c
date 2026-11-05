@@ -12,7 +12,6 @@
 #include "page.h"
 #include "catalog.h"
 #include "vm_helpers.h"
-#include "vm.h"
 
 // Include source files directly for single-unit compilation
 #include "codecs.c"
@@ -21,7 +20,6 @@
 #include "page.c"
 #include "catalog.c"
 #include "vm_helpers.c"
-#include "vm.c"
 
 // Freestanding library symbol definition for LLVM loop idiom lowering
 __attribute__((no_builtin("strlen"), visibility("default")))
