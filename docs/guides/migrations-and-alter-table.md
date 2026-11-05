@@ -1,8 +1,11 @@
-# Schema Evolution & Migrations (`ALTER TABLE`)
+# Schema Evolution (`ALTER TABLE`)
 
 As your application evolves, you often need to rename tables, rename columns, add new fields, or drop deprecated columns on existing user databases in the browser.
 
 WebDB provides dedicated schema mutation methods as well as a unified [`db.alterTable()`](./src/host/api/webdb.ts#L991-L1005) API.
+
+> [!TIP]
+> Looking for how to organize and run versioned startup migrations across application releases? See the dedicated **[Database Migrations](./migrations.md)** guide.
 
 ---
 
@@ -97,63 +100,6 @@ await db.alterTable("users", {
 
 ---
 
-## 5. Running Versioned App Migrations
+## Next Step: Versioned Database Migrations
 
-When shipping updates to a local-first web app, a clean pattern is to store a schema version in a `_meta` table and run migrations inside a single `db.transaction()` on startup. If any step fails, the entire migration rolls back safely:
-
-```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
-
-const MIGRATIONS: Array<(tx: WebDB) => Promise<void>> = [
-  // Version 1: Initial schema
-  async (tx) => {
-    await tx.createTable("todos", [
-      { name: "id", type: "UUID", primaryKey: true },
-      { name: "title", type: "TEXT", notNull: true },
-      { name: "done", type: "INT32", notNull: true },
-    ]);
-  },
-
-  // Version 2: Add priority column and index it
-  async (tx) => {
-    await tx.addColumn(
-      "todos",
-      { name: "priority", type: "INT32", notNull: true },
-      1,
-    );
-    await tx.createIndex("todos", "priority");
-  },
-
-  // Version 3: Rename 'title' to 'task_name'
-  async (tx) => {
-    await tx.renameColumn("todos", "title", "task_name");
-  },
-];
-
-export async function openAndMigrateDatabase(): Promise<WebDB> {
-  const db = await WebDB.open({ name: "todo_app", storage: "idb" });
-
-  const tables = await db.listTables();
-  if (!tables.some((t) => t.name === "_migrations")) {
-    await db.createTable("_migrations", [
-      { name: "id", type: "INT32", primaryKey: true },
-      { name: "version", type: "INT32", notNull: true },
-    ]);
-    await db.insert("_migrations", { id: 1, version: 0 });
-  }
-
-  const state = await db.from("_migrations").where("id", "=", 1).first();
-  const currentVersion = (state?.version as number) ?? 0;
-
-  if (currentVersion < MIGRATIONS.length) {
-    await db.transaction(async (tx) => {
-      for (let v = currentVersion; v < MIGRATIONS.length; v++) {
-        await MIGRATIONS[v](tx);
-      }
-      await tx.update("_migrations", 1, { version: MIGRATIONS.length });
-    });
-  }
-
-  return db;
-}
-```
+To run sequential schema upgrades, data backfills, and idempotent DDL helpers safely inside ACID transactions on startup, continue to **[Database Migrations](./migrations.md)**.

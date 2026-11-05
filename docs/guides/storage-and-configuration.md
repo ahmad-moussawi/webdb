@@ -236,7 +236,152 @@ const db = await WebDB.open({
 
 ---
 
-## 6. Closing the Database (`db.close()`)
+## 6. Example: HTTP Range VFS (`HttpVfsAdapter`)
+
+Because WebDB's B+Tree engine suspends asynchronously on 4 KB page faults (`PAGE_SIZE = 4096`), you can query a large `.webdb` database hosted on **Amazon S3, Cloudflare R2, GitHub Pages, or any static CDN** using standard HTTP `Range: bytes=start-end` (`206 Partial Content`) requests—without downloading the entire database file.
+
+When an indexed query runs, WebDB only fetches Page 1 (the system catalog), the relevant B+Tree index pages, and the matching data pages—often transferring just **12–24 KB** over the network for a point or range lookup on a multi-megabyte or multi-gigabyte dataset.
+
+### Implementing `HttpVfsAdapter`
+
+By extending `MemoryVfsAdapter`, your `HttpVfsAdapter` automatically caches every fetched 4 KB page in memory and even supports temporary local copy-on-write mutations in the browser session:
+
+```typescript
+import { WebDB, MemoryVfsAdapter } from "@ahmadmoussawi/webdb";
+
+const PAGE_SIZE = 4096;
+
+export class HttpVfsAdapter extends MemoryVfsAdapter {
+  /** Tracks 1-based pageIds already requested from the remote server */
+  private fetchedPages = new Set<number>();
+
+  constructor(
+    private readonly url: string,
+    private readonly requestInit?: RequestInit,
+  ) {
+    super();
+  }
+
+  override async readPages(
+    pageIds: number[],
+  ): Promise<Array<Uint8Array | null>> {
+    // 1. Check which pages are already resident in memory
+    const cached = await super.readPages(pageIds);
+    const missingIds = Array.from(
+      new Set(
+        pageIds.filter(
+          (pageId, idx) =>
+            cached[idx] === null && !this.fetchedPages.has(pageId),
+        ),
+      ),
+    ).sort((a, b) => a - b);
+
+    if (missingIds.length === 0) {
+      return cached;
+    }
+
+    // 2. Coalesce contiguous 4 KB page IDs into single HTTP Range spans
+    const spans: Array<{ startPageId: number; count: number }> = [];
+    for (const pageId of missingIds) {
+      const last = spans[spans.length - 1];
+      if (last && last.startPageId + last.count === pageId) {
+        last.count++;
+      } else {
+        spans.push({ startPageId: pageId, count: 1 });
+      }
+    }
+
+    // 3. Fetch each byte range in parallel via HTTP Range: bytes=start-end
+    const newlyLoaded: Array<{ pageId: number; data: Uint8Array }> = [];
+
+    await Promise.all(
+      spans.map(async ({ startPageId, count }) => {
+        const startByte = (startPageId - 1) * PAGE_SIZE;
+        const endByte = startByte + count * PAGE_SIZE - 1;
+
+        const response = await fetch(this.url, {
+          ...this.requestInit,
+          headers: {
+            ...this.requestInit?.headers,
+            Range: `bytes=${startByte}-${endByte}`,
+          },
+        });
+
+        // 416 Range Not Satisfiable / 404 means the page is beyond EOF
+        if (response.status === 416 || response.status === 404) {
+          for (let i = 0; i < count; i++) {
+            this.fetchedPages.add(startPageId + i);
+          }
+          return;
+        }
+
+        if (!response.ok && response.status !== 206) {
+          throw new Error(
+            `HttpVfsAdapter failed to fetch range ${startByte}-${endByte}: HTTP ${response.status}`,
+          );
+        }
+
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        const pagesReturned = Math.floor(buffer.byteLength / PAGE_SIZE);
+
+        for (let i = 0; i < count; i++) {
+          const pageId = startPageId + i;
+          this.fetchedPages.add(pageId);
+          if (i < pagesReturned) {
+            const offset = i * PAGE_SIZE;
+            newlyLoaded.push({
+              pageId,
+              data: buffer.subarray(offset, offset + PAGE_SIZE),
+            });
+          }
+        }
+      }),
+    );
+
+    // 4. Cache the fetched 4 KB pages in MemoryVfsAdapter for future reads
+    if (newlyLoaded.length > 0) {
+      await super.writePages(newlyLoaded);
+    }
+
+    return super.readPages(pageIds);
+  }
+}
+```
+
+### Querying a Remote `.webdb` File
+
+1. Export a pre-indexed `.webdb` binary snapshot during your build/CI pipeline using `const bytes = await db.exportBinary()` and upload `catalog.webdb` to S3, Cloudflare R2, or your static CDN.
+2. Open the database in the browser with `HttpVfsAdapter`:
+
+```typescript
+const db = await WebDB.open({
+  name: "remote_catalog",
+  vfs: new HttpVfsAdapter("https://cdn.example.com/catalog.webdb"),
+});
+
+// Traverses the B+Tree index over 4 KB HTTP Range requests
+// without downloading the entire database file!
+const products = await db
+  .from("products")
+  .where("category", "=", "Electronics")
+  .where("in_stock", "=", 1)
+  .orderBy("rating", "desc")
+  .limit(10)
+  .toArray();
+```
+
+> [!IMPORTANT]
+> **CORS & Static Host Requirements for HTTP Range Requests:**
+> When hosting `.webdb` files on a different origin (such as S3 or Cloudflare R2), ensure your bucket/CDN CORS policy allows the `Range` request header and exposes `Content-Range` and `Content-Length`:
+>
+> - `Accept-Ranges: bytes`
+> - `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`
+> - `Access-Control-Allow-Headers: Range`
+> - `Access-Control-Expose-Headers: Content-Range, Content-Length, Accept-Ranges`
+
+---
+
+## 7. Closing the Database (`db.close()`)
 
 When shutting down a component, test, or worker, call `await db.close()` to flush any dirty pages, close `BroadcastChannel` listeners, and release underlying storage handles:
 

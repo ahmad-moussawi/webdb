@@ -8,6 +8,46 @@
   /* Typography: Plus Jakarta Sans / Inter for UI & JetBrains Mono for code */
   --vp-font-family-base: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Landing Page & Code Terminal Tokens (Light Mode) */
+  --webdb-hero-glow: radial-gradient(
+    ellipse at center,
+    rgba(37, 99, 235, 0.14) 0%,
+    rgba(16, 185, 129, 0.06) 45%,
+    transparent 75%
+  );
+  --webdb-btn-primary-text: #ffffff;
+  --webdb-btn-primary-shadow: 0 4px 16px rgba(37, 99, 235, 0.25);
+  --webdb-badge-red-text: #dc2626;
+  --webdb-badge-green-text: #059669;
+  --webdb-bypass-pill-text: #047857;
+
+  /* Code Snippet Terminal (Light Mode) */
+  --webdb-term-bg: #f8fafc;
+  --webdb-term-header-bg: #f1f5f9;
+  --webdb-term-border: #e2e8f0;
+  --webdb-term-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  --webdb-term-text: #1e293b;
+  --webdb-term-line-num: #94a3b8;
+  --webdb-term-tab-text: #475569;
+  --webdb-term-tab-hover: #0f172a;
+  --webdb-term-tab-active-text: #2563eb;
+  --webdb-term-tab-active-bg: #ffffff;
+  --webdb-term-tab-active-border: #cbd5e1;
+  --webdb-term-copy-text: #334155;
+  --webdb-term-copy-bg: #ffffff;
+  --webdb-term-copy-border: #cbd5e1;
+
+  /* Syntax Highlighting (Light Mode) */
+  --webdb-hl-comment: #64748b;
+  --webdb-hl-str: #059669;
+  --webdb-hl-kw: #7c3aed;
+  --webdb-hl-type: #0284c7;
+  --webdb-hl-num: #d97706;
+  --webdb-hl-fn: #2563eb;
+  --webdb-hl-op: #db2777;
+  --webdb-hl-addr: #64748b;
+  --webdb-hl-reg: #0d9488;
 }
 
 .dark {
@@ -15,6 +55,46 @@
   --vp-c-brand-2: #0ea5e9;
   --vp-c-brand-3: #0284c7;
   --vp-c-brand-soft: rgba(56, 189, 248, 0.14);
+
+  /* Landing Page & Code Terminal Tokens (Dark Mode) */
+  --webdb-hero-glow: radial-gradient(
+    ellipse at center,
+    rgba(56, 189, 248, 0.16) 0%,
+    rgba(16, 185, 129, 0.08) 45%,
+    transparent 75%
+  );
+  --webdb-btn-primary-text: #090d16;
+  --webdb-btn-primary-shadow: 0 4px 18px rgba(56, 189, 248, 0.22);
+  --webdb-badge-red-text: #f87171;
+  --webdb-badge-green-text: #34d399;
+  --webdb-bypass-pill-text: #34d399;
+
+  /* Code Snippet Terminal (Dark Mode) */
+  --webdb-term-bg: #0f172a;
+  --webdb-term-header-bg: #162033;
+  --webdb-term-border: #263449;
+  --webdb-term-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
+  --webdb-term-text: #e2e8f0;
+  --webdb-term-line-num: #64748b;
+  --webdb-term-tab-text: #94a3b8;
+  --webdb-term-tab-hover: #f8fafc;
+  --webdb-term-tab-active-text: #38bdf8;
+  --webdb-term-tab-active-bg: rgba(56, 189, 248, 0.12);
+  --webdb-term-tab-active-border: rgba(56, 189, 248, 0.3);
+  --webdb-term-copy-text: #cbd5e1;
+  --webdb-term-copy-bg: rgba(255, 255, 255, 0.06);
+  --webdb-term-copy-border: rgba(255, 255, 255, 0.14);
+
+  /* Syntax Highlighting (Dark Mode) */
+  --webdb-hl-comment: #94a3b8;
+  --webdb-hl-str: #34d399;
+  --webdb-hl-kw: #c084fc;
+  --webdb-hl-type: #38bdf8;
+  --webdb-hl-num: #fbbf24;
+  --webdb-hl-fn: #60a5fa;
+  --webdb-hl-op: #f472b6;
+  --webdb-hl-addr: #94a3b8;
+  --webdb-hl-reg: #2dd4bf;
 }
 
 /* Fix VitePress default 24px line-height on headings across custom landing page */

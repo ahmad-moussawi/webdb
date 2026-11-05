@@ -99,8 +99,12 @@ export default defineConfig({
             link: "/guides/indexes",
           },
           {
-            text: "Migrations & ALTER TABLE",
+            text: "Schema Evolution (ALTER TABLE)",
             link: "/guides/migrations-and-alter-table",
+          },
+          {
+            text: "Database Migrations",
+            link: "/guides/migrations",
           },
         ],
       },

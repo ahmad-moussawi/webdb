@@ -425,8 +425,8 @@ const copyInstallCmd = () => {
           Ported desktop databases serialize queries into SQL text strings only
           to re-parse them inside a multi-megabyte C parser. WebDB compiles
           fluent TypeScript directly into compact binary opcodes—delivering a
-          full relational engine with a <strong>~13 KB Wasm core</strong> (&lt;100
-          KB total bundle).
+          full relational engine with a
+          <strong>~13 KB Wasm core</strong> (&lt;100 KB total bundle).
         </p>
       </div>
 
@@ -617,21 +617,97 @@ const copyInstallCmd = () => {
         <!-- 4-COLUMN FRAMEWORK SELECTOR BAR -->
         <div class="fw-selector-bar">
           <button
-            v-for="fw in (['react', 'vue', 'angular', 'vanilla'] as FrameworkTab[])"
+            v-for="fw in [
+              'react',
+              'vue',
+              'angular',
+              'vanilla',
+            ] as FrameworkTab[]"
             :key="fw"
             :class="[
               'fw-selector-card',
+              `fw-card-${fw}`,
               { active: activeFrameworkTab === fw },
             ]"
             @click="activeFrameworkTab = fw"
           >
             <div class="fw-selector-top">
-              <span class="fw-selector-name">{{
-                frameworkMeta[fw].label
-              }}</span>
-              <span class="fw-selector-size">{{
-                frameworkMeta[fw].size
-              }}</span>
+              <div class="fw-brand-group">
+                <span
+                  :class="['fw-logo-box', `fw-logo-${fw}`]"
+                  aria-hidden="true"
+                >
+                  <!-- React Atom Logo -->
+                  <svg
+                    v-if="fw === 'react'"
+                    viewBox="-11.5 -10.23174 23 20.46348"
+                    width="34"
+                    height="34"
+                  >
+                    <circle cx="0" cy="0" r="2.05" fill="#61DAFB" />
+                    <g stroke="#61DAFB" stroke-width="1.2" fill="none">
+                      <ellipse rx="11" ry="4.2" />
+                      <ellipse rx="11" ry="4.2" transform="rotate(60)" />
+                      <ellipse rx="11" ry="4.2" transform="rotate(120)" />
+                    </g>
+                  </svg>
+
+                  <!-- Vue 3 Logo -->
+                  <svg
+                    v-else-if="fw === 'vue'"
+                    viewBox="0 0 256 221"
+                    width="32"
+                    height="32"
+                  >
+                    <path
+                      fill="#41B883"
+                      d="M204.8 0H256L128 220.8 0 0h97.92L128 51.2 157.44 0h47.36Z"
+                    />
+                    <path
+                      fill="#41B883"
+                      d="m0 0 128 220.8L256 0h-51.2L128 132.48 50.56 0H0Z"
+                    />
+                    <path
+                      fill="#35495E"
+                      d="M50.56 0 128 133.12 204.8 0h-47.36L128 51.2 97.92 0H50.56Z"
+                    />
+                  </svg>
+
+                  <!-- Angular Shield Logo -->
+                  <svg
+                    v-else-if="fw === 'angular'"
+                    viewBox="25 25 200 210"
+                    width="34"
+                    height="34"
+                  >
+                    <polygon
+                      fill="#DD0031"
+                      points="125,30 125,30 125,30 31.9,63.2 46.1,186.3 125,230 125,230 125,230 203.9,186.3 218.1,63.2"
+                    />
+                    <polygon
+                      fill="#C3002F"
+                      points="125,30 125,52.2 125,52.1 125,153.4 125,153.4 125,230 125,230 203.9,186.3 218.1,63.2 125,30"
+                    />
+                    <path
+                      fill="#FFFFFF"
+                      d="M125,52.1L66.8,182.6h0h21.7h0l11.7-29.2h49.4l11.7,29.2h0h21.7h0L125,52.1L125,52.1L125,52.1L125,52.1 L125,52.1z M142,135.4H108l17-40.9L142,135.4z"
+                    />
+                  </svg>
+
+                  <!-- TypeScript / JavaScript Logo -->
+                  <svg v-else viewBox="0 0 256 256" width="32" height="32">
+                    <rect width="256" height="256" rx="36" fill="#3178C6" />
+                    <path
+                      fill="#FFFFFF"
+                      d="M150.5 200.5v27.7c4.5 2.3 9.9 4.1 16.2 5.3 6.3 1.2 13 1.8 20.1 1.8 6.9 0 13.3-.7 19.3-2 6-1.3 11.2-3.5 15.6-6.5 4.4-3 7.9-6.9 10.4-11.7 2.5-4.8 3.8-10.7 3.8-17.7 0-5.1-.8-9.5-2.3-13.2-1.5-3.7-3.8-7-6.8-9.8-3-2.8-6.6-5.3-10.9-7.5-4.3-2.2-9.2-4.3-14.8-6.4-4.1-1.5-7.6-3-10.5-4.3-2.9-1.3-5.2-2.7-7-4.1-1.8-1.4-3.1-2.9-3.9-4.5-.8-1.6-1.2-3.5-1.2-5.6 0-1.9.5-3.6 1.5-5.1 1-1.5 2.4-2.8 4.3-3.8 1.9-1 4.2-1.8 6.9-2.3 2.7-.5 5.8-.8 9.2-.8 5 0 9.9.6 14.8 1.9 4.9 1.3 9.4 3.2 13.5 5.8v-26.2c-4.1-1.6-8.7-2.8-13.8-3.6-5.1-.8-10.8-1.2-17.1-1.2-6.8 0-13.1.8-18.9 2.3-5.8 1.5-10.9 3.8-15.2 6.9-4.3 3.1-7.7 7-10.1 11.7-2.4 4.7-3.6 10.2-3.6 16.5 0 8.2 2.4 15.1 7.1 20.7 4.7 5.6 11.9 10.3 21.6 14.1 3.8 1.5 7.2 2.9 10.2 4.3 3 1.4 5.5 2.8 7.5 4.3 2 1.5 3.5 3.1 4.5 4.9 1 1.8 1.5 3.8 1.5 6.1 0 2.1-.5 3.9-1.4 5.5-.9 1.6-2.3 2.9-4.2 4-1.9 1.1-4.3 1.9-7.2 2.4-2.9.5-6.3.8-10.1.8-6.4 0-12.5-1.1-18.3-3.2-5.8-2.1-11-5.1-15.6-9zM105.7 137.4H140V113H41v24.4h34.2v95.6h30.5v-95.6z"
+                    />
+                  </svg>
+                </span>
+                <span class="fw-selector-name">{{
+                  frameworkMeta[fw].label
+                }}</span>
+              </div>
+              <span class="fw-selector-size">{{ frameworkMeta[fw].size }}</span>
             </div>
             <div class="fw-selector-pkg">
               <code>{{ frameworkMeta[fw].pkg }}</code>
@@ -648,6 +724,58 @@ const copyInstallCmd = () => {
               <span class="tdot tdot-green"></span>
             </div>
             <div class="fw-window-title">
+              <span class="fw-window-icon" aria-hidden="true">
+                <svg
+                  v-if="activeFrameworkTab === 'react'"
+                  viewBox="-11.5 -10.23174 23 20.46348"
+                  width="22"
+                  height="22"
+                >
+                  <circle cx="0" cy="0" r="2.05" fill="#61DAFB" />
+                  <g stroke="#61DAFB" stroke-width="1.2" fill="none">
+                    <ellipse rx="11" ry="4.2" />
+                    <ellipse rx="11" ry="4.2" transform="rotate(60)" />
+                    <ellipse rx="11" ry="4.2" transform="rotate(120)" />
+                  </g>
+                </svg>
+                <svg
+                  v-else-if="activeFrameworkTab === 'vue'"
+                  viewBox="0 0 256 221"
+                  width="20"
+                  height="20"
+                >
+                  <path
+                    fill="#41B883"
+                    d="m0 0 128 220.8L256 0h-51.2L128 132.48 50.56 0H0Z"
+                  />
+                  <path
+                    fill="#35495E"
+                    d="M50.56 0 128 133.12 204.8 0h-47.36L128 51.2 97.92 0H50.56Z"
+                  />
+                </svg>
+                <svg
+                  v-else-if="activeFrameworkTab === 'angular'"
+                  viewBox="25 25 200 210"
+                  width="22"
+                  height="22"
+                >
+                  <polygon
+                    fill="#DD0031"
+                    points="125,30 31.9,63.2 46.1,186.3 125,230 203.9,186.3 218.1,63.2"
+                  />
+                  <path
+                    fill="#FFFFFF"
+                    d="M125,52.1L66.8,182.6h21.7l11.7-29.2h49.4l11.7,29.2h21.7L125,52.1z M142,135.4H108l17-40.9L142,135.4z"
+                  />
+                </svg>
+                <svg v-else viewBox="0 0 256 256" width="20" height="20">
+                  <rect width="256" height="256" rx="36" fill="#3178C6" />
+                  <path
+                    fill="#FFFFFF"
+                    d="M150.5 200.5v27.7c4.5 2.3 9.9 4.1 16.2 5.3 6.3 1.2 13 1.8 20.1 1.8 6.9 0 13.3-.7 19.3-2 6-1.3 11.2-3.5 15.6-6.5 4.4-3 7.9-6.9 10.4-11.7 2.5-4.8 3.8-10.7 3.8-17.7 0-5.1-.8-9.5-2.3-13.2-1.5-3.7-3.8-7-6.8-9.8-3-2.8-6.6-5.3-10.9-7.5-4.3-2.2-9.2-4.3-14.8-6.4-4.1-1.5-7.6-3-10.5-4.3-2.9-1.3-5.2-2.7-7-4.1-1.8-1.4-3.1-2.9-3.9-4.5-.8-1.6-1.2-3.5-1.2-5.6 0-1.9.5-3.6 1.5-5.1 1-1.5 2.4-2.8 4.3-3.8 1.9-1 4.2-1.8 6.9-2.3 2.7-.5 5.8-.8 9.2-.8 5 0 9.9.6 14.8 1.9 4.9 1.3 9.4 3.2 13.5 5.8v-26.2c-4.1-1.6-8.7-2.8-13.8-3.6-5.1-.8-10.8-1.2-17.1-1.2-6.8 0-13.1.8-18.9 2.3-5.8 1.5-10.9 3.8-15.2 6.9-4.3 3.1-7.7 7-10.1 11.7-2.4 4.7-3.6 10.2-3.6 16.5 0 8.2 2.4 15.1 7.1 20.7 4.7 5.6 11.9 10.3 21.6 14.1 3.8 1.5 7.2 2.9 10.2 4.3 3 1.4 5.5 2.8 7.5 4.3 2 1.5 3.5 3.1 4.5 4.9 1 1.8 1.5 3.8 1.5 6.1 0 2.1-.5 3.9-1.4 5.5-.9 1.6-2.3 2.9-4.2 4-1.9 1.1-4.3 1.9-7.2 2.4-2.9.5-6.3.8-10.1.8-6.4 0-12.5-1.1-18.3-3.2-5.8-2.1-11-5.1-15.6-9zM105.7 137.4H140V113H41v24.4h34.2v95.6h30.5v-95.6z"
+                  />
+                </svg>
+              </span>
               <span class="fw-file-name">{{
                 frameworkMeta[activeFrameworkTab].file
               }}</span>
@@ -738,10 +866,10 @@ const copyInstallCmd = () => {
           </h3>
           <p class="bento-desc">
             Unlike desktop C ports that rely on Emscripten’s slow
-            <code>Asyncify</code> stack rewriting, WebDB suspends cleanly on
-            4 KB page faults. Persist data in high-speed
-            <strong>OPFS</strong> or <strong>IndexedDB</strong>, or query
-            multi-gigabyte read-only databases hosted on S3/CDN via
+            <code>Asyncify</code> stack rewriting, WebDB suspends cleanly on 4
+            KB page faults. Persist data in high-speed <strong>OPFS</strong> or
+            <strong>IndexedDB</strong>, or query multi-gigabyte read-only
+            databases hosted on S3/CDN via
             <code>Range: bytes=X-Y</code> requests without downloading the file.
           </p>
           <div class="bento-pills">
@@ -790,8 +918,8 @@ const copyInstallCmd = () => {
           <div class="bento-tag tag-amber">COST-BASED PLANNER</div>
           <h3 class="bento-title">Composite B+Trees &amp; .explain()</h3>
           <p class="bento-desc">
-            Up to 8-column composite indexes, index-assisted sorting, hash/nested
-            joins, and full VDBE bytecode disassembly via
+            Up to 8-column composite indexes, index-assisted sorting,
+            hash/nested joins, and full VDBE bytecode disassembly via
             <code>.explain()</code>.
           </p>
         </div>
@@ -812,9 +940,9 @@ const copyInstallCmd = () => {
           <div class="bento-tag tag-indigo">INSTANT COLD START</div>
           <h3 class="bento-title">Compressed Snapshots (.webdb.gz)</h3>
           <p class="bento-desc">
-            Export and restore full indexed databases as <code>Uint8Array</code>
-            or compressed <code>.webdb.gz</code> images in milliseconds—or share
-            live databases via Studio URLs.
+            Export and restore full indexed databases as
+            <code>Uint8Array</code> or compressed <code>.webdb.gz</code> images
+            in milliseconds—or share live databases via Studio URLs.
           </p>
         </div>
       </div>
@@ -936,9 +1064,9 @@ const copyInstallCmd = () => {
           </div>
           <h3 class="tool-title">In-Browser Benchmark Suite</h3>
           <p class="tool-desc">
-            Measure real-time ops/sec throughput, latency percentiles, and memory
-            footprint against Raw JS Arrays, Native IndexedDB, and official
-            SQLite WASM directly in your browser.
+            Measure real-time ops/sec throughput, latency percentiles, and
+            memory footprint against Raw JS Arrays, Native IndexedDB, and
+            official SQLite WASM directly in your browser.
           </p>
           <div class="tool-actions">
             <a
@@ -987,24 +1115,10 @@ code {
   transform: translateX(-50%);
   width: 680px;
   height: 320px;
-  background: radial-gradient(
-    ellipse at center,
-    rgba(37, 99, 235, 0.14) 0%,
-    rgba(16, 185, 129, 0.06) 45%,
-    transparent 75%
-  );
+  background: var(--webdb-hero-glow);
   pointer-events: none;
   z-index: 0;
   filter: blur(24px);
-}
-
-:global(.dark) .hero-glow {
-  background: radial-gradient(
-    ellipse at center,
-    rgba(56, 189, 248, 0.16) 0%,
-    rgba(16, 185, 129, 0.08) 45%,
-    transparent 75%
-  );
 }
 
 .hero-eyebrow {
@@ -1108,14 +1222,9 @@ code {
 
 .btn-primary {
   background: var(--vp-c-brand-1);
-  color: #ffffff;
+  color: var(--webdb-btn-primary-text);
   border-color: var(--vp-c-brand-1);
-  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.25);
-}
-
-:global(.dark) .btn-primary {
-  color: #090d16;
-  box-shadow: 0 4px 18px rgba(56, 189, 248, 0.22);
+  box-shadow: var(--webdb-btn-primary-shadow);
 }
 
 .btn-primary:hover {
@@ -1410,21 +1519,13 @@ code {
 }
 
 .badge-red-soft {
-  color: #dc2626;
+  color: var(--webdb-badge-red-text);
   background: rgba(239, 68, 68, 0.12);
 }
 
-:global(.dark) .badge-red-soft {
-  color: #f87171;
-}
-
 .badge-green-soft {
-  color: #059669;
+  color: var(--webdb-badge-green-text);
   background: rgba(16, 185, 129, 0.14);
-}
-
-:global(.dark) .badge-green-soft {
-  color: #34d399;
 }
 
 .dot {
@@ -1514,12 +1615,8 @@ code {
 }
 
 .pill-eliminated {
-  color: #dc2626;
+  color: var(--webdb-badge-red-text);
   background: rgba(239, 68, 68, 0.14);
-}
-
-:global(.dark) .pill-eliminated {
-  color: #f87171;
 }
 
 .node-title {
@@ -1606,7 +1703,7 @@ code {
   font-size: 0.68rem;
   font-weight: 800;
   letter-spacing: 0.04em;
-  color: #047857;
+  color: var(--webdb-bypass-pill-text);
   background: var(--vp-c-bg);
   border: 1px solid rgba(16, 185, 129, 0.45);
   padding: 0.28rem 0.75rem;
@@ -1615,17 +1712,13 @@ code {
   box-shadow: 0 2px 8px rgba(16, 185, 129, 0.12);
 }
 
-:global(.dark) .bypass-pill {
-  color: #34d399;
-}
-
 .bypass-caption {
   font-size: 0.74rem;
   color: var(--vp-c-text-2);
   text-align: center;
 }
 
-/* TERMINAL WINDOW — LIGHT THEME DEFAULT, SOFT SLATE IN DARK MODE */
+/* TERMINAL WINDOW — THEME-ADAPTIVE VIA CSS CUSTOM PROPERTIES */
 .terminal-window {
   width: 100%;
   min-width: 0;
@@ -1633,15 +1726,12 @@ code {
   box-sizing: border-box;
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
-}
-
-:global(.dark) .terminal-window {
-  border-color: #263248;
-  background: #141c2b;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--webdb-term-border);
+  background: var(--webdb-term-bg);
+  box-shadow: var(--webdb-term-shadow);
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
 }
 
 .terminal-header {
@@ -1650,13 +1740,11 @@ code {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.65rem 1rem;
-  background: #f1f5f9;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-:global(.dark) .terminal-header {
-  background: #1a2436;
-  border-bottom-color: #263248;
+  background: var(--webdb-term-header-bg);
+  border-bottom: 1px solid var(--webdb-term-border);
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
 }
 
 .terminal-dots {
@@ -1692,55 +1780,35 @@ code {
   font-family: var(--vp-font-family-mono);
   font-size: 0.76rem;
   font-weight: 600;
-  color: #475569;
+  color: var(--webdb-term-tab-text);
   background: transparent;
   border: 1px solid transparent;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
-:global(.dark) .ttab {
-  color: #94a3b8;
-}
-
 .ttab:hover {
-  color: #0f172a;
-}
-
-:global(.dark) .ttab:hover {
-  color: #f1f5f9;
+  color: var(--webdb-term-tab-hover);
 }
 
 .ttab.active {
-  color: #2563eb;
-  background: #ffffff;
-  border-color: #cbd5e1;
+  color: var(--webdb-term-tab-active-text);
+  background: var(--webdb-term-tab-active-bg);
+  border-color: var(--webdb-term-tab-active-border);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
-}
-
-:global(.dark) .ttab.active {
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.12);
-  border-color: rgba(56, 189, 248, 0.28);
 }
 
 .terminal-copy {
   font-family: var(--vp-font-family-mono);
   font-size: 0.72rem;
   font-weight: 700;
-  color: #334155;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
+  color: var(--webdb-term-copy-text);
+  background: var(--webdb-term-copy-bg);
+  border: 1px solid var(--webdb-term-copy-border);
   border-radius: 6px;
   padding: 0.3rem 0.7rem;
   cursor: pointer;
   transition: all 0.15s ease;
-}
-
-:global(.dark) .terminal-copy {
-  color: #cbd5e1;
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .terminal-copy:hover {
@@ -1754,11 +1822,7 @@ code {
   font-family: var(--vp-font-family-mono);
   font-size: 0.82rem;
   line-height: 1.68;
-  color: #1e293b;
-}
-
-:global(.dark) .terminal-body {
-  color: #e2e8f0;
+  color: var(--webdb-term-text);
 }
 
 .code-line {
@@ -1769,70 +1833,44 @@ code {
 .line-num {
   width: 2.2rem;
   flex-shrink: 0;
-  color: #94a3b8;
+  color: var(--webdb-term-line-num);
   user-select: none;
   text-align: right;
   padding-right: 1rem;
 }
 
-:global(.dark) .line-num {
-  color: #64748b;
-}
-
-/* Light-mode syntax highlighting */
+/* Theme-adaptive syntax highlighting */
 .line-content :deep(.hl-comment) {
-  color: #64748b;
+  color: var(--webdb-hl-comment);
   font-style: italic;
 }
 .line-content :deep(.hl-str) {
-  color: #059669;
+  color: var(--webdb-hl-str);
 }
 .line-content :deep(.hl-kw) {
-  color: #7c3aed;
+  color: var(--webdb-hl-kw);
   font-weight: 600;
 }
 .line-content :deep(.hl-type) {
-  color: #0284c7;
+  color: var(--webdb-hl-type);
   font-weight: 600;
 }
 .line-content :deep(.hl-num) {
-  color: #d97706;
+  color: var(--webdb-hl-num);
 }
 .line-content :deep(.hl-fn) {
-  color: #2563eb;
+  color: var(--webdb-hl-fn);
 }
 .line-content :deep(.hl-op) {
-  color: #db2777;
+  color: var(--webdb-hl-op);
   font-weight: 700;
 }
 .line-content :deep(.hl-addr) {
-  color: #64748b;
+  color: var(--webdb-hl-addr);
 }
-
-/* Dark-mode syntax highlighting */
-:global(.dark) .line-content :deep(.hl-comment) {
-  color: #94a3b8;
-}
-:global(.dark) .line-content :deep(.hl-str) {
-  color: #34d399;
-}
-:global(.dark) .line-content :deep(.hl-kw) {
-  color: #c084fc;
-}
-:global(.dark) .line-content :deep(.hl-type) {
-  color: #38bdf8;
-}
-:global(.dark) .line-content :deep(.hl-num) {
-  color: #fbbf24;
-}
-:global(.dark) .line-content :deep(.hl-fn) {
-  color: #60a5fa;
-}
-:global(.dark) .line-content :deep(.hl-op) {
-  color: #f472b6;
-}
-:global(.dark) .line-content :deep(.hl-addr) {
-  color: #94a3b8;
+.line-content :deep(.hl-reg) {
+  color: var(--webdb-hl-reg);
+  font-weight: 600;
 }
 
 /* ============================================================================
@@ -1854,36 +1892,80 @@ code {
 
 .fw-selector-card {
   text-align: left;
-  padding: 0.95rem 1.05rem;
-  border-radius: 12px;
+  padding: 1.05rem 1.15rem;
+  border-radius: 14px;
   background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
   cursor: pointer;
-  transition: all 0.16s ease;
+  transition: all 0.18s ease;
   min-width: 0;
 }
 
 .fw-selector-card:hover {
   border-color: var(--vp-c-brand-1);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
 }
 
 .fw-selector-card.active {
   border-color: #10b981;
   background: rgba(16, 185, 129, 0.08);
-  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.1);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.12);
+}
+
+.fw-card-react.active {
+  border-color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.08);
+  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.14);
+}
+
+.fw-card-vue.active {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.08);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.14);
+}
+
+.fw-card-angular.active {
+  border-color: #e11d48;
+  background: rgba(225, 29, 72, 0.07);
+  box-shadow: 0 4px 16px rgba(225, 29, 72, 0.13);
+}
+
+.fw-card-vanilla.active {
+  border-color: #3178c6;
+  background: rgba(49, 120, 198, 0.09);
+  box-shadow: 0 4px 16px rgba(49, 120, 198, 0.14);
 }
 
 .fw-selector-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  margin-bottom: 0.35rem;
+  gap: 0.65rem;
+  margin-bottom: 0.6rem;
+}
+
+.fw-brand-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.fw-logo-box {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 }
 
 .fw-selector-name {
-  font-size: 0.95rem;
+  font-size: 1.05rem;
   font-weight: 800;
   color: var(--vp-c-text-1);
 }
@@ -1892,14 +1974,10 @@ code {
   font-family: var(--vp-font-family-mono);
   font-size: 0.68rem;
   font-weight: 700;
-  color: #059669;
+  color: var(--webdb-badge-green-text);
   background: rgba(16, 185, 129, 0.12);
   padding: 0.12rem 0.45rem;
   border-radius: 999px;
-}
-
-:global(.dark) .fw-selector-size {
-  color: #34d399;
 }
 
 .fw-selector-pkg {
@@ -1916,32 +1994,30 @@ code {
 .fw-window-title {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.55rem;
+}
+
+.fw-window-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .fw-file-name {
   font-family: var(--vp-font-family-mono);
   font-size: 0.78rem;
   font-weight: 700;
-  color: #1e293b;
-}
-
-:global(.dark) .fw-file-name {
-  color: #e2e8f0;
+  color: var(--webdb-term-text);
 }
 
 .fw-badge-pill {
   font-family: var(--vp-font-family-mono);
   font-size: 0.66rem;
   font-weight: 700;
-  color: #059669;
+  color: var(--webdb-badge-green-text);
   background: rgba(16, 185, 129, 0.14);
   padding: 0.15rem 0.55rem;
   border-radius: 999px;
-}
-
-:global(.dark) .fw-badge-pill {
-  color: #34d399;
 }
 
 .live-highlights-grid {
@@ -1963,15 +2039,11 @@ code {
   font-size: 0.65rem;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: #059669;
+  color: var(--webdb-badge-green-text);
   background: rgba(16, 185, 129, 0.12);
   padding: 0.16rem 0.5rem;
   border-radius: 999px;
   margin-bottom: 0.6rem;
-}
-
-:global(.dark) .lh-badge {
-  color: #34d399;
 }
 
 .lh-title {
@@ -2143,11 +2215,7 @@ code {
   padding: 0.15rem 0.45rem;
   border-radius: 999px;
   background: var(--vp-c-brand-1);
-  color: #ffffff;
-}
-
-:global(.dark) .webdb-th-badge {
-  color: #090d16;
+  color: var(--webdb-btn-primary-text);
 }
 
 .td-feature {
