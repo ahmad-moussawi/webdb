@@ -97,6 +97,7 @@ export interface VmContext {
   udfs?: Record<number, (...args: any[]) => any>;
   inSets?: Set<any>[];
   _resetId?: number;
+  _fastHostMode?: boolean;
 }
 
 export function createVmContext(): VmContext {
@@ -137,18 +138,20 @@ export function resetVmContext(
   ctx.arenaOffset = 0;
   ctx.maxQueryMemory = DEFAULT_MAX_QUERY_MEMORY;
   ctx.rowsAffected = 0;
-  ctx.registers.fill(null);
-  for (let i = 0; i < ctx.cursors.length; i++) {
-    const c = ctx.cursors[i];
-    c.pageId = 0;
-    c.rootPageId = 0;
-    c.slotIdx = 0;
-    c.cellIdx = 0;
-    c.rowOffset = 0;
-    c.btreeDepth = 0;
-    c.flags = 0;
+  if (!ctx._fastHostMode) {
+    ctx.registers.fill(null);
+    for (let i = 0; i < ctx.cursors.length; i++) {
+      const c = ctx.cursors[i];
+      c.pageId = 0;
+      c.rootPageId = 0;
+      c.slotIdx = 0;
+      c.cellIdx = 0;
+      c.rowOffset = 0;
+      c.btreeDepth = 0;
+      c.flags = 0;
+    }
+    ctx.cursor = ctx.cursors[0];
   }
-  ctx.cursor = ctx.cursors[0];
   ctx.keyInfos = [];
   ctx.sorters = [];
   ctx.aggregators = [];

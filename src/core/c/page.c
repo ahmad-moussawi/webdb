@@ -5,6 +5,18 @@
 
 #include "page.h"
 
+static uint8_t _compactScratchBuf[PAGE_SIZE];
+
+uint32_t _compactScratchView = 0;
+
+static uint8_t _rowScratchBuf[8192];
+
+uint32_t _rowScratchView = 0;
+
+static uint8_t _keyScratchBuf[4096];
+
+uint32_t _keyScratchView = 0;
+
 void page_init(uint32_t page_offset, uint8_t page_type, uint32_t next_page_id) {
   store_u8((void *)(uintptr_t)(page_offset + 0), page_type);
   store_u8((void *)(uintptr_t)(page_offset + 1), 0);
@@ -94,40 +106,28 @@ uint16_t page_get_total_free_space(uint32_t page_offset) {
   return (page_get_contiguous_free_space(page_offset) + page_get_free_bytes(page_offset));
 }
 
-void page_compact(uint32_t page_offset, uint32_t scratchpad_offset) {
-  int32_t cell_count = page_get_cell_count(page_offset);
+void page_compact_raw(uint32_t page_offset, uint32_t scratchpad_offset) {
+  uint16_t cell_count = page_get_cell_count(page_offset);
   if (cell_count == 0) {
     page_set_cell_content_offset(page_offset, PAGE_SIZE);
     page_set_free_bytes(page_offset, 0);
     return;
   }
-  uint8_t * scratch_view = 0;
-  uint32_t scratch = scratchpad_offset;
-  if (scratchpad_offset == 0 || scratchpad_offset == page_offset || scratchpad_offset + PAGE_SIZE > 4096) {
-    uint8_t local_buf[PAGE_SIZE];
-    scratch_view = 0;
-    scratch = 0;
-  }
+  uint32_t scratch = scratchpad_offset == 0 || scratchpad_offset == page_offset ? PAGE_SCRATCHPAD_OFFSET : scratchpad_offset;
   webdb_memcpy((void *)(uintptr_t)(scratch), (const void *)(uintptr_t)(page_offset), PAGE_HEADER_SIZE);
   uint16_t current_offset = PAGE_SIZE;
+  uint8_t p_type = page_get_type(page_offset);
   for (uint32_t i = 0; i < cell_count; i++) {
+    uint16_t old_offset = page_get_cell_offset(page_offset, i);
     uint16_t len = 0;
-    uint32_t src_view = 0;
-    uint32_t src_bytes = 0;
-{
-      uint32_t old_offset = page_get_cell_offset(page_offset, i);
-      uint32_t p_type = page_get_type(page_offset);
-      if (p_type == PAGE_TYPE_INDEX_LEAF) {
-        uint32_t k_len = load_u16((const void *)(uintptr_t)(page_offset + old_offset));
-        len = (2 + k_len + 8);
-      } else {
-        len = page_get_row_length(page_offset + old_offset);
-      }
-      src_view = 0;
-      src_bytes = page_offset + old_offset;
+    if (p_type == PAGE_TYPE_INDEX_LEAF) {
+      uint16_t k_len = load_u16((const void *)(uintptr_t)(page_offset + old_offset));
+      len = (2 + k_len + 8);
+    } else {
+      len = page_get_row_length(page_offset + old_offset);
     }
     current_offset = (current_offset - len);
-    webdb_memcpy((void *)(uintptr_t)(scratch + current_offset), (const void *)(uintptr_t)(src_bytes), len);
+    webdb_memcpy((void *)(uintptr_t)(scratch + current_offset), (const void *)(uintptr_t)(page_offset + old_offset), len);
     page_set_cell_offset(scratch, i, current_offset);
   }
   page_set_cell_content_offset(scratch, current_offset);
@@ -137,6 +137,29 @@ void page_compact(uint32_t page_offset, uint32_t scratchpad_offset) {
 
 uint16_t page_get_row_length(uint32_t row_abs_offset) {
   return load_u16((const void *)(uintptr_t)(row_abs_offset + 1));
+}
+
+int32_t page_insert_row_raw(uint32_t page_offset, uint32_t row_src_offset, uint16_t row_len, uint32_t scratchpad_offset) {
+  uint16_t cell_count = page_get_cell_count(page_offset);
+  uint16_t cell_content_offset = page_get_cell_content_offset(page_offset);
+  uint32_t needed_bytes = row_len + 2;
+  uint32_t slot_dir_end = PAGE_HEADER_SIZE + cell_count * 2;
+  uint32_t contiguous_free = cell_content_offset - slot_dir_end;
+  uint32_t total_free = contiguous_free + page_get_free_bytes(page_offset);
+  if (needed_bytes > total_free) {
+    return -1;
+  }
+  if (needed_bytes > contiguous_free) {
+    page_compact_raw(page_offset, scratchpad_offset);
+  }
+  uint16_t current_content_offset = page_get_cell_content_offset(page_offset);
+  uint16_t current_cell_count = page_get_cell_count(page_offset);
+  uint16_t new_content_offset = (current_content_offset - row_len);
+  webdb_memcpy((void *)(uintptr_t)(page_offset + new_content_offset), (const void *)(uintptr_t)(row_src_offset), row_len);
+  page_set_cell_offset(page_offset, current_cell_count, new_content_offset);
+  page_set_cell_count(page_offset, (current_cell_count + 1));
+  page_set_cell_content_offset(page_offset, new_content_offset);
+  return current_cell_count;
 }
 
 void page_delete_row(uint32_t page_offset, uint16_t cell_idx) {
@@ -212,4 +235,185 @@ uint32_t page_binary_search_interior(uint32_t page_offset, int64_t target_row_id
 
 void page_init_index_leaf(uint32_t page_offset, uint32_t next_page_id) {
   page_init(page_offset, PAGE_TYPE_INDEX_LEAF, next_page_id);
+}
+
+int32_t page_compare_index_cell_raw(uint32_t cell_data_offset, uint16_t k_len, int64_t cell_rowid, uint8_t context_type, uint8_t target_type, double target_f64, uint32_t target_bytes_off, uint16_t target_bytes_len, int64_t target_rowid) {
+  uint8_t mid_type = TYPE_TEXT;
+  double mid_f64 = 0;
+  if (k_len == 0) {
+    mid_type = TYPE_NULL;
+  } else   if (context_type == TYPE_TEXT) {
+    if (k_len == 4) {
+      uint8_t b2 = load_u8((const void *)(uintptr_t)(cell_data_offset + 2));
+      uint8_t b3 = load_u8((const void *)(uintptr_t)(cell_data_offset + 3));
+      if ((b2 == 0 && b3 == 0) || (b2 == 255 && b3 == 255)) {
+        mid_type = TYPE_INT32;
+        mid_f64 = load_i32((const void *)(uintptr_t)(cell_data_offset));
+      } else {
+        mid_type = TYPE_TEXT;
+      }
+    } else     if (k_len == 2 && load_u8((const void *)(uintptr_t)(cell_data_offset)) < 32 && load_u8((const void *)(uintptr_t)(cell_data_offset + 1)) < 32) {
+      mid_type = TYPE_BLOB;
+    } else {
+      mid_type = TYPE_TEXT;
+    }
+  } else   if (k_len == 2) {
+    mid_type = TYPE_BLOB;
+  } else   if (k_len == 4) {
+    mid_type = TYPE_INT32;
+    mid_f64 = load_i32((const void *)(uintptr_t)(cell_data_offset));
+  } else   if (context_type == TYPE_UUID && k_len == 16) {
+    mid_type = TYPE_UUID;
+  } else   if (context_type == TYPE_ULID && k_len == 16) {
+    mid_type = TYPE_ULID;
+  } else   if (context_type == TYPE_FLOAT64 && k_len == 8) {
+    mid_type = TYPE_FLOAT64;
+    mid_f64 = load_f64((const void *)(uintptr_t)(cell_data_offset));
+  } else   if (context_type == TYPE_INT64 && k_len == 8) {
+    mid_type = TYPE_INT64;
+    mid_f64 = ((double)(load_i64((const void *)(uintptr_t)(cell_data_offset))));
+  } else   if (context_type == TYPE_BLOB) {
+    if (k_len == 5 || k_len == 6) {
+      mid_type = TYPE_TEXT;
+    } else {
+      mid_type = TYPE_BLOB;
+    }
+  } else {
+    mid_type = TYPE_TEXT;
+  }
+  if (target_type != mid_type) {
+    return (target_type) - (mid_type);
+  }
+  if (target_type == TYPE_NULL) {
+    return target_rowid < cell_rowid ? -1 : target_rowid > cell_rowid ? 1 : 0;
+  }
+  int32_t diff = 0;
+  if (target_type == TYPE_INT32 || target_type == TYPE_INT64 || target_type == TYPE_FLOAT64) {
+    diff = target_f64 < mid_f64 ? -1 : target_f64 > mid_f64 ? 1 : 0;
+  } else {
+    uint32_t min_len = target_bytes_len < k_len ? target_bytes_len : k_len;
+    for (uint32_t i = 0; i < min_len; i++) {
+      int32_t ba = load_u8((const void *)(uintptr_t)(target_bytes_off + i));
+      int32_t bb = load_u8((const void *)(uintptr_t)(cell_data_offset + i));
+      if (ba != bb) {
+        diff = ba < bb ? -1 : 1;
+        break;
+      }
+    }
+    if (diff == 0) {
+      diff = (target_bytes_len) - (k_len);
+    }
+  }
+  if (diff != 0) 
+    return diff;
+  return target_rowid < cell_rowid ? -1 : target_rowid > cell_rowid ? 1 : 0;
+}
+
+int32_t page_insert_index_cell_raw(uint32_t page_offset, uint8_t key_type, int64_t key_i64, double key_f64, uint32_t key_src_offset, uint16_t key_len, int64_t rowid, uint32_t scratchpad_offset) {
+  uint16_t cell_length = (2 + key_len + 8);
+  uint32_t needed_bytes = cell_length + 2;
+  uint16_t cell_count = page_get_cell_count(page_offset);
+  uint32_t contiguous_free = page_get_contiguous_free_space(page_offset);
+  uint32_t total_free = contiguous_free + page_get_free_bytes(page_offset);
+  if (needed_bytes > total_free) {
+    return -1;
+  }
+  if (needed_bytes > contiguous_free) {
+    page_compact_raw(page_offset, scratchpad_offset);
+  }
+  uint16_t content_offset = page_get_cell_content_offset(page_offset);
+  uint16_t new_content_offset = (content_offset - cell_length);
+  uint32_t target_offset = page_offset + new_content_offset;
+  store_u16((void *)(uintptr_t)(target_offset), key_len);
+  if (key_len > 0) {
+    if (key_type == TYPE_INT32) {
+      store_i32((void *)(uintptr_t)(target_offset + 2), ((int32_t)(key_f64)));
+    } else     if (key_type == TYPE_INT64) {
+      store_i64((void *)(uintptr_t)(target_offset + 2), key_i64);
+    } else     if (key_type == TYPE_FLOAT64) {
+      store_f64((void *)(uintptr_t)(target_offset + 2), key_f64);
+    } else     if (key_src_offset != target_offset + 2) {
+      webdb_memcpy((void *)(uintptr_t)(target_offset + 2), (const void *)(uintptr_t)(key_src_offset), key_len);
+    }
+  }
+  store_i64((void *)(uintptr_t)(target_offset + 2 + key_len), rowid);
+  int32_t lo = 0;
+  int32_t hi = (cell_count) - 1;
+  int32_t insert_slot = cell_count;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) >> 1;
+    uint16_t offset = page_get_cell_offset(page_offset, mid);
+    uint16_t existing_k_len = load_u16((const void *)(uintptr_t)(page_offset + offset));
+    int64_t r_id = load_i64((const void *)(uintptr_t)(page_offset + offset + 2 + existing_k_len));
+    int32_t cmp = page_compare_index_cell_raw(page_offset + offset + 2, existing_k_len, r_id, key_type, key_type, key_f64, target_offset + 2, key_len, rowid);
+    if (cmp < 0) {
+      insert_slot = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  for (int32_t s = (cell_count) - 1; s >= insert_slot; s--) {
+    uint16_t prev_off = page_get_cell_offset(page_offset, s);
+    page_set_cell_offset(page_offset, (s + 1), prev_off);
+  }
+  page_set_cell_offset(page_offset, insert_slot, new_content_offset);
+  page_set_cell_count(page_offset, (cell_count + 1));
+  page_set_cell_content_offset(page_offset, new_content_offset);
+  return insert_slot;
+}
+
+int32_t page_binary_search_index_raw(uint32_t page_offset, uint8_t target_type, double target_f64, uint32_t target_bytes_off, uint16_t target_bytes_len, uint8_t has_target_rowid, int64_t target_row_id) {
+  uint16_t cell_count = page_get_cell_count(page_offset);
+  int32_t lo = 0;
+  int32_t hi = (cell_count) - 1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) >> 1;
+    uint16_t offset = page_get_cell_offset(page_offset, mid);
+    uint16_t k_len = load_u16((const void *)(uintptr_t)(page_offset + offset));
+    int64_t r_id = load_i64((const void *)(uintptr_t)(page_offset + offset + 2 + k_len));
+    int64_t rowid_to_compare = has_target_rowid != 0 ? target_row_id : r_id;
+    int32_t cmp = page_compare_index_cell_raw(page_offset + offset + 2, k_len, r_id, target_type, target_type, target_f64, target_bytes_off, target_bytes_len, rowid_to_compare);
+    if (cmp == 0) {
+      if (has_target_rowid == 0) {
+        int32_t first_slot = mid;
+        while (first_slot > 0) {
+          int32_t prev_slot = first_slot - 1;
+          uint16_t prev_offset = page_get_cell_offset(page_offset, prev_slot);
+          uint16_t prev_k_len = load_u16((const void *)(uintptr_t)(page_offset + prev_offset));
+          int32_t prev_cmp = page_compare_index_cell_raw(page_offset + prev_offset + 2, prev_k_len, 0LL, target_type, target_type, target_f64, target_bytes_off, target_bytes_len, 0LL);
+          if (prev_cmp == 0) {
+            first_slot = prev_slot;
+          } else {
+            break;
+          }
+        }
+        return first_slot;
+      }
+      return mid;
+    } else     if (cmp < 0) {
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return -(lo + 1);
+}
+
+void page_delete_index_leaf_cell(uint32_t page_offset, uint16_t slot_idx) {
+  int32_t cell_count = page_get_cell_count(page_offset);
+  if (slot_idx < 0 || slot_idx >= cell_count) 
+    return;
+  uint32_t cell_offset = page_get_cell_offset(page_offset, slot_idx);
+  uint32_t k_len = load_u16((const void *)(uintptr_t)(page_offset + cell_offset));
+  uint32_t cell_length = 2 + k_len + 8;
+  uint32_t slot_dir_start = page_offset + PAGE_HEADER_SIZE;
+  uint32_t src = slot_dir_start + (slot_idx + 1) * 2;
+  uint32_t dst = slot_dir_start + slot_idx * 2;
+  uint32_t shift_len = (cell_count - 1 - slot_idx) * 2;
+  if (shift_len > 0) {
+    webdb_memcpy((void *)(uintptr_t)(dst), (const void *)(uintptr_t)(src), shift_len);
+  }
+  page_set_cell_count(page_offset, cell_count - 1);
+  page_set_free_bytes(page_offset, page_get_free_bytes(page_offset) + cell_length);
 }

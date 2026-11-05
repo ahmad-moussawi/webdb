@@ -239,6 +239,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.wasmCore = wasmCore;
     this.planner = planner;
     this.vmCtx = createVmContext();
+    this.vmCtx._fastHostMode = true;
 
     this.coordinator.setOnCrossTabInvalidated(async () => {
       this.tableMetaCache.clear();
@@ -1276,17 +1277,30 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.pool.unpinSlot(indexSlot);
 
     const isUnique = !!options?.unique;
+    const seenUniqueKeys = isUnique
+      ? new Set<string | number | bigint>()
+      : null;
 
     // Backfill: iterate all data pages and insert existing rows into new index
     let currentPageId = table.rootPageId;
     while (currentPageId !== 0) {
-      let pageSlot = await this.driver.acquirePage(currentPageId);
+      let pageSlot = this.pool.getResidentSlot(currentPageId);
+      if (pageSlot !== -1) {
+        this.pool.setRefBit(pageSlot, 1);
+      } else {
+        pageSlot = await this.driver.acquirePage(currentPageId);
+      }
       let pageView = this.pool.getSlotDataView(pageSlot);
       const cellCount = page_get_cell_count(pageView, 0);
       const nextPageId = page_get_next_page_id(pageView, 0);
 
       for (let i = 0; i < cellCount; i++) {
-        pageSlot = await this.driver.acquirePage(currentPageId);
+        pageSlot = this.pool.getResidentSlot(currentPageId);
+        if (pageSlot !== -1) {
+          this.pool.setRefBit(pageSlot, 1);
+        } else {
+          pageSlot = await this.driver.acquirePage(currentPageId);
+        }
         pageView = this.pool.getSlotDataView(pageSlot);
         const cellOffset = page_get_cell_offset(pageView, 0, i);
         const row = page_deserialize_row(table.columns, pageView, cellOffset);
@@ -1299,19 +1313,19 @@ export class WebDB implements IDatabaseQueryExecutor {
           );
 
           if (keyVal !== undefined && keyVal !== null) {
-            if (isUnique) {
-              const duplicate = await this.probeIndexUnique(
-                indexRootPageId,
-                keyType,
-                keyVal,
-              );
-              if (duplicate) {
+            if (seenUniqueKeys !== null) {
+              const setKey =
+                keyVal instanceof Uint8Array
+                  ? Array.from(keyVal).join(",")
+                  : keyVal;
+              if (seenUniqueKeys.has(setKey)) {
                 await this.freeTableTreePages(indexRootPageId);
                 this.indexTailPages.delete(indexRootPageId);
                 throw new UniqueConstraintViolationError(
                   `Duplicate key value violates unique constraint "${indexName}" on table "${tableName}"`,
                 );
               }
+              seenUniqueKeys.add(setKey);
             }
 
             await this.insertIntoIndex(indexRootPageId, keyType, keyVal, rowid);
@@ -1443,13 +1457,21 @@ export class WebDB implements IDatabaseQueryExecutor {
     keyVal: any,
     excludedRowids?: Set<bigint>,
   ): Promise<boolean> {
+    const searchFn = this.wasmCore
+      ? this.wasmCore.page_binary_search_index_leaf
+      : page_binary_search_index_leaf;
     let currIdxPageId = rootPageId;
     while (currIdxPageId !== 0) {
-      const slot = await this.driver.acquirePage(currIdxPageId);
+      let slot = this.pool.getResidentSlot(currIdxPageId);
+      if (slot !== -1) {
+        this.pool.setRefBit(slot, 1);
+      } else {
+        slot = await this.driver.acquirePage(currIdxPageId);
+      }
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
-        const search = page_binary_search_index_leaf(view, 0, keyType, keyVal);
+        const search = searchFn(view, 0, keyType, keyVal);
         if (search.found) {
           const cellOff = page_get_cell_offset(view, 0, search.slot_idx);
           const kLen = view.getUint16(cellOff, true);
@@ -1470,21 +1492,26 @@ export class WebDB implements IDatabaseQueryExecutor {
     keyVal: any,
     rowid: bigint,
   ): Promise<boolean> {
+    const searchFn = this.wasmCore
+      ? this.wasmCore.page_binary_search_index_leaf
+      : page_binary_search_index_leaf;
+    const deleteFn = this.wasmCore
+      ? this.wasmCore.page_delete_index_leaf_cell
+      : page_delete_index_leaf_cell;
     let currIdxPageId = rootPageId;
     while (currIdxPageId !== 0) {
-      const slot = await this.driver.acquirePage(currIdxPageId);
+      let slot = this.pool.getResidentSlot(currIdxPageId);
+      if (slot !== -1) {
+        this.pool.setRefBit(slot, 1);
+      } else {
+        slot = await this.driver.acquirePage(currIdxPageId);
+      }
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
-        const search = page_binary_search_index_leaf(
-          view,
-          0,
-          keyType,
-          keyVal,
-          rowid,
-        );
+        const search = searchFn(view, 0, keyType, keyVal, rowid);
         if (search.found) {
-          page_delete_index_leaf_cell(view, 0, search.slot_idx);
+          deleteFn(view, 0, search.slot_idx);
           this.pool.markDirty(slot);
           return true;
         }
@@ -1500,20 +1527,33 @@ export class WebDB implements IDatabaseQueryExecutor {
     keyVal: any,
     rowid: bigint,
   ): Promise<void> {
+    const insertIdxFn = this.wasmCore
+      ? this.wasmCore.page_insert_index_leaf_cell
+      : page_insert_index_leaf_cell;
     let idxPageId = this.indexTailPages.get(rootPageId) ?? rootPageId;
-    let idxSlot = await this.driver.acquirePage(idxPageId);
+    let idxSlot = this.pool.getResidentSlot(idxPageId);
+    if (idxSlot !== -1) {
+      this.pool.setRefBit(idxSlot, 1);
+    } else {
+      idxSlot = await this.driver.acquirePage(idxPageId);
+    }
     let idxView = this.pool.getSlotDataView(idxSlot);
 
     while (true) {
       const nextIdxPageId = page_get_next_page_id(idxView, 0);
       if (nextIdxPageId === 0) break;
       idxPageId = nextIdxPageId;
-      idxSlot = await this.driver.acquirePage(idxPageId);
+      idxSlot = this.pool.getResidentSlot(idxPageId);
+      if (idxSlot !== -1) {
+        this.pool.setRefBit(idxSlot, 1);
+      } else {
+        idxSlot = await this.driver.acquirePage(idxPageId);
+      }
       idxView = this.pool.getSlotDataView(idxSlot);
     }
     this.indexTailPages.set(rootPageId, idxPageId);
 
-    let idxInsertRes = page_insert_index_leaf_cell(
+    let idxInsertRes = insertIdxFn(
       idxView,
       0,
       keyType,
@@ -1533,7 +1573,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
           const newIdxView = this.pool.getSlotDataView(newIdxSlot);
           page_init_index_leaf(newIdxView, 0, 0);
-          idxInsertRes = page_insert_index_leaf_cell(
+          idxInsertRes = insertIdxFn(
             newIdxView,
             0,
             keyType,
@@ -2124,15 +2164,40 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     return this.coordinator.leaseQueue.enqueue(async () => {
       const inTx = this.coordinator.isInTransaction();
-      const recorded = await this._insertManyInternal(tableName, rows, true);
-      if (!inTx && recorded.length > 0) {
-        const changeset = this.buildChangeset(
-          this.nextAutoTxId++,
-          options?.origin ?? "local",
-          options?.meta,
-          recorded,
-        );
-        this.emitCommitAndSubscriptions(changeset);
+      const shouldTrackChanges =
+        inTx ||
+        this.commitHooks.size > 0 ||
+        this.beforeCommitHooks.size > 0 ||
+        this.subscriptions.size > 0;
+      const recorded = await this._insertManyInternal(
+        tableName,
+        rows,
+        shouldTrackChanges,
+      );
+      if (!inTx) {
+        if (recorded.length > 0) {
+          const changeset = this.buildChangeset(
+            this.nextAutoTxId++,
+            options?.origin ?? "local",
+            options?.meta,
+            recorded,
+          );
+          this.emitCommitAndSubscriptions(changeset);
+        } else if (this.broadcastChannel) {
+          const { changeCounter, schemaVersion } = this.getSyncState();
+          try {
+            this.broadcastChannel.postMessage({
+              senderId: this.instanceId,
+              tables: [tableName],
+              origin: options?.origin ?? "local",
+              meta: options?.meta,
+              changeCounter,
+              schemaVersion,
+            });
+          } catch {
+            // Ignore closed BroadcastChannel
+          }
+        }
       }
     }, this.currentLeaseId ?? undefined);
   }
@@ -2154,6 +2219,30 @@ export class WebDB implements IDatabaseQueryExecutor {
       (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
     );
 
+    const requiredPkCols = table.columns.filter(
+      (c) =>
+        (c.flags & ColumnFlag.PRIMARY_KEY) !== 0 &&
+        (c.flags & ColumnFlag.AUTO_INC) === 0,
+    );
+
+    // Check which unique indexes already contain entries prior to this batch
+    const nonEmptyUniqueRootIds = new Set<number>();
+    for (const idx of uniqueIndexes) {
+      let rSlot = this.pool.getResidentSlot(idx.rootPageId);
+      if (rSlot !== -1) {
+        this.pool.setRefBit(rSlot, 1);
+      } else {
+        rSlot = await this.driver.acquirePage(idx.rootPageId);
+      }
+      const rView = this.pool.getSlotDataView(rSlot);
+      if (
+        page_get_cell_count(rView, 0) > 0 ||
+        page_get_next_page_id(rView, 0) !== 0
+      ) {
+        nonEmptyUniqueRootIds.add(idx.rootPageId);
+      }
+    }
+
     // Pass 1: Pre-validate all rows in the batch (NOT NULL, uniqueness, row serialization size)
     // before mutating any data pages, index pages, or auto-increment counters.
     const batchUniqueSets: Map<string, Set<any>> = new Map();
@@ -2167,44 +2256,53 @@ export class WebDB implements IDatabaseQueryExecutor {
       effectiveRow: DbRow;
       rowBytes: Uint8Array;
       assignedAutoInc?: number;
-    }> = [];
+    }> = new Array(rows.length);
 
     for (let rIdx = 0; rIdx < rows.length; rIdx++) {
       const origRow = rows[rIdx];
 
       // 1. Primary Key NOT NULL validation
-      for (const c of table.columns) {
-        if ((c.flags & ColumnFlag.PRIMARY_KEY) !== 0) {
-          if ((c.flags & ColumnFlag.AUTO_INC) === 0) {
-            if (origRow[c.name] === undefined || origRow[c.name] === null) {
-              throw new NotNullConstraintError(c.name, tableName);
-            }
-          }
+      for (let p = 0; p < requiredPkCols.length; p++) {
+        const cName = requiredPkCols[p].name;
+        if (origRow[cName] === undefined || origRow[cName] === null) {
+          throw new NotNullConstraintError(cName, tableName);
         }
       }
 
       // 2. Tentative Auto-Inc calculation
       let assignedAutoInc: number | undefined;
-      const effectiveRow: DbRow = {};
-      for (const c of table.columns) {
-        if (origRow[c.name] !== undefined) {
-          effectiveRow[c.name] = origRow[c.name];
-        } else {
-          effectiveRow[c.name] = null;
+      let effectiveRow: DbRow;
+      if (trackChanges) {
+        effectiveRow = {};
+        for (let cIdx = 0; cIdx < table.columns.length; cIdx++) {
+          const cName = table.columns[cIdx].name;
+          effectiveRow[cName] =
+            origRow[cName] !== undefined ? origRow[cName] : null;
         }
-      }
-      if (
+        if (
+          autoIncCol &&
+          (origRow[autoIncCol.name] === undefined ||
+            origRow[autoIncCol.name] === null)
+        ) {
+          assignedAutoInc = Number(tentativeAutoInc);
+          tentativeAutoInc += 1n;
+          effectiveRow[autoIncCol.name] = assignedAutoInc;
+        }
+      } else if (
         autoIncCol &&
         (origRow[autoIncCol.name] === undefined ||
           origRow[autoIncCol.name] === null)
       ) {
         assignedAutoInc = Number(tentativeAutoInc);
         tentativeAutoInc += 1n;
-        effectiveRow[autoIncCol.name] = assignedAutoInc;
+        effectiveRow = { ...origRow, [autoIncCol.name]: assignedAutoInc };
+      } else {
+        effectiveRow = origRow;
       }
 
       // 3. Uniqueness constraint probe (intra-batch and existing index pages)
-      for (const idx of uniqueIndexes) {
+      for (let u = 0; u < uniqueIndexes.length; u++) {
+        const idx = uniqueIndexes[u];
         const { keyVal, keyType } = this.extractIndexKey(
           table.columns,
           idx,
@@ -2223,27 +2321,29 @@ export class WebDB implements IDatabaseQueryExecutor {
           }
           set.add(setKey);
 
-          const duplicate = await this.probeIndexUnique(
-            idx.rootPageId,
-            keyType,
-            keyVal,
-          );
-          if (duplicate) {
-            throw new UniqueConstraintViolationError(
-              `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+          if (nonEmptyUniqueRootIds.has(idx.rootPageId)) {
+            const duplicate = await this.probeIndexUnique(
+              idx.rootPageId,
+              keyType,
+              keyVal,
             );
+            if (duplicate) {
+              throw new UniqueConstraintViolationError(
+                `Duplicate key value violates unique constraint "${idx.name}" on table "${tableName}"`,
+              );
+            }
           }
         }
       }
 
       // 4. Pre-serialize row (validates row size <= 2048 bytes before any page mutation)
       const rowBytes = page_serialize_row(table.columns, effectiveRow);
-      preparedRows.push({
+      preparedRows[rIdx] = {
         row: origRow,
         effectiveRow,
         rowBytes,
         assignedAutoInc,
-      });
+      };
     }
 
     // Commit tentative auto-inc after full batch validation succeeds
@@ -2251,19 +2351,32 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // Fast resolution of tail data page
     let currentPageId = this.tableTailPages.get(tableName) ?? table.rootPageId;
-    let slot = await this.driver.acquirePage(currentPageId);
+    let slot = this.pool.getResidentSlot(currentPageId);
+    if (slot !== -1) {
+      this.pool.setRefBit(slot, 1);
+    } else {
+      slot = await this.driver.acquirePage(currentPageId);
+    }
     let view = this.pool.getSlotDataView(slot);
 
     while (true) {
       const nextPageId = page_get_next_page_id(view, 0);
       if (nextPageId === 0) break;
       currentPageId = nextPageId;
-      slot = await this.driver.acquirePage(currentPageId);
+      slot = this.pool.getResidentSlot(currentPageId);
+      if (slot !== -1) {
+        this.pool.setRefBit(slot, 1);
+      } else {
+        slot = await this.driver.acquirePage(currentPageId);
+      }
       view = this.pool.getSlotDataView(slot);
     }
     this.tableTailPages.set(tableName, currentPageId);
 
     const recordedChanges: MutationRecord[] = [];
+    const insertRowFn = this.wasmCore
+      ? this.wasmCore.page_insert_row
+      : page_insert_row;
 
     // Pass 2: Apply validated row insertions to data pages and secondary indexes
     for (let rIdx = 0; rIdx < preparedRows.length; rIdx++) {
@@ -2274,10 +2387,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
 
       // 4. Data page insertion (re-acquire currentPageId in case index insertion evicted it)
-      slot = await this.driver.acquirePage(currentPageId);
+      slot = this.pool.getResidentSlot(currentPageId);
+      if (slot !== -1) {
+        this.pool.setRefBit(slot, 1);
+      } else {
+        slot = await this.driver.acquirePage(currentPageId);
+      }
       view = this.pool.getSlotDataView(slot);
       let targetPageId = currentPageId;
-      let insertSlot = page_insert_row(
+      let insertSlot = insertRowFn(
         view,
         0,
         rowBytes,
@@ -2295,7 +2413,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             this.pool.markDirty(prevSlot);
 
             const newView = this.pool.getSlotDataView(newSlot);
-            insertSlot = page_insert_row(
+            insertSlot = insertRowFn(
               newView,
               0,
               rowBytes,
@@ -2324,7 +2442,8 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       // 5. Index insertion
       const rowid = (BigInt(targetPageId) << 16n) | BigInt(insertSlot);
-      for (const idx of indexes) {
+      for (let iIdx = 0; iIdx < indexes.length; iIdx++) {
+        const idx = indexes[iIdx];
         const { keyVal, keyType } = this.extractIndexKey(
           table.columns,
           idx,
@@ -3467,29 +3586,12 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    // Pre-load all data pages and index pages for all tables into buffer pool before running VM
-    for (const t of [table, ...joinedTablesMeta]) {
-      let currPageId = t.rootPageId;
-      while (currPageId !== 0) {
-        const slot = await this.driver.acquirePage(currPageId);
-        const view = this.pool.getSlotDataView(slot);
-        currPageId = page_get_next_page_id(view, 0);
-      }
-      for (const idx of t.indexes ?? []) {
-        let idxPageId = idx.rootPageId;
-        while (idxPageId !== 0) {
-          const slot = await this.driver.acquirePage(idxPageId);
-          const view = this.pool.getSlotDataView(slot);
-          idxPageId = page_get_next_page_id(view, 0);
-        }
-      }
-    }
-
     let orderBy = options.orderBy;
     if (!orderBy && options.sortCol) {
       orderBy = [{ colName: options.sortCol, direction: options.sortDir }];
     }
 
+    const hasUdfs = this.udfs.size > 0;
     const plan: QueryPlan = {
       table,
       joinedTables: joinPlans.length > 0 ? joinPlans : undefined,
@@ -3499,8 +3601,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       aggregates: options.aggregates,
       having: options.having,
       selectExprs: options.selectExprs,
-      udfNameMap: this.getUdfMap(),
-      udfDefs: this.getUdfDefs(),
+      udfNameMap: hasUdfs ? this.getUdfMap() : undefined,
+      udfDefs: hasUdfs ? this.getUdfDefs() : undefined,
       limit: options.limit !== null ? options.limit : undefined,
       offset: options.offset !== null ? options.offset : undefined,
       planner: options.planner ?? this.planner,
@@ -3522,11 +3624,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.vmCtx.keyInfos = keyInfos;
     }
 
-    const udfsRecord: Record<number, (...args: any[]) => any> = {};
-    for (const entry of this.udfs.values()) {
-      udfsRecord[entry.id] = entry.def.call;
+    if (hasUdfs) {
+      const udfsRecord: Record<number, (...args: any[]) => any> = {};
+      for (const entry of this.udfs.values()) {
+        udfsRecord[entry.id] = entry.def.call;
+      }
+      this.vmCtx.udfs = udfsRecord;
+    } else {
+      this.vmCtx.udfs = undefined;
     }
-    this.vmCtx.udfs = udfsRecord;
 
     // Determine output columns for page_deserialize_row
     let outputColumns =

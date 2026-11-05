@@ -11,6 +11,7 @@ import {
   TABLE_INTERIOR_SPLIT_INDEX,
   MAX_COLUMNS_PER_TABLE,
   PAGE_HEADER_OFFSET_CHECKSUM,
+  PAGE_SCRATCHPAD_OFFSET,
 } from "../../constants.ts";
 import {
   DataType,
@@ -24,11 +25,32 @@ import {
   TooManyColumnsError,
 } from "../../types/index.ts";
 import { UuidCodec, UlidCodec } from "./codecs.c.ts";
-import type { u8, u16, u32, i32, i64 } from "../types.ts";
-import { memcpy } from "../../shared/c_runtime.ts";
+import type { u8, u16, u32, i32, i64, f64 } from "../types.ts";
+import {
+  memcpy,
+  read_u8,
+  read_u16,
+  write_u16,
+  read_i32,
+  write_i32,
+  read_i64,
+  write_i64,
+  read_f64,
+  write_f64,
+  i64_to_f64,
+  f64_to_i32,
+} from "../../shared/c_runtime.ts";
 
 const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();
+
+// Pre-allocated scratch buffers for zero-intermediate-allocation JS operations
+const _compactScratchBuf = new Uint8Array(PAGE_SIZE);
+const _compactScratchView = new DataView(_compactScratchBuf.buffer);
+const _rowScratchBuf = new Uint8Array(8192);
+const _rowScratchView = new DataView(_rowScratchBuf.buffer);
+const _keyScratchBuf = new Uint8Array(4096);
+const _keyScratchView = new DataView(_keyScratchBuf.buffer);
 
 // ============================================================================
 // 1. Slotted Page Initialization & Header Accessors (16-Byte Header)
@@ -277,6 +299,56 @@ export function page_get_total_free_space(
 
 /**
  * @export_c
+ * Defragments a slotted data or index leaf page in linear memory using a 4KB staging scratchpad.
+ */
+export function page_compact_raw(
+  view: DataView,
+  page_offset: u32,
+  scratchpad_offset: u32,
+): void {
+  const cell_count: u16 = page_get_cell_count(view, page_offset);
+  if (cell_count === 0) {
+    page_set_cell_content_offset(view, page_offset, PAGE_SIZE);
+    page_set_free_bytes(view, page_offset, 0);
+    return;
+  }
+
+  const scratch: u32 =
+    scratchpad_offset === 0 || scratchpad_offset === page_offset
+      ? PAGE_SCRATCHPAD_OFFSET
+      : scratchpad_offset;
+
+  // 1. Copy page header to scratchpad
+  memcpy(view, scratch, view, page_offset, PAGE_HEADER_SIZE);
+
+  // 2. Repack cells from end of page (PAGE_SIZE) downwards
+  let current_offset: u16 = PAGE_SIZE;
+  const p_type: u8 = page_get_type(view, page_offset);
+
+  for (let i: u32 = 0; i < cell_count; i++) {
+    const old_offset: u16 = page_get_cell_offset(view, page_offset, i as u16);
+    let len: u16 = 0;
+    if (p_type === PAGE_TYPE_INDEX_LEAF) {
+      const k_len: u16 = read_u16(view, page_offset + old_offset);
+      len = (2 + k_len + 8) as u16;
+    } else {
+      len = page_get_row_length(view, page_offset + old_offset);
+    }
+
+    current_offset = (current_offset - len) as u16;
+    memcpy(view, scratch + current_offset, view, page_offset + old_offset, len);
+    page_set_cell_offset(view, scratch, i as u16, current_offset);
+  }
+
+  // 3. Update scratchpad header fields
+  page_set_cell_content_offset(view, scratch, current_offset);
+  page_set_free_bytes(view, scratch, 0);
+
+  // 4. Copy back to page
+  memcpy(view, page_offset, view, scratch, PAGE_SIZE);
+}
+
+/**
  * Defragments a slotted data page using a 4KB staging scratchpad.
  * Collapses fragmented holes to the bottom, rewrites slot directory entries,
  * and sets free_bytes to 0.
@@ -287,6 +359,16 @@ export function page_compact(
   scratchpad_offset: u32 = 0,
   replacement?: { cell_idx: number; row_bytes: Uint8Array },
 ): void {
+  if (
+    !replacement &&
+    scratchpad_offset > 0 &&
+    scratchpad_offset !== page_offset &&
+    scratchpad_offset + PAGE_SIZE <= view.byteLength
+  ) {
+    page_compact_raw(view, page_offset, scratchpad_offset);
+    return;
+  }
+
   const cell_count = page_get_cell_count(view, page_offset);
   if (cell_count === 0) {
     page_set_cell_content_offset(view, page_offset, PAGE_SIZE);
@@ -294,13 +376,16 @@ export function page_compact(
     return;
   }
 
-  // If no external scratchpad provided or buffer too small, use local 4KB scratchpad
+  // If no external scratchpad provided or buffer too small, use pre-allocated 4KB scratchpad
   let scratch_view: DataView = view;
   let scratch: u32 = scratchpad_offset;
 
-  if (scratchpad_offset === 0 || scratchpad_offset === page_offset || scratchpad_offset + PAGE_SIZE > view.byteLength) {
-    const local_buf = new Uint8Array(PAGE_SIZE);
-    scratch_view = new DataView(local_buf.buffer);
+  if (
+    scratchpad_offset === 0 ||
+    scratchpad_offset === page_offset ||
+    scratchpad_offset + PAGE_SIZE > view.byteLength
+  ) {
+    scratch_view = _compactScratchView;
     scratch = 0;
   }
 
@@ -309,6 +394,7 @@ export function page_compact(
 
   // 2. Repack cells from end of page (PAGE_SIZE) downwards
   let current_offset: u16 = PAGE_SIZE;
+  const p_type = page_get_type(view, page_offset);
 
   for (let i = 0; i < cell_count; i++) {
     let len: u16 = 0;
@@ -321,7 +407,6 @@ export function page_compact(
       src_bytes = 0;
     } else {
       const old_offset = page_get_cell_offset(view, page_offset, i as u16);
-      const p_type = page_get_type(view, page_offset);
       if (p_type === PAGE_TYPE_INDEX_LEAF) {
         const k_len = view.getUint16(page_offset + old_offset, true);
         len = (2 + k_len + 8) as u16;
@@ -363,6 +448,56 @@ export function page_get_row_length(
 // ============================================================================
 
 /**
+ * @export_c
+ * Inserts a serialized row record located in linear memory at row_src_offset (of length row_len)
+ * into a slotted data page at page_offset.
+ * Returns the slot index (0-indexed) or -1 if the row cannot fit in this page.
+ */
+export function page_insert_row_raw(
+  view: DataView,
+  page_offset: u32,
+  row_src_offset: u32,
+  row_len: u16,
+  scratchpad_offset: u32,
+): i32 {
+  const cell_count: u16 = page_get_cell_count(view, page_offset);
+  const cell_content_offset: u16 = page_get_cell_content_offset(view, page_offset);
+  const needed_bytes: u32 = row_len + 2;
+
+  const slot_dir_end: u32 = PAGE_HEADER_SIZE + cell_count * 2;
+  const contiguous_free: u32 = cell_content_offset - slot_dir_end;
+  const total_free: u32 = contiguous_free + page_get_free_bytes(view, page_offset);
+
+  if (needed_bytes > total_free) {
+    return -1;
+  }
+
+  if (needed_bytes > contiguous_free) {
+    page_compact_raw(view, page_offset, scratchpad_offset);
+  }
+
+  const current_content_offset: u16 = page_get_cell_content_offset(
+    view,
+    page_offset,
+  );
+  const current_cell_count: u16 = page_get_cell_count(view, page_offset);
+
+  const new_content_offset: u16 = (current_content_offset - row_len) as u16;
+  memcpy(view, page_offset + new_content_offset, view, row_src_offset, row_len);
+
+  page_set_cell_offset(
+    view,
+    page_offset,
+    current_cell_count,
+    new_content_offset,
+  );
+  page_set_cell_count(view, page_offset, (current_cell_count + 1) as u16);
+  page_set_cell_content_offset(view, page_offset, new_content_offset);
+
+  return current_cell_count as i32;
+}
+
+/**
  * Inserts a serialized row record into a slotted data page.
  * Returns the slot index (0-indexed) or -1 if the row cannot fit in this page.
  */
@@ -397,11 +532,13 @@ export function page_insert_row(
 
   // Allocate payload from bottom up
   const new_content_offset = current_content_offset - row_bytes.byteLength;
-  const abs_target = view.byteOffset + page_offset + new_content_offset;
-
-  // Copy row bytes into page
-  const uint8 = new Uint8Array(view.buffer);
-  uint8.set(row_bytes, abs_target);
+  memcpy(
+    view,
+    page_offset + new_content_offset,
+    row_bytes,
+    0,
+    row_bytes.byteLength,
+  );
 
   // Write new slot directory entry
   page_set_cell_offset(
@@ -580,32 +717,30 @@ export function page_serialize_row(
     throw new TooManyColumnsError(col_count, MAX_COLUMNS_PER_TABLE);
   }
 
-  const null_bitmap_bytes = Math.ceil(col_count / 8);
-  const null_bitmap = new Uint8Array(null_bitmap_bytes);
+  const null_bitmap_bytes = (col_count + 7) >> 3;
+  for (let b = 0; b < null_bitmap_bytes; b++) {
+    _rowScratchBuf[3 + b] = 0;
+  }
 
-  // Validate NOT NULL constraints & compute null bits
+  // Pass 1: Validate NOT NULL constraints, populate null bitmap, and compute fixed/var sizes
+  let fixed_slice_size = 0;
+  let var_col_count = 0;
   for (let i = 0; i < col_count; i++) {
     const col = columns[i];
     const val = values[col.name];
     const is_null = val === null || val === undefined;
+    const c_type = col.type;
 
     if (is_null) {
       if ((col.flags & ColumnFlag.NOT_NULL) !== 0) {
         throw new NotNullConstraintError(col.name);
       }
-      const byte_idx = i >> 3;
-      const bit_mask = 1 << (i & 7);
-      null_bitmap[byte_idx] |= bit_mask;
-    }
-  }
-
-  // Calculate fixed-width slice and var-length payloads
-  let fixed_slice_size = 0;
-  for (let i = 0; i < col_count; i++) {
-    const col = columns[i];
-    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!is_null) {
-      switch (col.type) {
+      _rowScratchBuf[3 + (i >> 3)] |= 1 << (i & 7);
+      if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+        var_col_count++;
+      }
+    } else {
+      switch (c_type) {
         case DataType.INT32:
           fixed_slice_size += 4;
           break;
@@ -617,121 +752,135 @@ export function page_serialize_row(
         case DataType.ULID:
           fixed_slice_size += 16;
           break;
+        case DataType.TEXT:
+        case DataType.BLOB:
+          var_col_count++;
+          break;
       }
     }
   }
 
-  // Variable columns offset table (4 bytes each)
-  const var_columns: Array<{
-    col_idx: number;
-    col: ColumnMeta;
-    payload: Uint8Array | null;
-  }> = [];
-  for (let i = 0; i < col_count; i++) {
-    const col = columns[i];
-    if (col.type === DataType.TEXT || col.type === DataType.BLOB) {
-      const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
-      if (is_null) {
-        var_columns.push({ col_idx: i, col, payload: null });
-      } else {
-        const val = values[col.name];
-        let bytes: Uint8Array;
-        if (col.type === DataType.TEXT) {
-          bytes = text_encoder.encode(String(val ?? ""));
-        } else {
-          bytes = val instanceof Uint8Array ? val : new Uint8Array(val as any);
-        }
-        var_columns.push({ col_idx: i, col, payload: bytes });
-      }
-    }
-  }
-
-  const var_offset_table_size = var_columns.length * 4;
+  const var_offset_table_size = var_col_count << 2;
   const header_and_tables_size =
     3 + null_bitmap_bytes + fixed_slice_size + var_offset_table_size;
+  if (header_and_tables_size > MAX_ROW_SIZE) {
+    throw new RowSizeLimitExceededError(header_and_tables_size, MAX_ROW_SIZE);
+  }
 
-  let total_var_payload_size = 0;
-  for (let i = 0; i < var_columns.length; i++) {
-    const item = var_columns[i];
-    if (item.payload) {
-      total_var_payload_size += item.payload.byteLength;
+  let current_fixed_offset = 3 + null_bitmap_bytes;
+  let current_var_table_offset = current_fixed_offset + fixed_slice_size;
+  let current_payload_offset = header_and_tables_size;
+
+  // Pass 2: Serialize fixed columns and variable-length columns directly into _rowScratchBuf
+  for (let i = 0; i < col_count; i++) {
+    const col = columns[i];
+    const c_type = col.type;
+    const is_null = (_rowScratchBuf[3 + (i >> 3)] & (1 << (i & 7))) !== 0;
+
+    if (is_null) {
+      if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+        _rowScratchView.setUint16(current_var_table_offset, 0, true);
+        _rowScratchView.setUint16(current_var_table_offset + 2, 0, true);
+        current_var_table_offset += 4;
+      }
+      continue;
+    }
+
+    const val = values[col.name];
+    switch (c_type) {
+      case DataType.INT32:
+        _rowScratchView.setInt32(current_fixed_offset, Number(val), true);
+        current_fixed_offset += 4;
+        break;
+      case DataType.INT64:
+        _rowScratchView.setBigInt64(
+          current_fixed_offset,
+          BigInt(val as any),
+          true,
+        );
+        current_fixed_offset += 8;
+        break;
+      case DataType.FLOAT64:
+        _rowScratchView.setFloat64(current_fixed_offset, Number(val), true);
+        current_fixed_offset += 8;
+        break;
+      case DataType.UUID:
+        UuidCodec.encode(String(val), _rowScratchBuf, current_fixed_offset);
+        current_fixed_offset += 16;
+        break;
+      case DataType.ULID:
+        UlidCodec.encode(String(val), _rowScratchBuf, current_fixed_offset);
+        current_fixed_offset += 16;
+        break;
+      case DataType.TEXT: {
+        const str = String(val ?? "");
+        let byte_len = 0;
+        if (str.length > 0) {
+          if (current_payload_offset + str.length * 3 <= _rowScratchBuf.byteLength) {
+            const res = text_encoder.encodeInto(
+              str,
+              _rowScratchBuf.subarray(current_payload_offset),
+            );
+            byte_len = res.written;
+          } else {
+            const encoded = text_encoder.encode(str);
+            byte_len = encoded.byteLength;
+            if (current_payload_offset + byte_len <= MAX_ROW_SIZE) {
+              _rowScratchBuf.set(encoded, current_payload_offset);
+            }
+          }
+        }
+        if (current_payload_offset <= MAX_ROW_SIZE) {
+          _rowScratchView.setUint16(
+            current_var_table_offset,
+            current_payload_offset,
+            true,
+          );
+          _rowScratchView.setUint16(
+            current_var_table_offset + 2,
+            byte_len,
+            true,
+          );
+        }
+        current_payload_offset += byte_len;
+        current_var_table_offset += 4;
+        break;
+      }
+      case DataType.BLOB: {
+        const bytes =
+          val instanceof Uint8Array ? val : new Uint8Array(val as any);
+        const byte_len = bytes.byteLength;
+        if (current_payload_offset + byte_len <= MAX_ROW_SIZE) {
+          _rowScratchView.setUint16(
+            current_var_table_offset,
+            current_payload_offset,
+            true,
+          );
+          _rowScratchView.setUint16(
+            current_var_table_offset + 2,
+            byte_len,
+            true,
+          );
+          _rowScratchBuf.set(bytes, current_payload_offset);
+        }
+        current_payload_offset += byte_len;
+        current_var_table_offset += 4;
+        break;
+      }
     }
   }
 
-  const total_row_size = header_and_tables_size + total_var_payload_size;
+  const total_row_size = current_payload_offset;
   if (total_row_size > MAX_ROW_SIZE) {
     throw new RowSizeLimitExceededError(total_row_size, MAX_ROW_SIZE);
   }
 
-  const row_buffer = new Uint8Array(total_row_size);
-  const row_view = new DataView(row_buffer.buffer);
-
   // [0]: Flags (0x01 = Active)
-  row_view.setUint8(0, 0x01);
-  // [1..2]: Stored Row _length
-  row_view.setUint16(1, total_row_size, true);
-  // [3..]: _null-_bitmap
-  row_buffer.set(null_bitmap, 3);
+  _rowScratchBuf[0] = 0x01;
+  // [1..2]: Stored Row length
+  _rowScratchView.setUint16(1, total_row_size, true);
 
-  let current_fixed_offset = 3 + null_bitmap_bytes;
-  for (let i = 0; i < col_count; i++) {
-    const col = columns[i];
-    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!is_null) {
-      const val = values[col.name];
-      switch (col.type) {
-        case DataType.INT32:
-          row_view.setInt32(current_fixed_offset, Number(val), true);
-          current_fixed_offset += 4;
-          break;
-        case DataType.INT64:
-          row_view.setBigInt64(current_fixed_offset, BigInt(val as any), true);
-          current_fixed_offset += 8;
-          break;
-        case DataType.FLOAT64:
-          row_view.setFloat64(current_fixed_offset, Number(val), true);
-          current_fixed_offset += 8;
-          break;
-        case DataType.UUID:
-          UuidCodec.encode(String(val), row_buffer, current_fixed_offset);
-          current_fixed_offset += 16;
-          break;
-        case DataType.ULID:
-          UlidCodec.encode(String(val), row_buffer, current_fixed_offset);
-          current_fixed_offset += 16;
-          break;
-      }
-    }
-  }
-
-  // Write var-offset table and payloads
-  let current_var_table_offset = current_fixed_offset;
-  let current_payload_offset = header_and_tables_size;
-
-  for (let i = 0; i < var_columns.length; i++) {
-    const item = var_columns[i];
-    if (item.payload === null) {
-      // _null column: rel_offset 0, length 0
-      row_view.setUint16(current_var_table_offset, 0, true);
-      row_view.setUint16(current_var_table_offset + 2, 0, true);
-    } else {
-      row_view.setUint16(
-        current_var_table_offset,
-        current_payload_offset,
-        true,
-      );
-      row_view.setUint16(
-        current_var_table_offset + 2,
-        item.payload.byteLength,
-        true,
-      );
-      row_buffer.set(item.payload, current_payload_offset);
-      current_payload_offset += item.payload.byteLength;
-    }
-    current_var_table_offset += 4;
-  }
-
-  return row_buffer;
+  return _rowScratchBuf.slice(0, total_row_size);
 }
 
 /**
@@ -761,57 +910,49 @@ export function page_deserialize_row(
 
   const row: DbRow = {};
   const col_count = columns.length;
-  const null_bitmap_bytes = Math.ceil(col_count / 8);
+  const null_bitmap_bytes = (col_count + 7) >> 3;
+  const bitmap_start = record_offset + 3;
+  const fixed_start = bitmap_start + null_bitmap_bytes;
 
-  const null_bitmap = new Uint8Array(
-    view.buffer,
-    view.byteOffset + record_offset + 3,
-    null_bitmap_bytes,
-  );
-
-  let current_fixed_offset = record_offset + 3 + null_bitmap_bytes;
-
-  // Track var-column index
-  let var_col_idx = 0;
-  // Calculate where the var-offset table starts
-  // We need to advance fixed offset for non-null fixed columns
-  const fixed_start = current_fixed_offset;
+  // Calculate where the var-offset table starts without allocating a Uint8Array for null_bitmap
+  let current_fixed_offset = fixed_start;
+  let cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
   for (let i = 0; i < col_count; i++) {
-    const col = columns[i];
-    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
-    if (!is_null) {
-      switch (col.type) {
-        case DataType.INT32:
-          current_fixed_offset += 4;
-          break;
-        case DataType.INT64:
-        case DataType.FLOAT64:
-          current_fixed_offset += 8;
-          break;
-        case DataType.UUID:
-        case DataType.ULID:
-          current_fixed_offset += 16;
-          break;
-      }
+    if ((i & 7) === 0 && i > 0) {
+      cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
+    }
+    if ((cur_bitmap_byte & (1 << (i & 7))) === 0) {
+      const c_type = columns[i].type;
+      if (c_type === DataType.INT32) current_fixed_offset += 4;
+      else if (c_type === DataType.INT64 || c_type === DataType.FLOAT64)
+        current_fixed_offset += 8;
+      else if (c_type === DataType.UUID || c_type === DataType.ULID)
+        current_fixed_offset += 16;
     }
   }
 
   const var_offset_table_start = current_fixed_offset;
   current_fixed_offset = fixed_start;
 
+  let var_col_idx = 0;
+  cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
   for (let i = 0; i < col_count; i++) {
+    if ((i & 7) === 0 && i > 0) {
+      cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
+    }
     const col = columns[i];
-    const is_null = (null_bitmap[i >> 3] & (1 << (i & 7))) !== 0;
+    const c_type = col.type;
+    const is_null = (cur_bitmap_byte & (1 << (i & 7))) !== 0;
 
     if (is_null) {
       row[col.name] = null;
-      if (col.type === DataType.TEXT || col.type === DataType.BLOB) {
+      if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
         var_col_idx++;
       }
       continue;
     }
 
-    switch (col.type) {
+    switch (c_type) {
       case DataType.INT32:
         row[col.name] = view.getInt32(current_fixed_offset, true);
         current_fixed_offset += 4;
@@ -845,22 +986,28 @@ export function page_deserialize_row(
         break;
       }
       case DataType.TEXT: {
-        const table_entry_offset = var_offset_table_start + var_col_idx * 4;
+        const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
         const rel_offset = view.getUint16(table_entry_offset, true);
         const len = view.getUint16(table_entry_offset + 2, true);
-        const payload_offset = view.byteOffset + record_offset + rel_offset;
-        const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
-        row[col.name] = text_decoder.decode(text_bytes);
+        if (len === 0) {
+          row[col.name] = "";
+        } else {
+          const payload_offset = view.byteOffset + record_offset + rel_offset;
+          const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
+          row[col.name] = text_decoder.decode(text_bytes);
+        }
         var_col_idx++;
         break;
       }
       case DataType.BLOB: {
-        const table_entry_offset = var_offset_table_start + var_col_idx * 4;
+        const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
         const rel_offset = view.getUint16(table_entry_offset, true);
         const len = view.getUint16(table_entry_offset + 2, true);
         const payload_offset = view.byteOffset + record_offset + rel_offset;
         const blob_bytes = new Uint8Array(len);
-        blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
+        if (len > 0) {
+          blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
+        }
         row[col.name] = blob_bytes;
         var_col_idx++;
         break;
@@ -1113,79 +1260,286 @@ export function page_compare_index_keys(
   return rowid_a < rowid_b ? -1 : rowid_a > rowid_b ? 1 : 0;
 }
 
-function page_decode_index_cell(
+/**
+ * @export_c
+ * Zero-allocation 3VL comparison between a target index key and a cell at cell_data_offset.
+ * Returns <0 if target < cell, 0 if equal, >0 if target > cell.
+ */
+export function page_compare_index_cell_raw(
   view: DataView,
-  cell_data_offset: number,
-  k_len: number,
-  context_type: DataType,
-): { cellType: DataType; cellVal: any } {
-  const k_data = new Uint8Array(
-    view.buffer,
-    view.byteOffset + cell_data_offset,
-    k_len,
-  );
+  cell_data_offset: u32,
+  k_len: u16,
+  cell_rowid: i64,
+  context_type: u8,
+  target_type: u8,
+  target_f64: f64,
+  target_bytes_off: u32,
+  target_bytes_len: u16,
+  target_rowid: i64,
+): i32 {
+  let mid_type: u8 = DataType.TEXT;
+  let mid_f64: f64 = 0.0;
+
   if (k_len === 0) {
-    return { cellType: DataType.NULL, cellVal: null };
-  }
-  if (context_type === DataType.TEXT) {
-    if (
-      k_len === 4 &&
-      ((k_data[2] === 0 && k_data[3] === 0) ||
-        (k_data[2] === 0xff && k_data[3] === 0xff))
+    mid_type = DataType.NULL;
+  } else if (context_type === DataType.TEXT) {
+    if (k_len === 4) {
+      const b2: u8 = read_u8(view, cell_data_offset + 2);
+      const b3: u8 = read_u8(view, cell_data_offset + 3);
+      if ((b2 === 0 && b3 === 0) || (b2 === 0xff && b3 === 0xff)) {
+        mid_type = DataType.INT32;
+        mid_f64 = read_i32(view, cell_data_offset) as f64;
+      } else {
+        mid_type = DataType.TEXT;
+      }
+    } else if (
+      k_len === 2 &&
+      read_u8(view, cell_data_offset) < 32 &&
+      read_u8(view, cell_data_offset + 1) < 32
     ) {
-      return {
-        cellType: DataType.INT32,
-        cellVal: new DataView(k_data.buffer, k_data.byteOffset).getInt32(
-          0,
-          true,
-        ),
-      };
+      mid_type = DataType.BLOB;
+    } else {
+      mid_type = DataType.TEXT;
     }
-    if (k_len === 2 && k_data[0] < 32 && k_data[1] < 32) {
-      return { cellType: DataType.BLOB, cellVal: k_data };
-    }
-    return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
-  }
-  if (k_len === 2) {
-    return { cellType: DataType.BLOB, cellVal: k_data };
-  }
-  if (k_len === 4) {
-    return {
-      cellType: DataType.INT32,
-      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getInt32(0, true),
-    };
-  }
-  if (context_type === DataType.UUID && k_len === 16) {
-    return { cellType: DataType.UUID, cellVal: UuidCodec.decode(k_data, 0) };
-  }
-  if (context_type === DataType.ULID && k_len === 16) {
-    return { cellType: DataType.ULID, cellVal: UlidCodec.decode(k_data, 0) };
-  }
-  if (context_type === DataType.FLOAT64 && k_len === 8) {
-    return {
-      cellType: DataType.FLOAT64,
-      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getFloat64(
-        0,
-        true,
-      ),
-    };
-  }
-  if (context_type === DataType.INT64 && k_len === 8) {
-    return {
-      cellType: DataType.INT64,
-      cellVal: new DataView(k_data.buffer, k_data.byteOffset).getBigInt64(
-        0,
-        true,
-      ),
-    };
-  }
-  if (context_type === DataType.BLOB) {
+  } else if (k_len === 2) {
+    mid_type = DataType.BLOB;
+  } else if (k_len === 4) {
+    mid_type = DataType.INT32;
+    mid_f64 = read_i32(view, cell_data_offset) as f64;
+  } else if (context_type === DataType.UUID && k_len === 16) {
+    mid_type = DataType.UUID;
+  } else if (context_type === DataType.ULID && k_len === 16) {
+    mid_type = DataType.ULID;
+  } else if (context_type === DataType.FLOAT64 && k_len === 8) {
+    mid_type = DataType.FLOAT64;
+    mid_f64 = read_f64(view, cell_data_offset);
+  } else if (context_type === DataType.INT64 && k_len === 8) {
+    mid_type = DataType.INT64;
+    mid_f64 = i64_to_f64(read_i64(view, cell_data_offset));
+  } else if (context_type === DataType.BLOB) {
     if (k_len === 5 || k_len === 6) {
-      return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
+      mid_type = DataType.TEXT;
+    } else {
+      mid_type = DataType.BLOB;
     }
-    return { cellType: DataType.BLOB, cellVal: k_data };
+  } else {
+    mid_type = DataType.TEXT;
   }
-  return { cellType: DataType.TEXT, cellVal: text_decoder.decode(k_data) };
+
+  if (target_type !== mid_type) {
+    return (target_type as i32) - (mid_type as i32);
+  }
+
+  if (target_type === DataType.NULL) {
+    return target_rowid < cell_rowid ? -1 : target_rowid > cell_rowid ? 1 : 0;
+  }
+
+  let diff: i32 = 0;
+  if (
+    target_type === DataType.INT32 ||
+    target_type === DataType.INT64 ||
+    target_type === DataType.FLOAT64
+  ) {
+    diff = target_f64 < mid_f64 ? -1 : target_f64 > mid_f64 ? 1 : 0;
+  } else {
+    const min_len: u32 = target_bytes_len < k_len ? target_bytes_len : k_len;
+    for (let i: u32 = 0; i < min_len; i++) {
+      const ba: i32 = read_u8(view, target_bytes_off + i);
+      const bb: i32 = read_u8(view, cell_data_offset + i);
+      if (ba !== bb) {
+        diff = ba < bb ? -1 : 1;
+        break;
+      }
+    }
+    if (diff === 0) {
+      diff = (target_bytes_len as i32) - (k_len as i32);
+    }
+  }
+
+  if (diff !== 0) return diff;
+  return target_rowid < cell_rowid ? -1 : target_rowid > cell_rowid ? 1 : 0;
+}
+
+/**
+ * @export_c
+ * Inserts an index key and rowid into a Secondary Index Leaf Page in linear memory,
+ * maintaining the sorted slot directory.
+ */
+export function page_insert_index_cell_raw(
+  view: DataView,
+  page_offset: u32,
+  key_type: u8,
+  key_i64: i64,
+  key_f64: f64,
+  key_src_offset: u32,
+  key_len: u16,
+  rowid: i64,
+  scratchpad_offset: u32,
+): i32 {
+  const cell_length: u16 = (2 + key_len + 8) as u16;
+  const needed_bytes: u32 = cell_length + 2;
+
+  const cell_count: u16 = page_get_cell_count(view, page_offset);
+  const contiguous_free: u32 = page_get_contiguous_free_space(view, page_offset);
+  const total_free: u32 = contiguous_free + page_get_free_bytes(view, page_offset);
+
+  if (needed_bytes > total_free) {
+    return -1;
+  }
+
+  if (needed_bytes > contiguous_free) {
+    page_compact_raw(view, page_offset, scratchpad_offset);
+  }
+
+  const content_offset: u16 = page_get_cell_content_offset(view, page_offset);
+  const new_content_offset: u16 = (content_offset - cell_length) as u16;
+  const target_offset: u32 = page_offset + new_content_offset;
+
+  write_u16(view, target_offset, key_len);
+  if (key_len > 0) {
+    if (key_type === DataType.INT32) {
+      write_i32(view, target_offset + 2, f64_to_i32(key_f64));
+    } else if (key_type === DataType.INT64) {
+      write_i64(view, target_offset + 2, key_i64);
+    } else if (key_type === DataType.FLOAT64) {
+      write_f64(view, target_offset + 2, key_f64);
+    } else if (key_src_offset !== target_offset + 2) {
+      memcpy(view, target_offset + 2, view, key_src_offset, key_len);
+    }
+  }
+  write_i64(view, target_offset + 2 + key_len, rowid);
+
+  // Binary search to find sorted insertion slot index
+  let lo: i32 = 0;
+  let hi: i32 = (cell_count as i32) - 1;
+  let insert_slot: i32 = cell_count as i32;
+
+  while (lo <= hi) {
+    const mid: i32 = (lo + hi) >> 1;
+    const offset: u16 = page_get_cell_offset(view, page_offset, mid as u16);
+    const existing_k_len: u16 = read_u16(view, page_offset + offset);
+    const r_id: i64 = read_i64(
+      view,
+      page_offset + offset + 2 + existing_k_len,
+    );
+
+    const cmp: i32 = page_compare_index_cell_raw(
+      view,
+      page_offset + offset + 2,
+      existing_k_len,
+      r_id,
+      key_type,
+      key_type,
+      key_f64,
+      target_offset + 2,
+      key_len,
+      rowid,
+    );
+    if (cmp < 0) {
+      insert_slot = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  for (let s: i32 = (cell_count as i32) - 1; s >= insert_slot; s--) {
+    const prev_off: u16 = page_get_cell_offset(view, page_offset, s as u16);
+    page_set_cell_offset(view, page_offset, (s + 1) as u16, prev_off);
+  }
+
+  page_set_cell_offset(
+    view,
+    page_offset,
+    insert_slot as u16,
+    new_content_offset,
+  );
+  page_set_cell_count(view, page_offset, (cell_count + 1) as u16);
+  page_set_cell_content_offset(view, page_offset, new_content_offset);
+
+  return insert_slot;
+}
+
+/**
+ * @export_c
+ * Binary searches an Index Leaf Page for target key and optional rowid.
+ * Returns >= 0 (found slot_idx) if found, or < 0 (-(insertion_slot + 1)) if not found.
+ */
+export function page_binary_search_index_raw(
+  view: DataView,
+  page_offset: u32,
+  target_type: u8,
+  target_f64: f64,
+  target_bytes_off: u32,
+  target_bytes_len: u16,
+  has_target_rowid: u8,
+  target_row_id: i64,
+): i32 {
+  const cell_count: u16 = page_get_cell_count(view, page_offset);
+  let lo: i32 = 0;
+  let hi: i32 = (cell_count as i32) - 1;
+
+  while (lo <= hi) {
+    const mid: i32 = (lo + hi) >> 1;
+    const offset: u16 = page_get_cell_offset(view, page_offset, mid as u16);
+    const k_len: u16 = read_u16(view, page_offset + offset);
+    const r_id: i64 = read_i64(view, page_offset + offset + 2 + k_len);
+
+    const rowid_to_compare: i64 =
+      has_target_rowid !== 0 ? target_row_id : r_id;
+    const cmp: i32 = page_compare_index_cell_raw(
+      view,
+      page_offset + offset + 2,
+      k_len,
+      r_id,
+      target_type,
+      target_type,
+      target_f64,
+      target_bytes_off,
+      target_bytes_len,
+      rowid_to_compare,
+    );
+
+    if (cmp === 0) {
+      if (has_target_rowid === 0) {
+        let first_slot: i32 = mid;
+        while (first_slot > 0) {
+          const prev_slot: i32 = first_slot - 1;
+          const prev_offset: u16 = page_get_cell_offset(
+            view,
+            page_offset,
+            prev_slot as u16,
+          );
+          const prev_k_len: u16 = read_u16(view, page_offset + prev_offset);
+          const prev_cmp: i32 = page_compare_index_cell_raw(
+            view,
+            page_offset + prev_offset + 2,
+            prev_k_len,
+            0n,
+            target_type,
+            target_type,
+            target_f64,
+            target_bytes_off,
+            target_bytes_len,
+            0n,
+          );
+          if (prev_cmp === 0) {
+            first_slot = prev_slot;
+          } else {
+            break;
+          }
+        }
+        return first_slot;
+      }
+      return mid;
+    } else if (cmp < 0) {
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  return -(lo + 1);
 }
 
 /**
@@ -1197,40 +1551,138 @@ export function page_insert_index_leaf_cell(
   key_type: DataType,
   key_value: any,
   rowid: bigint,
-  scratchpad_offset?: number,
+  scratchpad_offset: number = 0,
 ): number {
-  let key_bytes: Uint8Array;
+  let effective_type = key_type;
   if (
     key_type === DataType.NULL ||
     key_value === null ||
     key_value === undefined
   ) {
-    key_bytes = new Uint8Array(0);
-  } else if (key_type === DataType.INT32) {
-    key_bytes = new Uint8Array(4);
-    new DataView(key_bytes.buffer).setInt32(0, Number(key_value), true);
-  } else if (key_type === DataType.INT64) {
-    key_bytes = new Uint8Array(8);
-    new DataView(key_bytes.buffer).setBigInt64(0, BigInt(key_value), true);
-  } else if (key_type === DataType.FLOAT64) {
-    key_bytes = new Uint8Array(8);
-    new DataView(key_bytes.buffer).setFloat64(0, Number(key_value), true);
-  } else if (key_type === DataType.UUID) {
-    key_bytes = new Uint8Array(16);
-    UuidCodec.encode(String(key_value), key_bytes, 0);
-  } else if (key_type === DataType.ULID) {
-    key_bytes = new Uint8Array(16);
-    UlidCodec.encode(String(key_value), key_bytes, 0);
-  } else if (key_type === DataType.TEXT) {
-    key_bytes = text_encoder.encode(String(key_value));
+    effective_type = DataType.NULL;
+  }
+
+  // Fast zero-allocation path for NULL and numeric keys
+  if (effective_type === DataType.NULL) {
+    if (
+      scratchpad_offset > 0 &&
+      scratchpad_offset !== page_offset &&
+      scratchpad_offset + PAGE_SIZE <= view.byteLength
+    ) {
+      return page_insert_index_cell_raw(
+        view,
+        page_offset,
+        DataType.NULL,
+        0n,
+        0.0,
+        0,
+        0,
+        rowid,
+        scratchpad_offset,
+      );
+    }
+  } else if (effective_type === DataType.INT32) {
+    const num = Number(key_value) | 0;
+    if (
+      scratchpad_offset > 0 &&
+      scratchpad_offset !== page_offset &&
+      scratchpad_offset + PAGE_SIZE <= view.byteLength
+    ) {
+      return page_insert_index_cell_raw(
+        view,
+        page_offset,
+        DataType.INT32,
+        0n,
+        num,
+        0,
+        4,
+        rowid,
+        scratchpad_offset,
+      );
+    }
+  } else if (effective_type === DataType.INT64) {
+    const bi = BigInt(key_value);
+    if (
+      scratchpad_offset > 0 &&
+      scratchpad_offset !== page_offset &&
+      scratchpad_offset + PAGE_SIZE <= view.byteLength
+    ) {
+      return page_insert_index_cell_raw(
+        view,
+        page_offset,
+        DataType.INT64,
+        bi,
+        Number(bi),
+        0,
+        8,
+        rowid,
+        scratchpad_offset,
+      );
+    }
+  } else if (effective_type === DataType.FLOAT64) {
+    const num = Number(key_value);
+    if (
+      scratchpad_offset > 0 &&
+      scratchpad_offset !== page_offset &&
+      scratchpad_offset + PAGE_SIZE <= view.byteLength
+    ) {
+      return page_insert_index_cell_raw(
+        view,
+        page_offset,
+        DataType.FLOAT64,
+        0n,
+        num,
+        0,
+        8,
+        rowid,
+        scratchpad_offset,
+      );
+    }
+  }
+
+  // Encode key into _keyScratchBuf (or use Uint8Array directly) with zero heap allocation
+  let key_len = 0;
+  let key_f64 = 0.0;
+  let ext_bytes: Uint8Array | null = null;
+
+  if (effective_type === DataType.NULL) {
+    key_len = 0;
+  } else if (effective_type === DataType.INT32) {
+    key_f64 = Number(key_value) | 0;
+    _keyScratchView.setInt32(0, key_f64, true);
+    key_len = 4;
+  } else if (effective_type === DataType.INT64) {
+    const bi = BigInt(key_value);
+    key_f64 = Number(bi);
+    _keyScratchView.setBigInt64(0, bi, true);
+    key_len = 8;
+  } else if (effective_type === DataType.FLOAT64) {
+    key_f64 = Number(key_value);
+    _keyScratchView.setFloat64(0, key_f64, true);
+    key_len = 8;
+  } else if (effective_type === DataType.UUID) {
+    UuidCodec.encode(String(key_value), _keyScratchBuf, 0);
+    key_len = 16;
+  } else if (effective_type === DataType.ULID) {
+    UlidCodec.encode(String(key_value), _keyScratchBuf, 0);
+    key_len = 16;
+  } else if (effective_type === DataType.TEXT) {
+    const str = String(key_value);
+    if (str.length * 3 <= _keyScratchBuf.byteLength) {
+      key_len = text_encoder.encodeInto(str, _keyScratchBuf).written;
+    } else {
+      ext_bytes = text_encoder.encode(str);
+      key_len = ext_bytes.byteLength;
+    }
   } else {
-    key_bytes =
+    ext_bytes =
       key_value instanceof Uint8Array ? key_value : new Uint8Array(key_value);
+    key_len = ext_bytes.byteLength;
   }
 
   // Cell format: [key_len uint16][key_data][rowid int64]
-  const cell_length = 2 + key_bytes.byteLength + 8;
-  const needed_bytes = cell_length + 2; // + 2B slot directory entry
+  const cell_length = 2 + key_len + 8;
+  const needed_bytes = cell_length + 2;
 
   const cell_count = page_get_cell_count(view, page_offset);
   const contiguous_free = page_get_contiguous_free_space(view, page_offset);
@@ -1248,13 +1700,19 @@ export function page_insert_index_leaf_cell(
   const new_content_offset = content_offset - cell_length;
   const target_offset = page_offset + new_content_offset;
 
-  // Write cell
-  const abs_target = view.byteOffset + target_offset;
-  view.setUint16(target_offset, key_bytes.byteLength, true);
-  new Uint8Array(view.buffer).set(key_bytes, abs_target + 2);
-  view.setBigInt64(target_offset + 2 + key_bytes.byteLength, rowid, true);
+  // Write cell directly into target_offset
+  view.setUint16(target_offset, key_len, true);
+  if (key_len > 0) {
+    if (ext_bytes !== null) {
+      memcpy(view, target_offset + 2, ext_bytes, 0, key_len);
+    } else {
+      memcpy(view, target_offset + 2, _keyScratchBuf, 0, key_len);
+    }
+  }
+  view.setBigInt64(target_offset + 2 + key_len, rowid, true);
 
-  // Binary search to find sorted insertion slot index
+  // Binary search using zero-allocation page_compare_index_cell_raw
+  // (the new key's bytes are now in `view` at `target_offset + 2`!)
   let lo = 0;
   let hi = cell_count - 1;
   let insert_slot = cell_count;
@@ -1267,20 +1725,18 @@ export function page_insert_index_leaf_cell(
       page_offset + offset + 2 + existing_k_len,
       true,
     );
-    const { cellType: mid_type, cellVal: mid_val } = page_decode_index_cell(
+
+    const cmp = page_compare_index_cell_raw(
       view,
       page_offset + offset + 2,
       existing_k_len,
-      key_type,
-    );
-
-    const cmp = page_compare_index_keys(
-      key_type,
-      key_value,
-      rowid,
-      mid_type,
-      mid_val,
       r_id,
+      effective_type,
+      effective_type,
+      key_f64,
+      target_offset + 2,
+      key_len,
+      rowid,
     );
     if (cmp < 0) {
       insert_slot = mid;
@@ -1290,21 +1746,12 @@ export function page_insert_index_leaf_cell(
     }
   }
 
-  // Shift slot directory entries from insert_slot right by 2 bytes
-  const uint8 = new Uint8Array(view.buffer);
-  const abs_page_start = view.byteOffset + page_offset;
-  const slot_dir_start = abs_page_start + PAGE_HEADER_SIZE;
-  const src = slot_dir_start + insert_slot * 2;
-  const dst = slot_dir_start + (insert_slot + 1) * 2;
-  const shift_len = (cell_count - insert_slot) * 2;
-
-  if (shift_len > 0) {
-    uint8.copyWithin(dst, src, src + shift_len);
+  for (let s = cell_count - 1; s >= insert_slot; s--) {
+    const prev_off = page_get_cell_offset(view, page_offset, s);
+    page_set_cell_offset(view, page_offset, s + 1, prev_off);
   }
 
-  // Write new slot entry
   page_set_cell_offset(view, page_offset, insert_slot, new_content_offset);
-
   page_set_cell_count(view, page_offset, cell_count + 1);
   page_set_cell_content_offset(view, page_offset, new_content_offset);
 
@@ -1312,12 +1759,13 @@ export function page_insert_index_leaf_cell(
 }
 
 /**
+ * @export_c
  * Deletes an entry at slot_idx from a Secondary Index Leaf Page.
  */
 export function page_delete_index_leaf_cell(
   view: DataView,
-  page_offset: number,
-  slot_idx: number,
+  page_offset: u32,
+  slot_idx: u16,
 ): void {
   const cell_count = page_get_cell_count(view, page_offset);
   if (slot_idx < 0 || slot_idx >= cell_count) return;
@@ -1353,6 +1801,70 @@ export function page_binary_search_index_leaf(
   target_value: any,
   target_row_id?: bigint,
 ): { found: boolean; slot_idx: number } {
+  let effective_type = target_type;
+  if (
+    target_type === DataType.NULL ||
+    target_value === null ||
+    target_value === undefined
+  ) {
+    effective_type = DataType.NULL;
+  }
+
+  const has_rowid: u8 = target_row_id !== undefined ? 1 : 0;
+  const rowid_val: i64 = target_row_id !== undefined ? target_row_id : 0n;
+
+  if (
+    effective_type === DataType.NULL ||
+    effective_type === DataType.INT32 ||
+    effective_type === DataType.INT64 ||
+    effective_type === DataType.FLOAT64
+  ) {
+    const num_f64 =
+      effective_type === DataType.NULL
+        ? 0.0
+        : typeof target_value === "bigint"
+          ? Number(target_value)
+          : Number(target_value);
+    const res = page_binary_search_index_raw(
+      view,
+      page_offset,
+      effective_type,
+      num_f64,
+      0,
+      0,
+      has_rowid,
+      rowid_val,
+    );
+    return res >= 0
+      ? { found: true, slot_idx: res }
+      : { found: false, slot_idx: -res - 1 };
+  }
+
+  // For byte/string keys (TEXT, BLOB, UUID, ULID), encode into _keyScratchBuf
+  let key_len = 0;
+  let key_buf: Uint8Array = _keyScratchBuf;
+  if (effective_type === DataType.UUID) {
+    UuidCodec.encode(String(target_value), _keyScratchBuf, 0);
+    key_len = 16;
+  } else if (effective_type === DataType.ULID) {
+    UlidCodec.encode(String(target_value), _keyScratchBuf, 0);
+    key_len = 16;
+  } else if (effective_type === DataType.TEXT) {
+    const str = String(target_value);
+    if (str.length * 3 <= _keyScratchBuf.byteLength) {
+      key_len = text_encoder.encodeInto(str, _keyScratchBuf).written;
+    } else {
+      key_buf = text_encoder.encode(str);
+      key_len = key_buf.byteLength;
+    }
+  } else {
+    key_buf =
+      target_value instanceof Uint8Array
+        ? target_value
+        : new Uint8Array(target_value);
+    key_len = key_buf.byteLength;
+  }
+
   const cell_count = page_get_cell_count(view, page_offset);
   let lo = 0;
   let hi = cell_count - 1;
@@ -1362,46 +1874,76 @@ export function page_binary_search_index_leaf(
     const offset = page_get_cell_offset(view, page_offset, mid);
     const k_len = view.getUint16(page_offset + offset, true);
     const r_id = view.getBigInt64(page_offset + offset + 2 + k_len, true);
-    const { cellType: mid_type, cellVal: mid_val } = page_decode_index_cell(
-      view,
-      page_offset + offset + 2,
-      k_len,
-      target_type,
-    );
+    const cell_data_offset = page_offset + offset + 2;
 
-    const rowid_to_compare = target_row_id !== undefined ? target_row_id : r_id;
-    const cmp = page_compare_index_keys(
-      target_type,
-      target_value,
-      rowid_to_compare,
-      mid_type,
-      mid_val,
-      r_id,
-    );
+    // Determine cell type
+    let mid_type: DataType = DataType.TEXT;
+    if (k_len === 0) {
+      mid_type = DataType.NULL;
+    } else if (effective_type === DataType.TEXT) {
+      if (k_len === 4) {
+        const b2 = view.getUint8(cell_data_offset + 2);
+        const b3 = view.getUint8(cell_data_offset + 3);
+        if ((b2 === 0 && b3 === 0) || (b2 === 0xff && b3 === 0xff)) {
+          mid_type = DataType.INT32;
+        }
+      } else if (
+        k_len === 2 &&
+        view.getUint8(cell_data_offset) < 32 &&
+        view.getUint8(cell_data_offset + 1) < 32
+      ) {
+        mid_type = DataType.BLOB;
+      }
+    } else if (k_len === 2) {
+      mid_type = DataType.BLOB;
+    } else if (k_len === 4) {
+      mid_type = DataType.INT32;
+    } else if (effective_type === DataType.UUID && k_len === 16) {
+      mid_type = DataType.UUID;
+    } else if (effective_type === DataType.ULID && k_len === 16) {
+      mid_type = DataType.ULID;
+    } else if (effective_type === DataType.BLOB) {
+      mid_type = k_len === 5 || k_len === 6 ? DataType.TEXT : DataType.BLOB;
+    }
+
+    let cmp = 0;
+    if (effective_type !== mid_type) {
+      cmp = effective_type - mid_type;
+    } else {
+      const min_len = key_len < k_len ? key_len : k_len;
+      for (let i = 0; i < min_len; i++) {
+        const ba = key_buf[i];
+        const bb = view.getUint8(cell_data_offset + i);
+        if (ba !== bb) {
+          cmp = ba < bb ? -1 : 1;
+          break;
+        }
+      }
+      if (cmp === 0) {
+        cmp = key_len - k_len;
+      }
+      if (cmp === 0 && has_rowid !== 0) {
+        cmp = rowid_val < r_id ? -1 : rowid_val > r_id ? 1 : 0;
+      }
+    }
 
     if (cmp === 0) {
-      if (target_row_id === undefined) {
+      if (has_rowid === 0) {
         let first_slot = mid;
         while (first_slot > 0) {
           const prev_slot = first_slot - 1;
           const prev_offset = page_get_cell_offset(view, page_offset, prev_slot);
           const prev_k_len = view.getUint16(page_offset + prev_offset, true);
-          const { cellType: prev_type, cellVal: prev_val } = page_decode_index_cell(
-            view,
-            page_offset + prev_offset + 2,
-            prev_k_len,
-            target_type,
-          );
-          if (
-            page_compare_index_keys(
-              target_type,
-              target_value,
-              0n,
-              prev_type,
-              prev_val,
-              0n,
-            ) === 0
-          ) {
+          if (prev_k_len !== key_len) break;
+          const prev_data_off = page_offset + prev_offset + 2;
+          let same = true;
+          for (let i = 0; i < key_len; i++) {
+            if (key_buf[i] !== view.getUint8(prev_data_off + i)) {
+              same = false;
+              break;
+            }
+          }
+          if (same) {
             first_slot = prev_slot;
           } else {
             break;
@@ -1467,27 +2009,77 @@ export function serialize_composite_key(
   col_count: number,
   row: DbRow,
 ): Uint8Array {
-  const parts: Uint8Array[] = [];
-  let total_len = 0;
+  let offset = 0;
   for (let i = 0; i < col_count; i++) {
     const col = columns[col_indices[i]];
     const val = row[col.name];
-    const encoded = serialize_single_key(col.type, val);
-    const part = new Uint8Array(1 + 2 + encoded.byteLength);
-    part[0] = col.type;
-    part[1] = encoded.byteLength & 0xff;
-    part[2] = (encoded.byteLength >> 8) & 0xff;
-    part.set(encoded, 3);
-    parts.push(part);
-    total_len += part.byteLength;
+    const c_type = col.type;
+    _keyScratchBuf[offset] = c_type;
+
+    if (val === null || val === undefined) {
+      _keyScratchBuf[offset + 1] = 0;
+      _keyScratchBuf[offset + 2] = 0;
+      offset += 3;
+      continue;
+    }
+
+    switch (c_type) {
+      case DataType.INT32:
+        _keyScratchBuf[offset + 1] = 4;
+        _keyScratchBuf[offset + 2] = 0;
+        _keyScratchView.setInt32(offset + 3, Number(val), true);
+        offset += 7;
+        break;
+      case DataType.INT64:
+        _keyScratchBuf[offset + 1] = 8;
+        _keyScratchBuf[offset + 2] = 0;
+        _keyScratchView.setBigInt64(offset + 3, BigInt(val as any), true);
+        offset += 11;
+        break;
+      case DataType.FLOAT64:
+        _keyScratchBuf[offset + 1] = 8;
+        _keyScratchBuf[offset + 2] = 0;
+        _keyScratchView.setFloat64(offset + 3, Number(val), true);
+        offset += 11;
+        break;
+      case DataType.UUID:
+        _keyScratchBuf[offset + 1] = 16;
+        _keyScratchBuf[offset + 2] = 0;
+        UuidCodec.encode(String(val), _keyScratchBuf, offset + 3);
+        offset += 19;
+        break;
+      case DataType.ULID:
+        _keyScratchBuf[offset + 1] = 16;
+        _keyScratchBuf[offset + 2] = 0;
+        UlidCodec.encode(String(val), _keyScratchBuf, offset + 3);
+        offset += 19;
+        break;
+      case DataType.TEXT: {
+        const str = String(val);
+        let len = 0;
+        if (str.length > 0) {
+          len = text_encoder.encodeInto(
+            str,
+            _keyScratchBuf.subarray(offset + 3),
+          ).written;
+        }
+        _keyScratchBuf[offset + 1] = len & 0xff;
+        _keyScratchBuf[offset + 2] = (len >> 8) & 0xff;
+        offset += 3 + len;
+        break;
+      }
+      default: {
+        const bytes =
+          val instanceof Uint8Array ? val : new Uint8Array(val as any);
+        const len = bytes.byteLength;
+        _keyScratchBuf[offset + 1] = len & 0xff;
+        _keyScratchBuf[offset + 2] = (len >> 8) & 0xff;
+        _keyScratchBuf.set(bytes, offset + 3);
+        offset += 3 + len;
+        break;
+      }
+    }
   }
-  const result = new Uint8Array(total_len);
-  let offset = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    result.set(p, offset);
-    offset += p.byteLength;
-  }
-  return result;
+  return _keyScratchBuf.slice(0, offset);
 }
 

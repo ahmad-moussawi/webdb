@@ -2610,7 +2610,10 @@ export function chooseIndexScan(
 
         return tagCandidate({
           index: idx,
-          scanType: "point",
+          scanType:
+            (idx.flags & (IndexFlag.UNIQUE | IndexFlag.PRIMARY)) !== 0
+              ? "point"
+              : "range",
           seekFilter: matchedFilters[0],
           filterIndex: allLeaves.indexOf(matchedFilters[0]),
           keyType: DataType.BLOB,

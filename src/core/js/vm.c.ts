@@ -9,7 +9,6 @@ import {
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
   VM_CONTEXT_OFFSET,
-  VM_CONTEXT_SIZE,
   RESULT_BUFFER_OFFSET,
   BYTECODE_OFFSET,
   TRANSIENT_ARENA_OFFSET,
@@ -81,6 +80,8 @@ import {
   VM_CUR_SLOT_IDX,
   VM_CUR_CELL_IDX,
   VM_CUR_ROW_OFFSET,
+  VM_CTX_REGISTERS_OFF,
+  VM_CTX_CURSORS_OFF,
   VM_CTX_TABLES_OFF,
   VM_TABLE_DESC_SIZE,
   VM_CTX_OUTPUT_COLS_OFF,
@@ -92,6 +93,7 @@ import {
   VM_KI_OFFSET,
   VM_KI_DIRECTIONS,
   VM_KI_NULL_ORDERS,
+  VM_CTX_SORTERS_OFF,
   VM_CTX_AGGS_OFF,
   VM_AGG_SIZE,
   VM_AGG_IS_OPEN,
@@ -2340,37 +2342,51 @@ export function executeVmStepWithRunner(
   const code_off = BYTECODE_OFFSET;
   const arena_base = TRANSIENT_ARENA_OFFSET;
   const meta = ctx as any;
+  const fastHost = ctx._fastHostMode === true;
 
   if (
     meta._syncedResetId !== ctx._resetId ||
     meta._syncedBuffer !== activeView.buffer
   ) {
-    memset(activeView, ctx_off, 0, VM_CONTEXT_SIZE);
-    meta._lastSyncedRegs = new Array(64).fill(null);
+    // Zero header + registers + cursors (0..2504) and sorters + aggregators (7184..7440)
+    memset(activeView, ctx_off, 0, VM_CTX_CURSORS_OFF + 384);
+    memset(activeView, ctx_off + VM_CTX_SORTERS_OFF, 0, 256);
     for (let r = 0; r < 64; r++) {
-      vm_reg_set_null(activeView, vm_reg_off(ctx_off, r));
+      write_u8(
+        activeView,
+        ctx_off + VM_CTX_REGISTERS_OFF + (r << 5) + VM_REG_IS_NULL,
+        1,
+      );
+    }
+    if (!fastHost) {
+      if (!meta._lastSyncedRegs) {
+        meta._lastSyncedRegs = new Array(64).fill(null);
+      } else {
+        meta._lastSyncedRegs.fill(null);
+      }
     }
     meta._syncedInSetsRef = null;
     meta._syncedResetId = ctx._resetId;
     meta._syncedBuffer = activeView.buffer;
   }
 
-    if (needsCopyBack && ctx.resultOffset > 0) {
-      const resEnd = RESULT_BUFFER_OFFSET + ctx.resultOffset;
-      if (view.byteLength >= resEnd) {
+  if (needsCopyBack && ctx.resultOffset > 0) {
+    const resEnd = RESULT_BUFFER_OFFSET + ctx.resultOffset;
+    if (view.byteLength >= resEnd) {
+      new Uint8Array(
+        activeView.buffer,
+        activeView.byteOffset + RESULT_BUFFER_OFFSET,
+        ctx.resultOffset,
+      ).set(
         new Uint8Array(
-          activeView.buffer,
-          activeView.byteOffset + RESULT_BUFFER_OFFSET,
+          view.buffer,
+          view.byteOffset + RESULT_BUFFER_OFFSET,
           ctx.resultOffset,
-        ).set(
-          new Uint8Array(
-            view.buffer,
-            view.byteOffset + RESULT_BUFFER_OFFSET,
-            ctx.resultOffset,
-          ),
-        );
-      }
+        ),
+      );
     }
+  }
+
   const tables = ctx.tables ?? (ctx.table ? [ctx.table] : []);
   const num_tables = Math.min(tables.length, 16);
   write_u32(activeView, ctx_off + VM_CTX_NUM_TABLES, num_tables);
@@ -2454,31 +2470,33 @@ export function executeVmStepWithRunner(
     meta._syncedInSetsRef = ctx.inSets;
   }
 
-  // Sync cursors
-  for (let c = 0; c < 16; c++) {
-    const cur = (ctx.cursors && ctx.cursors[c]) ?? (c === 0 ? ctx.cursor : undefined);
-    const cur_off = vm_cursor_off(ctx_off, c);
-    if (cur) {
-      write_u32(activeView, cur_off + VM_CUR_PAGE_ID, cur.pageId);
-      write_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID, cur.rootPageId ?? 0);
-      write_i32(activeView, cur_off + VM_CUR_SLOT_IDX, cur.slotIdx);
-      write_i32(activeView, cur_off + VM_CUR_CELL_IDX, cur.cellIdx);
-      write_u32(activeView, cur_off + VM_CUR_ROW_OFFSET, cur.rowOffset);
+  if (!fastHost) {
+    // Sync cursors
+    for (let c = 0; c < 16; c++) {
+      const cur = (ctx.cursors && ctx.cursors[c]) ?? (c === 0 ? ctx.cursor : undefined);
+      const cur_off = vm_cursor_off(ctx_off, c);
+      if (cur) {
+        write_u32(activeView, cur_off + VM_CUR_PAGE_ID, cur.pageId);
+        write_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID, cur.rootPageId ?? 0);
+        write_i32(activeView, cur_off + VM_CUR_SLOT_IDX, cur.slotIdx);
+        write_i32(activeView, cur_off + VM_CUR_CELL_IDX, cur.cellIdx);
+        write_u32(activeView, cur_off + VM_CUR_ROW_OFFSET, cur.rowOffset);
+      }
     }
-  }
 
-  // Sync registers changed on host since last step
-  const lastRegs: any[] = meta._lastSyncedRegs;
-  for (let r = 0; r < 64; r++) {
-    if (ctx.registers[r] !== lastRegs[r]) {
-      writeValueToSlot(
-        activeView,
-        ctx_off,
-        arena_base,
-        vm_reg_off(ctx_off, r),
-        ctx.registers[r],
-      );
-      lastRegs[r] = ctx.registers[r];
+    // Sync registers changed on host since last step
+    const lastRegs: any[] = meta._lastSyncedRegs;
+    for (let r = 0; r < 64; r++) {
+      if (ctx.registers[r] !== lastRegs[r]) {
+        writeValueToSlot(
+          activeView,
+          ctx_off,
+          arena_base,
+          vm_reg_off(ctx_off, r),
+          ctx.registers[r],
+        );
+        lastRegs[r] = ctx.registers[r];
+      }
     }
   }
 
@@ -2559,56 +2577,73 @@ export function executeVmStepWithRunner(
   // Sync back scalar fields
   ctx.pc = read_u32(activeView, ctx_off + VM_CTX_PC);
   ctx.status = status as VmStatus;
-  ctx.fault_page_id = read_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID);
   ctx.resultCount = read_u32(activeView, ctx_off + VM_CTX_RESULT_COUNT);
   ctx.resultOffset = read_u32(activeView, ctx_off + VM_CTX_RESULT_OFFSET);
   ctx.arenaOffset = read_u32(activeView, ctx_off + VM_CTX_ARENA_OFFSET);
 
-  // Sync back cursors
-  for (let c = 0; c < 16; c++) {
-    const cur_off = vm_cursor_off(ctx_off, c);
-    const cur = ctx.cursors[c];
-    if (cur) {
-      cur.pageId = read_u32(activeView, cur_off + VM_CUR_PAGE_ID);
-      cur.rootPageId = read_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID);
-      cur.slotIdx = read_i32(activeView, cur_off + VM_CUR_SLOT_IDX);
-      cur.cellIdx = read_i32(activeView, cur_off + VM_CUR_CELL_IDX);
-      cur.rowOffset = read_u32(activeView, cur_off + VM_CUR_ROW_OFFSET);
+  if (fastHost) {
+    if (status === VmStatus.PAGE_FAULT) {
+      ctx.fault_page_id = read_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID);
+      for (let c = 0; c < 16; c++) {
+        const cur = ctx.cursors[c];
+        if (cur) {
+          cur.pageId = read_u32(
+            activeView,
+            vm_cursor_off(ctx_off, c) + VM_CUR_PAGE_ID,
+          );
+        }
+      }
     }
-  }
-  if (ctx.cursor && ctx.cursors && ctx.cursor !== ctx.cursors[0]) {
-    Object.assign(ctx.cursor, ctx.cursors[0]);
-  }
+  } else {
+    ctx.fault_page_id = read_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID);
 
-  // Sync back registers
-  for (let r = 0; r < 64; r++) {
-    const val = readValueFromSlot(activeView, vm_reg_off(ctx_off, r));
-    ctx.registers[r] = val;
-    lastRegs[r] = val;
-  }
+    // Sync back cursors
+    for (let c = 0; c < 16; c++) {
+      const cur_off = vm_cursor_off(ctx_off, c);
+      const cur = ctx.cursors[c];
+      if (cur) {
+        cur.pageId = read_u32(activeView, cur_off + VM_CUR_PAGE_ID);
+        cur.rootPageId = read_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID);
+        cur.slotIdx = read_i32(activeView, cur_off + VM_CUR_SLOT_IDX);
+        cur.cellIdx = read_i32(activeView, cur_off + VM_CUR_CELL_IDX);
+        cur.rowOffset = read_u32(activeView, cur_off + VM_CUR_ROW_OFFSET);
+      }
+    }
+    if (ctx.cursor && ctx.cursors && ctx.cursor !== ctx.cursors[0]) {
+      Object.assign(ctx.cursor, ctx.cursors[0]);
+    }
 
-  // Sync back aggregator metadata in-place
-  for (let a = 0; a < 4; a++) {
-    const agg_off = ctx_off + VM_CTX_AGGS_OFF + a * VM_AGG_SIZE;
-    if (read_u8(activeView, agg_off + VM_AGG_IS_OPEN) !== 0) {
-      const cap = read_u32(activeView, agg_off + VM_AGG_CAPACITY);
-      const occ = read_u32(activeView, agg_off + VM_AGG_OCCUPIED);
-      const rIdx = read_u32(activeView, agg_off + VM_AGG_READ_IDX);
-      if (ctx.aggregators[a]) {
-        ctx.aggregators[a].capacity = cap;
-        ctx.aggregators[a].occupiedCount = occ;
-        ctx.aggregators[a].readIdx = rIdx;
-      } else {
-        ctx.aggregators[a] = {
-          mode: read_u8(activeView, agg_off + VM_AGG_MODE),
-          startKeyReg: read_u8(activeView, agg_off + VM_AGG_START_KEY_REG),
-          numKeys: read_u8(activeView, agg_off + VM_AGG_NUM_KEYS),
-          capacity: cap,
-          occupiedCount: occ,
-          readIdx: rIdx,
-          buckets: [],
-          currentBucket: null,
-        };
+    // Sync back registers
+    const lastRegs: any[] = meta._lastSyncedRegs;
+    for (let r = 0; r < 64; r++) {
+      const val = readValueFromSlot(activeView, vm_reg_off(ctx_off, r));
+      ctx.registers[r] = val;
+      lastRegs[r] = val;
+    }
+
+    // Sync back aggregator metadata in-place
+    for (let a = 0; a < 4; a++) {
+      const agg_off = ctx_off + VM_CTX_AGGS_OFF + a * VM_AGG_SIZE;
+      if (read_u8(activeView, agg_off + VM_AGG_IS_OPEN) !== 0) {
+        const cap = read_u32(activeView, agg_off + VM_AGG_CAPACITY);
+        const occ = read_u32(activeView, agg_off + VM_AGG_OCCUPIED);
+        const rIdx = read_u32(activeView, agg_off + VM_AGG_READ_IDX);
+        if (ctx.aggregators[a]) {
+          ctx.aggregators[a].capacity = cap;
+          ctx.aggregators[a].occupiedCount = occ;
+          ctx.aggregators[a].readIdx = rIdx;
+        } else {
+          ctx.aggregators[a] = {
+            mode: read_u8(activeView, agg_off + VM_AGG_MODE),
+            startKeyReg: read_u8(activeView, agg_off + VM_AGG_START_KEY_REG),
+            numKeys: read_u8(activeView, agg_off + VM_AGG_NUM_KEYS),
+            capacity: cap,
+            occupiedCount: occ,
+            readIdx: rIdx,
+            buckets: [],
+            currentBucket: null,
+          };
+        }
       }
     }
   }

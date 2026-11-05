@@ -4,8 +4,12 @@
  */
 
 import { getWebDbCoreWasmBytes } from "./embedded_wasm.ts";
-import { PAGE_TYPE_LEAF_DATA } from "../../constants.ts";
+import { PAGE_TYPE_LEAF_DATA, BYTECODE_OFFSET } from "../../constants.ts";
+import { DataType } from "../../types/index.ts";
+import { UuidCodec, UlidCodec } from "../js/codecs.c.ts";
 import * as jsCore from "../js/index.ts";
+
+const wasmTextEncoder = new TextEncoder();
 
 export interface WasmCoreExports {
   instance: WebAssembly.Instance;
@@ -36,6 +40,9 @@ export interface WasmCoreExports {
   page_insert_row: (view: DataView, page_offset: number, row_bytes: Uint8Array, scratchpad_offset?: number) => number;
   page_delete_row: (view: DataView, page_offset: number, cell_idx: number) => void;
   page_update_row: (view: DataView, page_offset: number, cell_idx: number, new_row_bytes: Uint8Array, scratchpad_offset?: number) => boolean;
+  page_insert_index_leaf_cell: (view: DataView, page_offset: number, key_type: DataType, key_value: any, rowid: bigint, scratchpad_offset?: number) => number;
+  page_delete_index_leaf_cell: (view: DataView, page_offset: number, slot_idx: number) => void;
+  page_binary_search_index_leaf: (view: DataView, page_offset: number, target_type: DataType, target_value: any, target_row_id?: bigint) => { found: boolean; slot_idx: number };
 
   // Page Table
   page_table_hash: (page_id: number, mask: number) => number;
@@ -96,6 +103,14 @@ export function createWasmCore(
 
   const getAbsOffset = (view: DataView | Uint8Array, offset: number = 0) => {
     return view.byteOffset + offset;
+  };
+
+  let cachedMemU8 = new Uint8Array(memory.buffer);
+  const getMemU8 = () => {
+    if (cachedMemU8.buffer !== memory.buffer) {
+      cachedMemU8 = new Uint8Array(memory.buffer);
+    }
+    return cachedMemU8;
   };
 
   const wasmExports: WasmCoreExports = {
@@ -177,11 +192,10 @@ export function createWasmCore(
     },
 
     page_compact: (view, page_offset, scratchpad_offset = 0, replacement) => {
-      if (replacement) {
-        // Fall back to JS core for replacement cell compaction edge-cases
+      if (replacement || view.buffer !== memory.buffer) {
         jsCore.page_compact(view, page_offset, scratchpad_offset, replacement);
       } else {
-        exp.page_compact(getAbsOffset(view, page_offset), scratchpad_offset, -1, 0, 0);
+        exp.page_compact_raw(getAbsOffset(view, page_offset), scratchpad_offset);
       }
     },
 
@@ -190,7 +204,16 @@ export function createWasmCore(
     },
 
     page_insert_row: (view, page_offset, row_bytes, scratchpad_offset = 0) => {
-      // Direct call into JS or WASM
+      if (view.buffer === memory.buffer && exp.page_insert_row_raw) {
+        const memU8 = getMemU8();
+        memU8.set(row_bytes, BYTECODE_OFFSET);
+        return exp.page_insert_row_raw(
+          getAbsOffset(view, page_offset),
+          BYTECODE_OFFSET,
+          row_bytes.byteLength,
+          scratchpad_offset,
+        );
+      }
       return jsCore.page_insert_row(view, page_offset, row_bytes, scratchpad_offset);
     },
 
@@ -200,6 +223,90 @@ export function createWasmCore(
 
     page_update_row: (view, page_offset, cell_idx, new_row_bytes, scratchpad_offset = 0) => {
       return jsCore.page_update_row(view, page_offset, cell_idx, new_row_bytes, scratchpad_offset);
+    },
+
+    page_insert_index_leaf_cell: (view, page_offset, key_type, key_value, rowid, scratchpad_offset = 0) => {
+      if (view.buffer === memory.buffer && exp.page_insert_index_cell_raw) {
+        const absPageOff = getAbsOffset(view, page_offset);
+        if (key_type === DataType.NULL || key_value === null || key_value === undefined) {
+          return exp.page_insert_index_cell_raw(absPageOff, DataType.NULL, 0n, 0.0, 0, 0, rowid, scratchpad_offset);
+        }
+        if (key_type === DataType.INT32) {
+          return exp.page_insert_index_cell_raw(absPageOff, DataType.INT32, 0n, Number(key_value) | 0, 0, 4, rowid, scratchpad_offset);
+        }
+        if (key_type === DataType.INT64) {
+          const bi = BigInt(key_value);
+          return exp.page_insert_index_cell_raw(absPageOff, DataType.INT64, bi, Number(bi), 0, 8, rowid, scratchpad_offset);
+        }
+        if (key_type === DataType.FLOAT64) {
+          return exp.page_insert_index_cell_raw(absPageOff, DataType.FLOAT64, 0n, Number(key_value), 0, 8, rowid, scratchpad_offset);
+        }
+        const memU8 = getMemU8();
+        let keyLen = 0;
+        if (key_type === DataType.UUID) {
+          UuidCodec.encode(String(key_value), memU8, BYTECODE_OFFSET);
+          keyLen = 16;
+        } else if (key_type === DataType.ULID) {
+          UlidCodec.encode(String(key_value), memU8, BYTECODE_OFFSET);
+          keyLen = 16;
+        } else if (key_type === DataType.TEXT) {
+          keyLen = wasmTextEncoder.encodeInto(String(key_value), memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + 8192)).written;
+        } else {
+          const bytes = key_value instanceof Uint8Array ? key_value : new Uint8Array(key_value);
+          keyLen = bytes.byteLength;
+          memU8.set(bytes, BYTECODE_OFFSET);
+        }
+        return exp.page_insert_index_cell_raw(absPageOff, key_type, 0n, 0.0, BYTECODE_OFFSET, keyLen, rowid, scratchpad_offset);
+      }
+      return jsCore.page_insert_index_leaf_cell(view, page_offset, key_type, key_value, rowid, scratchpad_offset);
+    },
+
+    page_delete_index_leaf_cell: (view, page_offset, slot_idx) => {
+      if (view.buffer === memory.buffer && exp.page_delete_index_leaf_cell) {
+        exp.page_delete_index_leaf_cell(getAbsOffset(view, page_offset), slot_idx);
+      } else {
+        jsCore.page_delete_index_leaf_cell(view, page_offset, slot_idx);
+      }
+    },
+
+    page_binary_search_index_leaf: (view, page_offset, target_type, target_value, target_row_id) => {
+      if (view.buffer === memory.buffer && exp.page_binary_search_index_raw) {
+        const absPageOff = getAbsOffset(view, page_offset);
+        const hasRowid = target_row_id !== undefined ? 1 : 0;
+        const rowidVal = target_row_id !== undefined ? target_row_id : 0n;
+        let effType = target_type;
+        if (target_type === DataType.NULL || target_value === null || target_value === undefined) {
+          effType = DataType.NULL;
+        }
+        if (
+          effType === DataType.NULL ||
+          effType === DataType.INT32 ||
+          effType === DataType.INT64 ||
+          effType === DataType.FLOAT64
+        ) {
+          const numF64 = effType === DataType.NULL ? 0.0 : typeof target_value === "bigint" ? Number(target_value) : Number(target_value);
+          const res = exp.page_binary_search_index_raw(absPageOff, effType, numF64, 0, 0, hasRowid, rowidVal);
+          return res >= 0 ? { found: true, slot_idx: res } : { found: false, slot_idx: -res - 1 };
+        }
+        const memU8 = getMemU8();
+        let keyLen = 0;
+        if (effType === DataType.UUID) {
+          UuidCodec.encode(String(target_value), memU8, BYTECODE_OFFSET);
+          keyLen = 16;
+        } else if (effType === DataType.ULID) {
+          UlidCodec.encode(String(target_value), memU8, BYTECODE_OFFSET);
+          keyLen = 16;
+        } else if (effType === DataType.TEXT) {
+          keyLen = wasmTextEncoder.encodeInto(String(target_value), memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + 8192)).written;
+        } else {
+          const bytes = target_value instanceof Uint8Array ? target_value : new Uint8Array(target_value);
+          keyLen = bytes.byteLength;
+          memU8.set(bytes, BYTECODE_OFFSET);
+        }
+        const res = exp.page_binary_search_index_raw(absPageOff, effType, 0.0, BYTECODE_OFFSET, keyLen, hasRowid, rowidVal);
+        return res >= 0 ? { found: true, slot_idx: res } : { found: false, slot_idx: -res - 1 };
+      }
+      return jsCore.page_binary_search_index_leaf(view, page_offset, target_type, target_value, target_row_id);
     },
 
     // Page Table

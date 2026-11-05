@@ -113,6 +113,7 @@ export class BufferPoolDriver {
   readonly pin_counts: Uint32Array;
   readonly slot_dirty_generations: Uint32Array;
   readonly ref_bits: Uint8Array;
+  private readonly slot_views: DataView[];
   private clock_hand: number = 0;
   private arena_offset: number = 0;
 
@@ -161,6 +162,14 @@ export class BufferPoolDriver {
     this.ref_bits = new Uint8Array(this.slotCount);
     this.pin_counts = new Uint32Array(this.slotCount);
     this.slot_dirty_generations = new Uint32Array(this.slotCount);
+    this.slot_views = new Array<DataView>(this.slotCount);
+    for (let i = 0; i < this.slotCount; i++) {
+      this.slot_views[i] = new DataView(
+        this.buffer,
+        i * PAGE_SIZE,
+        PAGE_SIZE,
+      );
+    }
 
     if (options.io) {
       this.io = options.io;
@@ -241,7 +250,17 @@ export class BufferPoolDriver {
 
   getSlotDataView(slotIdx: number): DataView {
     this.validate_slot_idx(slotIdx);
-    return new DataView(this.buffer, slotIdx * PAGE_SIZE, PAGE_SIZE);
+    const cached = this.slot_views[slotIdx];
+    if (cached && cached.buffer === this.wasmMemory.buffer) {
+      return cached;
+    }
+    const fresh = new DataView(
+      this.wasmMemory.buffer,
+      slotIdx * PAGE_SIZE,
+      PAGE_SIZE,
+    );
+    this.slot_views[slotIdx] = fresh;
+    return fresh;
   }
 
   getResidentSlot(pageId: number): number {
