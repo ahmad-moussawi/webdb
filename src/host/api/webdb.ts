@@ -297,10 +297,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       Math.max(slotCount, DEFAULT_SLOT_COUNT),
       maxQueryMemory,
     );
-    const envCore =
-      typeof process !== "undefined" &&
-      (process.env?.WEBDB_CORE === "wasm" || process.env?.WEBDB_CORE === "js")
-        ? process.env.WEBDB_CORE
+    const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
+    const envCore: "js" | "wasm" | undefined =
+      procEnv === "wasm" || procEnv === "js"
+        ? procEnv
         : (globalThis as any).__WEBDB_DEFAULT_CORE__;
     const coreMode = options.core ?? envCore ?? "js";
     let wasmCore: WasmCoreExports | undefined;

@@ -99,17 +99,17 @@ import {
 } from "./wasm/wasm_core.js";
 
 let _defaultWasmCore: WasmCoreExports | null = null;
-const _poolWasmCores = new WeakMap<ArrayBuffer, WasmCoreExports>();
+const _poolWasmCores = new WeakMap<ArrayBufferLike, WasmCoreExports>();
 
 export function vm_step(
   ctx: VmContext,
   view: DataView,
   bytecode: Uint8Array,
 ): VmStatus {
-  const envCore =
-    typeof process !== "undefined" &&
-    (process.env?.WEBDB_CORE === "wasm" || process.env?.WEBDB_CORE === "js")
-      ? process.env.WEBDB_CORE
+  const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
+  const envCore: "js" | "wasm" | undefined =
+    procEnv === "wasm" || procEnv === "js"
+      ? procEnv
       : (globalThis as any).__WEBDB_DEFAULT_CORE__;
 
   if (envCore === "wasm") {

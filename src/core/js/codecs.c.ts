@@ -14,7 +14,7 @@ export const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /**
  * @export_c
  */
-function hex_val(c: i32): i32 {
+export function hex_val(c: i32): i32 {
   if (c >= 48 && c <= 57) return c - 48;
   if (c >= 97 && c <= 102) return c - 97 + 10;
   if (c >= 65 && c <= 70) return c - 65 + 10;
@@ -24,7 +24,7 @@ function hex_val(c: i32): i32 {
 /**
  * @export_c
  */
-function crockford_decode(c: i32): i32 {
+export function crockford_decode(c: i32): i32 {
   if (c >= 48 && c <= 57) return c - 48;
   if (c >= 97 && c <= 122) c = c - 32;
 
