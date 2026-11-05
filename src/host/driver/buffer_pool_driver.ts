@@ -51,7 +51,8 @@ export function createWasmMemory(
   maxQueryMemory: number = DEFAULT_MAX_QUERY_MEMORY,
 ): WebAssembly.Memory {
   const offsets = computeBufferPoolOffsets(slotCount, maxQueryMemory);
-  const initial_bytes = offsets.transientArenaOffset + 256 * 1024;
+  const initial_bytes =
+    offsets.transientArenaOffset + Math.min(maxQueryMemory, 2 * 1024 * 1024);
   const initial_wasm_pages = Math.ceil(initial_bytes / 65536);
   const max_wasm_pages = Math.ceil(
     (offsets.transientArenaOffset + maxQueryMemory) / 65536,

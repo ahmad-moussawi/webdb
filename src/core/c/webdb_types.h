@@ -103,6 +103,7 @@ static inline void store_f64(void *p, double v) {
 #define MAX_TABLES_PAGE1 16
 #define MAX_INDEXES_PAGE1 8
 #define MAX_INDEX_COLUMNS 8
+#define MAX_TOPK_HEAP_LIMIT 10000
 #define NULL_BITMAP_BYTES ((MAX_COLUMNS_PER_TABLE + 7) / 8) // 32 bytes
 
 // ============================================================================
@@ -191,7 +192,15 @@ typedef enum {
   DATA_TYPE_TEXT    = 4,
   DATA_TYPE_BLOB    = 5,
   DATA_TYPE_UUID    = 6,
-  DATA_TYPE_ULID    = 7
+  DATA_TYPE_ULID    = 7,
+  TYPE_NULL         = 0,
+  TYPE_INT32        = 1,
+  TYPE_INT64        = 2,
+  TYPE_FLOAT64      = 3,
+  TYPE_TEXT         = 4,
+  TYPE_BLOB         = 5,
+  TYPE_UUID         = 6,
+  TYPE_ULID         = 7
 } DataType;
 
 // ============================================================================
@@ -222,20 +231,21 @@ typedef enum {
 // VM Execution Status & OpCodes
 // ============================================================================
 typedef enum {
-  VM_STATUS_INIT             = 0,
-  VM_STATUS_RUNNING          = 1,
-  VM_STATUS_YIELD            = 2,
-  VM_STATUS_PAGE_FAULT       = 3,
-  VM_STATUS_DONE             = 4,
-  VM_STATUS_ERROR            = 5,
-  VM_STATUS_TIMEOUT          = 6,
-  VM_STATUS_BUFFER_FULL      = 7,
-  VM_STATUS_INVALID_BYTECODE = 8
+  VM_STATUS_RUNNING          = 0,
+  VM_STATUS_DONE             = 1,
+  VM_STATUS_PAGE_FAULT       = 2,
+  VM_STATUS_BUFFER_FULL      = 3,
+  VM_STATUS_ERROR            = 4,
+  VM_STATUS_TIMEOUT          = 5,
+  VM_STATUS_ARENA_EXHAUSTED  = 6,
+  VM_STATUS_INVALID_BYTECODE = 7,
+  VM_STATUS_HOST_UDF         = 99
 } VmStatus;
 
 typedef enum {
   OP_HALT               = 0x00,
   OP_OPEN_CURSOR        = 0x01,
+  OP_OPEN_READ          = 0x01,
   OP_REWIND             = 0x02,
   OP_NEXT_ROW           = 0x03,
   OP_COLUMN_INT         = 0x04,
@@ -298,25 +308,23 @@ typedef enum {
   OP_MUL                = 0x38,
   OP_DIV                = 0x39,
   OP_MOD                = 0x3a,
-  OP_NEGATE             = 0x3b,
-  OP_AND                = 0x3c,
-  OP_OR                 = 0x3d,
-  OP_NOT                = 0x3e,
+  OP_ENTER_SUBQUERY     = 0x3b,
+  OP_RETURN_SUBQUERY    = 0x3c,
+  OP_STR_CONCAT         = 0x3d,
+  OP_COALESCE           = 0x3e,
+  OP_COPY               = 0x3f,
 
-  OP_AGG_STEP           = 0x40,
-  OP_AGG_FINAL          = 0x41,
-  OP_GROUP_BY_KEY       = 0x42,
-  OP_GROUP_BY_EMIT      = 0x43,
+  OP_AGG_INIT           = 0x40,
+  OP_AGG_STEP           = 0x41,
+  OP_AGG_NEXT           = 0x42,
+  OP_AGG_FINAL          = 0x43,
 
-  OP_SEEK_ROWID         = 0x50,
-  OP_ROWID              = 0x51,
-  OP_INDEX_SEEK_LE      = 0x52,
-  OP_INDEX_PREV         = 0x53,
-  OP_INDEX_KEY_IS_NULL  = 0x54,
-  OP_INDEX_KEY_IS_NOT_NULL = 0x55,
-  OP_INDEX_REWIND       = 0x56,
-  OP_INDEX_LAST         = 0x57,
-  OP_COLUMN_VALUE       = 0x58
+  OP_REG_IS_NULL        = 0x48,
+  OP_REG_IS_NOT_NULL    = 0x49,
+
+  OP_DELETE_ROW         = 0x50,
+  OP_UPDATE_FIELD       = 0x51,
+  OP_INSERT_ROW         = 0x52
 } OpCode;
 
 #endif /* WEBDB_TYPES_H */

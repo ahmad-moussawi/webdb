@@ -684,12 +684,33 @@ export class TsToCTranspiler {
       return `((uint32_t)(${this.emitExpression(expr.arguments[0])}))`;
     }
 
+    if (calleeText === 'i64_to_f64' && expr.arguments.length === 1) {
+      return `((double)(${this.emitExpression(expr.arguments[0])}))`;
+    }
+    if (calleeText === 'i64_to_i32' && expr.arguments.length === 1) {
+      return `((int32_t)(${this.emitExpression(expr.arguments[0])}))`;
+    }
+    if (calleeText === 'f64_to_i64' && expr.arguments.length === 1) {
+      return `((int64_t)(${this.emitExpression(expr.arguments[0])}))`;
+    }
+    if (calleeText === 'f64_to_i32' && expr.arguments.length === 1) {
+      return `((int32_t)(${this.emitExpression(expr.arguments[0])}))`;
+    }
+
     // strlen(s) -> strlen(s)
     if (calleeText === 'strlen' && expr.arguments.length === 1) {
       return `strlen(${this.emitExpression(expr.arguments[0])})`;
     }
 
-    // Math.floor, Math.max, Math.min
+    // Math.floor, Math.trunc, Math.abs, Math.max, Math.min
+    if (calleeText === 'Math.trunc' && expr.arguments.length === 1) {
+      const arg = this.emitExpression(expr.arguments[0]);
+      return `((double)((int64_t)(${arg})))`;
+    }
+    if (calleeText === 'Math.abs' && expr.arguments.length === 1) {
+      const arg = this.emitExpression(expr.arguments[0]);
+      return `(((${arg}) < 0) ? -(${arg}) : (${arg}))`;
+    }
     if (calleeText === 'Math.floor' && expr.arguments.length === 1) {
       const arg = this.emitExpression(expr.arguments[0]);
       return `((int32_t)(${arg}))`;
@@ -836,6 +857,19 @@ export class TsToCTranspiler {
   private emitPropertyAccess(expr: ts.PropertyAccessExpression): string {
     const objText = expr.expression.getText();
     const propText = expr.name.text;
+
+    if (objText === 'OpCode') {
+      return propText;
+    }
+    if (objText === 'VmStatus') {
+      return `VM_STATUS_${propText}`;
+    }
+    if (objText === 'DataType') {
+      return `TYPE_${propText}`;
+    }
+    if (objText === 'ColumnFlag') {
+      return `COL_FLAG_${propText}`;
+    }
 
     // Handle length on arrays or buffers
     if (propText === 'length') {

@@ -84,12 +84,60 @@ export {
 // ============================================================================
 // Virtual Machine Execution Loop (@export_c)
 // ============================================================================
-export {
-  vm_step,
+import {
+  vm_step as js_vm_step,
   sql_like_match,
   compare_sorter_keys,
   fnv1a_32,
 } from "./js/vm.c.js";
+import { TOTAL_MEMORY_BYTES } from "../constants.js";
+import type { VmContext } from "../shared/index.js";
+import type { VmStatus } from "../types/index.js";
+import {
+  createWasmCore,
+  type WasmCoreExports,
+} from "./wasm/wasm_core.js";
+
+let _defaultWasmCore: WasmCoreExports | null = null;
+const _poolWasmCores = new WeakMap<ArrayBuffer, WasmCoreExports>();
+
+export function vm_step(
+  ctx: VmContext,
+  view: DataView,
+  bytecode: Uint8Array,
+): VmStatus {
+  const envCore =
+    typeof process !== "undefined" &&
+    (process.env?.WEBDB_CORE === "wasm" || process.env?.WEBDB_CORE === "js")
+      ? process.env.WEBDB_CORE
+      : (globalThis as any).__WEBDB_DEFAULT_CORE__;
+
+  if (envCore === "wasm") {
+    const pool = (view.buffer as any)?.__webdbPool;
+    if (pool?.wasmMemory) {
+      let core = _poolWasmCores.get(view.buffer);
+      if (!core) {
+        core = createWasmCore(pool.wasmMemory);
+        _poolWasmCores.set(view.buffer, core);
+      }
+      return core.vm_step(ctx, view, bytecode);
+    }
+    if (!_defaultWasmCore) {
+      const pages = Math.ceil(TOTAL_MEMORY_BYTES / 65536);
+      const mem = new WebAssembly.Memory({ initial: pages, maximum: pages });
+      _defaultWasmCore = createWasmCore(mem);
+    }
+    return _defaultWasmCore.vm_step(ctx, view, bytecode);
+  }
+
+  return js_vm_step(ctx, view, bytecode);
+}
+
+export {
+  sql_like_match,
+  compare_sorter_keys,
+  fnv1a_32,
+};
 
 // ============================================================================
 // Schema Catalog Operations (@export_c)

@@ -129,46 +129,21 @@ void catalog_write_fixed_string(uint32_t offset, const char * str, uint32_t max_
   }
 }
 
-int32_t catalog_find_free_table_slot(uint32_t page1_offset) {
-  for (uint32_t i = 0; i < MAX_TABLES_PAGE1; i++) {
-    uint32_t offset = page1_offset + MASTER_TABLE_OFFSET + i * TABLE_DESCRIPTOR_SIZE;
-    uint32_t table_id = load_u16((const void *)(uintptr_t)(offset));
-    if (table_id == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
+#ifndef MAX_DESCRIPTORS_PER_OVERFLOW_PAGE
+#define MAX_DESCRIPTORS_PER_OVERFLOW_PAGE 31
+#endif
+
+#ifndef CATALOG_PAGE_FLAG_TABLE_OVERFLOW
+#define CATALOG_PAGE_FLAG_TABLE_OVERFLOW 1
+#endif
+
+#ifndef CATALOG_PAGE_FLAG_INDEX_OVERFLOW
+#define CATALOG_PAGE_FLAG_INDEX_OVERFLOW 2
+#endif
 
 #ifndef MAX_INDEXES_PAGE1
 #define MAX_INDEXES_PAGE1 8
 #endif
-
-int32_t catalog_find_free_index_slot(uint32_t page1_offset) {
-  for (uint32_t i = 0; i < MAX_INDEXES_PAGE1; i++) {
-    uint32_t offset = page1_offset + INDEX_CATALOG_OFFSET + i * INDEX_DESCRIPTOR_SIZE;
-    uint32_t index_id = load_u16((const void *)(uintptr_t)(offset + 0));
-    if (index_id == 0) 
-      return i;
-  }
-  return -1;
-}
-
-int32_t catalog_delete_index_descriptor(uint32_t page1_offset, uint32_t slot_idx) {
-  if (slot_idx >= MAX_INDEXES_PAGE1) 
-    return -1;
-  uint32_t offset = page1_offset + INDEX_CATALOG_OFFSET + slot_idx * INDEX_DESCRIPTOR_SIZE;
-  webdb_memset((void *)(uintptr_t)(offset), 0, INDEX_DESCRIPTOR_SIZE);
-  return 0;
-}
-
-int32_t catalog_delete_table_descriptor(uint32_t page1_offset, uint32_t slot_idx) {
-  if (slot_idx >= MAX_TABLES_PAGE1) 
-    return -1;
-  uint32_t offset = page1_offset + MASTER_TABLE_OFFSET + slot_idx * TABLE_DESCRIPTOR_SIZE;
-  webdb_memset((void *)(uintptr_t)(offset), 0, TABLE_DESCRIPTOR_SIZE);
-  return 0;
-}
 
 void catalog_init_page(uint32_t page_offset, uint16_t table_id, uint16_t start_col_index, uint32_t next_col_catalog_page_id) {
   webdb_memset((void *)(uintptr_t)(page_offset), 0, PAGE_SIZE);

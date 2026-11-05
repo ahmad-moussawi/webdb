@@ -10,6 +10,20 @@
 // Standard C Memory Functions (<string.h>)
 // ============================================================================
 
+const u8Cache = new WeakMap<ArrayBufferLike, Uint8Array>();
+function getU8(target: Uint8Array | DataView): Uint8Array {
+  if (target instanceof Uint8Array) return target;
+  if (target.byteOffset === 0 && target.byteLength === target.buffer.byteLength) {
+    let cached = u8Cache.get(target.buffer);
+    if (!cached) {
+      cached = new Uint8Array(target.buffer);
+      u8Cache.set(target.buffer, cached);
+    }
+    return cached;
+  }
+  return new Uint8Array(target.buffer, target.byteOffset, target.byteLength);
+}
+
 /**
  * C: void *memcpy(void *dest, const void *src, size_t n);
  * Copies n bytes from memory area src to memory area dest.
@@ -21,9 +35,16 @@ export function memcpy(
   src_offset: number,
   n: number,
 ): void {
-  const d = dest instanceof Uint8Array ? dest : new Uint8Array(dest.buffer, dest.byteOffset, dest.byteLength);
-  const s = src instanceof Uint8Array ? src : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
-  d.set(s.subarray(src_offset, src_offset + n), dest_offset);
+  if (n <= 0) return;
+  const d = getU8(dest);
+  const s = getU8(src);
+  if (d === s) {
+    d.copyWithin(dest_offset, src_offset, src_offset + n);
+  } else {
+    for (let i = 0; i < n; i++) {
+      d[dest_offset + i] = s[src_offset + i];
+    }
+  }
 }
 
 /**
@@ -36,7 +57,8 @@ export function memset(
   c: number,
   n: number,
 ): void {
-  const d = dest instanceof Uint8Array ? dest : new Uint8Array(dest.buffer, dest.byteOffset, dest.byteLength);
+  if (n <= 0) return;
+  const d = getU8(dest);
   d.fill(c & 0xff, dest_offset, dest_offset + n);
 }
 
@@ -52,8 +74,8 @@ export function memcmp(
   s2_offset: number,
   n: number,
 ): number {
-  const b1 = s1 instanceof Uint8Array ? s1 : new Uint8Array(s1.buffer, s1.byteOffset, s1.byteLength);
-  const b2 = s2 instanceof Uint8Array ? s2 : new Uint8Array(s2.buffer, s2.byteOffset, s2.byteLength);
+  const b1 = getU8(s1);
+  const b2 = getU8(s2);
   for (let i = 0; i < n; i++) {
     const diff = b1[s1_offset + i] - b2[s2_offset + i];
     if (diff !== 0) return diff;
@@ -136,6 +158,22 @@ export function read_i64(view: DataView, offset: number): bigint {
 
 export function write_i64(view: DataView, offset: number, val: bigint): void {
   view.setBigInt64(offset, val, true);
+}
+
+export function i64_to_f64(val: bigint): number {
+  return Number(val);
+}
+
+export function i64_to_i32(val: bigint): number {
+  return Number(val) | 0;
+}
+
+export function f64_to_i64(val: number): bigint {
+  return BigInt(Math.trunc(val));
+}
+
+export function f64_to_i32(val: number): number {
+  return Math.trunc(val) | 0;
 }
 
 // ============================================================================

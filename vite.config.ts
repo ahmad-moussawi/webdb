@@ -26,6 +26,28 @@ export default defineConfig({
       'rxjs': resolve(__dirname, 'tests/helpers/framework_test_harness.ts'),
       'vue': resolve(__dirname, 'tests/helpers/framework_test_harness.ts'),
     },
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'js',
+          include: ['tests/**/*.test.ts'],
+          env: {
+            WEBDB_CORE: 'js',
+          },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'wasm',
+          include: ['tests/**/*.test.ts'],
+          env: {
+            WEBDB_CORE: 'wasm',
+          },
+        },
+      },
+    ],
   },
   build: {
     lib: {

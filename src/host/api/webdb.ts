@@ -297,7 +297,12 @@ export class WebDB implements IDatabaseQueryExecutor {
       Math.max(slotCount, DEFAULT_SLOT_COUNT),
       maxQueryMemory,
     );
-    const coreMode = options.core ?? "js";
+    const envCore =
+      typeof process !== "undefined" &&
+      (process.env?.WEBDB_CORE === "wasm" || process.env?.WEBDB_CORE === "js")
+        ? process.env.WEBDB_CORE
+        : (globalThis as any).__WEBDB_DEFAULT_CORE__;
+    const coreMode = options.core ?? envCore ?? "js";
     let wasmCore: WasmCoreExports | undefined;
     if (coreMode === "wasm") {
       wasmCore = createWasmCore(
@@ -3573,8 +3578,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.vmCtx.outputColumns = outputColumns;
 
     const rows: DbRow[] = [];
+    const stepFn = this.wasmCore ? this.wasmCore.vm_step : vm_step;
     while (true) {
-      const status = vm_step(this.vmCtx, this.pool.view, bytecode);
+      const status = stepFn(this.vmCtx, this.pool.view, bytecode);
 
       // Hydrate rows from Output Result Buffer for current chunk
       let currentOffset = 0;

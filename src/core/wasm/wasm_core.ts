@@ -4,9 +4,7 @@
  */
 
 import { getWebDbCoreWasmBytes } from "./embedded_wasm.ts";
-import {
-  PAGE_TYPE_LEAF_DATA,
-} from "../../constants.ts";
+import { PAGE_TYPE_LEAF_DATA } from "../../constants.ts";
 import * as jsCore from "../js/index.ts";
 
 export interface WasmCoreExports {
@@ -347,7 +345,16 @@ export function createWasmCore(
     },
 
     compare_sorter_keys: jsCore.compare_sorter_keys,
-    vm_step: jsCore.vm_step,
+    vm_step: (ctx, view, bytecode) => {
+      return jsCore.executeVmStepWithRunner(
+        ctx,
+        view,
+        bytecode,
+        (_activeView, ctxOff, codeOff, codeLen, arenaBase) =>
+          exp.vm_step_raw(ctxOff, codeOff, codeLen, arenaBase),
+        memory.buffer,
+      );
+    },
   };
 
   return wasmExports;

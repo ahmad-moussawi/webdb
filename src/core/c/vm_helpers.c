@@ -4,11 +4,1788 @@
  */
 
 #include "vm_helpers.h"
+#include "page.h"
+#include "buffer_pool.h"
+#include "codecs.h"
+
+#ifndef VM_CTX_PC
+#define VM_CTX_PC 0
+#endif
+
+#ifndef VM_CTX_STATUS
+#define VM_CTX_STATUS 4
+#endif
+
+#ifndef VM_CTX_FAULT_PAGE_ID
+#define VM_CTX_FAULT_PAGE_ID 8
+#endif
+
+#ifndef VM_CTX_RESULT_COUNT
+#define VM_CTX_RESULT_COUNT 12
+#endif
+
+#ifndef VM_CTX_RESULT_OFFSET
+#define VM_CTX_RESULT_OFFSET 16
+#endif
+
+#ifndef VM_CTX_ARENA_OFFSET
+#define VM_CTX_ARENA_OFFSET 20
+#endif
+
+#ifndef VM_CTX_MAX_QUERY_MEMORY
+#define VM_CTX_MAX_QUERY_MEMORY 24
+#endif
+
+#ifndef VM_CTX_HAS_BUFFER_POOL
+#define VM_CTX_HAS_BUFFER_POOL 28
+#endif
+
+#ifndef VM_CTX_NUM_TABLES
+#define VM_CTX_NUM_TABLES 32
+#endif
+
+#ifndef VM_CTX_NUM_OUTPUT_COLS
+#define VM_CTX_NUM_OUTPUT_COLS 36
+#endif
+
+#ifndef VM_CTX_NUM_KEY_INFOS
+#define VM_CTX_NUM_KEY_INFOS 40
+#endif
+
+#ifndef VM_CTX_NUM_IN_SETS
+#define VM_CTX_NUM_IN_SETS 44
+#endif
+
+#ifndef VM_CTX_UDF_ID
+#define VM_CTX_UDF_ID 48
+#endif
+
+#ifndef VM_CTX_UDF_START_REG
+#define VM_CTX_UDF_START_REG 52
+#endif
+
+#ifndef VM_CTX_UDF_NUM_ARGS
+#define VM_CTX_UDF_NUM_ARGS 56
+#endif
+
+#ifndef VM_CTX_UDF_DEST_REG
+#define VM_CTX_UDF_DEST_REG 60
+#endif
+
+#ifndef VM_CTX_PHYS_ARENA_USED
+#define VM_CTX_PHYS_ARENA_USED 64
+#endif
+
+#ifndef VM_CTX_CURRENT_BUCKET_OFF
+#define VM_CTX_CURRENT_BUCKET_OFF 68
+#endif
+
+#ifndef VM_CTX_REGISTERS_OFF
+#define VM_CTX_REGISTERS_OFF 72
+#endif
+
+#ifndef VM_REG_SIZE
+#define VM_REG_SIZE 32
+#endif
+
+#ifndef VM_REG_IS_NULL
+#define VM_REG_IS_NULL 0
+#endif
+
+#ifndef VM_REG_TYPE
+#define VM_REG_TYPE 1
+#endif
+
+#ifndef VM_REG_I32
+#define VM_REG_I32 4
+#endif
+
+#ifndef VM_REG_I64
+#define VM_REG_I64 8
+#endif
+
+#ifndef VM_REG_F64
+#define VM_REG_F64 16
+#endif
+
+#ifndef VM_REG_DATA_OFF
+#define VM_REG_DATA_OFF 24
+#endif
+
+#ifndef VM_REG_DATA_LEN
+#define VM_REG_DATA_LEN 28
+#endif
+
+#ifndef VM_CTX_CURSORS_OFF
+#define VM_CTX_CURSORS_OFF 2120
+#endif
+
+#ifndef VM_CURSOR_SIZE
+#define VM_CURSOR_SIZE 24
+#endif
+
+#ifndef VM_CUR_PAGE_ID
+#define VM_CUR_PAGE_ID 0
+#endif
+
+#ifndef VM_CUR_ROOT_PAGE_ID
+#define VM_CUR_ROOT_PAGE_ID 4
+#endif
+
+#ifndef VM_CUR_SLOT_IDX
+#define VM_CUR_SLOT_IDX 8
+#endif
+
+#ifndef VM_CUR_CELL_IDX
+#define VM_CUR_CELL_IDX 12
+#endif
+
+#ifndef VM_CUR_ROW_OFFSET
+#define VM_CUR_ROW_OFFSET 16
+#endif
+
+#ifndef VM_CUR_FLAGS
+#define VM_CUR_FLAGS 20
+#endif
+
+#ifndef VM_CTX_TABLES_OFF
+#define VM_CTX_TABLES_OFF 2504
+#endif
+
+#ifndef VM_TABLE_DESC_SIZE
+#define VM_TABLE_DESC_SIZE 260
+#endif
+
+#ifndef VM_CTX_OUTPUT_COLS_OFF
+#define VM_CTX_OUTPUT_COLS_OFF 6664
+#endif
+
+#ifndef VM_CTX_KEY_INFOS_OFF
+#define VM_CTX_KEY_INFOS_OFF 6928
+#endif
+
+#ifndef VM_KEY_INFO_SIZE
+#define VM_KEY_INFO_SIZE 32
+#endif
+
+#ifndef VM_KI_NUM_KEYS
+#define VM_KI_NUM_KEYS 0
+#endif
+
+#ifndef VM_KI_HAS_LIMIT
+#define VM_KI_HAS_LIMIT 1
+#endif
+
+#ifndef VM_KI_LIMIT
+#define VM_KI_LIMIT 4
+#endif
+
+#ifndef VM_KI_OFFSET
+#define VM_KI_OFFSET 8
+#endif
+
+#ifndef VM_KI_DIRECTIONS
+#define VM_KI_DIRECTIONS 12
+#endif
+
+#ifndef VM_KI_NULL_ORDERS
+#define VM_KI_NULL_ORDERS 20
+#endif
+
+#ifndef VM_CTX_SORTERS_OFF
+#define VM_CTX_SORTERS_OFF 7184
+#endif
+
+#ifndef VM_SORTER_SIZE
+#define VM_SORTER_SIZE 32
+#endif
+
+#ifndef VM_SRT_IS_OPEN
+#define VM_SRT_IS_OPEN 0
+#endif
+
+#ifndef VM_SRT_IS_SORTED
+#define VM_SRT_IS_SORTED 1
+#endif
+
+#ifndef VM_SRT_KEY_INFO_IDX
+#define VM_SRT_KEY_INFO_IDX 2
+#endif
+
+#ifndef VM_SRT_ENTRY_COUNT
+#define VM_SRT_ENTRY_COUNT 4
+#endif
+
+#ifndef VM_SRT_CAPACITY
+#define VM_SRT_CAPACITY 8
+#endif
+
+#ifndef VM_SRT_READ_IDX
+#define VM_SRT_READ_IDX 12
+#endif
+
+#ifndef VM_SRT_MAX_K
+#define VM_SRT_MAX_K 16
+#endif
+
+#ifndef VM_SRT_PTRS_OFF
+#define VM_SRT_PTRS_OFF 20
+#endif
+
+#ifndef VM_SRT_SCRATCH_OFF
+#define VM_SRT_SCRATCH_OFF 24
+#endif
+
+#ifndef VM_CTX_AGGS_OFF
+#define VM_CTX_AGGS_OFF 7312
+#endif
+
+#ifndef VM_AGG_SIZE
+#define VM_AGG_SIZE 32
+#endif
+
+#ifndef VM_AGG_IS_OPEN
+#define VM_AGG_IS_OPEN 0
+#endif
+
+#ifndef VM_AGG_MODE
+#define VM_AGG_MODE 1
+#endif
+
+#ifndef VM_AGG_START_KEY_REG
+#define VM_AGG_START_KEY_REG 2
+#endif
+
+#ifndef VM_AGG_NUM_KEYS
+#define VM_AGG_NUM_KEYS 3
+#endif
+
+#ifndef VM_AGG_CAPACITY
+#define VM_AGG_CAPACITY 4
+#endif
+
+#ifndef VM_AGG_OCCUPIED
+#define VM_AGG_OCCUPIED 8
+#endif
+
+#ifndef VM_AGG_READ_IDX
+#define VM_AGG_READ_IDX 12
+#endif
+
+#ifndef VM_AGG_BUCKETS_OFF
+#define VM_AGG_BUCKETS_OFF 16
+#endif
+
+#ifndef VM_AGG_CURR_BUCKET_OFF
+#define VM_AGG_CURR_BUCKET_OFF 20
+#endif
+
+#ifndef VM_CTX_IN_SETS_OFF
+#define VM_CTX_IN_SETS_OFF 7440
+#endif
+
+#ifndef VM_CTX_SCRATCH_OFF
+#define VM_CTX_SCRATCH_OFF 7680
+#endif
+
+#ifndef VM_STATUS_HOST_UDF
+#define VM_STATUS_HOST_UDF 99
+#endif
 
 int32_t to_lower_char(int32_t c) {
   if (c >= 65 && c <= 90) 
     return c + 32;
   return c;
+}
+
+int32_t to_upper_char(int32_t c) {
+  if (c >= 97 && c <= 122) 
+    return c - 32;
+  return c;
+}
+
+uint32_t vm_reg_off(uint32_t ctx_off, uint32_t reg_idx) {
+  return ctx_off + VM_CTX_REGISTERS_OFF + (reg_idx << 5);
+}
+
+uint32_t vm_cursor_off(uint32_t ctx_off, uint32_t cursor_idx) {
+  return ctx_off + VM_CTX_CURSORS_OFF + cursor_idx * VM_CURSOR_SIZE;
+}
+
+uint32_t vm_resolve_table_off(uint32_t ctx_off, uint32_t cursor_idx) {
+  uint32_t num_tables = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_NUM_TABLES));
+  if (cursor_idx < num_tables) {
+    return ctx_off + VM_CTX_TABLES_OFF + cursor_idx * VM_TABLE_DESC_SIZE;
+  }
+  return ctx_off + VM_CTX_TABLES_OFF;
+}
+
+uint32_t vm_phys_alloc(uint32_t ctx_off, uint32_t arena_base, uint32_t bytes) {
+  uint32_t aligned = (bytes + 7) & ((uint32_t)(~7));
+  uint32_t used = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PHYS_ARENA_USED));
+  if (used + aligned > DEFAULT_MAX_QUERY_MEMORY) {
+    return 0;
+  }
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PHYS_ARENA_USED), used + aligned);
+  return arena_base + used;
+}
+
+void vm_reg_set_null(uint32_t reg_off) {
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 1);
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_NULL);
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), 0);
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), 0LL);
+  store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
+}
+
+void vm_reg_set_i32(uint32_t reg_off, int32_t val) {
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_INT32);
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), val);
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), ((int64_t)(val)));
+  store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), val);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
+}
+
+void vm_reg_set_i64(uint32_t reg_off, int64_t val) {
+  double as_f64 = ((double)(val));
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_INT64);
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), ((int32_t)(val)));
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), val);
+  store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), as_f64);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
+}
+
+void vm_reg_set_f64(uint32_t reg_off, double val) {
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_FLOAT64);
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), ((int32_t)(val)));
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), ((int64_t)(val)));
+  store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), val);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
+}
+
+void vm_reg_set_slice(uint32_t reg_off, uint8_t col_type, uint32_t data_off, uint32_t data_len) {
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
+  store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), col_type);
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), 0);
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), 0LL);
+  store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), 0);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), data_off);
+  store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), data_len);
+}
+
+void vm_reg_copy(uint32_t dst_reg_off, uint32_t src_reg_off) {
+  if (dst_reg_off == src_reg_off) 
+    return;
+  webdb_memcpy((void *)(uintptr_t)(dst_reg_off), (const void *)(uintptr_t)(src_reg_off), VM_REG_SIZE);
+}
+
+int32_t vm_reg_clone_to_arena(uint32_t ctx_off, uint32_t arena_base, uint32_t dst_slot_off, uint32_t src_reg_off) {
+  webdb_memcpy((void *)(uintptr_t)(dst_slot_off), (const void *)(uintptr_t)(src_reg_off), VM_REG_SIZE);
+  uint8_t is_null = load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL));
+  if (is_null != 0) 
+    return 0;
+  uint8_t r_type = load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_TYPE));
+  if (r_type == TYPE_TEXT || r_type == TYPE_BLOB || r_type == TYPE_UUID || r_type == TYPE_ULID) {
+    uint32_t d_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
+    uint32_t d_len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
+    if (d_len > 0 && d_off < arena_base) {
+      uint32_t copy_off = vm_phys_alloc(ctx_off, arena_base, d_len);
+      if (copy_off == 0) 
+        return -1;
+      webdb_memcpy((void *)(uintptr_t)(copy_off), (const void *)(uintptr_t)(d_off), d_len);
+      store_u32((void *)(uintptr_t)(dst_slot_off + VM_REG_DATA_OFF), copy_off);
+    }
+  }
+  return 0;
+}
+
+uint8_t vm_hex_char(uint32_t nibble) {
+  return (nibble < 10 ? 48 + nibble : 87 + nibble);
+}
+
+uint8_t vm_crockford_char(uint32_t idx) {
+  if (idx < 10) 
+    return (48 + idx);
+  if (idx < 18) 
+    return (65 + (idx - 10));
+  if (idx == 18) 
+    return 74;
+  if (idx == 19) 
+    return 75;
+  if (idx == 20) 
+    return 77;
+  if (idx == 21) 
+    return 78;
+  if (idx < 26) 
+    return (80 + (idx - 22));
+  return (86 + (idx - 26));
+}
+
+void vm_uuid_decode_view(uint32_t src_off, uint32_t dst_off) {
+  uint32_t out_idx = 0;
+  for (uint32_t i = 0; i < 16; i++) {
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      store_u8((void *)(uintptr_t)(dst_off + out_idx), 45);
+      out_idx++;
+    }
+    uint32_t b = load_u8((const void *)(uintptr_t)(src_off + i));
+    store_u8((void *)(uintptr_t)(dst_off + out_idx), vm_hex_char((b >> 4) & 15));
+    out_idx++;
+    store_u8((void *)(uintptr_t)(dst_off + out_idx), vm_hex_char(b & 15));
+    out_idx++;
+  }
+}
+
+int32_t vm_uuid_encode_view(uint32_t src_off, uint32_t src_len, uint32_t dst_off) {
+  uint32_t clean_idx = 0;
+  int32_t hi = -1;
+  for (uint32_t i = 0; i < src_len; i++) {
+    int32_t c = load_u8((const void *)(uintptr_t)(src_off + i));
+    if (c != 45) {
+      if (clean_idx >= 32) 
+        return -1;
+      int32_t val = hex_val(c);
+      if (val < 0) 
+        return -1;
+      if ((clean_idx & 1) == 0) {
+        hi = val;
+      } else {
+        store_u8((void *)(uintptr_t)(dst_off + (clean_idx >> 1)), ((hi << 4) | val));
+      }
+      clean_idx++;
+    }
+  }
+  return clean_idx == 32 ? 0 : -1;
+}
+
+void vm_ulid_decode_view(uint32_t src_off, uint32_t dst_off) {
+  int64_t time = 0LL;
+  for (uint32_t i = 0; i < 6; i++) {
+    time = (time << 8LL) | ((uint64_t)(load_u8((const void *)(uintptr_t)(src_off + i))));
+  }
+  for (int32_t i = 9; i >= 0; i--) {
+    uint32_t rem = ((int32_t)(time & 31LL));
+    store_u8((void *)(uintptr_t)(dst_off + (i)), vm_crockford_char(rem));
+    time = time >> 5LL;
+  }
+  int64_t rand_hi = 0LL;
+  for (uint32_t i = 0; i < 5; i++) {
+    rand_hi = (rand_hi << 8LL) | ((uint64_t)(load_u8((const void *)(uintptr_t)(src_off + 6 + i))));
+  }
+  int64_t rand_lo = 0LL;
+  for (uint32_t i = 0; i < 5; i++) {
+    rand_lo = (rand_lo << 8LL) | ((uint64_t)(load_u8((const void *)(uintptr_t)(src_off + 11 + i))));
+  }
+  for (int32_t i = 25; i >= 18; i--) {
+    uint32_t rem = ((int32_t)(rand_lo & 31LL));
+    store_u8((void *)(uintptr_t)(dst_off + (i)), vm_crockford_char(rem));
+    rand_lo = rand_lo >> 5LL;
+  }
+  for (int32_t i = 17; i >= 10; i--) {
+    uint32_t rem = ((int32_t)(rand_hi & 31LL));
+    store_u8((void *)(uintptr_t)(dst_off + (i)), vm_crockford_char(rem));
+    rand_hi = rand_hi >> 5LL;
+  }
+}
+
+int32_t vm_ulid_encode_view(uint32_t src_off, uint32_t src_len, uint32_t dst_off) {
+  if (src_len != 26) 
+    return -1;
+  int64_t time = 0LL;
+  for (uint32_t i = 0; i < 10; i++) {
+    int32_t v = crockford_decode(load_u8((const void *)(uintptr_t)(src_off + i)));
+    if (v < 0) 
+      return -1;
+    time = (time << 5LL) | ((uint64_t)(v));
+  }
+  store_u8((void *)(uintptr_t)(dst_off + 0), ((int32_t)((time >> 40LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 1), ((int32_t)((time >> 32LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 2), ((int32_t)((time >> 24LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 3), ((int32_t)((time >> 16LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 4), ((int32_t)((time >> 8LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 5), ((int32_t)(time & 0xffLL)));
+  int64_t rand_hi = 0LL;
+  for (uint32_t i = 10; i < 18; i++) {
+    int32_t v = crockford_decode(load_u8((const void *)(uintptr_t)(src_off + i)));
+    if (v < 0) 
+      return -1;
+    rand_hi = (rand_hi << 5LL) | ((uint64_t)(v));
+  }
+  int64_t rand_lo = 0LL;
+  for (uint32_t i = 18; i < 26; i++) {
+    int32_t v = crockford_decode(load_u8((const void *)(uintptr_t)(src_off + i)));
+    if (v < 0) 
+      return -1;
+    rand_lo = (rand_lo << 5LL) | ((uint64_t)(v));
+  }
+  store_u8((void *)(uintptr_t)(dst_off + 6), ((int32_t)((rand_hi >> 32LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 7), ((int32_t)((rand_hi >> 24LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 8), ((int32_t)((rand_hi >> 16LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 9), ((int32_t)((rand_hi >> 8LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 10), ((int32_t)(rand_hi & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 11), ((int32_t)((rand_lo >> 32LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 12), ((int32_t)((rand_lo >> 24LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 13), ((int32_t)((rand_lo >> 16LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 14), ((int32_t)((rand_lo >> 8LL) & 0xffLL)));
+  store_u8((void *)(uintptr_t)(dst_off + 15), ((int32_t)(rand_lo & 0xffLL)));
+  return 0;
+}
+
+uint32_t vm_resolve_page_offset(uint32_t has_buffer_pool, uint32_t page_id) {
+  if (page_id == 0) 
+    return 0;
+  if (has_buffer_pool != 0) {
+    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, page_id);
+    if (slot >= 0) {
+      return (slot) * PAGE_SIZE;
+    }
+  }
+  return (page_id - 1) * PAGE_SIZE;
+}
+
+int32_t vm_row_is_null(uint32_t null_bitmap_offset, uint32_t col_idx) {
+  uint8_t b = load_u8((const void *)(uintptr_t)(null_bitmap_offset + (col_idx >> 3)));
+  return (b & (1 << (col_idx & 7))) != 0 ? 1 : 0;
+}
+
+uint32_t vm_compute_fixed_col_offset(uint32_t null_bitmap_offset, uint32_t null_bitmap_bytes, uint32_t tbl_off, uint32_t target_col_idx) {
+  uint32_t col_offset = null_bitmap_offset + null_bitmap_bytes;
+  for (uint32_t i = 0; i < target_col_idx; i++) {
+    if (vm_row_is_null(null_bitmap_offset, i) == 0) {
+      uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + i));
+      if (col_type == TYPE_INT32) {
+        col_offset += 4;
+      } else       if (col_type == TYPE_INT64 || col_type == TYPE_FLOAT64) {
+        col_offset += 8;
+      } else       if (col_type == TYPE_UUID || col_type == TYPE_ULID) {
+        col_offset += 16;
+      }
+    }
+  }
+  return col_offset;
+}
+
+uint32_t vm_compute_var_col_idx(uint32_t tbl_off, uint32_t target_col_idx) {
+  uint32_t var_idx = 0;
+  for (uint32_t i = 0; i < target_col_idx; i++) {
+    uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + i));
+    if (col_type == TYPE_TEXT || col_type == TYPE_BLOB) {
+      var_idx++;
+    }
+  }
+  return var_idx;
+}
+
+int32_t vm_compare_bytes_raw(uint32_t off_a, uint32_t len_a, uint32_t off_b, uint32_t len_b) {
+  uint32_t min_len = len_a < len_b ? len_a : len_b;
+  for (uint32_t i = 0; i < min_len; i++) {
+    uint8_t ba = load_u8((const void *)(uintptr_t)(off_a + i));
+    uint8_t bb = load_u8((const void *)(uintptr_t)(off_b + i));
+    if (ba != bb) {
+      return ba < bb ? -1 : 1;
+    }
+  }
+  if (len_a == len_b) 
+    return 0;
+  return len_a < len_b ? -1 : 1;
+}
+
+int32_t vm_compare_reg_3vl(uint32_t reg_a_off, uint32_t reg_b_off) {
+  uint8_t a_null = load_u8((const void *)(uintptr_t)(reg_a_off + VM_REG_IS_NULL));
+  uint8_t b_null = load_u8((const void *)(uintptr_t)(reg_b_off + VM_REG_IS_NULL));
+  if (a_null != 0 || b_null != 0) {
+    return -2;
+  }
+  uint8_t type_a = load_u8((const void *)(uintptr_t)(reg_a_off + VM_REG_TYPE));
+  uint8_t type_b = load_u8((const void *)(uintptr_t)(reg_b_off + VM_REG_TYPE));
+  if (type_a == TYPE_INT64 && type_b == TYPE_INT64) {
+    int64_t ia = load_i64((const void *)(uintptr_t)(reg_a_off + VM_REG_I64));
+    int64_t ib = load_i64((const void *)(uintptr_t)(reg_b_off + VM_REG_I64));
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  }
+  int32_t a_is_num = type_a == TYPE_INT32 || type_a == TYPE_INT64 || type_a == TYPE_FLOAT64 ? 1 : 0;
+  int32_t b_is_num = type_b == TYPE_INT32 || type_b == TYPE_INT64 || type_b == TYPE_FLOAT64 ? 1 : 0;
+  if (a_is_num != 0 && b_is_num != 0) {
+    double fa = load_f64((const void *)(uintptr_t)(reg_a_off + VM_REG_F64));
+    double fb = load_f64((const void *)(uintptr_t)(reg_b_off + VM_REG_F64));
+    return fa < fb ? -1 : fa > fb ? 1 : 0;
+  }
+  uint32_t off_a = load_u32((const void *)(uintptr_t)(reg_a_off + VM_REG_DATA_OFF));
+  uint32_t len_a = load_u32((const void *)(uintptr_t)(reg_a_off + VM_REG_DATA_LEN));
+  uint32_t off_b = load_u32((const void *)(uintptr_t)(reg_b_off + VM_REG_DATA_OFF));
+  uint32_t len_b = load_u32((const void *)(uintptr_t)(reg_b_off + VM_REG_DATA_LEN));
+  return vm_compare_bytes_raw(off_a, len_a, off_b, len_b);
+}
+
+int32_t vm_compare_index_cell(uint32_t ctx_off, uint32_t page_offset, uint16_t slot_idx, uint8_t key_type, uint32_t reg_off) {
+  uint16_t cell_rel = page_get_cell_offset(page_offset, slot_idx);
+  uint32_t cell_abs = page_offset + cell_rel;
+  uint16_t k_len = load_u16((const void *)(uintptr_t)(cell_abs));
+  if (k_len == 0) {
+    return 1;
+  }
+  uint32_t cell_data = cell_abs + 2;
+  if (key_type == TYPE_INT32) {
+    double target_v = load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64));
+    double cell_v = load_i32((const void *)(uintptr_t)(cell_data));
+    return target_v < cell_v ? -1 : target_v > cell_v ? 1 : 0;
+  }
+  if (key_type == TYPE_INT64) {
+    int64_t cell_i64 = load_i64((const void *)(uintptr_t)(cell_data));
+    uint8_t r_type = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_TYPE));
+    if (r_type == TYPE_INT64) {
+      int64_t target_i64 = load_i64((const void *)(uintptr_t)(reg_off + VM_REG_I64));
+      return target_i64 < cell_i64 ? -1 : target_i64 > cell_i64 ? 1 : 0;
+    }
+    double target_f64 = load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64));
+    double cell_f64 = ((double)(cell_i64));
+    return target_f64 < cell_f64 ? -1 : target_f64 > cell_f64 ? 1 : 0;
+  }
+  if (key_type == TYPE_FLOAT64) {
+    double target_f64 = load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64));
+    double cell_f64 = load_f64((const void *)(uintptr_t)(cell_data));
+    return target_f64 < cell_f64 ? -1 : target_f64 > cell_f64 ? 1 : 0;
+  }
+  uint32_t target_off = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF));
+  uint32_t target_len = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN));
+  if (key_type == TYPE_UUID && k_len == 16) {
+    uint32_t scratch = ctx_off + VM_CTX_SCRATCH_OFF;
+    vm_uuid_decode_view(cell_data, scratch);
+    return vm_compare_bytes_raw(target_off, target_len, scratch, 36);
+  }
+  if (key_type == TYPE_ULID && k_len == 16) {
+    uint32_t scratch = ctx_off + VM_CTX_SCRATCH_OFF;
+    vm_ulid_decode_view(cell_data, scratch);
+    return vm_compare_bytes_raw(target_off, target_len, scratch, 26);
+  }
+  return vm_compare_bytes_raw(target_off, target_len, cell_data, k_len);
+}
+
+int32_t vm_index_seek_leaf_eq(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off) {
+  int32_t cell_count = page_get_cell_count(page_offset);
+  int32_t lo = 0;
+  int32_t hi = cell_count - 1;
+  int32_t matched_slot = -1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) >> 1;
+    int32_t cmp = vm_compare_index_cell(ctx_off, page_offset, mid, key_type, reg_off);
+    if (cmp <= 0) {
+      if (cmp == 0) {
+        matched_slot = mid;
+      }
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return matched_slot;
+}
+
+int32_t vm_index_seek_leaf_ge(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off) {
+  int32_t cell_count = page_get_cell_count(page_offset);
+  int32_t lo = 0;
+  int32_t hi = cell_count - 1;
+  int32_t candidate_slot = -1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) >> 1;
+    int32_t cmp = vm_compare_index_cell(ctx_off, page_offset, mid, key_type, reg_off);
+    if (cmp <= 0) {
+      candidate_slot = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return candidate_slot;
+}
+
+int32_t sql_like_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len) {
+  uint32_t s = 0;
+  uint32_t p = 0;
+  int32_t star_p = -1;
+  int32_t star_s = -1;
+  while (s < str_len) {
+    int32_t p_c = p < pat_len ? load_u8((const void *)(uintptr_t)(pat_off + p)) : 0;
+    int32_t s_c = load_u8((const void *)(uintptr_t)(str_off + s));
+    if (p < pat_len && (p_c == 95 || to_lower_char(p_c) == to_lower_char(s_c))) {
+      s++;
+      p++;
+    } else     if (p < pat_len && p_c == 37) {
+      star_p = p;
+      p++;
+      star_s = s;
+    } else     if (star_p != -1) {
+      p = (star_p + 1);
+      star_s++;
+      s = star_s;
+    } else {
+      return 0;
+    }
+  }
+  while (p < pat_len && load_u8((const void *)(uintptr_t)(pat_off + p)) == 37) {
+    p++;
+  }
+  return p == pat_len ? 1 : 0;
+}
+
+int32_t vm_str_contains_view(uint32_t str_off, uint32_t str_len, uint32_t sub_off, uint32_t sub_len) {
+  if (sub_len == 0) 
+    return 1;
+  if (sub_len > str_len) 
+    return 0;
+  uint32_t limit = str_len - sub_len;
+  for (uint32_t i = 0; i <= limit; i++) {
+    int32_t matched = 1;
+    for (uint32_t j = 0; j < sub_len; j++) {
+      if (load_u8((const void *)(uintptr_t)(str_off + i + j)) != load_u8((const void *)(uintptr_t)(sub_off + j))) {
+        matched = 0;
+        break;
+      }
+    }
+    if (matched != 0) 
+      return 1;
+  }
+  return 0;
+}
+
+int32_t vm_str_starts_with_view(uint32_t str_off, uint32_t str_len, uint32_t pfx_off, uint32_t pfx_len) {
+  if (pfx_len > str_len) 
+    return 0;
+  for (uint32_t i = 0; i < pfx_len; i++) {
+    if (load_u8((const void *)(uintptr_t)(str_off + i)) != load_u8((const void *)(uintptr_t)(pfx_off + i))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int32_t vm_str_ends_with_view(uint32_t str_off, uint32_t str_len, uint32_t sfx_off, uint32_t sfx_len) {
+  if (sfx_len > str_len) 
+    return 0;
+  uint32_t start = str_len - sfx_len;
+  for (uint32_t i = 0; i < sfx_len; i++) {
+    if (load_u8((const void *)(uintptr_t)(str_off + start + i)) != load_u8((const void *)(uintptr_t)(sfx_off + i))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int32_t vm_utf8_char_count(uint32_t str_off, uint32_t byte_len) {
+  int32_t count = 0;
+  uint32_t i = 0;
+  while (i < byte_len) {
+    uint8_t b = load_u8((const void *)(uintptr_t)(str_off + i));
+    if ((b & 128) == 0) {
+      i += 1;
+    } else     if ((b & 224) == 192) {
+      i += 2;
+    } else     if ((b & 240) == 224) {
+      i += 3;
+    } else {
+      i += 4;
+    }
+    count++;
+  }
+  return count;
+}
+
+void vm_str_lower(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off) {
+  if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0) {
+    vm_reg_set_null(dest_reg_off);
+    return;
+  }
+  uint32_t src_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
+  uint32_t len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
+  if (len == 0) {
+    vm_reg_set_slice(dest_reg_off, TYPE_TEXT, 0, 0);
+    return;
+  }
+  uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, len);
+  if (out_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return;
+  }
+  for (uint32_t i = 0; i < len; i++) {
+    store_u8((void *)(uintptr_t)(out_off + i), to_lower_char(load_u8((const void *)(uintptr_t)(src_off + i))));
+  }
+  vm_reg_set_slice(dest_reg_off, TYPE_TEXT, out_off, len);
+}
+
+void vm_str_upper(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off) {
+  if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0) {
+    vm_reg_set_null(dest_reg_off);
+    return;
+  }
+  uint32_t src_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
+  uint32_t len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
+  if (len == 0) {
+    vm_reg_set_slice(dest_reg_off, TYPE_TEXT, 0, 0);
+    return;
+  }
+  uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, len);
+  if (out_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return;
+  }
+  for (uint32_t i = 0; i < len; i++) {
+    store_u8((void *)(uintptr_t)(out_off + i), to_upper_char(load_u8((const void *)(uintptr_t)(src_off + i))));
+  }
+  vm_reg_set_slice(dest_reg_off, TYPE_TEXT, out_off, len);
+}
+
+void vm_str_trim(uint32_t src_reg_off, uint32_t dest_reg_off) {
+  if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0) {
+    vm_reg_set_null(dest_reg_off);
+    return;
+  }
+  uint32_t src_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
+  uint32_t len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
+  uint32_t start = 0;
+  uint32_t end = len;
+  while (start < end) {
+    uint8_t c = load_u8((const void *)(uintptr_t)(src_off + start));
+    if (c == 32 || c == 9 || c == 10 || c == 13) {
+      start++;
+    } else {
+      break;
+    }
+  }
+  while (end > start) {
+    uint8_t c = load_u8((const void *)(uintptr_t)(src_off + end - 1));
+    if (c == 32 || c == 9 || c == 10 || c == 13) {
+      end--;
+    } else {
+      break;
+    }
+  }
+  vm_reg_set_slice(dest_reg_off, TYPE_TEXT, src_off + start, end - start);
+}
+
+void vm_utf8_substr(uint32_t src_reg_off, uint32_t start_reg_off, uint32_t len_reg_off, uint32_t dest_reg_off) {
+  if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(start_reg_off + VM_REG_IS_NULL)) != 0) {
+    vm_reg_set_null(dest_reg_off);
+    return;
+  }
+  uint32_t src_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
+  uint32_t byte_len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
+  int32_t raw_start = load_i32((const void *)(uintptr_t)(start_reg_off + VM_REG_I32)) - 1;
+  int32_t start_char = raw_start < 0 ? 0 : raw_start;
+  int32_t has_len = load_u8((const void *)(uintptr_t)(len_reg_off + VM_REG_IS_NULL)) == 0 ? 1 : 0;
+  int32_t max_chars = 2147483647;
+  if (has_len != 0) {
+    int32_t rl = load_i32((const void *)(uintptr_t)(len_reg_off + VM_REG_I32));
+    max_chars = rl < 0 ? 0 : rl;
+  }
+  int32_t char_idx = 0;
+  uint32_t byte_idx = 0;
+  uint32_t slice_start = byte_len;
+  while (byte_idx < byte_len && char_idx < start_char) {
+    uint8_t b = load_u8((const void *)(uintptr_t)(src_off + byte_idx));
+    if ((b & 128) == 0) 
+      byte_idx += 1; else     if ((b & 224) == 192) 
+      byte_idx += 2; else     if ((b & 240) == 224) 
+      byte_idx += 3; else 
+      byte_idx += 4;
+    char_idx++;
+  }
+  slice_start = byte_idx;
+  int32_t taken = 0;
+  while (byte_idx < byte_len && taken < max_chars) {
+    uint8_t b = load_u8((const void *)(uintptr_t)(src_off + byte_idx));
+    if ((b & 128) == 0) 
+      byte_idx += 1; else     if ((b & 224) == 192) 
+      byte_idx += 2; else     if ((b & 240) == 224) 
+      byte_idx += 3; else 
+      byte_idx += 4;
+    taken++;
+  }
+  vm_reg_set_slice(dest_reg_off, TYPE_TEXT, src_off + slice_start, byte_idx - slice_start);
+}
+
+uint32_t vm_format_i64_to_scratch(uint32_t scratch_off, int64_t val) {
+  if (val == 0LL) {
+    store_u8((void *)(uintptr_t)(scratch_off), 48);
+    return 1;
+  }
+  int64_t v = val;
+  uint32_t is_neg = 0;
+  if (v < 0LL) {
+    is_neg = 1;
+    v = -v;
+  }
+  uint32_t temp_len = 0;
+  uint32_t rev_off = scratch_off + 32;
+  while (v > 0LL) {
+    uint32_t digit = ((int32_t)(v % 10LL));
+    store_u8((void *)(uintptr_t)(rev_off + temp_len), (48 + digit));
+    temp_len++;
+    v = v / 10LL;
+  }
+  uint32_t out_len = 0;
+  if (is_neg != 0) {
+    store_u8((void *)(uintptr_t)(scratch_off), 45);
+    out_len++;
+  }
+  for (uint32_t i = 0; i < temp_len; i++) {
+    store_u8((void *)(uintptr_t)(scratch_off + out_len), load_u8((const void *)(uintptr_t)(rev_off + temp_len - 1 - i)));
+    out_len++;
+  }
+  return out_len;
+}
+
+void vm_str_concat(uint32_t ctx_off, uint32_t arena_base, uint32_t start_reg, uint32_t num_regs, uint32_t dest_reg) {
+  uint32_t total_len = 0;
+  int32_t has_val = 0;
+  uint32_t scratch = ctx_off + VM_CTX_SCRATCH_OFF;
+  for (uint32_t i = 0; i < num_regs; i++) {
+    uint32_t r_off = vm_reg_off(ctx_off, start_reg + i);
+    if (load_u8((const void *)(uintptr_t)(r_off + VM_REG_IS_NULL)) == 0) {
+      has_val = 1;
+      uint8_t r_type = load_u8((const void *)(uintptr_t)(r_off + VM_REG_TYPE));
+      if (r_type == TYPE_TEXT || r_type == TYPE_BLOB || r_type == TYPE_UUID || r_type == TYPE_ULID) {
+        total_len += load_u32((const void *)(uintptr_t)(r_off + VM_REG_DATA_LEN));
+      } else {
+        total_len += vm_format_i64_to_scratch(scratch, load_i64((const void *)(uintptr_t)(r_off + VM_REG_I64)));
+      }
+    }
+  }
+  uint32_t dest_off = vm_reg_off(ctx_off, dest_reg);
+  if (has_val == 0) {
+    vm_reg_set_null(dest_off);
+    return;
+  }
+  if (total_len == 0) {
+    vm_reg_set_slice(dest_off, TYPE_TEXT, 0, 0);
+    return;
+  }
+  uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, total_len);
+  if (out_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return;
+  }
+  uint32_t pos = 0;
+  for (uint32_t i = 0; i < num_regs; i++) {
+    uint32_t r_off = vm_reg_off(ctx_off, start_reg + i);
+    if (load_u8((const void *)(uintptr_t)(r_off + VM_REG_IS_NULL)) == 0) {
+      uint8_t r_type = load_u8((const void *)(uintptr_t)(r_off + VM_REG_TYPE));
+      if (r_type == TYPE_TEXT || r_type == TYPE_BLOB || r_type == TYPE_UUID || r_type == TYPE_ULID) {
+        uint32_t d_off = load_u32((const void *)(uintptr_t)(r_off + VM_REG_DATA_OFF));
+        uint32_t d_len = load_u32((const void *)(uintptr_t)(r_off + VM_REG_DATA_LEN));
+        if (d_len > 0) {
+          webdb_memcpy((void *)(uintptr_t)(out_off + pos), (const void *)(uintptr_t)(d_off), d_len);
+          pos += d_len;
+        }
+      } else {
+        uint32_t fmt_len = vm_format_i64_to_scratch(scratch, load_i64((const void *)(uintptr_t)(r_off + VM_REG_I64)));
+        webdb_memcpy((void *)(uintptr_t)(out_off + pos), (const void *)(uintptr_t)(scratch), fmt_len);
+        pos += fmt_len;
+      }
+    }
+  }
+  vm_reg_set_slice(dest_off, TYPE_TEXT, out_off, total_len);
+}
+
+double vm_math_abs(double x) {
+  return x < 0 ? -x : x;
+}
+
+double vm_math_floor(double x) {
+  double t = ((double)((int64_t)(x)));
+  return x < t ? t - 1 : t;
+}
+
+double vm_math_ceil(double x) {
+  double t = ((double)((int64_t)(x)));
+  return x > t ? t + 1 : t;
+}
+
+double vm_math_round(double x) {
+  return vm_math_floor(x + 0.5);
+}
+
+int32_t vm_in_set_contains(uint32_t ctx_off, uint32_t set_idx, uint32_t reg_off) {
+  if (load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL)) != 0) {
+    return 0;
+  }
+  uint32_t num_sets = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_NUM_IN_SETS));
+  if (set_idx >= num_sets) 
+    return 0;
+  uint32_t set_desc_off = ctx_off + VM_CTX_IN_SETS_OFF + set_idx * 8;
+  uint32_t count = load_u32((const void *)(uintptr_t)(set_desc_off));
+  uint32_t items_off = load_u32((const void *)(uintptr_t)(set_desc_off + 4));
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t item_off = items_off + (i << 5);
+    if (vm_compare_reg_3vl(reg_off, item_off) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int32_t vm_emit_raw_row(uint32_t ctx_off, uint32_t row_src_off, uint32_t row_len, uint32_t instr_pc) {
+  uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
+  uint32_t needed = 2 + row_len;
+  if (result_offset + needed > RESULT_BUFFER_SIZE) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+    return VM_STATUS_BUFFER_FULL;
+  }
+  uint32_t out_target = RESULT_BUFFER_OFFSET + result_offset;
+  store_u16((void *)(uintptr_t)(out_target), row_len);
+  webdb_memcpy((void *)(uintptr_t)(out_target + 2), (const void *)(uintptr_t)(row_src_off), row_len);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET), result_offset + needed);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_COUNT), load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_COUNT)) + 1);
+  return VM_STATUS_RUNNING;
+}
+
+uint8_t vm_infer_result_col_type(uint32_t ctx_off, uint32_t start_reg, uint32_t num_cols, uint32_t col_idx) {
+  uint32_t out_cols_off = ctx_off + VM_CTX_OUTPUT_COLS_OFF;
+  uint8_t has_out_cols = load_u8((const void *)(uintptr_t)(out_cols_off));
+  uint16_t out_num_cols = load_u16((const void *)(uintptr_t)(out_cols_off + 2));
+  if (has_out_cols != 0 && num_cols == out_num_cols) {
+    return load_u8((const void *)(uintptr_t)(out_cols_off + 4 + col_idx));
+  }
+  uint32_t num_tables = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_NUM_TABLES));
+  if (num_tables > 0) {
+    uint32_t tbl0_off = ctx_off + VM_CTX_TABLES_OFF;
+    uint16_t tbl0_cols = load_u16((const void *)(uintptr_t)(tbl0_off));
+    if (num_cols == tbl0_cols) {
+      return load_u8((const void *)(uintptr_t)(tbl0_off + 4 + col_idx));
+    }
+  }
+  uint32_t reg_off = vm_reg_off(ctx_off, start_reg + col_idx);
+  if (load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL)) != 0) {
+    return TYPE_TEXT;
+  }
+  uint8_t r_type = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_TYPE));
+  if (r_type == TYPE_FLOAT64) {
+    double fv = load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64));
+    if (fv == ((double)((int64_t)(fv))) && fv >= -2147483648 && fv <= 2147483647) {
+      return TYPE_INT32;
+    }
+    return TYPE_FLOAT64;
+  }
+  return r_type;
+}
+
+int32_t vm_serialize_and_emit_result_row(uint32_t ctx_off, uint32_t start_reg, uint32_t num_cols, uint32_t instr_pc) {
+  uint32_t null_bitmap_bytes = (num_cols + 7) >> 3;
+  uint32_t fixed_slice_size = 0;
+  uint32_t var_col_count = 0;
+  uint32_t total_var_payload_size = 0;
+  for (uint32_t c = 0; c < num_cols; c++) {
+    uint8_t col_type = vm_infer_result_col_type(ctx_off, start_reg, num_cols, c);
+    uint32_t reg_off = vm_reg_off(ctx_off, start_reg + c);
+    uint8_t is_null = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL));
+    if (col_type == TYPE_TEXT || col_type == TYPE_BLOB) {
+      var_col_count++;
+      if (is_null == 0) {
+        total_var_payload_size += load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN));
+      }
+    } else     if (is_null == 0) {
+      if (col_type == TYPE_INT32) {
+        fixed_slice_size += 4;
+      } else       if (col_type == TYPE_INT64 || col_type == TYPE_FLOAT64) {
+        fixed_slice_size += 8;
+      } else       if (col_type == TYPE_UUID || col_type == TYPE_ULID) {
+        fixed_slice_size += 16;
+      }
+    }
+  }
+  uint32_t var_offset_table_size = var_col_count * 4;
+  uint32_t header_and_tables_size = 3 + null_bitmap_bytes + fixed_slice_size + var_offset_table_size;
+  uint32_t total_row_size = header_and_tables_size + total_var_payload_size;
+  uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
+  uint32_t needed = 2 + total_row_size;
+  if (result_offset + needed > RESULT_BUFFER_SIZE) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+    return VM_STATUS_BUFFER_FULL;
+  }
+  uint32_t out_target = RESULT_BUFFER_OFFSET + result_offset;
+  store_u16((void *)(uintptr_t)(out_target), total_row_size);
+  uint32_t row_start = out_target + 2;
+  store_u8((void *)(uintptr_t)(row_start + 0), 1);
+  store_u16((void *)(uintptr_t)(row_start + 1), total_row_size);
+  webdb_memset((void *)(uintptr_t)(row_start + 3), 0, null_bitmap_bytes);
+  uint32_t current_fixed_offset = row_start + 3 + null_bitmap_bytes;
+  uint32_t current_var_table_offset = current_fixed_offset + fixed_slice_size;
+  uint32_t current_payload_rel_offset = header_and_tables_size;
+  for (uint32_t c = 0; c < num_cols; c++) {
+    uint8_t col_type = vm_infer_result_col_type(ctx_off, start_reg, num_cols, c);
+    uint32_t reg_off = vm_reg_off(ctx_off, start_reg + c);
+    uint8_t is_null = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL));
+    if (is_null != 0) {
+      uint32_t bm_off = row_start + 3 + (c >> 3);
+      store_u8((void *)(uintptr_t)(bm_off), (load_u8((const void *)(uintptr_t)(bm_off)) | (1 << (c & 7))));
+      if (col_type == TYPE_TEXT || col_type == TYPE_BLOB) {
+        store_u16((void *)(uintptr_t)(current_var_table_offset), 0);
+        store_u16((void *)(uintptr_t)(current_var_table_offset + 2), 0);
+        current_var_table_offset += 4;
+      }
+    } else     if (col_type == TYPE_TEXT || col_type == TYPE_BLOB) {
+      uint32_t d_off = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF));
+      uint32_t d_len = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN));
+      store_u16((void *)(uintptr_t)(current_var_table_offset), current_payload_rel_offset);
+      store_u16((void *)(uintptr_t)(current_var_table_offset + 2), d_len);
+      if (d_len > 0) {
+        webdb_memcpy((void *)(uintptr_t)(row_start + current_payload_rel_offset), (const void *)(uintptr_t)(d_off), d_len);
+        current_payload_rel_offset += d_len;
+      }
+      current_var_table_offset += 4;
+    } else     if (col_type == TYPE_INT32) {
+      store_i32((void *)(uintptr_t)(current_fixed_offset), ((int32_t)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64)))));
+      current_fixed_offset += 4;
+    } else     if (col_type == TYPE_INT64) {
+      uint8_t r_type = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_TYPE));
+      int64_t iv = r_type == TYPE_INT64 ? load_i64((const void *)(uintptr_t)(reg_off + VM_REG_I64)) : ((int64_t)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64))));
+      store_i64((void *)(uintptr_t)(current_fixed_offset), iv);
+      current_fixed_offset += 8;
+    } else     if (col_type == TYPE_FLOAT64) {
+      store_f64((void *)(uintptr_t)(current_fixed_offset), load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64)));
+      current_fixed_offset += 8;
+    } else     if (col_type == TYPE_UUID) {
+      uint32_t d_off = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF));
+      uint32_t d_len = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN));
+      vm_uuid_encode_view(d_off, d_len, current_fixed_offset);
+      current_fixed_offset += 16;
+    } else     if (col_type == TYPE_ULID) {
+      uint32_t d_off = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF));
+      uint32_t d_len = load_u32((const void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN));
+      vm_ulid_encode_view(d_off, d_len, current_fixed_offset);
+      current_fixed_offset += 16;
+    }
+  }
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET), result_offset + needed);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_COUNT), load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_COUNT)) + 1);
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_compare_sorter_key_slots(uint32_t keys_a_base, uint32_t keys_b_base, uint32_t ki_off) {
+  uint32_t num_keys = load_u8((const void *)(uintptr_t)(ki_off + VM_KI_NUM_KEYS));
+  for (uint32_t k = 0; k < num_keys; k++) {
+    uint32_t ka_off = keys_a_base + (k << 5);
+    uint32_t kb_off = keys_b_base + (k << 5);
+    uint8_t direction = load_u8((const void *)(uintptr_t)(ki_off + VM_KI_DIRECTIONS + k));
+    uint8_t null_order = load_u8((const void *)(uintptr_t)(ki_off + VM_KI_NULL_ORDERS + k));
+    uint8_t a_null = load_u8((const void *)(uintptr_t)(ka_off + VM_REG_IS_NULL));
+    uint8_t b_null = load_u8((const void *)(uintptr_t)(kb_off + VM_REG_IS_NULL));
+    if (a_null != 0 && b_null != 0) {
+      continue;
+    }
+    if (a_null != 0 || b_null != 0) {
+      if (null_order == 0) {
+        return a_null != 0 ? -1 : 1;
+      }
+      return a_null != 0 ? 1 : -1;
+    }
+    int32_t cmp = vm_compare_reg_3vl(ka_off, kb_off);
+    if (cmp != 0) {
+      return direction == 1 ? -cmp : cmp;
+    }
+  }
+  return 0;
+}
+
+void vm_sorter_heap_sift_down(uint32_t ptrs_off, uint32_t index, uint32_t length, uint32_t ki_off) {
+  uint32_t curr = index;
+  while (1) {
+    uint32_t largest = curr;
+    uint32_t left = 2 * curr + 1;
+    uint32_t right = 2 * curr + 2;
+    if (left < length) {
+      uint32_t left_entry = load_u32((const void *)(uintptr_t)(ptrs_off + (left << 2)));
+      uint32_t largest_entry = load_u32((const void *)(uintptr_t)(ptrs_off + (largest << 2)));
+      if (vm_compare_sorter_key_slots(left_entry + 16, largest_entry + 16, ki_off) > 0) {
+        largest = left;
+      }
+    }
+    if (right < length) {
+      uint32_t right_entry = load_u32((const void *)(uintptr_t)(ptrs_off + (right << 2)));
+      uint32_t largest_entry = load_u32((const void *)(uintptr_t)(ptrs_off + (largest << 2)));
+      if (vm_compare_sorter_key_slots(right_entry + 16, largest_entry + 16, ki_off) > 0) {
+        largest = right;
+      }
+    }
+    if (largest != curr) {
+      uint32_t tmp = load_u32((const void *)(uintptr_t)(ptrs_off + (curr << 2)));
+      store_u32((void *)(uintptr_t)(ptrs_off + (curr << 2)), load_u32((const void *)(uintptr_t)(ptrs_off + (largest << 2))));
+      store_u32((void *)(uintptr_t)(ptrs_off + (largest << 2)), tmp);
+      curr = largest;
+    } else {
+      break;
+    }
+  }
+}
+
+int32_t vm_sorter_open_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t sorter_id, uint32_t key_info_idx) {
+  uint32_t srt_off = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  uint32_t ki_off = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  uint8_t has_limit = load_u8((const void *)(uintptr_t)(ki_off + VM_KI_HAS_LIMIT));
+  uint32_t limit = load_u32((const void *)(uintptr_t)(ki_off + VM_KI_LIMIT));
+  uint32_t offset = load_u32((const void *)(uintptr_t)(ki_off + VM_KI_OFFSET));
+  uint32_t requested_k = 0;
+  if (has_limit != 0 && limit > 0) {
+    requested_k = offset + limit;
+  }
+  uint32_t max_k = requested_k > 0 && requested_k <= MAX_TOPK_HEAP_LIMIT ? requested_k : 0;
+  uint32_t init_cap = max_k > 0 ? max_k : 256;
+  uint32_t ptrs_off = vm_phys_alloc(ctx_off, arena_base, init_cap * 4);
+  if (ptrs_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return VM_STATUS_ARENA_EXHAUSTED;
+  }
+  store_u8((void *)(uintptr_t)(srt_off + VM_SRT_IS_OPEN), 1);
+  store_u8((void *)(uintptr_t)(srt_off + VM_SRT_IS_SORTED), 0);
+  store_u8((void *)(uintptr_t)(srt_off + VM_SRT_KEY_INFO_IDX), key_info_idx);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_ENTRY_COUNT), 0);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_CAPACITY), init_cap);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_READ_IDX), 0);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_MAX_K), max_k);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_PTRS_OFF), ptrs_off);
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_SCRATCH_OFF), 0);
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_sorter_insert_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t sorter_id, uint32_t start_reg, uint32_t num_keys, uint32_t cursor_idx) {
+  uint32_t srt_off = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  if (load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_IS_OPEN)) == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+    return VM_STATUS_INVALID_BYTECODE;
+  }
+  uint32_t key_info_idx = load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_KEY_INFO_IDX));
+  uint32_t ki_off = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  uint32_t entry_count = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_ENTRY_COUNT));
+  uint32_t max_k = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_MAX_K));
+  uint32_t ptrs_off = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_PTRS_OFF));
+  uint32_t cand_keys_base = vm_reg_off(ctx_off, start_reg);
+  if (max_k > 0 && entry_count >= max_k) {
+    uint32_t root_entry = load_u32((const void *)(uintptr_t)(ptrs_off));
+    int32_t cmp = vm_compare_sorter_key_slots(cand_keys_base, root_entry + 16, ki_off);
+    if (cmp >= 0) {
+      return VM_STATUS_RUNNING;
+    }
+    uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
+    uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
+    uint32_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
+    uint32_t old_row_len = load_u32((const void *)(uintptr_t)(root_entry + 4));
+    uint32_t arena_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET));
+    uint32_t max_mem = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_MAX_QUERY_MEMORY));
+    if (row_len > old_row_len) {
+      uint32_t diff = row_len - old_row_len;
+      if (arena_off + diff > max_mem) {
+        store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+        return VM_STATUS_ARENA_EXHAUSTED;
+      }
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), arena_off + diff);
+    } else {
+      uint32_t diff = old_row_len - row_len;
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), arena_off >= diff ? arena_off - diff : 0);
+    }
+    uint32_t new_entry_bytes = 16 + (num_keys << 5) + row_len;
+    uint32_t new_entry_off = vm_phys_alloc(ctx_off, arena_base, new_entry_bytes);
+    if (new_entry_off == 0) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    uint32_t row_dst_off = new_entry_off + 16 + (num_keys << 5);
+    store_u32((void *)(uintptr_t)(new_entry_off + 0), num_keys);
+    store_u32((void *)(uintptr_t)(new_entry_off + 4), row_len);
+    store_u32((void *)(uintptr_t)(new_entry_off + 8), row_dst_off);
+    store_u32((void *)(uintptr_t)(new_entry_off + 12), 0);
+    for (uint32_t k = 0; k < num_keys; k++) {
+      vm_reg_clone_to_arena(ctx_off, arena_base, new_entry_off + 16 + (k << 5), vm_reg_off(ctx_off, start_reg + k));
+    }
+    webdb_memcpy((void *)(uintptr_t)(row_dst_off), (const void *)(uintptr_t)(row_offset), row_len);
+    store_u32((void *)(uintptr_t)(ptrs_off), new_entry_off);
+    vm_sorter_heap_sift_down(ptrs_off, 0, max_k, ki_off);
+    return VM_STATUS_RUNNING;
+  }
+  uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
+  uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
+  uint32_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
+  uint32_t logical_entry_size = 16 + 16 * num_keys + row_len;
+  uint32_t arena_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET));
+  uint32_t max_mem = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_MAX_QUERY_MEMORY));
+  if (arena_off + logical_entry_size > max_mem) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return VM_STATUS_ARENA_EXHAUSTED;
+  }
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), arena_off + logical_entry_size);
+  uint32_t capacity = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_CAPACITY));
+  if (entry_count >= capacity) {
+    uint32_t new_cap = capacity * 2;
+    uint32_t new_ptrs = vm_phys_alloc(ctx_off, arena_base, new_cap * 4);
+    if (new_ptrs == 0) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    webdb_memcpy((void *)(uintptr_t)(new_ptrs), (const void *)(uintptr_t)(ptrs_off), entry_count * 4);
+    ptrs_off = new_ptrs;
+    capacity = new_cap;
+    store_u32((void *)(uintptr_t)(srt_off + VM_SRT_CAPACITY), capacity);
+    store_u32((void *)(uintptr_t)(srt_off + VM_SRT_PTRS_OFF), ptrs_off);
+  }
+  uint32_t phys_entry_bytes = 16 + (num_keys << 5) + row_len;
+  uint32_t entry_off = vm_phys_alloc(ctx_off, arena_base, phys_entry_bytes);
+  if (entry_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return VM_STATUS_ARENA_EXHAUSTED;
+  }
+  uint32_t row_dst_off = entry_off + 16 + (num_keys << 5);
+  store_u32((void *)(uintptr_t)(entry_off + 0), num_keys);
+  store_u32((void *)(uintptr_t)(entry_off + 4), row_len);
+  store_u32((void *)(uintptr_t)(entry_off + 8), row_dst_off);
+  store_u32((void *)(uintptr_t)(entry_off + 12), 0);
+  for (uint32_t k = 0; k < num_keys; k++) {
+    vm_reg_clone_to_arena(ctx_off, arena_base, entry_off + 16 + (k << 5), vm_reg_off(ctx_off, start_reg + k));
+  }
+  webdb_memcpy((void *)(uintptr_t)(row_dst_off), (const void *)(uintptr_t)(row_offset), row_len);
+  store_u32((void *)(uintptr_t)(ptrs_off + (entry_count << 2)), entry_off);
+  uint32_t new_count = entry_count + 1;
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_ENTRY_COUNT), new_count);
+  if (max_k > 0 && new_count == max_k) {
+    for (int32_t h = ((max_k >> 1)) - 1; h >= 0; h--) {
+      vm_sorter_heap_sift_down(ptrs_off, h, max_k, ki_off);
+    }
+  }
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_sorter_sort_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t sorter_id) {
+  uint32_t srt_off = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  if (load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_IS_OPEN)) == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+    return VM_STATUS_INVALID_BYTECODE;
+  }
+  uint32_t n = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_ENTRY_COUNT));
+  uint32_t key_info_idx = load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_KEY_INFO_IDX));
+  uint32_t ki_off = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  uint32_t offset = load_u32((const void *)(uintptr_t)(ki_off + VM_KI_OFFSET));
+  if (n > 1) {
+    uint32_t ptrs_off = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_PTRS_OFF));
+    uint32_t scratch_off = vm_phys_alloc(ctx_off, arena_base, n * 4);
+    if (scratch_off == 0) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    for (uint32_t width = 1; width < n; width = width << 1) {
+      for (uint32_t i = 0; i < n; i += width << 1) {
+        uint32_t left = i;
+        uint32_t mid = i + width < n ? i + width : n;
+        uint32_t right = i + (width << 1) < n ? i + (width << 1) : n;
+        uint32_t l = left;
+        uint32_t r = mid;
+        for (uint32_t k = left; k < right; k++) {
+          if (l < mid && r < right) {
+            uint32_t entry_l = load_u32((const void *)(uintptr_t)(ptrs_off + (l << 2)));
+            uint32_t entry_r = load_u32((const void *)(uintptr_t)(ptrs_off + (r << 2)));
+            int32_t cmp = vm_compare_sorter_key_slots(entry_l + 16, entry_r + 16, ki_off);
+            if (cmp <= 0) {
+              store_u32((void *)(uintptr_t)(scratch_off + (k << 2)), entry_l);
+              l++;
+            } else {
+              store_u32((void *)(uintptr_t)(scratch_off + (k << 2)), entry_r);
+              r++;
+            }
+          } else           if (l < mid) {
+            store_u32((void *)(uintptr_t)(scratch_off + (k << 2)), load_u32((const void *)(uintptr_t)(ptrs_off + (l << 2))));
+            l++;
+          } else {
+            store_u32((void *)(uintptr_t)(scratch_off + (k << 2)), load_u32((const void *)(uintptr_t)(ptrs_off + (r << 2))));
+            r++;
+          }
+        }
+      }
+      webdb_memcpy((void *)(uintptr_t)(ptrs_off), (const void *)(uintptr_t)(scratch_off), n * 4);
+    }
+  }
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_READ_IDX), offset);
+  store_u8((void *)(uintptr_t)(srt_off + VM_SRT_IS_SORTED), 1);
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_sorter_next_raw(uint32_t ctx_off, uint32_t sorter_id, uint32_t jump_target, uint32_t instr_pc) {
+  uint32_t srt_off = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  if (load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_IS_OPEN)) == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+    return VM_STATUS_INVALID_BYTECODE;
+  }
+  uint32_t entry_count = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_ENTRY_COUNT));
+  uint32_t read_idx = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_READ_IDX));
+  uint32_t key_info_idx = load_u8((const void *)(uintptr_t)(srt_off + VM_SRT_KEY_INFO_IDX));
+  uint32_t ki_off = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  uint8_t has_limit = load_u8((const void *)(uintptr_t)(ki_off + VM_KI_HAS_LIMIT));
+  uint32_t limit = load_u32((const void *)(uintptr_t)(ki_off + VM_KI_LIMIT));
+  uint32_t offset = load_u32((const void *)(uintptr_t)(ki_off + VM_KI_OFFSET));
+  uint32_t max_read = entry_count;
+  if (has_limit != 0) {
+    uint32_t bound = offset + limit;
+    if (bound < max_read) {
+      max_read = bound;
+    }
+  }
+  if (read_idx >= max_read) {
+    return VM_STATUS_RUNNING;
+  }
+  uint32_t ptrs_off = load_u32((const void *)(uintptr_t)(srt_off + VM_SRT_PTRS_OFF));
+  uint32_t entry_off = load_u32((const void *)(uintptr_t)(ptrs_off + (read_idx << 2)));
+  uint32_t row_len = load_u32((const void *)(uintptr_t)(entry_off + 4));
+  uint32_t row_data_off = load_u32((const void *)(uintptr_t)(entry_off + 8));
+  int32_t emit_status = vm_emit_raw_row(ctx_off, row_data_off, row_len, instr_pc);
+  if (emit_status != VM_STATUS_RUNNING) {
+    return emit_status;
+  }
+  store_u32((void *)(uintptr_t)(srt_off + VM_SRT_READ_IDX), read_idx + 1);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), jump_target);
+  return VM_STATUS_RUNNING;
+}
+
+uint32_t vm_hash_group_keys(uint32_t keys_base_off, uint32_t num_keys) {
+  uint32_t hash = 2166136261;
+  for (uint32_t k = 0; k < num_keys; k++) {
+    uint32_t r_off = keys_base_off + (k << 5);
+    uint8_t is_null = load_u8((const void *)(uintptr_t)(r_off + VM_REG_IS_NULL));
+    if (is_null != 0) {
+      hash ^= 255;
+      hash = (uint32_t)((hash * 16777619));
+    } else {
+      uint8_t r_type = load_u8((const void *)(uintptr_t)(r_off + VM_REG_TYPE));
+      if (r_type == TYPE_INT32 || r_type == TYPE_INT64 || r_type == TYPE_FLOAT64) {
+        for (uint32_t b = 0; b < 8; b++) {
+          hash ^= load_u8((const void *)(uintptr_t)(r_off + VM_REG_F64 + b));
+          hash = (uint32_t)((hash * 16777619));
+        }
+      } else {
+        uint32_t d_off = load_u32((const void *)(uintptr_t)(r_off + VM_REG_DATA_OFF));
+        uint32_t d_len = load_u32((const void *)(uintptr_t)(r_off + VM_REG_DATA_LEN));
+        for (uint32_t b = 0; b < d_len; b++) {
+          hash ^= load_u8((const void *)(uintptr_t)(d_off + b));
+          hash = (uint32_t)((hash * 16777619));
+        }
+      }
+    }
+  }
+  hash = (uint32_t)(hash);
+  return hash == 0 ? 1 : hash;
+}
+
+int32_t vm_group_key_slots_match(uint32_t keys_a_base, uint32_t keys_b_base, uint32_t num_keys) {
+  for (uint32_t k = 0; k < num_keys; k++) {
+    uint32_t ka_off = keys_a_base + (k << 5);
+    uint32_t kb_off = keys_b_base + (k << 5);
+    uint8_t a_null = load_u8((const void *)(uintptr_t)(ka_off + VM_REG_IS_NULL));
+    uint8_t b_null = load_u8((const void *)(uintptr_t)(kb_off + VM_REG_IS_NULL));
+    if (a_null != 0 && b_null != 0) {
+      continue;
+    }
+    if (a_null != 0 || b_null != 0) {
+      return 0;
+    }
+    if (vm_compare_reg_3vl(ka_off, kb_off) != 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+uint32_t vm_alloc_agg_bucket(uint32_t ctx_off, uint32_t arena_base, uint32_t hash, uint32_t num_keys, uint32_t src_keys_base) {
+  uint32_t bucket_off = vm_phys_alloc(ctx_off, arena_base, 1320);
+  if (bucket_off == 0) 
+    return 0;
+  webdb_memset((void *)(uintptr_t)(bucket_off), 0, 1320);
+  store_u32((void *)(uintptr_t)(bucket_off + 0), hash);
+  store_u32((void *)(uintptr_t)(bucket_off + 4), num_keys);
+  for (uint32_t k = 0; k < num_keys; k++) {
+    if (vm_reg_clone_to_arena(ctx_off, arena_base, bucket_off + 40 + (k << 5), src_keys_base + (k << 5)) < 0) {
+      return 0;
+    }
+  }
+  return bucket_off;
+}
+
+int32_t vm_agg_init_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t agg_id, uint32_t start_key_reg, uint32_t num_keys, uint32_t mode) {
+  uint32_t agg_off = ctx_off + VM_CTX_AGGS_OFF + agg_id * VM_AGG_SIZE;
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_CURRENT_BUCKET_OFF), 0);
+  if (mode == 0) {
+    uint32_t initial_capacity = 1024;
+    uint32_t alloc_size = initial_capacity * 40;
+    uint32_t arena_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET));
+    uint32_t max_mem = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_MAX_QUERY_MEMORY));
+    if (arena_off + alloc_size > max_mem) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), arena_off + alloc_size);
+    uint32_t buckets_off = vm_phys_alloc(ctx_off, arena_base, initial_capacity * 4);
+    if (buckets_off == 0) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    webdb_memset((void *)(uintptr_t)(buckets_off), 0, initial_capacity * 4);
+    uint32_t occupied = 0;
+    if (num_keys == 0) {
+      uint32_t h = 2166136261;
+      uint32_t slot = h % initial_capacity;
+      uint32_t b_off = vm_alloc_agg_bucket(ctx_off, arena_base, h, 0, 0);
+      if (b_off == 0) {
+        store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+        return VM_STATUS_ARENA_EXHAUSTED;
+      }
+      store_u32((void *)(uintptr_t)(buckets_off + (slot << 2)), b_off);
+      occupied = 1;
+    }
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_IS_OPEN), 1);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_MODE), 0);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_START_KEY_REG), start_key_reg);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_NUM_KEYS), num_keys);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CAPACITY), initial_capacity);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_OCCUPIED), occupied);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_READ_IDX), 0);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_BUCKETS_OFF), buckets_off);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CURR_BUCKET_OFF), 0);
+  } else {
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_IS_OPEN), 1);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_MODE), 1);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_START_KEY_REG), start_key_reg);
+    store_u8((void *)(uintptr_t)(agg_off + VM_AGG_NUM_KEYS), num_keys);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CAPACITY), 1);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_OCCUPIED), 0);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_READ_IDX), 0);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_BUCKETS_OFF), 0);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CURR_BUCKET_OFF), 0);
+  }
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_agg_step_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t agg_id, uint32_t start_key_reg, uint32_t num_keys, uint32_t val_reg, uint32_t raw_func_id) {
+  uint32_t agg_off = ctx_off + VM_CTX_AGGS_OFF + agg_id * VM_AGG_SIZE;
+  if (load_u8((const void *)(uintptr_t)(agg_off + VM_AGG_IS_OPEN)) == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+    return VM_STATUS_INVALID_BYTECODE;
+  }
+  uint32_t func_id = raw_func_id & 7;
+  uint32_t slot_idx = raw_func_id >> 3;
+  uint8_t mode = load_u8((const void *)(uintptr_t)(agg_off + VM_AGG_MODE));
+  if (mode == 0) {
+    uint32_t capacity = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_CAPACITY));
+    uint32_t occupied = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_OCCUPIED));
+    uint32_t buckets_off = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_BUCKETS_OFF));
+    uint32_t keys_base = vm_reg_off(ctx_off, start_key_reg);
+    uint32_t hash = vm_hash_group_keys(keys_base, num_keys);
+    uint32_t start_slot = hash % capacity;
+    uint32_t target_bucket = 0;
+    for (uint32_t probe = 0; probe < capacity; probe++) {
+      uint32_t idx = (start_slot + probe) % capacity;
+      uint32_t b_off = load_u32((const void *)(uintptr_t)(buckets_off + (idx << 2)));
+      if (b_off == 0) {
+        uint32_t new_b = vm_alloc_agg_bucket(ctx_off, arena_base, hash, num_keys, keys_base);
+        if (new_b == 0) {
+          store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+          return VM_STATUS_ARENA_EXHAUSTED;
+        }
+        store_u32((void *)(uintptr_t)(buckets_off + (idx << 2)), new_b);
+        occupied++;
+        store_u32((void *)(uintptr_t)(agg_off + VM_AGG_OCCUPIED), occupied);
+        target_bucket = new_b;
+        break;
+      } else       if (load_u32((const void *)(uintptr_t)(b_off + 0)) == hash && vm_group_key_slots_match(b_off + 40, keys_base, num_keys) != 0) {
+        target_bucket = b_off;
+        break;
+      }
+    }
+    if (target_bucket == 0) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+      return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    uint32_t agg_slot_off = target_bucket + 296 + (slot_idx << 5);
+    int32_t val_is_non_null = val_reg != 255 && load_u8((const void *)(uintptr_t)(vm_reg_off(ctx_off, val_reg) + VM_REG_IS_NULL)) == 0 ? 1 : 0;
+    if (func_id == 0) {
+      if (val_reg == 255 || val_is_non_null != 0) {
+        store_u32((void *)(uintptr_t)(agg_slot_off + 0), load_u32((const void *)(uintptr_t)(agg_slot_off + 0)) + 1);
+        store_u32((void *)(uintptr_t)(target_bucket + 8), load_u32((const void *)(uintptr_t)(target_bucket + 8)) + 1);
+      }
+    } else     if (func_id == 1 || func_id == 2) {
+      if (val_is_non_null != 0) {
+        double num = load_f64((const void *)(uintptr_t)(vm_reg_off(ctx_off, val_reg) + VM_REG_F64));
+        store_f64((void *)(uintptr_t)(agg_slot_off + 8), load_f64((const void *)(uintptr_t)(agg_slot_off + 8)) + num);
+        store_u32((void *)(uintptr_t)(agg_slot_off + 0), load_u32((const void *)(uintptr_t)(agg_slot_off + 0)) + 1);
+        store_u32((void *)(uintptr_t)(agg_slot_off + 4), 1);
+        store_f64((void *)(uintptr_t)(target_bucket + 16), load_f64((const void *)(uintptr_t)(target_bucket + 16)) + num);
+        store_u32((void *)(uintptr_t)(target_bucket + 12), 1);
+      }
+    } else     if (func_id == 3) {
+      if (val_is_non_null != 0) {
+        double num = load_f64((const void *)(uintptr_t)(vm_reg_off(ctx_off, val_reg) + VM_REG_F64));
+        if (load_u32((const void *)(uintptr_t)(agg_slot_off + 4)) == 0 || num < load_f64((const void *)(uintptr_t)(agg_slot_off + 16))) {
+          store_f64((void *)(uintptr_t)(agg_slot_off + 16), num);
+        }
+        store_u32((void *)(uintptr_t)(agg_slot_off + 0), load_u32((const void *)(uintptr_t)(agg_slot_off + 0)) + 1);
+        store_u32((void *)(uintptr_t)(agg_slot_off + 4), 1);
+        if (load_u32((const void *)(uintptr_t)(target_bucket + 12)) == 0 || num < load_f64((const void *)(uintptr_t)(target_bucket + 24))) {
+          store_f64((void *)(uintptr_t)(target_bucket + 24), num);
+        }
+        store_u32((void *)(uintptr_t)(target_bucket + 12), 1);
+      }
+    } else     if (func_id == 4) {
+      if (val_is_non_null != 0) {
+        double num = load_f64((const void *)(uintptr_t)(vm_reg_off(ctx_off, val_reg) + VM_REG_F64));
+        if (load_u32((const void *)(uintptr_t)(agg_slot_off + 4)) == 0 || num > load_f64((const void *)(uintptr_t)(agg_slot_off + 24))) {
+          store_f64((void *)(uintptr_t)(agg_slot_off + 24), num);
+        }
+        store_u32((void *)(uintptr_t)(agg_slot_off + 0), load_u32((const void *)(uintptr_t)(agg_slot_off + 0)) + 1);
+        store_u32((void *)(uintptr_t)(agg_slot_off + 4), 1);
+        if (load_u32((const void *)(uintptr_t)(target_bucket + 12)) == 0 || num > load_f64((const void *)(uintptr_t)(target_bucket + 32))) {
+          store_f64((void *)(uintptr_t)(target_bucket + 32), num);
+        }
+        store_u32((void *)(uintptr_t)(target_bucket + 12), 1);
+      }
+    }
+    if (occupied * 10 > capacity * 7) {
+      uint32_t new_capacity = capacity * 2;
+      uint32_t add_size = new_capacity * 40;
+      uint32_t arena_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET));
+      uint32_t max_mem = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_MAX_QUERY_MEMORY));
+      if (arena_off + add_size > max_mem) {
+        store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+        return VM_STATUS_ARENA_EXHAUSTED;
+      }
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), arena_off + add_size);
+      uint32_t new_buckets_off = vm_phys_alloc(ctx_off, arena_base, new_capacity * 4);
+      if (new_buckets_off == 0) {
+        store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+        return VM_STATUS_ARENA_EXHAUSTED;
+      }
+      webdb_memset((void *)(uintptr_t)(new_buckets_off), 0, new_capacity * 4);
+      for (uint32_t b_idx = 0; b_idx < capacity; b_idx++) {
+        uint32_t old_b = load_u32((const void *)(uintptr_t)(buckets_off + (b_idx << 2)));
+        if (old_b != 0) {
+          uint32_t bh = load_u32((const void *)(uintptr_t)(old_b + 0));
+          uint32_t s = bh % new_capacity;
+          for (uint32_t p = 0; p < new_capacity; p++) {
+            uint32_t pos = (s + p) % new_capacity;
+            if (load_u32((const void *)(uintptr_t)(new_buckets_off + (pos << 2))) == 0) {
+              store_u32((void *)(uintptr_t)(new_buckets_off + (pos << 2)), old_b);
+              break;
+            }
+          }
+        }
+      }
+      store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CAPACITY), new_capacity);
+      store_u32((void *)(uintptr_t)(agg_off + VM_AGG_BUCKETS_OFF), new_buckets_off);
+    }
+  }
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_agg_next_raw(uint32_t ctx_off, uint32_t agg_id, uint32_t out_key_reg, uint32_t out_acc_reg, uint32_t jump_target) {
+  uint32_t agg_off = ctx_off + VM_CTX_AGGS_OFF + agg_id * VM_AGG_SIZE;
+  if (load_u8((const void *)(uintptr_t)(agg_off + VM_AGG_IS_OPEN)) == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+    return VM_STATUS_INVALID_BYTECODE;
+  }
+  uint32_t capacity = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_CAPACITY));
+  uint32_t buckets_off = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_BUCKETS_OFF));
+  uint32_t read_idx = load_u32((const void *)(uintptr_t)(agg_off + VM_AGG_READ_IDX));
+  while (read_idx < capacity && load_u32((const void *)(uintptr_t)(buckets_off + (read_idx << 2))) == 0) {
+    read_idx++;
+  }
+  if (read_idx >= capacity) {
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_READ_IDX), read_idx);
+    store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CURR_BUCKET_OFF), 0);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_CURRENT_BUCKET_OFF), 0);
+    return VM_STATUS_RUNNING;
+  }
+  uint32_t bucket_off = load_u32((const void *)(uintptr_t)(buckets_off + (read_idx << 2)));
+  read_idx++;
+  store_u32((void *)(uintptr_t)(agg_off + VM_AGG_READ_IDX), read_idx);
+  store_u32((void *)(uintptr_t)(agg_off + VM_AGG_CURR_BUCKET_OFF), bucket_off);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_CURRENT_BUCKET_OFF), bucket_off);
+  uint32_t num_keys = load_u32((const void *)(uintptr_t)(bucket_off + 4));
+  for (uint32_t k = 0; k < num_keys; k++) {
+    vm_reg_copy(vm_reg_off(ctx_off, out_key_reg + k), bucket_off + 40 + (k << 5));
+  }
+  int32_t b_count = load_u32((const void *)(uintptr_t)(bucket_off + 8));
+  uint32_t b_has_val = load_u32((const void *)(uintptr_t)(bucket_off + 12));
+  double b_sum = load_f64((const void *)(uintptr_t)(bucket_off + 16));
+  double b_min = load_f64((const void *)(uintptr_t)(bucket_off + 24));
+  double b_max = load_f64((const void *)(uintptr_t)(bucket_off + 32));
+  vm_reg_set_f64(vm_reg_off(ctx_off, out_acc_reg), b_sum);
+  vm_reg_set_i32(vm_reg_off(ctx_off, out_acc_reg + 1), b_count);
+  if (b_has_val != 0) {
+    vm_reg_set_f64(vm_reg_off(ctx_off, out_acc_reg + 2), b_min);
+    vm_reg_set_f64(vm_reg_off(ctx_off, out_acc_reg + 3), b_max);
+  } else {
+    vm_reg_set_null(vm_reg_off(ctx_off, out_acc_reg + 2));
+    vm_reg_set_null(vm_reg_off(ctx_off, out_acc_reg + 3));
+  }
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), jump_target);
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_agg_final_raw(uint32_t ctx_off, uint32_t sum_reg, uint32_t count_reg, uint32_t out_reg, uint32_t raw_func_id) {
+  uint32_t func_id = raw_func_id & 7;
+  uint32_t slot_idx = raw_func_id >> 3;
+  uint32_t out_reg_off = vm_reg_off(ctx_off, out_reg);
+  uint32_t curr_bucket = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_CURRENT_BUCKET_OFF));
+  if (curr_bucket != 0) {
+    uint32_t slot_off = curr_bucket + 296 + (slot_idx << 5);
+    int32_t s_count = load_u32((const void *)(uintptr_t)(slot_off + 0));
+    uint32_t s_has_val = load_u32((const void *)(uintptr_t)(slot_off + 4));
+    double s_sum = load_f64((const void *)(uintptr_t)(slot_off + 8));
+    double s_min = load_f64((const void *)(uintptr_t)(slot_off + 16));
+    double s_max = load_f64((const void *)(uintptr_t)(slot_off + 24));
+    if (func_id == 0) {
+      vm_reg_set_i32(out_reg_off, s_count);
+    } else     if (func_id == 1) {
+      if (s_has_val != 0) 
+        vm_reg_set_f64(out_reg_off, s_sum); else 
+        vm_reg_set_null(out_reg_off);
+    } else     if (func_id == 2) {
+      if (s_count > 0) 
+        vm_reg_set_f64(out_reg_off, s_sum / s_count); else 
+        vm_reg_set_null(out_reg_off);
+    } else     if (func_id == 3) {
+      if (s_has_val != 0) 
+        vm_reg_set_f64(out_reg_off, s_min); else 
+        vm_reg_set_null(out_reg_off);
+    } else     if (func_id == 4) {
+      if (s_has_val != 0) 
+        vm_reg_set_f64(out_reg_off, s_max); else 
+        vm_reg_set_null(out_reg_off);
+    }
+    return VM_STATUS_RUNNING;
+  }
+  uint32_t sum_reg_off = vm_reg_off(ctx_off, sum_reg);
+  uint32_t count_reg_off = vm_reg_off(ctx_off, count_reg);
+  int32_t count_val = load_u8((const void *)(uintptr_t)(count_reg_off + VM_REG_IS_NULL)) != 0 ? 0 : load_i32((const void *)(uintptr_t)(count_reg_off + VM_REG_I32));
+  if (func_id == 0) {
+    vm_reg_set_i32(out_reg_off, count_val);
+  } else   if (func_id == 1) {
+    if (count_val > 0) {
+      vm_reg_set_f64(out_reg_off, load_f64((const void *)(uintptr_t)(sum_reg_off + VM_REG_F64)));
+    } else {
+      vm_reg_set_null(out_reg_off);
+    }
+  } else   if (func_id == 2) {
+    if (count_val > 0) {
+      vm_reg_set_f64(out_reg_off, load_f64((const void *)(uintptr_t)(sum_reg_off + VM_REG_F64)) / count_val);
+    } else {
+      vm_reg_set_null(out_reg_off);
+    }
+  } else   if (func_id == 3 || func_id == 4) {
+    vm_reg_copy(out_reg_off, sum_reg_off);
+  }
+  return VM_STATUS_RUNNING;
 }
 
 uint32_t fnv1a_32_bytes(uint8_t * data, uint32_t len) {
@@ -35,7 +1812,7 @@ int32_t sql_like_match_raw(const char * str, uint32_t str_len, const char * patt
       star_p = p++;
       star_s = s;
     } else     if (star_p != -1) {
-      p = star_p + 1;
+      p = (star_p + 1);
       s = ++star_s;
     } else {
       return 0;

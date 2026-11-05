@@ -1,18 +1,43 @@
+/**
+ * @c_include "vm_helpers.h"
+ * @c_include "page.h"
+ * @c_include "buffer_pool.h"
+ */
+
 import {
   PAGE_TO_SLOT_OFFSET,
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
-  MAX_TOPK_HEAP_LIMIT,
+  VM_CONTEXT_OFFSET,
+  VM_CONTEXT_SIZE,
+  RESULT_BUFFER_OFFSET,
+  BYTECODE_OFFSET,
+  TRANSIENT_ARENA_OFFSET,
+  TOTAL_MEMORY_BYTES,
 } from "../../constants.ts";
 import { OpCode, VmStatus, DataType } from "../../types/index.ts";
+import { u8, u16, u32, i32, i64, f64 } from "../types.ts";
 import {
   page_get_cell_count,
   page_get_cell_offset,
   page_get_next_page_id,
-  page_binary_search_index_leaf,
 } from "./page.c.ts";
 import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
-import { UuidCodec, UlidCodec } from "./codecs.c.ts";
+import {
+  memcpy,
+  memset,
+  read_u8,
+  write_u8,
+  read_u16,
+  write_u16,
+  read_u32,
+  write_u32,
+  read_i32,
+  write_i32,
+  read_i64,
+  read_f64,
+  i64_to_i32,
+} from "../../shared/c_runtime.ts";
 
 import {
   type VmCursor,
@@ -26,20 +51,102 @@ import {
 } from "../../shared/index.ts";
 
 import {
-  get_cursor,
-  resolve_page_offset,
-  compare_3vl,
-  sql_like_match,
-  fnv1a_32,
-  group_keys_match,
-  create_agg_buckets,
-  sort_sorter_entries,
-  sorter_insert_row,
-  compare_registers_to_sorter_keys,
-  serialize_result_registers,
-  emit_to_result_buffer,
-  row_is_null,
-  compute_fixed_column_offset,
+  VM_CTX_PC,
+  VM_CTX_STATUS,
+  VM_CTX_FAULT_PAGE_ID,
+  VM_CTX_RESULT_COUNT,
+  VM_CTX_RESULT_OFFSET,
+  VM_CTX_ARENA_OFFSET,
+  VM_CTX_MAX_QUERY_MEMORY,
+  VM_CTX_HAS_BUFFER_POOL,
+  VM_CTX_NUM_TABLES,
+  VM_CTX_NUM_OUTPUT_COLS,
+  VM_CTX_NUM_KEY_INFOS,
+  VM_CTX_NUM_IN_SETS,
+  VM_CTX_UDF_ID,
+  VM_CTX_UDF_START_REG,
+  VM_CTX_UDF_NUM_ARGS,
+  VM_CTX_UDF_DEST_REG,
+  VM_CTX_PHYS_ARENA_USED,
+  VM_CTX_CURRENT_BUCKET_OFF,
+  VM_REG_IS_NULL,
+  VM_REG_TYPE,
+  VM_REG_I32,
+  VM_REG_I64,
+  VM_REG_F64,
+  VM_REG_DATA_OFF,
+  VM_REG_DATA_LEN,
+  VM_CUR_PAGE_ID,
+  VM_CUR_ROOT_PAGE_ID,
+  VM_CUR_SLOT_IDX,
+  VM_CUR_CELL_IDX,
+  VM_CUR_ROW_OFFSET,
+  VM_CTX_TABLES_OFF,
+  VM_TABLE_DESC_SIZE,
+  VM_CTX_OUTPUT_COLS_OFF,
+  VM_CTX_KEY_INFOS_OFF,
+  VM_KEY_INFO_SIZE,
+  VM_KI_NUM_KEYS,
+  VM_KI_HAS_LIMIT,
+  VM_KI_LIMIT,
+  VM_KI_OFFSET,
+  VM_KI_DIRECTIONS,
+  VM_KI_NULL_ORDERS,
+  VM_CTX_AGGS_OFF,
+  VM_AGG_SIZE,
+  VM_AGG_IS_OPEN,
+  VM_AGG_MODE,
+  VM_AGG_START_KEY_REG,
+  VM_AGG_NUM_KEYS,
+  VM_AGG_CAPACITY,
+  VM_AGG_OCCUPIED,
+  VM_AGG_READ_IDX,
+  VM_CTX_IN_SETS_OFF,
+  VM_STATUS_HOST_UDF,
+  vm_reg_off,
+  vm_cursor_off,
+  vm_resolve_table_off,
+  vm_phys_alloc,
+  vm_reg_set_null,
+  vm_reg_set_i32,
+  vm_reg_set_i64,
+  vm_reg_set_f64,
+  vm_reg_set_slice,
+  vm_reg_copy,
+  vm_uuid_decode_view,
+  vm_ulid_decode_view,
+  vm_resolve_page_offset,
+  vm_row_is_null,
+  vm_compute_fixed_col_offset,
+  vm_compute_var_col_idx,
+  vm_compare_reg_3vl,
+  vm_index_seek_leaf_eq,
+  vm_index_seek_leaf_ge,
+  sql_like_match_view,
+  vm_str_contains_view,
+  vm_str_starts_with_view,
+  vm_str_ends_with_view,
+  vm_utf8_char_count,
+  vm_str_lower,
+  vm_str_upper,
+  vm_str_trim,
+  vm_utf8_substr,
+  vm_str_concat,
+  vm_math_abs,
+  vm_math_floor,
+  vm_math_ceil,
+  vm_math_round,
+  vm_in_set_contains,
+  vm_emit_raw_row,
+  vm_serialize_and_emit_result_row,
+  vm_sorter_open_raw,
+  vm_sorter_insert_raw,
+  vm_sorter_sort_raw,
+  vm_sorter_next_raw,
+  vm_agg_init_raw,
+  vm_agg_step_raw,
+  vm_agg_next_raw,
+  vm_agg_final_raw,
 } from "./vm.helpers.c.ts";
 
 // Re-export helpers, context functions, and types for public/core consumers
@@ -54,7 +161,2477 @@ export type {
   VmAggBucket,
 };
 
+// ============================================================================
+// 1. Zero-Allocation Flat Linear-Memory Bytecode VM (@export_c)
+// ============================================================================
+
+/**
+ * @export_c
+ * Synchronous Bytecode VM execution step loop over flat linear memory.
+ * Zero dynamic allocations and zero object property accesses; transpiles 1:1 to C.
+ *
+ * Guide to Low-Level Memory Primitives (`read_*` / `write_*`) vs Pure JS Equivalents:
+ * -----------------------------------------------------------------------------------
+ * 1. Bytecode Operands (at `code_off + pc`):
+ *    - `read_u8(view, code_off + pc)`       <-> `bytecode[pc]`
+ *    - `read_u16(view, code_off + pc)`      <-> `bytecodeView.getUint16(pc, true)`
+ *    - `read_i32(view, code_off + pc)`      <-> `bytecodeView.getInt32(pc, true)`
+ *    - `read_u32(view, code_off + pc)`      <-> `bytecodeView.getUint32(pc, true)`
+ *    - `read_f64(view, code_off + pc)`      <-> `bytecodeView.getFloat64(pc, true)`
+ *
+ * 2. VmContext Scalar State (at `ctx_off = VM_CONTEXT_OFFSET`):
+ *    - `read_u32(view, ctx_off + VM_CTX_PC)`                   <-> `ctx.pc`
+ *    - `write_u32(view, ctx_off + VM_CTX_PC, pc)`              <-> `ctx.pc = pc`
+ *    - `write_i32(view, ctx_off + VM_CTX_STATUS, s)`           <-> `ctx.status = s`
+ *    - `write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, pid)`  <-> `ctx.fault_page_id = pid`
+ *    - `write_u32(view, ctx_off + VM_CTX_ARENA_OFFSET, off)`   <-> `ctx.arenaOffset = off`
+ *
+ * 3. Cursor State (`cur_off = vm_cursor_off(ctx_off, cursor_idx)`):
+ *    - `read_u32(view, cur_off + VM_CUR_PAGE_ID)`              <-> `ctx.cursors[cursor_idx].pageId`
+ *    - `write_u32(view, cur_off + VM_CUR_PAGE_ID, pid)`        <-> `ctx.cursors[cursor_idx].pageId = pid`
+ *    - `write_u32(view, cur_off + VM_CUR_ROOT_PAGE_ID, pid)`   <-> `ctx.cursors[cursor_idx].rootPageId = pid`
+ *    - `write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot)`      <-> `ctx.cursors[cursor_idx].slotIdx = slot`
+ *    - `read_i32(view, cur_off + VM_CUR_CELL_IDX)`             <-> `ctx.cursors[cursor_idx].cellIdx`
+ *    - `write_i32(view, cur_off + VM_CUR_CELL_IDX, idx)`       <-> `ctx.cursors[cursor_idx].cellIdx = idx`
+ *    - `read_u32(view, cur_off + VM_CUR_ROW_OFFSET)`           <-> `ctx.cursors[cursor_idx].rowOffset`
+ *    - `write_u32(view, cur_off + VM_CUR_ROW_OFFSET, off)`     <-> `ctx.cursors[cursor_idx].rowOffset = off`
+ *
+ * 4. Register State (`reg_off = vm_reg_off(ctx_off, reg_idx)`):
+ *    - `vm_reg_set_null(view, reg_off)`                        <-> `ctx.registers[reg_idx] = null`
+ *    - `vm_reg_set_i32(view, reg_off, val)`                    <-> `ctx.registers[reg_idx] = val`
+ *    - `vm_reg_set_i64(view, reg_off, val)`                    <-> `ctx.registers[reg_idx] = val`
+ *    - `vm_reg_set_f64(view, reg_off, val)`                    <-> `ctx.registers[reg_idx] = val`
+ *    - `vm_reg_set_slice(view, reg_off, type, off, len)`       <-> `ctx.registers[reg_idx] = slice(off, off + len)`
+ *    - `read_u8(view, reg_off + VM_REG_IS_NULL) !== 0`         <-> `ctx.registers[reg_idx] === null`
+ *    - `read_f64(view, reg_off + VM_REG_F64)`                  <-> `Number(ctx.registers[reg_idx])`
+ */
+export function vm_step_raw(
+  view: DataView,
+  ctx_off: u32,
+  code_off: u32,
+  code_len: u32,
+  arena_base: u32,
+): i32 {
+  const MAX_CYCLES: u32 = 10000000;
+  let cycles: u32 = 0;
+
+  // JS: const hasBufferPool = ctx.hasBufferPool;
+  // JS: let pc = ctx.pc;
+  const has_buffer_pool: u32 = read_u32(view, ctx_off + VM_CTX_HAS_BUFFER_POOL);
+  let pc: u32 = read_u32(view, ctx_off + VM_CTX_PC);
+
+  while (pc < code_len) {
+    cycles++;
+    if (cycles > MAX_CYCLES) {
+      // JS: ctx.pc = pc; ctx.status = VmStatus.TIMEOUT; return VmStatus.TIMEOUT;
+      write_u32(view, ctx_off + VM_CTX_PC, pc);
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.TIMEOUT);
+      return VmStatus.TIMEOUT;
+    }
+
+    const instr_pc: u32 = pc;
+    // JS: const op = bytecode[pc++];
+    const op: u8 = read_u8(view, code_off + pc);
+    pc += 1;
+
+    switch (op) {
+      case OpCode.OP_HALT: {
+        // JS:
+        //   ctx.arenaOffset = 0;
+        //   ctx.pc = pc;
+        //   ctx.status = VmStatus.DONE;
+        //   return VmStatus.DONE;
+        write_u32(view, ctx_off + VM_CTX_ARENA_OFFSET, 0);
+        write_u32(view, ctx_off + VM_CTX_PC, pc);
+        write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.DONE);
+        return VmStatus.DONE;
+      }
+
+      case OpCode.OP_OPEN_CURSOR: {
+        // JS: const cursor_idx = bytecode[pc]; const root_page_id = bytecodeView.getUint32(pc + 1, true); pc += 5;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const root_page_id: u32 = read_u32(view, code_off + pc + 1);
+        pc += 5;
+
+        // JS:
+        //   const cursor = ctx.cursors[cursor_idx];
+        //   cursor.pageId = root_page_id;
+        //   cursor.cellIdx = 0;
+        //   cursor.rowOffset = 0;
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        write_u32(view, cur_off + VM_CUR_PAGE_ID, root_page_id);
+        write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
+        write_u32(view, cur_off + VM_CUR_ROW_OFFSET, 0);
+
+        if (has_buffer_pool !== 0 && root_page_id > 0) {
+          const slot: i32 = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            root_page_id,
+          );
+          if (slot < 0) {
+            // JS:
+            //   ctx.fault_page_id = root_page_id;
+            //   ctx.status = VmStatus.PAGE_FAULT;
+            //   ctx.pc = instr_pc; // Re-run this instruction once host loads page
+            //   return VmStatus.PAGE_FAULT;
+            write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, root_page_id);
+            write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+            write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+            return VmStatus.PAGE_FAULT;
+          }
+          // JS: cursor.slotIdx = slot;
+          write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
+        }
+        break;
+      }
+
+      case OpCode.OP_REWIND: {
+        // JS: const cursor_idx = bytecode[pc]; const jump_target = bytecodeView.getUint16(pc + 1, true); pc += 3;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          // JS: ctx.pc = pc; ctx.status = VmStatus.INVALID_BYTECODE; return VmStatus.INVALID_BYTECODE;
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        // JS: const cursor = ctx.cursors[cursor_idx]; const page_id = cursor.pageId;
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
+
+        if (has_buffer_pool !== 0 && page_id > 0) {
+          const slot: i32 = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            page_id,
+          );
+          if (slot < 0) {
+            // JS: ctx.fault_page_id = page_id; ctx.status = VmStatus.PAGE_FAULT; ctx.pc = instr_pc;
+            write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, page_id);
+            write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+            write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+            return VmStatus.PAGE_FAULT;
+          }
+          // JS: cursor.slotIdx = slot;
+          write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
+        }
+
+        const page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          page_id,
+        );
+        const cell_count: u16 = page_get_cell_count(view, page_offset);
+
+        if (cell_count === 0) {
+          // JS: pc = jump_target; (empty table -> jump to EOF)
+          pc = jump_target;
+        } else {
+          // JS:
+          //   cursor.cellIdx = 0;
+          //   cursor.rowOffset = page_offset + page_get_cell_offset(view, page_offset, 0);
+          write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
+          const rel_cell_offset: u16 = page_get_cell_offset(view, page_offset, 0);
+          write_u32(
+            view,
+            cur_off + VM_CUR_ROW_OFFSET,
+            page_offset + rel_cell_offset,
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_NEXT_ROW: {
+        // JS: const cursor_idx = bytecode[pc]; const jump_target = bytecodeView.getUint16(pc + 1, true); pc += 3;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        // JS: const cursor = ctx.cursors[cursor_idx]; const page_id = cursor.pageId;
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
+        const page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          page_id,
+        );
+        const cell_count: i32 = page_get_cell_count(view, page_offset);
+
+        // JS: const next_cell_idx = cursor.cellIdx + 1;
+        const next_cell_idx: i32 = read_i32(view, cur_off + VM_CUR_CELL_IDX) + 1;
+        if (next_cell_idx < cell_count) {
+          // JS:
+          //   cursor.cellIdx = next_cell_idx;
+          //   cursor.rowOffset = page_offset + page_get_cell_offset(view, page_offset, next_cell_idx);
+          write_i32(view, cur_off + VM_CUR_CELL_IDX, next_cell_idx);
+          const rel_cell_offset: u16 = page_get_cell_offset(
+            view,
+            page_offset,
+            next_cell_idx as u16,
+          );
+          write_u32(
+            view,
+            cur_off + VM_CUR_ROW_OFFSET,
+            page_offset + rel_cell_offset,
+          );
+        } else {
+          // Follow leaf page chain (`next_page_id`) when current page is exhausted
+          const next_page_id: u32 = page_get_next_page_id(view, page_offset);
+          if (next_page_id !== 0) {
+            if (has_buffer_pool !== 0) {
+              const slot: i32 = buf_pool_get_resident_slot(
+                view,
+                PAGE_TO_SLOT_OFFSET,
+                DEFAULT_PAGE_TO_SLOT_BUCKETS,
+                next_page_id,
+              );
+              if (slot < 0) {
+                // JS: ctx.fault_page_id = next_page_id; ctx.status = VmStatus.PAGE_FAULT; ctx.pc = instr_pc;
+                write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, next_page_id);
+                write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+                write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+                return VmStatus.PAGE_FAULT;
+              }
+              // JS: cursor.slotIdx = slot;
+              write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
+            }
+
+            // JS: cursor.pageId = next_page_id; cursor.cellIdx = 0;
+            write_u32(view, cur_off + VM_CUR_PAGE_ID, next_page_id);
+            write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
+            const next_offset: u32 = vm_resolve_page_offset(
+              view,
+              has_buffer_pool,
+              next_page_id,
+            );
+            const next_count: u16 = page_get_cell_count(view, next_offset);
+            if (next_count > 0) {
+              const rel_cell_offset: u16 = page_get_cell_offset(
+                view,
+                next_offset,
+                0,
+              );
+              // JS: cursor.rowOffset = next_offset + rel_cell_offset;
+              write_u32(
+                view,
+                cur_off + VM_CUR_ROW_OFFSET,
+                next_offset + rel_cell_offset,
+              );
+            } else {
+              pc = jump_target;
+            }
+          } else {
+            pc = jump_target;
+          }
+        }
+        break;
+      }
+
+      case OpCode.OP_LAST: {
+        // JS:
+        //   const cursor = ctx.cursors[cursor_idx];
+        //   if (cell_count === 0) pc = jump_target;
+        //   else { cursor.cellIdx = cell_count - 1; cursor.rowOffset = page_offset + rel_cell_offset; }
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
+        const page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          page_id,
+        );
+        const cell_count: i32 = page_get_cell_count(view, page_offset);
+
+        if (cell_count === 0) {
+          pc = jump_target;
+        } else {
+          const last_idx: i32 = cell_count - 1;
+          write_i32(view, cur_off + VM_CUR_CELL_IDX, last_idx);
+          const rel_cell_offset: u16 = page_get_cell_offset(
+            view,
+            page_offset,
+            last_idx as u16,
+          );
+          write_u32(
+            view,
+            cur_off + VM_CUR_ROW_OFFSET,
+            page_offset + rel_cell_offset,
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_PREV_ROW: {
+        // JS:
+        //   const cursor = ctx.cursors[cursor_idx];
+        //   if (cursor.cellIdx > 0) { cursor.cellIdx--; cursor.rowOffset = page_offset + rel_cell_offset; }
+        //   else pc = jump_target;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
+        const page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          page_id,
+        );
+        const cell_idx: i32 = read_i32(view, cur_off + VM_CUR_CELL_IDX);
+
+        if (cell_idx > 0) {
+          const prev_idx: i32 = cell_idx - 1;
+          write_i32(view, cur_off + VM_CUR_CELL_IDX, prev_idx);
+          const rel_cell_offset: u16 = page_get_cell_offset(
+            view,
+            page_offset,
+            prev_idx as u16,
+          );
+          write_u32(
+            view,
+            cur_off + VM_CUR_ROW_OFFSET,
+            page_offset + rel_cell_offset,
+          );
+        } else {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_COLUMN_INT: {
+        // JS:
+        //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
+        //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
+        //   else ctx.registers[reg_idx] = view.getInt32(col_offset, true); // or getBigInt64
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_idx: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        const tbl_off: u32 = vm_resolve_table_off(view, ctx_off, cursor_idx);
+        const null_bitmap_bytes: u32 = read_u16(view, tbl_off + 2);
+        const null_bitmap_offset: u32 = row_offset + 3;
+        const reg_off: u32 = vm_reg_off(ctx_off, reg_idx);
+
+        if (vm_row_is_null(view, null_bitmap_offset, col_idx) !== 0) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
+
+        const col_offset: u32 = vm_compute_fixed_col_offset(
+          view,
+          null_bitmap_offset,
+          null_bitmap_bytes,
+          tbl_off,
+          col_idx,
+        );
+        const col_type: u8 = read_u8(view, tbl_off + 4 + col_idx);
+
+        if (col_type === DataType.INT32) {
+          vm_reg_set_i32(view, reg_off, read_i32(view, col_offset));
+        } else if (col_type === DataType.INT64) {
+          vm_reg_set_i64(view, reg_off, read_i64(view, col_offset));
+        }
+        break;
+      }
+
+      case OpCode.OP_COLUMN_FLOAT: {
+        // JS:
+        //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
+        //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
+        //   else ctx.registers[reg_idx] = view.getFloat64(col_offset, true);
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_idx: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        const tbl_off: u32 = vm_resolve_table_off(view, ctx_off, cursor_idx);
+        const null_bitmap_bytes: u32 = read_u16(view, tbl_off + 2);
+        const null_bitmap_offset: u32 = row_offset + 3;
+        const reg_off: u32 = vm_reg_off(ctx_off, reg_idx);
+
+        if (vm_row_is_null(view, null_bitmap_offset, col_idx) !== 0) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
+
+        const col_offset: u32 = vm_compute_fixed_col_offset(
+          view,
+          null_bitmap_offset,
+          null_bitmap_bytes,
+          tbl_off,
+          col_idx,
+        );
+        vm_reg_set_f64(view, reg_off, read_f64(view, col_offset));
+        break;
+      }
+
+      case OpCode.OP_COLUMN_UUID:
+      case OpCode.OP_COLUMN_ULID:
+      case OpCode.OP_COLUMN_TEXT: {
+        // JS:
+        //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
+        //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
+        //   else ctx.registers[reg_idx] = textDecoder.decode(rowSlice); // stored here as zero-copy (offset, len)
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_idx: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        const tbl_off: u32 = vm_resolve_table_off(view, ctx_off, cursor_idx);
+        const num_cols: u32 = read_u16(view, tbl_off + 0);
+        const null_bitmap_bytes: u32 = read_u16(view, tbl_off + 2);
+        const null_bitmap_offset: u32 = row_offset + 3;
+        const reg_off: u32 = vm_reg_off(ctx_off, reg_idx);
+
+        if (vm_row_is_null(view, null_bitmap_offset, col_idx) !== 0) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
+
+        const col_type: u8 = read_u8(view, tbl_off + 4 + col_idx);
+        if (col_type === DataType.UUID || col_type === DataType.ULID) {
+          const col_offset: u32 = vm_compute_fixed_col_offset(
+            view,
+            null_bitmap_offset,
+            null_bitmap_bytes,
+            tbl_off,
+            col_idx,
+          );
+          if (col_type === DataType.UUID) {
+            const out_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, 36);
+            if (out_off === 0) {
+              write_u32(view, ctx_off + VM_CTX_PC, pc);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
+              return VmStatus.ARENA_EXHAUSTED;
+            }
+            vm_uuid_decode_view(view, col_offset, out_off);
+            vm_reg_set_slice(view, reg_off, DataType.UUID, out_off, 36);
+          } else {
+            const out_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, 26);
+            if (out_off === 0) {
+              write_u32(view, ctx_off + VM_CTX_PC, pc);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
+              return VmStatus.ARENA_EXHAUSTED;
+            }
+            vm_ulid_decode_view(view, col_offset, out_off);
+            vm_reg_set_slice(view, reg_off, DataType.ULID, out_off, 26);
+          }
+          break;
+        }
+
+        const var_table_offset: u32 = vm_compute_fixed_col_offset(
+          view,
+          null_bitmap_offset,
+          null_bitmap_bytes,
+          tbl_off,
+          num_cols,
+        );
+        const var_idx: u32 = vm_compute_var_col_idx(view, tbl_off, col_idx);
+        const entry_offset: u32 = var_table_offset + (var_idx << 2);
+        const rel_offset: u16 = read_u16(view, entry_offset);
+        const len: u16 = read_u16(view, entry_offset + 2);
+
+        vm_reg_set_slice(
+          view,
+          reg_off,
+          DataType.TEXT,
+          row_offset + rel_offset,
+          len,
+        );
+        break;
+      }
+
+      case OpCode.OP_COLUMN_BLOB: {
+        // JS:
+        //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
+        //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
+        //   else ctx.registers[reg_idx] = new Uint8Array(buffer, rowOffset + rel_offset, len);
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_idx: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        const tbl_off: u32 = vm_resolve_table_off(view, ctx_off, cursor_idx);
+        const num_cols: u32 = read_u16(view, tbl_off + 0);
+        const null_bitmap_bytes: u32 = read_u16(view, tbl_off + 2);
+        const null_bitmap_offset: u32 = row_offset + 3;
+        const reg_off: u32 = vm_reg_off(ctx_off, reg_idx);
+
+        if (vm_row_is_null(view, null_bitmap_offset, col_idx) !== 0) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
+
+        const var_table_offset: u32 = vm_compute_fixed_col_offset(
+          view,
+          null_bitmap_offset,
+          null_bitmap_bytes,
+          tbl_off,
+          num_cols,
+        );
+        const var_idx: u32 = vm_compute_var_col_idx(view, tbl_off, col_idx);
+        const entry_offset: u32 = var_table_offset + (var_idx << 2);
+        const rel_offset: u16 = read_u16(view, entry_offset);
+        const len: u16 = read_u16(view, entry_offset + 2);
+
+        vm_reg_set_slice(
+          view,
+          reg_off,
+          DataType.BLOB,
+          row_offset + rel_offset,
+          len,
+        );
+        break;
+      }
+
+      case OpCode.OP_OPEN_INDEX: {
+        // JS:
+        //   const cursor = ctx.cursors[cursor_idx];
+        //   cursor.pageId = root_page_id;
+        //   cursor.rootPageId = root_page_id;
+        //   cursor.cellIdx = 0;
+        //   cursor.rowOffset = 0;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const root_page_id: u32 = read_u32(view, code_off + pc + 1);
+        pc += 5;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        write_u32(view, cur_off + VM_CUR_PAGE_ID, root_page_id);
+        write_u32(view, cur_off + VM_CUR_ROOT_PAGE_ID, root_page_id);
+        write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
+        write_u32(view, cur_off + VM_CUR_ROW_OFFSET, 0);
+
+        if (has_buffer_pool !== 0 && root_page_id > 0) {
+          const slot: i32 = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            root_page_id,
+          );
+          if (slot < 0) {
+            write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, root_page_id);
+            write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+            write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+            return VmStatus.PAGE_FAULT;
+          }
+          write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
+        }
+        break;
+      }
+
+      case OpCode.OP_INDEX_SEEK_EQ: {
+        const index_cursor_idx: u32 = read_u8(view, code_off + pc);
+        const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_key: u32 = read_u8(view, code_off + pc + 2);
+        const key_type: u8 = read_u8(view, code_off + pc + 3);
+        const jump_not_found: u32 = read_u16(view, code_off + pc + 4);
+        pc += 6;
+
+        if (jump_not_found > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const key_reg_off: u32 = vm_reg_off(ctx_off, reg_key);
+        if (read_u8(view, key_reg_off + VM_REG_IS_NULL) !== 0) {
+          pc = jump_not_found;
+          break;
+        }
+
+        const idx_cur_off: u32 = vm_cursor_off(ctx_off, index_cursor_idx);
+        const root_pid: u32 = read_u32(view, idx_cur_off + VM_CUR_ROOT_PAGE_ID);
+        let curr_page_id: u32 =
+          root_pid !== 0
+            ? root_pid
+            : read_u32(view, idx_cur_off + VM_CUR_PAGE_ID);
+        let found: i32 = 0;
+        let matched_rowid: i64 = 0n;
+
+        while (curr_page_id !== 0) {
+          if (has_buffer_pool !== 0 && curr_page_id > 0) {
+            const slot: i32 = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, curr_page_id);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+              write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+              return VmStatus.PAGE_FAULT;
+            }
+            write_i32(view, idx_cur_off + VM_CUR_SLOT_IDX, slot);
+          }
+
+          const page_offset: u32 = vm_resolve_page_offset(
+            view,
+            has_buffer_pool,
+            curr_page_id,
+          );
+          const matched_slot: i32 = vm_index_seek_leaf_eq(
+            view,
+            ctx_off,
+            page_offset,
+            key_type,
+            key_reg_off,
+          );
+
+          if (matched_slot >= 0) {
+            found = 1;
+            write_u32(view, idx_cur_off + VM_CUR_PAGE_ID, curr_page_id);
+            write_i32(view, idx_cur_off + VM_CUR_CELL_IDX, matched_slot);
+            const cell_offset: u16 = page_get_cell_offset(
+              view,
+              page_offset,
+              matched_slot as u16,
+            );
+            const k_len: u16 = read_u16(view, page_offset + cell_offset);
+            matched_rowid = read_i64(
+              view,
+              page_offset + cell_offset + 2 + k_len,
+            );
+            break;
+          }
+
+          curr_page_id = page_get_next_page_id(view, page_offset);
+        }
+
+        if (found === 0) {
+          pc = jump_not_found;
+        } else {
+          const data_page_id: u32 = i64_to_i32(matched_rowid >> 16n) as u32;
+          const data_cell_idx: i32 = i64_to_i32(matched_rowid & 0xffffn);
+
+          if (has_buffer_pool !== 0 && data_page_id > 0) {
+            const slot: i32 = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              data_page_id,
+            );
+            if (slot < 0) {
+              write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, data_page_id);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+              write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+              return VmStatus.PAGE_FAULT;
+            }
+          }
+
+          const data_cur_off: u32 = vm_cursor_off(ctx_off, data_cursor_idx);
+          write_u32(view, data_cur_off + VM_CUR_PAGE_ID, data_page_id);
+          write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
+          const data_page_offset: u32 = vm_resolve_page_offset(
+            view,
+            has_buffer_pool,
+            data_page_id,
+          );
+          const rel_cell_offset: u16 = page_get_cell_offset(
+            view,
+            data_page_offset,
+            data_cell_idx as u16,
+          );
+          write_u32(
+            view,
+            data_cur_off + VM_CUR_ROW_OFFSET,
+            data_page_offset + rel_cell_offset,
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_INDEX_SEEK_GE: {
+        const index_cursor_idx: u32 = read_u8(view, code_off + pc);
+        const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
+        const reg_key: u32 = read_u8(view, code_off + pc + 2);
+        const key_type: u8 = read_u8(view, code_off + pc + 3);
+        const jump_eof: u32 = read_u16(view, code_off + pc + 4);
+        pc += 6;
+
+        if (jump_eof > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const key_reg_off: u32 = vm_reg_off(ctx_off, reg_key);
+        if (read_u8(view, key_reg_off + VM_REG_IS_NULL) !== 0) {
+          pc = jump_eof;
+          break;
+        }
+
+        const idx_cur_off: u32 = vm_cursor_off(ctx_off, index_cursor_idx);
+        const root_pid: u32 = read_u32(view, idx_cur_off + VM_CUR_ROOT_PAGE_ID);
+        let curr_page_id: u32 =
+          root_pid !== 0
+            ? root_pid
+            : read_u32(view, idx_cur_off + VM_CUR_PAGE_ID);
+        let found: i32 = 0;
+        let matched_rowid: i64 = 0n;
+
+        while (curr_page_id !== 0) {
+          if (has_buffer_pool !== 0 && curr_page_id > 0) {
+            const slot: i32 = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, curr_page_id);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+              write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+              return VmStatus.PAGE_FAULT;
+            }
+            write_i32(view, idx_cur_off + VM_CUR_SLOT_IDX, slot);
+          }
+
+          const page_offset: u32 = vm_resolve_page_offset(
+            view,
+            has_buffer_pool,
+            curr_page_id,
+          );
+          const candidate_slot: i32 = vm_index_seek_leaf_ge(
+            view,
+            ctx_off,
+            page_offset,
+            key_type,
+            key_reg_off,
+          );
+
+          if (candidate_slot >= 0) {
+            found = 1;
+            write_u32(view, idx_cur_off + VM_CUR_PAGE_ID, curr_page_id);
+            write_i32(view, idx_cur_off + VM_CUR_CELL_IDX, candidate_slot);
+            const cell_offset: u16 = page_get_cell_offset(
+              view,
+              page_offset,
+              candidate_slot as u16,
+            );
+            const k_len: u16 = read_u16(view, page_offset + cell_offset);
+            matched_rowid = read_i64(
+              view,
+              page_offset + cell_offset + 2 + k_len,
+            );
+            break;
+          }
+
+          curr_page_id = page_get_next_page_id(view, page_offset);
+        }
+
+        if (found === 0) {
+          pc = jump_eof;
+        } else {
+          const data_page_id: u32 = i64_to_i32(matched_rowid >> 16n) as u32;
+          const data_cell_idx: i32 = i64_to_i32(matched_rowid & 0xffffn);
+
+          if (has_buffer_pool !== 0 && data_page_id > 0) {
+            const slot: i32 = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              data_page_id,
+            );
+            if (slot < 0) {
+              write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, data_page_id);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+              write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+              return VmStatus.PAGE_FAULT;
+            }
+          }
+
+          const data_cur_off: u32 = vm_cursor_off(ctx_off, data_cursor_idx);
+          write_u32(view, data_cur_off + VM_CUR_PAGE_ID, data_page_id);
+          write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
+          const data_page_offset: u32 = vm_resolve_page_offset(
+            view,
+            has_buffer_pool,
+            data_page_id,
+          );
+          const rel_cell_offset: u16 = page_get_cell_offset(
+            view,
+            data_page_offset,
+            data_cell_idx as u16,
+          );
+          write_u32(
+            view,
+            data_cur_off + VM_CUR_ROW_OFFSET,
+            data_page_offset + rel_cell_offset,
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_INDEX_NEXT: {
+        const index_cursor_idx: u32 = read_u8(view, code_off + pc);
+        const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
+        const jump_eof: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_eof > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const idx_cur_off: u32 = vm_cursor_off(ctx_off, index_cursor_idx);
+        let curr_page_id: u32 = read_u32(view, idx_cur_off + VM_CUR_PAGE_ID);
+        let page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          curr_page_id,
+        );
+        const cell_count: i32 = page_get_cell_count(view, page_offset);
+
+        let next_cell_idx: i32 =
+          read_i32(view, idx_cur_off + VM_CUR_CELL_IDX) + 1;
+        if (next_cell_idx >= cell_count) {
+          curr_page_id = page_get_next_page_id(view, page_offset);
+          if (curr_page_id === 0) {
+            pc = jump_eof;
+            break;
+          }
+          if (has_buffer_pool !== 0 && curr_page_id > 0) {
+            const slot: i32 = buf_pool_get_resident_slot(
+              view,
+              PAGE_TO_SLOT_OFFSET,
+              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              curr_page_id,
+            );
+            if (slot < 0) {
+              write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, curr_page_id);
+              write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+              write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+              return VmStatus.PAGE_FAULT;
+            }
+            write_i32(view, idx_cur_off + VM_CUR_SLOT_IDX, slot);
+          }
+          page_offset = vm_resolve_page_offset(
+            view,
+            has_buffer_pool,
+            curr_page_id,
+          );
+          next_cell_idx = 0;
+          write_u32(view, idx_cur_off + VM_CUR_PAGE_ID, curr_page_id);
+          write_i32(view, idx_cur_off + VM_CUR_CELL_IDX, -1);
+        }
+
+        const cell_offset: u16 = page_get_cell_offset(
+          view,
+          page_offset,
+          next_cell_idx as u16,
+        );
+        const k_len: u16 = read_u16(view, page_offset + cell_offset);
+        const matched_rowid: i64 = read_i64(
+          view,
+          page_offset + cell_offset + 2 + k_len,
+        );
+
+        const data_page_id: u32 = i64_to_i32(matched_rowid >> 16n) as u32;
+        const data_cell_idx: i32 = i64_to_i32(matched_rowid & 0xffffn);
+
+        if (has_buffer_pool !== 0 && data_page_id > 0) {
+          const slot: i32 = buf_pool_get_resident_slot(
+            view,
+            PAGE_TO_SLOT_OFFSET,
+            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            data_page_id,
+          );
+          if (slot < 0) {
+            write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, data_page_id);
+            write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+            write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+            return VmStatus.PAGE_FAULT;
+          }
+        }
+
+        write_u32(view, idx_cur_off + VM_CUR_PAGE_ID, curr_page_id);
+        write_i32(view, idx_cur_off + VM_CUR_CELL_IDX, next_cell_idx);
+
+        const data_cur_off: u32 = vm_cursor_off(ctx_off, data_cursor_idx);
+        write_u32(view, data_cur_off + VM_CUR_PAGE_ID, data_page_id);
+        write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
+        const data_page_offset: u32 = vm_resolve_page_offset(
+          view,
+          has_buffer_pool,
+          data_page_id,
+        );
+        const rel_cell_offset: u16 = page_get_cell_offset(
+          view,
+          data_page_offset,
+          data_cell_idx as u16,
+        );
+        write_u32(
+          view,
+          data_cur_off + VM_CUR_ROW_OFFSET,
+          data_page_offset + rel_cell_offset,
+        );
+        break;
+      }
+
+      case OpCode.OP_IS_NULL: {
+        // JS: if (isColNull(ctx.cursors[cursor_idx].rowOffset, col_idx)) pc = jump_target;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        if (vm_row_is_null(view, row_offset + 3, col_idx) !== 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_IS_NOT_NULL: {
+        // JS: if (!isColNull(ctx.cursors[cursor_idx].rowOffset, col_idx)) pc = jump_target;
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        const col_idx: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        if (vm_row_is_null(view, row_offset + 3, col_idx) === 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_EQ: {
+        // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === 0) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp === 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_NE: {
+        // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp !== UNKNOWN && cmp !== 0) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp !== -2 && cmp !== 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_GT: {
+        // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === 1) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp === 1) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_GE: {
+        // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp === 0 || cmp === 1) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp === 0 || cmp === 1) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_LT: {
+        // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === -1) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp === -1) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_LE: {
+        // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp === -1 || cmp === 0) pc = jump_target;
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const cmp: i32 = vm_compare_reg_3vl(
+          view,
+          vm_reg_off(ctx_off, reg_a),
+          vm_reg_off(ctx_off, reg_b),
+        );
+        if (cmp === -1 || cmp === 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_JUMP: {
+        // JS: pc = bytecodeView.getUint16(pc, true);
+        const jump_target: u32 = read_u16(view, code_off + pc);
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        pc = jump_target;
+        break;
+      }
+
+      case OpCode.OP_STR_LIKE: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_pat: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const p_off: u32 = vm_reg_off(ctx_off, reg_pat);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, p_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          sql_like_match_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, p_off + VM_REG_DATA_OFF),
+            read_u32(view, p_off + VM_REG_DATA_LEN),
+          ) !== 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_NOT_LIKE: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_pat: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const p_off: u32 = vm_reg_off(ctx_off, reg_pat);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, p_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          sql_like_match_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, p_off + VM_REG_DATA_OFF),
+            read_u32(view, p_off + VM_REG_DATA_LEN),
+          ) === 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_CONTAINS: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_sub: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const sub_off: u32 = vm_reg_off(ctx_off, reg_sub);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, sub_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          vm_str_contains_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, sub_off + VM_REG_DATA_OFF),
+            read_u32(view, sub_off + VM_REG_DATA_LEN),
+          ) !== 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_STARTS_WITH: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_pfx: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const pfx_off: u32 = vm_reg_off(ctx_off, reg_pfx);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, pfx_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          vm_str_starts_with_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, pfx_off + VM_REG_DATA_OFF),
+            read_u32(view, pfx_off + VM_REG_DATA_LEN),
+          ) !== 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_ENDS_WITH: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_sfx: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const sfx_off: u32 = vm_reg_off(ctx_off, reg_sfx);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, sfx_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          vm_str_ends_with_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, sfx_off + VM_REG_DATA_OFF),
+            read_u32(view, sfx_off + VM_REG_DATA_LEN),
+          ) !== 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_IN: {
+        const reg_val: u32 = read_u8(view, code_off + pc);
+        const set_idx: u32 = read_u16(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 3);
+        pc += 5;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        if (
+          vm_in_set_contains(view, ctx_off, set_idx, vm_reg_off(ctx_off, reg_val)) !==
+          0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_LOAD_INT: {
+        // JS: ctx.registers[reg_idx] = bytecodeView.getInt32(pc + 1, true);
+        const reg_idx: u32 = read_u8(view, code_off + pc);
+        const val: i32 = read_i32(view, code_off + pc + 1);
+        pc += 5;
+        vm_reg_set_i32(view, vm_reg_off(ctx_off, reg_idx), val);
+        break;
+      }
+
+      case OpCode.OP_LOAD_FLOAT: {
+        // JS: ctx.registers[reg_idx] = bytecodeView.getFloat64(pc + 1, true);
+        const reg_idx: u32 = read_u8(view, code_off + pc);
+        const val: f64 = read_f64(view, code_off + pc + 1);
+        pc += 9;
+        vm_reg_set_f64(view, vm_reg_off(ctx_off, reg_idx), val);
+        break;
+      }
+
+      case OpCode.OP_LOAD_TEXT: {
+        // JS: ctx.registers[reg_idx] = textDecoder.decode(bytecode.subarray(pc + 3, pc + 3 + len));
+        // Flat memory: stores zero-copy pointer `(code_off + pc + 3, len)` directly into register
+        const reg_idx: u32 = read_u8(view, code_off + pc);
+        const len: u16 = read_u16(view, code_off + pc + 1);
+        const str_off: u32 = code_off + pc + 3;
+        pc += 3 + len;
+        vm_reg_set_slice(
+          view,
+          vm_reg_off(ctx_off, reg_idx),
+          DataType.TEXT,
+          str_off,
+          len,
+        );
+        break;
+      }
+
+      case OpCode.OP_LOAD_BLOB: {
+        // JS: ctx.registers[reg_idx] = bytecode.slice(pc + 3, pc + 3 + len);
+        // Flat memory: stores zero-copy pointer `(code_off + pc + 3, len)` directly into register
+        const reg_idx: u32 = read_u8(view, code_off + pc);
+        const len: u16 = read_u16(view, code_off + pc + 1);
+        const blob_off: u32 = code_off + pc + 3;
+        pc += 3 + len;
+        vm_reg_set_slice(
+          view,
+          vm_reg_off(ctx_off, reg_idx),
+          DataType.BLOB,
+          blob_off,
+          len,
+        );
+        break;
+      }
+
+      case OpCode.OP_LOAD_NULL: {
+        // JS: ctx.registers[reg_idx] = null;
+        const reg_idx: u32 = read_u8(view, code_off + pc);
+        pc += 1;
+        vm_reg_set_null(view, vm_reg_off(ctx_off, reg_idx));
+        break;
+      }
+
+      case OpCode.OP_EMIT_ROW: {
+        // JS:
+        //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
+        //   emitRawRowToResultBuffer(ctx, view, rowOffset, totalRowLength);
+        const cursor_idx: u32 = read_u8(view, code_off + pc);
+        pc += 1;
+
+        const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
+        const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
+        const total_row_length: u16 = read_u16(view, row_offset + 1);
+
+        const emit_status: i32 = vm_emit_raw_row(
+          view,
+          ctx_off,
+          row_offset,
+          total_row_length,
+          instr_pc,
+        );
+        if (emit_status !== VmStatus.RUNNING) {
+          return emit_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_OFFSET: {
+        // JS:
+        //   const offsetVal = Number(ctx.registers[offset_reg] ?? 0);
+        //   if (offsetVal > 0) { ctx.registers[offset_reg] = offsetVal - 1; pc = jump_target; }
+        const offset_reg: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const reg_off: u32 = vm_reg_off(ctx_off, offset_reg);
+        const offset_val: i32 =
+          read_u8(view, reg_off + VM_REG_IS_NULL) !== 0
+            ? 0
+            : read_i32(view, reg_off + VM_REG_I32);
+        if (offset_val > 0) {
+          vm_reg_set_i32(view, reg_off, offset_val - 1);
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_LIMIT: {
+        // JS:
+        //   const limitVal = Number(ctx.registers[limit_reg] ?? 0);
+        //   if (limitVal <= 1) { ctx.registers[limit_reg] = 0; pc = jump_target; }
+        //   else { ctx.registers[limit_reg] = limitVal - 1; }
+        const limit_reg: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        const reg_off: u32 = vm_reg_off(ctx_off, limit_reg);
+        const limit_val: i32 =
+          read_u8(view, reg_off + VM_REG_IS_NULL) !== 0
+            ? 0
+            : read_i32(view, reg_off + VM_REG_I32);
+        if (limit_val <= 1) {
+          vm_reg_set_i32(view, reg_off, 0);
+          pc = jump_target;
+        } else {
+          vm_reg_set_i32(view, reg_off, limit_val - 1);
+        }
+        break;
+      }
+
+      case OpCode.OP_CALL_UDF: {
+        // JS: ctx.registers[dest_reg] = ctx.udfs[udf_id](...ctx.registers.slice(start_arg_reg, start_arg_reg + num_args));
+        // Flat memory: writes UDF call descriptor into `VM_CONTEXT` and yields `VM_STATUS_HOST_UDF` to host wrapper
+        const udf_id: u32 = read_u16(view, code_off + pc);
+        const start_arg_reg: u32 = read_u8(view, code_off + pc + 2);
+        const num_args: u32 = read_u8(view, code_off + pc + 3);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 4);
+        pc += 5;
+
+        write_u32(view, ctx_off + VM_CTX_UDF_ID, udf_id);
+        write_u32(view, ctx_off + VM_CTX_UDF_START_REG, start_arg_reg);
+        write_u32(view, ctx_off + VM_CTX_UDF_NUM_ARGS, num_args);
+        write_u32(view, ctx_off + VM_CTX_UDF_DEST_REG, dest_reg);
+        write_u32(view, ctx_off + VM_CTX_PC, pc);
+        write_i32(view, ctx_off + VM_CTX_STATUS, VM_STATUS_HOST_UDF);
+        return VM_STATUS_HOST_UDF;
+      }
+
+      case OpCode.OP_STR_LOWER: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        vm_str_lower(
+          view,
+          ctx_off,
+          arena_base,
+          vm_reg_off(ctx_off, src_reg),
+          vm_reg_off(ctx_off, dest_reg),
+        );
+        break;
+      }
+
+      case OpCode.OP_STR_UPPER: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        vm_str_upper(
+          view,
+          ctx_off,
+          arena_base,
+          vm_reg_off(ctx_off, src_reg),
+          vm_reg_off(ctx_off, dest_reg),
+        );
+        break;
+      }
+
+      case OpCode.OP_STR_LENGTH: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        const src_off: u32 = vm_reg_off(ctx_off, src_reg);
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
+          vm_reg_set_null(view, dst_off);
+        } else {
+          const char_len: i32 = vm_utf8_char_count(
+            view,
+            read_u32(view, src_off + VM_REG_DATA_OFF),
+            read_u32(view, src_off + VM_REG_DATA_LEN),
+          );
+          vm_reg_set_i32(view, dst_off, char_len);
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_SUBSTR: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const start_reg: u32 = read_u8(view, code_off + pc + 1);
+        const len_reg: u32 = read_u8(view, code_off + pc + 2);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 3);
+        pc += 4;
+        vm_utf8_substr(
+          view,
+          vm_reg_off(ctx_off, src_reg),
+          vm_reg_off(ctx_off, start_reg),
+          vm_reg_off(ctx_off, len_reg),
+          vm_reg_off(ctx_off, dest_reg),
+        );
+        break;
+      }
+
+      case OpCode.OP_STR_TRIM: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        vm_str_trim(
+          view,
+          vm_reg_off(ctx_off, src_reg),
+          vm_reg_off(ctx_off, dest_reg),
+        );
+        break;
+      }
+
+      case OpCode.OP_MATH_ABS: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        const src_off: u32 = vm_reg_off(ctx_off, src_reg);
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
+          vm_reg_set_null(view, dst_off);
+        } else {
+          vm_reg_set_f64(
+            view,
+            dst_off,
+            vm_math_abs(read_f64(view, src_off + VM_REG_F64)),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_MATH_ROUND: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        const src_off: u32 = vm_reg_off(ctx_off, src_reg);
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
+          vm_reg_set_null(view, dst_off);
+        } else {
+          vm_reg_set_f64(
+            view,
+            dst_off,
+            vm_math_round(read_f64(view, src_off + VM_REG_F64)),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_RESULT_ROW: {
+        const start_reg: u32 = read_u8(view, code_off + pc);
+        const num_cols: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+
+        const emit_status: i32 = vm_serialize_and_emit_result_row(
+          view,
+          ctx_off,
+          start_reg,
+          num_cols,
+          instr_pc,
+        );
+        if (emit_status !== VmStatus.RUNNING) {
+          return emit_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_SORTER_OPEN: {
+        const sorter_id: u32 = read_u8(view, code_off + pc);
+        const key_info_idx: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+
+        const open_status: i32 = vm_sorter_open_raw(
+          view,
+          ctx_off,
+          arena_base,
+          sorter_id,
+          key_info_idx,
+        );
+        if (open_status !== VmStatus.RUNNING) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          return open_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_SORTER_INSERT: {
+        const sorter_id: u32 = read_u8(view, code_off + pc);
+        const start_reg: u32 = read_u8(view, code_off + pc + 1);
+        const num_keys: u32 = read_u8(view, code_off + pc + 2);
+        const cursor_idx: u32 = read_u8(view, code_off + pc + 3);
+        pc += 4;
+
+        const ins_status: i32 = vm_sorter_insert_raw(
+          view,
+          ctx_off,
+          arena_base,
+          sorter_id,
+          start_reg,
+          num_keys,
+          cursor_idx,
+        );
+        if (ins_status !== VmStatus.RUNNING) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          return ins_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_SORTER_SORT: {
+        const sorter_id: u32 = read_u8(view, code_off + pc);
+        pc += 1;
+
+        const sort_status: i32 = vm_sorter_sort_raw(
+          view,
+          ctx_off,
+          arena_base,
+          sorter_id,
+        );
+        if (sort_status !== VmStatus.RUNNING) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          return sort_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_SORTER_NEXT: {
+        const sorter_id: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        write_u32(view, ctx_off + VM_CTX_PC, pc);
+        const next_status: i32 = vm_sorter_next_raw(
+          view,
+          ctx_off,
+          sorter_id,
+          jump_target,
+          instr_pc,
+        );
+        if (next_status !== VmStatus.RUNNING) {
+          return next_status;
+        }
+        pc = read_u32(view, ctx_off + VM_CTX_PC);
+        break;
+      }
+
+      case OpCode.OP_MATH_FLOOR: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        const src_off: u32 = vm_reg_off(ctx_off, src_reg);
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
+          vm_reg_set_null(view, dst_off);
+        } else {
+          vm_reg_set_f64(
+            view,
+            dst_off,
+            vm_math_floor(read_f64(view, src_off + VM_REG_F64)),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_MATH_CEIL: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        const src_off: u32 = vm_reg_off(ctx_off, src_reg);
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
+          vm_reg_set_null(view, dst_off);
+        } else {
+          vm_reg_set_f64(
+            view,
+            dst_off,
+            vm_math_ceil(read_f64(view, src_off + VM_REG_F64)),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_ADD: {
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const off_a: u32 = vm_reg_off(ctx_off, reg_a);
+        const off_b: u32 = vm_reg_off(ctx_off, reg_b);
+        const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, off_a + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, off_b + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, off_d);
+        } else {
+          vm_reg_set_f64(
+            view,
+            off_d,
+            read_f64(view, off_a + VM_REG_F64) +
+              read_f64(view, off_b + VM_REG_F64),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_SUB: {
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const off_a: u32 = vm_reg_off(ctx_off, reg_a);
+        const off_b: u32 = vm_reg_off(ctx_off, reg_b);
+        const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, off_a + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, off_b + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, off_d);
+        } else {
+          vm_reg_set_f64(
+            view,
+            off_d,
+            read_f64(view, off_a + VM_REG_F64) -
+              read_f64(view, off_b + VM_REG_F64),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_MUL: {
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const off_a: u32 = vm_reg_off(ctx_off, reg_a);
+        const off_b: u32 = vm_reg_off(ctx_off, reg_b);
+        const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, off_a + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, off_b + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, off_d);
+        } else {
+          vm_reg_set_f64(
+            view,
+            off_d,
+            read_f64(view, off_a + VM_REG_F64) *
+              read_f64(view, off_b + VM_REG_F64),
+          );
+        }
+        break;
+      }
+
+      case OpCode.OP_DIV: {
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const off_a: u32 = vm_reg_off(ctx_off, reg_a);
+        const off_b: u32 = vm_reg_off(ctx_off, reg_b);
+        const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, off_a + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, off_b + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, off_d);
+        } else {
+          const denom: f64 = read_f64(view, off_b + VM_REG_F64);
+          if (denom === 0.0) {
+            vm_reg_set_null(view, off_d);
+          } else {
+            vm_reg_set_f64(
+              view,
+              off_d,
+              read_f64(view, off_a + VM_REG_F64) / denom,
+            );
+          }
+        }
+        break;
+      }
+
+      case OpCode.OP_MOD: {
+        const reg_a: u32 = read_u8(view, code_off + pc);
+        const reg_b: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const off_a: u32 = vm_reg_off(ctx_off, reg_a);
+        const off_b: u32 = vm_reg_off(ctx_off, reg_b);
+        const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, off_a + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, off_b + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, off_d);
+        } else {
+          const denom: f64 = read_f64(view, off_b + VM_REG_F64);
+          if (denom === 0.0) {
+            vm_reg_set_null(view, off_d);
+          } else {
+            const num: f64 = read_f64(view, off_a + VM_REG_F64);
+            const q: f64 = Math.trunc(num / denom);
+            vm_reg_set_f64(view, off_d, num - q * denom);
+          }
+        }
+        break;
+      }
+
+      case OpCode.OP_STR_CONCAT: {
+        const start_reg: u32 = read_u8(view, code_off + pc);
+        const num_regs: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        vm_str_concat(view, ctx_off, arena_base, start_reg, num_regs, dest_reg);
+        break;
+      }
+
+      case OpCode.OP_COALESCE: {
+        const start_reg: u32 = read_u8(view, code_off + pc);
+        const num_regs: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        let found: i32 = 0;
+        for (let i: u32 = 0; i < num_regs; i++) {
+          const r_off: u32 = vm_reg_off(ctx_off, start_reg + i);
+          if (read_u8(view, r_off + VM_REG_IS_NULL) === 0) {
+            vm_reg_copy(view, dst_off, r_off);
+            found = 1;
+            break;
+          }
+        }
+        if (found === 0) {
+          vm_reg_set_null(view, dst_off);
+        }
+        break;
+      }
+
+      case OpCode.OP_COPY: {
+        const src_reg: u32 = read_u8(view, code_off + pc);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 1);
+        pc += 2;
+        vm_reg_copy(
+          view,
+          vm_reg_off(ctx_off, dest_reg),
+          vm_reg_off(ctx_off, src_reg),
+        );
+        break;
+      }
+
+      case OpCode.OP_AGG_INIT: {
+        const agg_id: u32 = read_u8(view, code_off + pc);
+        const start_key_reg: u32 = read_u8(view, code_off + pc + 1);
+        const num_keys: u32 = read_u8(view, code_off + pc + 2);
+        const mode: u32 = read_u8(view, code_off + pc + 3);
+        pc += 4;
+
+        const init_status: i32 = vm_agg_init_raw(
+          view,
+          ctx_off,
+          arena_base,
+          agg_id,
+          start_key_reg,
+          num_keys,
+          mode,
+        );
+        if (init_status !== VmStatus.RUNNING) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          return init_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_AGG_STEP: {
+        const agg_id: u32 = read_u8(view, code_off + pc);
+        const start_key_reg: u32 = read_u8(view, code_off + pc + 1);
+        const num_keys: u32 = read_u8(view, code_off + pc + 2);
+        const val_reg: u32 = read_u8(view, code_off + pc + 3);
+        const raw_func_id: u32 = read_u8(view, code_off + pc + 4);
+        pc += 5;
+
+        const step_status: i32 = vm_agg_step_raw(
+          view,
+          ctx_off,
+          arena_base,
+          agg_id,
+          start_key_reg,
+          num_keys,
+          val_reg,
+          raw_func_id,
+        );
+        if (step_status !== VmStatus.RUNNING) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          return step_status;
+        }
+        break;
+      }
+
+      case OpCode.OP_AGG_NEXT: {
+        const agg_id: u32 = read_u8(view, code_off + pc);
+        const out_key_reg: u32 = read_u8(view, code_off + pc + 1);
+        const out_acc_reg: u32 = read_u8(view, code_off + pc + 2);
+        const jump_target: u32 = read_u16(view, code_off + pc + 3);
+        pc += 5;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        write_u32(view, ctx_off + VM_CTX_PC, pc);
+        const next_status: i32 = vm_agg_next_raw(
+          view,
+          ctx_off,
+          agg_id,
+          out_key_reg,
+          out_acc_reg,
+          jump_target,
+        );
+        if (next_status !== VmStatus.RUNNING) {
+          return next_status;
+        }
+        pc = read_u32(view, ctx_off + VM_CTX_PC);
+        break;
+      }
+
+      case OpCode.OP_AGG_FINAL: {
+        const sum_reg: u32 = read_u8(view, code_off + pc);
+        const count_reg: u32 = read_u8(view, code_off + pc + 1);
+        const out_reg: u32 = read_u8(view, code_off + pc + 2);
+        const raw_func_id: u32 = read_u8(view, code_off + pc + 3);
+        pc += 4;
+
+        vm_agg_final_raw(
+          view,
+          ctx_off,
+          sum_reg,
+          count_reg,
+          out_reg,
+          raw_func_id,
+        );
+        break;
+      }
+
+      case OpCode.OP_REG_IS_NULL: {
+        const reg: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        if (read_u8(view, vm_reg_off(ctx_off, reg) + VM_REG_IS_NULL) !== 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      case OpCode.OP_REG_IS_NOT_NULL: {
+        const reg: u32 = read_u8(view, code_off + pc);
+        const jump_target: u32 = read_u16(view, code_off + pc + 1);
+        pc += 3;
+
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+
+        if (read_u8(view, vm_reg_off(ctx_off, reg) + VM_REG_IS_NULL) === 0) {
+          pc = jump_target;
+        }
+        break;
+      }
+
+      default:
+        write_u32(view, ctx_off + VM_CTX_PC, pc);
+        write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+        return VmStatus.INVALID_BYTECODE;
+    }
+  }
+
+  write_u32(view, ctx_off + VM_CTX_PC, pc);
+  write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.DONE);
+  return VmStatus.DONE;
+}
+
+// ============================================================================
+// 2. Host-Boundary Marshaling for JS & WASM Execution
+// ============================================================================
+
+const text_encoder = new TextEncoder();
 const text_decoder = new TextDecoder();
+
+function writeValueToSlot(
+  view: DataView,
+  ctx_off: number,
+  arena_base: number,
+  slot_off: number,
+  val: any,
+): void {
+  if (val === null || val === undefined) {
+    vm_reg_set_null(view, slot_off);
+  } else if (typeof val === "boolean") {
+    vm_reg_set_i32(view, slot_off, val ? 1 : 0);
+  } else if (typeof val === "number") {
+    if (Number.isInteger(val) && val >= -2147483648 && val <= 2147483647) {
+      vm_reg_set_i32(view, slot_off, val);
+    } else {
+      vm_reg_set_f64(view, slot_off, val);
+    }
+  } else if (typeof val === "bigint") {
+    vm_reg_set_i64(view, slot_off, val);
+  } else if (typeof val === "string") {
+    const bytes = text_encoder.encode(val);
+    if (bytes.byteLength === 0) {
+      vm_reg_set_slice(view, slot_off, DataType.TEXT, 0, 0);
+    } else {
+      const dst = vm_phys_alloc(view, ctx_off, arena_base, bytes.byteLength);
+      new Uint8Array(view.buffer, view.byteOffset + dst, bytes.byteLength).set(
+        bytes,
+      );
+      vm_reg_set_slice(view, slot_off, DataType.TEXT, dst, bytes.byteLength);
+    }
+  } else if (val instanceof Uint8Array) {
+    if (val.byteLength === 0) {
+      vm_reg_set_slice(view, slot_off, DataType.BLOB, 0, 0);
+    } else {
+      const dst = vm_phys_alloc(view, ctx_off, arena_base, val.byteLength);
+      new Uint8Array(view.buffer, view.byteOffset + dst, val.byteLength).set(
+        val,
+      );
+      vm_reg_set_slice(view, slot_off, DataType.BLOB, dst, val.byteLength);
+    }
+  } else {
+    vm_reg_set_null(view, slot_off);
+  }
+}
+
+function readValueFromSlot(view: DataView, slot_off: number): any {
+  if (read_u8(view, slot_off + VM_REG_IS_NULL) !== 0) {
+    return null;
+  }
+  const r_type = read_u8(view, slot_off + VM_REG_TYPE);
+  if (r_type === DataType.INT32) {
+    return read_i32(view, slot_off + VM_REG_I32);
+  }
+  if (r_type === DataType.INT64) {
+    return Number(read_i64(view, slot_off + VM_REG_I64));
+  }
+  if (r_type === DataType.FLOAT64) {
+    return read_f64(view, slot_off + VM_REG_F64);
+  }
+  const d_off = read_u32(view, slot_off + VM_REG_DATA_OFF);
+  const d_len = read_u32(view, slot_off + VM_REG_DATA_LEN);
+  if (
+    r_type === DataType.TEXT ||
+    r_type === DataType.UUID ||
+    r_type === DataType.ULID
+  ) {
+    if (d_len === 0) return "";
+    return text_decoder.decode(
+      new Uint8Array(view.buffer, view.byteOffset + d_off, d_len),
+    );
+  }
+  if (r_type === DataType.BLOB) {
+    const out = new Uint8Array(d_len);
+    if (d_len > 0) {
+      out.set(new Uint8Array(view.buffer, view.byteOffset + d_off, d_len));
+    }
+    return out;
+  }
+  return null;
+}
+
+export function executeVmStepWithRunner(
+  ctx: VmContext,
+  view: DataView,
+  bytecode: Uint8Array,
+  runRaw: (
+    activeView: DataView,
+    ctxOff: number,
+    codeOff: number,
+    codeLen: number,
+    arenaBase: number,
+  ) => number,
+  targetBuffer?: ArrayBuffer,
+): VmStatus {
+  let activeView = view;
+  let needsCopyBack = false;
+
+  if (targetBuffer) {
+    if (view.buffer === targetBuffer && view.byteOffset === 0) {
+      activeView =
+        view.byteLength >= TRANSIENT_ARENA_OFFSET + 65536
+          ? view
+          : new DataView(targetBuffer);
+    } else {
+      activeView = new DataView(targetBuffer);
+      const copyLen = Math.min(view.byteLength, VM_CONTEXT_OFFSET);
+      new Uint8Array(targetBuffer, 0, copyLen).set(
+        new Uint8Array(view.buffer, view.byteOffset, copyLen),
+      );
+      needsCopyBack = true;
+    }
+  } else if (
+    view.byteLength < TRANSIENT_ARENA_OFFSET + 65536 ||
+    view.byteOffset !== 0
+  ) {
+    const holder = executeVmStepWithRunner as any;
+    if (!holder._fallbackBuffer || !holder._fallbackView) {
+      holder._fallbackBuffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
+      holder._fallbackView = new DataView(holder._fallbackBuffer);
+    }
+    const copyLen = Math.min(view.byteLength, VM_CONTEXT_OFFSET);
+    new Uint8Array(holder._fallbackBuffer, 0, copyLen).set(
+      new Uint8Array(view.buffer, view.byteOffset, copyLen),
+    );
+    activeView = holder._fallbackView;
+    needsCopyBack = true;
+  }
+
+  const ctx_off = VM_CONTEXT_OFFSET;
+  const code_off = BYTECODE_OFFSET;
+  const arena_base = TRANSIENT_ARENA_OFFSET;
+  const meta = ctx as any;
+
+  if (
+    meta._syncedResetId !== ctx._resetId ||
+    meta._syncedBuffer !== activeView.buffer
+  ) {
+    memset(activeView, ctx_off, 0, VM_CONTEXT_SIZE);
+    meta._lastSyncedRegs = new Array(64).fill(null);
+    for (let r = 0; r < 64; r++) {
+      vm_reg_set_null(activeView, vm_reg_off(ctx_off, r));
+    }
+    meta._syncedInSetsRef = null;
+    meta._syncedResetId = ctx._resetId;
+    meta._syncedBuffer = activeView.buffer;
+  }
+
+    if (needsCopyBack && ctx.resultOffset > 0) {
+      const resEnd = RESULT_BUFFER_OFFSET + ctx.resultOffset;
+      if (view.byteLength >= resEnd) {
+        new Uint8Array(
+          activeView.buffer,
+          activeView.byteOffset + RESULT_BUFFER_OFFSET,
+          ctx.resultOffset,
+        ).set(
+          new Uint8Array(
+            view.buffer,
+            view.byteOffset + RESULT_BUFFER_OFFSET,
+            ctx.resultOffset,
+          ),
+        );
+      }
+    }
+  const tables = ctx.tables ?? (ctx.table ? [ctx.table] : []);
+  const num_tables = Math.min(tables.length, 16);
+  write_u32(activeView, ctx_off + VM_CTX_NUM_TABLES, num_tables);
+  for (let t = 0; t < num_tables; t++) {
+    const tbl = tables[t] ?? tables[0];
+    const tbl_off = ctx_off + VM_CTX_TABLES_OFF + t * VM_TABLE_DESC_SIZE;
+    if (tbl) {
+      const num_cols = Math.min(tbl.columns.length, 256);
+      write_u16(activeView, tbl_off + 0, num_cols);
+      write_u16(activeView, tbl_off + 2, Math.ceil(num_cols / 8));
+      for (let c = 0; c < num_cols; c++) {
+        write_u8(activeView, tbl_off + 4 + c, tbl.columns[c].type);
+      }
+    }
+  }
+
+  // Sync outputColumns descriptor
+  const out_cols_off = ctx_off + VM_CTX_OUTPUT_COLS_OFF;
+  if (ctx.outputColumns && ctx.outputColumns.length > 0) {
+    const n_out = Math.min(ctx.outputColumns.length, 256);
+    write_u8(activeView, out_cols_off + 0, 1);
+    write_u16(activeView, out_cols_off + 2, n_out);
+    for (let c = 0; c < n_out; c++) {
+      write_u8(activeView, out_cols_off + 4 + c, ctx.outputColumns[c].type);
+    }
+  } else {
+    write_u8(activeView, out_cols_off + 0, 0);
+    write_u16(activeView, out_cols_off + 2, 0);
+  }
+
+  // Sync keyInfos descriptors
+  const num_ki = Math.min(ctx.keyInfos?.length ?? 0, 8);
+  write_u32(activeView, ctx_off + VM_CTX_NUM_KEY_INFOS, num_ki);
+  for (let k = 0; k < num_ki; k++) {
+    const ki = ctx.keyInfos[k];
+    const ki_off = ctx_off + VM_CTX_KEY_INFOS_OFF + k * VM_KEY_INFO_SIZE;
+    const nk = Math.min(ki.numKeys, 8);
+    write_u8(activeView, ki_off + VM_KI_NUM_KEYS, nk);
+    write_u8(activeView, ki_off + VM_KI_HAS_LIMIT, ki.limit !== undefined ? 1 : 0);
+    write_u32(activeView, ki_off + VM_KI_LIMIT, ki.limit ?? 0);
+    write_u32(activeView, ki_off + VM_KI_OFFSET, ki.offset ?? 0);
+    for (let d = 0; d < nk; d++) {
+      const dir = ki.directions[d] ?? 0;
+      const null_ord = ki.nullOrders?.[d] ?? (dir === 1 ? 1 : 0);
+      write_u8(activeView, ki_off + VM_KI_DIRECTIONS + d, dir);
+      write_u8(activeView, ki_off + VM_KI_NULL_ORDERS + d, null_ord);
+    }
+  }
+
+  // Sync inSets into arena if changed
+  if (ctx.inSets && ctx.inSets.length > 0 && meta._syncedInSetsRef !== ctx.inSets) {
+    const num_sets = Math.min(ctx.inSets.length, 16);
+    write_u32(activeView, ctx_off + VM_CTX_NUM_IN_SETS, num_sets);
+    for (let s = 0; s < num_sets; s++) {
+      const set = ctx.inSets[s];
+      const set_desc_off = ctx_off + VM_CTX_IN_SETS_OFF + s * 8;
+      if (!set || set.size === 0) {
+        write_u32(activeView, set_desc_off + 0, 0);
+        write_u32(activeView, set_desc_off + 4, 0);
+      } else {
+        const items = Array.from(set);
+        const items_off = vm_phys_alloc(
+          activeView,
+          ctx_off,
+          arena_base,
+          items.length * 32,
+        );
+        write_u32(activeView, set_desc_off + 0, items.length);
+        write_u32(activeView, set_desc_off + 4, items_off);
+        for (let idx = 0; idx < items.length; idx++) {
+          writeValueToSlot(
+            activeView,
+            ctx_off,
+            arena_base,
+            items_off + idx * 32,
+            items[idx],
+          );
+        }
+      }
+    }
+    meta._syncedInSetsRef = ctx.inSets;
+  }
+
+  // Sync cursors
+  for (let c = 0; c < 16; c++) {
+    const cur = (ctx.cursors && ctx.cursors[c]) ?? (c === 0 ? ctx.cursor : undefined);
+    const cur_off = vm_cursor_off(ctx_off, c);
+    if (cur) {
+      write_u32(activeView, cur_off + VM_CUR_PAGE_ID, cur.pageId);
+      write_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID, cur.rootPageId ?? 0);
+      write_i32(activeView, cur_off + VM_CUR_SLOT_IDX, cur.slotIdx);
+      write_i32(activeView, cur_off + VM_CUR_CELL_IDX, cur.cellIdx);
+      write_u32(activeView, cur_off + VM_CUR_ROW_OFFSET, cur.rowOffset);
+    }
+  }
+
+  // Sync registers changed on host since last step
+  const lastRegs: any[] = meta._lastSyncedRegs;
+  for (let r = 0; r < 64; r++) {
+    if (ctx.registers[r] !== lastRegs[r]) {
+      writeValueToSlot(
+        activeView,
+        ctx_off,
+        arena_base,
+        vm_reg_off(ctx_off, r),
+        ctx.registers[r],
+      );
+      lastRegs[r] = ctx.registers[r];
+    }
+  }
+
+  // Sync scalar header fields
+  const has_buffer_pool =
+    view.byteLength >= SLOT_TO_PAGE_OFFSET + 4 &&
+    view.getUint32(SLOT_TO_PAGE_OFFSET, true) > 0
+      ? 1
+      : 0;
+  write_u32(activeView, ctx_off + VM_CTX_PC, ctx.pc);
+  write_i32(activeView, ctx_off + VM_CTX_STATUS, ctx.status);
+  write_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID, ctx.fault_page_id);
+  write_u32(activeView, ctx_off + VM_CTX_RESULT_COUNT, ctx.resultCount);
+  write_u32(activeView, ctx_off + VM_CTX_RESULT_OFFSET, ctx.resultOffset);
+  write_u32(activeView, ctx_off + VM_CTX_ARENA_OFFSET, ctx.arenaOffset);
+  write_u32(activeView, ctx_off + VM_CTX_MAX_QUERY_MEMORY, ctx.maxQueryMemory);
+  write_u32(activeView, ctx_off + VM_CTX_HAS_BUFFER_POOL, has_buffer_pool);
+
+  // Copy bytecode into BYTECODE_OFFSET
+  new Uint8Array(
+    activeView.buffer,
+    activeView.byteOffset + code_off,
+    bytecode.byteLength,
+  ).set(bytecode);
+
+  let status = runRaw(
+    activeView,
+    ctx_off,
+    code_off,
+    bytecode.byteLength,
+    arena_base,
+  );
+
+  while (status === VM_STATUS_HOST_UDF) {
+    const udf_id = read_u32(activeView, ctx_off + VM_CTX_UDF_ID);
+    const start_arg_reg = read_u32(activeView, ctx_off + VM_CTX_UDF_START_REG);
+    const num_args = read_u32(activeView, ctx_off + VM_CTX_UDF_NUM_ARGS);
+    const dest_reg = read_u32(activeView, ctx_off + VM_CTX_UDF_DEST_REG);
+
+    const fn = ctx.udfs?.[udf_id];
+    if (!fn) {
+      status = VmStatus.INVALID_BYTECODE;
+      write_i32(activeView, ctx_off + VM_CTX_STATUS, status);
+      break;
+    }
+
+    const args: any[] = [];
+    for (let a = 0; a < num_args; a++) {
+      args.push(
+        readValueFromSlot(activeView, vm_reg_off(ctx_off, start_arg_reg + a)),
+      );
+    }
+
+    try {
+      const res = fn(...args);
+      writeValueToSlot(
+        activeView,
+        ctx_off,
+        arena_base,
+        vm_reg_off(ctx_off, dest_reg),
+        res,
+      );
+      write_i32(activeView, ctx_off + VM_CTX_STATUS, VmStatus.RUNNING);
+      status = runRaw(
+        activeView,
+        ctx_off,
+        code_off,
+        bytecode.byteLength,
+        arena_base,
+      );
+    } catch {
+      status = VmStatus.ERROR;
+      write_i32(activeView, ctx_off + VM_CTX_STATUS, status);
+      break;
+    }
+  }
+
+  // Sync back scalar fields
+  ctx.pc = read_u32(activeView, ctx_off + VM_CTX_PC);
+  ctx.status = status as VmStatus;
+  ctx.fault_page_id = read_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID);
+  ctx.resultCount = read_u32(activeView, ctx_off + VM_CTX_RESULT_COUNT);
+  ctx.resultOffset = read_u32(activeView, ctx_off + VM_CTX_RESULT_OFFSET);
+  ctx.arenaOffset = read_u32(activeView, ctx_off + VM_CTX_ARENA_OFFSET);
+
+  // Sync back cursors
+  for (let c = 0; c < 16; c++) {
+    const cur_off = vm_cursor_off(ctx_off, c);
+    const cur = ctx.cursors[c];
+    if (cur) {
+      cur.pageId = read_u32(activeView, cur_off + VM_CUR_PAGE_ID);
+      cur.rootPageId = read_u32(activeView, cur_off + VM_CUR_ROOT_PAGE_ID);
+      cur.slotIdx = read_i32(activeView, cur_off + VM_CUR_SLOT_IDX);
+      cur.cellIdx = read_i32(activeView, cur_off + VM_CUR_CELL_IDX);
+      cur.rowOffset = read_u32(activeView, cur_off + VM_CUR_ROW_OFFSET);
+    }
+  }
+  if (ctx.cursor && ctx.cursors && ctx.cursor !== ctx.cursors[0]) {
+    Object.assign(ctx.cursor, ctx.cursors[0]);
+  }
+
+  // Sync back registers
+  for (let r = 0; r < 64; r++) {
+    const val = readValueFromSlot(activeView, vm_reg_off(ctx_off, r));
+    ctx.registers[r] = val;
+    lastRegs[r] = val;
+  }
+
+  // Sync back aggregator metadata in-place
+  for (let a = 0; a < 4; a++) {
+    const agg_off = ctx_off + VM_CTX_AGGS_OFF + a * VM_AGG_SIZE;
+    if (read_u8(activeView, agg_off + VM_AGG_IS_OPEN) !== 0) {
+      const cap = read_u32(activeView, agg_off + VM_AGG_CAPACITY);
+      const occ = read_u32(activeView, agg_off + VM_AGG_OCCUPIED);
+      const rIdx = read_u32(activeView, agg_off + VM_AGG_READ_IDX);
+      if (ctx.aggregators[a]) {
+        ctx.aggregators[a].capacity = cap;
+        ctx.aggregators[a].occupiedCount = occ;
+        ctx.aggregators[a].readIdx = rIdx;
+      } else {
+        ctx.aggregators[a] = {
+          mode: read_u8(activeView, agg_off + VM_AGG_MODE),
+          startKeyReg: read_u8(activeView, agg_off + VM_AGG_START_KEY_REG),
+          numKeys: read_u8(activeView, agg_off + VM_AGG_NUM_KEYS),
+          capacity: cap,
+          occupiedCount: occ,
+          readIdx: rIdx,
+          buckets: [],
+          currentBucket: null,
+        };
+      }
+    }
+  }
+
+  if (needsCopyBack && ctx.resultOffset > 0) {
+    const resEnd = RESULT_BUFFER_OFFSET + ctx.resultOffset;
+    if (view.byteLength >= resEnd) {
+      new Uint8Array(
+        view.buffer,
+        view.byteOffset + RESULT_BUFFER_OFFSET,
+        ctx.resultOffset,
+      ).set(
+        new Uint8Array(
+          activeView.buffer,
+          activeView.byteOffset + RESULT_BUFFER_OFFSET,
+          ctx.resultOffset,
+        ),
+      );
+    }
+  }
+
+  return status as VmStatus;
+}
 
 /**
  * Synchronous Bytecode VM execution step loop.
@@ -65,2292 +2642,11 @@ export function vm_step(
   view: DataView,
   bytecode: Uint8Array,
 ): VmStatus {
-  const code_view = new DataView(
-    bytecode.buffer,
-    bytecode.byteOffset,
-    bytecode.byteLength,
+  return executeVmStepWithRunner(
+    ctx,
+    view,
+    bytecode,
+    (activeView, ctxOff, codeOff, codeLen, arenaBase) =>
+      vm_step_raw(activeView, ctxOff, codeOff, codeLen, arenaBase),
   );
-  const code_len = bytecode.byteLength;
-
-  const MAX_CYCLES = 10_000_000;
-  let cycles = 0;
-
-  const has_buffer_pool =
-    view.byteLength >= SLOT_TO_PAGE_OFFSET + 4 &&
-    view.getUint32(SLOT_TO_PAGE_OFFSET, true) > 0;
-
-  while (ctx.pc < code_len) {
-    if (++cycles > MAX_CYCLES) {
-      ctx.status = VmStatus.TIMEOUT;
-      return VmStatus.TIMEOUT;
-    }
-
-    const instr_pc = ctx.pc;
-    const op = bytecode[ctx.pc];
-    ctx.pc += 1;
-
-    switch (op) {
-      /**
-       * OP_HALT (0x00)
-       * Operands: none (0 bytes)
-       * Halts VM execution successfully; sets status to STATUS_DONE.
-       */
-      case OpCode.OP_HALT: {
-        ctx.arenaOffset = 0;
-        ctx.status = VmStatus.DONE;
-        return VmStatus.DONE;
-      }
-
-      /**
-       * OP_OPEN_CURSOR (0x01)
-       * Operands: [cursor_idx: uint8] [root_page_id: uint32] (5 bytes)
-       * Binds cursor[cursor_idx] to a table or index root page ID.
-       * Resets the cursor's cellIdx and rowOffset to 0.
-       */
-      case OpCode.OP_OPEN_CURSOR: {
-        const cursor_idx = bytecode[ctx.pc];
-        const root_page_id = code_view.getUint32(ctx.pc + 1, true);
-        ctx.pc += 5;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        cursor.pageId = root_page_id;
-        cursor.cellIdx = 0;
-        cursor.rowOffset = 0;
-
-        if (has_buffer_pool && root_page_id > 0) {
-          const slot = buf_pool_get_resident_slot(
-            view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
-            root_page_id,
-          );
-          if (slot < 0) {
-            ctx.fault_page_id = root_page_id;
-            ctx.status = VmStatus.PAGE_FAULT;
-            ctx.pc = instr_pc;
-            return VmStatus.PAGE_FAULT;
-          }
-          cursor.slotIdx = slot;
-        }
-        break;
-      }
-
-      /**
-       * OP_REWIND (0x02)
-       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
-       * Positions cursor[cursor_idx] at the first cell (index 0) of root page.
-       * If the table has 0 rows (cell_count == 0), branches to jump_target (EOF).
-       */
-      case OpCode.OP_REWIND: {
-        const cursor_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-
-        if (has_buffer_pool && cursor.pageId > 0) {
-          const slot = buf_pool_get_resident_slot(
-            view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
-            cursor.pageId,
-          );
-          if (slot < 0) {
-            ctx.fault_page_id = cursor.pageId;
-            ctx.status = VmStatus.PAGE_FAULT;
-            ctx.pc = instr_pc;
-            return VmStatus.PAGE_FAULT;
-          }
-          cursor.slotIdx = slot;
-        }
-
-        const page_offset = resolve_page_offset(view, cursor.pageId);
-        const cell_count = page_get_cell_count(view, page_offset);
-
-        if (cell_count === 0) {
-          ctx.pc = jump_target;
-        } else {
-          cursor.cellIdx = 0;
-          const rel_cell_offset = page_get_cell_offset(view, page_offset, 0);
-          cursor.rowOffset = page_offset + rel_cell_offset;
-        }
-        break;
-      }
-
-      /**
-       * OP_NEXT_ROW (0x03)
-       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
-       * Advances cursor[cursor_idx] to the next cell. If all cells on the
-       * current page are exhausted, traverses next_page_id to the linked sibling
-       * leaf page. Jumps to jump_target when EOF (no more pages) is reached.
-       */
-      case OpCode.OP_NEXT_ROW: {
-        const cursor_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const page_offset = resolve_page_offset(view, cursor.pageId);
-        const cell_count = page_get_cell_count(view, page_offset);
-
-        const next_cell_idx = cursor.cellIdx + 1;
-        if (next_cell_idx < cell_count) {
-          cursor.cellIdx = next_cell_idx;
-          const rel_cell_offset = page_get_cell_offset(
-            view,
-            page_offset,
-            cursor.cellIdx,
-          );
-          cursor.rowOffset = page_offset + rel_cell_offset;
-        } else {
-          // Check if there is a next page linked for this table
-          const next_page_id = page_get_next_page_id(view, page_offset);
-          if (next_page_id !== 0) {
-            if (has_buffer_pool) {
-              const slot = buf_pool_get_resident_slot(
-                view,
-                PAGE_TO_SLOT_OFFSET,
-                DEFAULT_PAGE_TO_SLOT_BUCKETS,
-                next_page_id,
-              );
-              if (slot < 0) {
-                // Page miss: leave cursor on current page and cell, rewind PC to re-evaluate after load
-                ctx.fault_page_id = next_page_id;
-                ctx.status = VmStatus.PAGE_FAULT;
-                ctx.pc = instr_pc;
-                return VmStatus.PAGE_FAULT;
-              }
-              cursor.slotIdx = slot;
-            }
-
-            cursor.pageId = next_page_id;
-            cursor.cellIdx = 0;
-            const next_offset = resolve_page_offset(view, next_page_id);
-            const next_count = page_get_cell_count(view, next_offset);
-            if (next_count > 0) {
-              const rel_cell_offset = page_get_cell_offset(
-                view,
-                next_offset,
-                0,
-              );
-              cursor.rowOffset = next_offset + rel_cell_offset;
-            } else {
-              ctx.pc = jump_target;
-            }
-          } else {
-            // EOF reached
-            ctx.pc = jump_target;
-          }
-        }
-        break;
-      }
-
-      /**
-       * OP_LAST (0x08)
-       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
-       * Positions cursor at rightmost leaf cell for reverse scan.
-       */
-      case OpCode.OP_LAST: {
-        const cursor_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const page_offset = resolve_page_offset(view, cursor.pageId);
-        const cell_count = page_get_cell_count(view, page_offset);
-
-        if (cell_count === 0) {
-          ctx.pc = jump_target;
-        } else {
-          cursor.cellIdx = cell_count - 1;
-          const rel_cell_offset = page_get_cell_offset(
-            view,
-            page_offset,
-            cursor.cellIdx,
-          );
-          cursor.rowOffset = page_offset + rel_cell_offset;
-        }
-        break;
-      }
-
-      /**
-       * OP_PREV_ROW (0x09)
-       * Operands: [cursor_idx: uint8] [jump_target: uint16] (3 bytes)
-       * Decrements cell index; jumps on beginning of table (BOF).
-       */
-      case OpCode.OP_PREV_ROW: {
-        const cursor_idx = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const page_offset = resolve_page_offset(view, cursor.pageId);
-
-        if (cursor.cellIdx > 0) {
-          cursor.cellIdx--;
-          const rel_cell_offset = page_get_cell_offset(
-            view,
-            page_offset,
-            cursor.cellIdx,
-          );
-          cursor.rowOffset = page_offset + rel_cell_offset;
-        } else {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_COLUMN_INT (0x04)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
-       * Extracts an INT32 or INT64 column value from the current row under cursor.
-       */
-      case OpCode.OP_COLUMN_INT: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const reg_idx = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
-        const col = table.columns[col_idx];
-        const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-
-        if (row_is_null(view, null_bitmap_offset, col_idx)) {
-          ctx.registers[reg_idx] = null;
-          break;
-        }
-
-        const col_offset = compute_fixed_column_offset(
-          view,
-          null_bitmap_offset,
-          null_bitmap_bytes,
-          table.columns,
-          col_idx,
-        );
-
-        if (col.type === DataType.INT32) {
-          ctx.registers[reg_idx] = view.getInt32(col_offset, true);
-        } else if (col.type === DataType.INT64) {
-          ctx.registers[reg_idx] = Number(view.getBigInt64(col_offset, true));
-        }
-        break;
-      }
-
-      /**
-       * OP_COLUMN_FLOAT (0x05)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
-       * Extracts a 64-bit IEEE 754 float column from the row under cursor.
-       */
-      case OpCode.OP_COLUMN_FLOAT: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const reg_idx = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
-        const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-
-        if (row_is_null(view, null_bitmap_offset, col_idx)) {
-          ctx.registers[reg_idx] = null;
-          break;
-        }
-
-        const col_offset = compute_fixed_column_offset(
-          view,
-          null_bitmap_offset,
-          null_bitmap_bytes,
-          table.columns,
-          col_idx,
-        );
-
-        ctx.registers[reg_idx] = view.getFloat64(col_offset, true);
-        break;
-      }
-
-      /**
-       * OP_COLUMN_TEXT (0x06)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
-       * Extracts a variable-length UTF-8 string (or formatted UUID/ULID string)
-       * from the row under cursor into register r[reg_idx].
-       */
-      case OpCode.OP_COLUMN_UUID:
-      case OpCode.OP_COLUMN_ULID:
-      case OpCode.OP_COLUMN_TEXT: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const reg_idx = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
-        const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-
-        if (row_is_null(view, null_bitmap_offset, col_idx)) {
-          ctx.registers[reg_idx] = null;
-          break;
-        }
-
-        if (
-          table.columns[col_idx].type === DataType.UUID ||
-          table.columns[col_idx].type === DataType.ULID
-        ) {
-          const col_offset = compute_fixed_column_offset(
-            view,
-            null_bitmap_offset,
-            null_bitmap_bytes,
-            table.columns,
-            col_idx,
-          );
-
-          const slice = new Uint8Array(
-            view.buffer,
-            view.byteOffset + col_offset,
-            16,
-          );
-
-          ctx.registers[reg_idx] =
-            table.columns[col_idx].type === DataType.UUID
-              ? UuidCodec.decode(slice, 0)
-              : UlidCodec.decode(slice, 0);
-          break;
-        }
-
-        // Find start of var-offset table
-        const var_table_offset = compute_fixed_column_offset(
-          view,
-          null_bitmap_offset,
-          null_bitmap_bytes,
-          table.columns,
-          table.columns.length,
-        );
-
-        let var_idx = 0;
-        for (let i = 0; i < col_idx; i++) {
-          const c = table.columns[i];
-          if (c.type === DataType.TEXT || c.type === DataType.BLOB) {
-            var_idx++;
-          }
-        }
-
-        const entry_offset = var_table_offset + var_idx * 4;
-        const rel_offset = view.getUint16(entry_offset, true);
-        const len = view.getUint16(entry_offset + 2, true);
-
-        if (len === 0) {
-          ctx.registers[reg_idx] = "";
-        } else {
-          const text_bytes = new Uint8Array(
-            view.buffer,
-            cursor.rowOffset + rel_offset,
-            len,
-          );
-          ctx.registers[reg_idx] = text_decoder.decode(text_bytes);
-        }
-        break;
-      }
-
-      /**
-       * OP_COLUMN_BLOB (0x07)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [reg_idx: uint8] (3 bytes)
-       * Extracts a variable-length binary BLOB column from the row under cursor.
-       */
-      case OpCode.OP_COLUMN_BLOB: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const reg_idx = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const table = (ctx.tables && ctx.tables[cursor_idx]) ?? ctx.table!;
-        const null_bitmap_bytes = Math.ceil(table.columns.length / 8);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-
-        if (row_is_null(view, null_bitmap_offset, col_idx)) {
-          ctx.registers[reg_idx] = null;
-          break;
-        }
-
-        const var_table_offset = compute_fixed_column_offset(
-          view,
-          null_bitmap_offset,
-          null_bitmap_bytes,
-          table.columns,
-          table.columns.length,
-        );
-
-        let var_idx = 0;
-        for (let i = 0; i < col_idx; i++) {
-          const c = table.columns[i];
-          if (c.type === DataType.TEXT || c.type === DataType.BLOB) {
-            var_idx++;
-          }
-        }
-
-        const entry_offset = var_table_offset + var_idx * 4;
-        const rel_offset = view.getUint16(entry_offset, true);
-        const len = view.getUint16(entry_offset + 2, true);
-
-        const blob_copy = new Uint8Array(len);
-        blob_copy.set(
-          new Uint8Array(view.buffer, cursor.rowOffset + rel_offset, len),
-        );
-        ctx.registers[reg_idx] = blob_copy;
-        break;
-      }
-
-      /**
-       * OP_OPEN_INDEX (0x0c)
-       * Operands: [cursor_idx: uint8] [root_page_id: uint32] (5 bytes)
-       * Binds cursor[cursor_idx] to an index root page ID.
-       */
-      case OpCode.OP_OPEN_INDEX: {
-        const cursor_idx = bytecode[ctx.pc];
-        const root_page_id = code_view.getUint32(ctx.pc + 1, true);
-        ctx.pc += 5;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        cursor.pageId = root_page_id;
-        cursor.rootPageId = root_page_id;
-        cursor.cellIdx = 0;
-        cursor.rowOffset = 0;
-
-        if (has_buffer_pool && root_page_id > 0) {
-          const slot = buf_pool_get_resident_slot(
-            view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
-            root_page_id,
-          );
-          if (slot < 0) {
-            ctx.fault_page_id = root_page_id;
-            ctx.status = VmStatus.PAGE_FAULT;
-            ctx.pc = instr_pc;
-            return VmStatus.PAGE_FAULT;
-          }
-          cursor.slotIdx = slot;
-        }
-        break;
-      }
-
-      /**
-       * OP_INDEX_SEEK_EQ (0x0d)
-       * Operands: [index_cursor: uint8] [data_cursor: uint8] [reg_key: uint8] [key_type: uint8] [jump_not_found: uint16] (6 bytes)
-       * Performs binary search on index leaf for target key.
-       * If found: positions data_cursor at matched rowid (data page + cell).
-       * If not found: jumps to jump_not_found.
-       */
-      case OpCode.OP_INDEX_SEEK_EQ: {
-        const index_cursor_idx = bytecode[ctx.pc];
-        const data_cursor_idx = bytecode[ctx.pc + 1];
-        const reg_key = bytecode[ctx.pc + 2];
-        const key_type = bytecode[ctx.pc + 3] as DataType;
-        const jump_not_found = code_view.getUint16(ctx.pc + 4, true);
-        ctx.pc += 6;
-
-        if (jump_not_found > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const key_val = ctx.registers[reg_key];
-        if (key_val === null || key_val === undefined) {
-          ctx.pc = jump_not_found;
-          break;
-        }
-
-        const idx_cursor = get_cursor(ctx, index_cursor_idx);
-
-        let curr_page_id = idx_cursor.rootPageId || idx_cursor.pageId;
-        let found = false;
-        let matched_rowid = 0n;
-
-        while (curr_page_id !== 0) {
-          if (has_buffer_pool && curr_page_id > 0) {
-            const slot = buf_pool_get_resident_slot(
-              view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
-              curr_page_id,
-            );
-            if (slot < 0) {
-              ctx.fault_page_id = curr_page_id;
-              ctx.status = VmStatus.PAGE_FAULT;
-              ctx.pc = instr_pc;
-              return VmStatus.PAGE_FAULT;
-            }
-            idx_cursor.slotIdx = slot;
-          }
-
-          const page_offset = resolve_page_offset(view, curr_page_id);
-          const search = page_binary_search_index_leaf(
-            view,
-            page_offset,
-            key_type,
-            key_val,
-          );
-
-          if (search.found) {
-            found = true;
-            idx_cursor.pageId = curr_page_id;
-            idx_cursor.cellIdx = search.slot_idx;
-            const cell_offset = page_get_cell_offset(
-              view,
-              page_offset,
-              search.slot_idx,
-            );
-            const k_len = view.getUint16(page_offset + cell_offset, true);
-            matched_rowid = view.getBigInt64(
-              page_offset + cell_offset + 2 + k_len,
-              true,
-            );
-            break;
-          }
-
-          curr_page_id = page_get_next_page_id(view, page_offset);
-        }
-
-        if (!found) {
-          ctx.pc = jump_not_found;
-        } else {
-          const data_page_id = Number(matched_rowid >> 16n);
-          const data_cell_idx = Number(matched_rowid & 0xffffn);
-
-          if (has_buffer_pool && data_page_id > 0) {
-            const slot = buf_pool_get_resident_slot(
-              view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
-              data_page_id,
-            );
-            if (slot < 0) {
-              ctx.fault_page_id = data_page_id;
-              ctx.status = VmStatus.PAGE_FAULT;
-              ctx.pc = instr_pc;
-              return VmStatus.PAGE_FAULT;
-            }
-          }
-
-          const data_cursor = get_cursor(ctx, data_cursor_idx);
-          data_cursor.pageId = data_page_id;
-          data_cursor.cellIdx = data_cell_idx;
-          const data_page_offset = resolve_page_offset(view, data_page_id);
-          const rel_cell_offset = page_get_cell_offset(
-            view,
-            data_page_offset,
-            data_cell_idx,
-          );
-          data_cursor.rowOffset = data_page_offset + rel_cell_offset;
-        }
-        break;
-      }
-
-      /**
-       * OP_INDEX_SEEK_GE (0x0e)
-       * Operands: [index_cursor: uint8] [data_cursor: uint8] [reg_key: uint8] [key_type: uint8] [jump_eof: uint16] (6 bytes)
-       * Seeks index_cursor to the first entry >= key_val.
-       * If found: positions data_cursor at the matched rowid.
-       * If EOF / not found: jumps to jump_eof.
-       */
-      case OpCode.OP_INDEX_SEEK_GE: {
-        const index_cursor_idx = bytecode[ctx.pc];
-        const data_cursor_idx = bytecode[ctx.pc + 1];
-        const reg_key = bytecode[ctx.pc + 2];
-        const key_type = bytecode[ctx.pc + 3] as DataType;
-        const jump_eof = code_view.getUint16(ctx.pc + 4, true);
-        ctx.pc += 6;
-
-        if (jump_eof > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const key_val = ctx.registers[reg_key];
-        if (key_val === null || key_val === undefined) {
-          ctx.pc = jump_eof;
-          break;
-        }
-
-        const idx_cursor = get_cursor(ctx, index_cursor_idx);
-
-        let curr_page_id = idx_cursor.rootPageId || idx_cursor.pageId;
-        let found = false;
-        let matched_rowid = 0n;
-
-        while (curr_page_id !== 0) {
-          if (has_buffer_pool && curr_page_id > 0) {
-            const slot = buf_pool_get_resident_slot(
-              view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
-              curr_page_id,
-            );
-            if (slot < 0) {
-              ctx.fault_page_id = curr_page_id;
-              ctx.status = VmStatus.PAGE_FAULT;
-              ctx.pc = instr_pc;
-              return VmStatus.PAGE_FAULT;
-            }
-            idx_cursor.slotIdx = slot;
-          }
-
-          const page_offset = resolve_page_offset(view, curr_page_id);
-          const cell_count = page_get_cell_count(view, page_offset);
-          const search = page_binary_search_index_leaf(
-            view,
-            page_offset,
-            key_type,
-            key_val,
-          );
-
-          if (search.found || search.slot_idx < cell_count) {
-            found = true;
-            idx_cursor.pageId = curr_page_id;
-            idx_cursor.cellIdx = search.slot_idx;
-            const cell_offset = page_get_cell_offset(
-              view,
-              page_offset,
-              search.slot_idx,
-            );
-            const k_len = view.getUint16(page_offset + cell_offset, true);
-            matched_rowid = view.getBigInt64(
-              page_offset + cell_offset + 2 + k_len,
-              true,
-            );
-            break;
-          }
-
-          curr_page_id = page_get_next_page_id(view, page_offset);
-        }
-
-        if (!found) {
-          ctx.pc = jump_eof;
-        } else {
-          const data_page_id = Number(matched_rowid >> 16n);
-          const data_cell_idx = Number(matched_rowid & 0xffffn);
-
-          if (has_buffer_pool && data_page_id > 0) {
-            const slot = buf_pool_get_resident_slot(
-              view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
-              data_page_id,
-            );
-            if (slot < 0) {
-              ctx.fault_page_id = data_page_id;
-              ctx.status = VmStatus.PAGE_FAULT;
-              ctx.pc = instr_pc;
-              return VmStatus.PAGE_FAULT;
-            }
-          }
-
-          const data_cursor = get_cursor(ctx, data_cursor_idx);
-          data_cursor.pageId = data_page_id;
-          data_cursor.cellIdx = data_cell_idx;
-          const data_page_offset = resolve_page_offset(view, data_page_id);
-          const rel_cell_offset = page_get_cell_offset(
-            view,
-            data_page_offset,
-            data_cell_idx,
-          );
-          data_cursor.rowOffset = data_page_offset + rel_cell_offset;
-        }
-        break;
-      }
-
-      /**
-       * OP_INDEX_NEXT (0x0f)
-       * Operands: [index_cursor: uint8] [data_cursor: uint8] [jump_eof: uint16] (4 bytes)
-       * Advances index_cursor to the next index cell and positions data_cursor.
-       * If index exhausted (EOF), jumps to jump_eof.
-       */
-      case OpCode.OP_INDEX_NEXT: {
-        const index_cursor_idx = bytecode[ctx.pc];
-        const data_cursor_idx = bytecode[ctx.pc + 1];
-        const jump_eof = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_eof > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const idx_cursor = get_cursor(ctx, index_cursor_idx);
-        let curr_page_id = idx_cursor.pageId;
-        let page_offset = resolve_page_offset(view, curr_page_id);
-        const cell_count = page_get_cell_count(view, page_offset);
-
-        let next_cell_idx = idx_cursor.cellIdx + 1;
-        if (next_cell_idx >= cell_count) {
-          curr_page_id = page_get_next_page_id(view, page_offset);
-          if (curr_page_id === 0) {
-            ctx.pc = jump_eof;
-            break;
-          }
-          if (has_buffer_pool && curr_page_id > 0) {
-            const slot = buf_pool_get_resident_slot(
-              view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
-              curr_page_id,
-            );
-            if (slot < 0) {
-              ctx.fault_page_id = curr_page_id;
-              ctx.status = VmStatus.PAGE_FAULT;
-              ctx.pc = instr_pc;
-              return VmStatus.PAGE_FAULT;
-            }
-            idx_cursor.slotIdx = slot;
-          }
-          page_offset = resolve_page_offset(view, curr_page_id);
-          next_cell_idx = 0;
-          idx_cursor.pageId = curr_page_id;
-          idx_cursor.cellIdx = -1;
-        }
-
-        const cell_offset = page_get_cell_offset(
-          view,
-          page_offset,
-          next_cell_idx,
-        );
-        const k_len = view.getUint16(page_offset + cell_offset, true);
-        const matched_rowid = view.getBigInt64(
-          page_offset + cell_offset + 2 + k_len,
-          true,
-        );
-
-        const data_page_id = Number(matched_rowid >> 16n);
-        const data_cell_idx = Number(matched_rowid & 0xffffn);
-
-        if (has_buffer_pool && data_page_id > 0) {
-          const slot = buf_pool_get_resident_slot(
-            view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
-            data_page_id,
-          );
-          if (slot < 0) {
-            ctx.fault_page_id = data_page_id;
-            ctx.status = VmStatus.PAGE_FAULT;
-            ctx.pc = instr_pc;
-            return VmStatus.PAGE_FAULT;
-          }
-        }
-
-        idx_cursor.pageId = curr_page_id;
-        idx_cursor.cellIdx = next_cell_idx;
-
-        const data_cursor = get_cursor(ctx, data_cursor_idx);
-        data_cursor.pageId = data_page_id;
-        data_cursor.cellIdx = data_cell_idx;
-        const data_page_offset = resolve_page_offset(view, data_page_id);
-        const rel_cell_offset = page_get_cell_offset(
-          view,
-          data_page_offset,
-          data_cell_idx,
-        );
-        data_cursor.rowOffset = data_page_offset + rel_cell_offset;
-        break;
-      }
-
-      /**
-       * OP_IS_NULL (0x10)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [jump_target: uint16] (4 bytes)
-       * Evaluates SQL "col IS NULL". Tests the row's Null-Bitmap at col_idx.
-       */
-      case OpCode.OP_IS_NULL: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-        const is_null = row_is_null(view, null_bitmap_offset, col_idx);
-
-        if (is_null) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_IS_NOT_NULL (0x11)
-       * Operands: [cursor_idx: uint8] [col_idx: uint8] [jump_target: uint16] (4 bytes)
-       * Evaluates SQL "col IS NOT NULL". Tests the row's Null-Bitmap at col_idx.
-       */
-      case OpCode.OP_IS_NOT_NULL: {
-        const cursor_idx = bytecode[ctx.pc];
-        const col_idx = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const null_bitmap_offset = cursor.rowOffset + 3;
-        const is_null = row_is_null(view, null_bitmap_offset, col_idx);
-
-        if (!is_null) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_EQ (0x12)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) equality check: r[reg_a] == r[reg_b].
-       */
-      case OpCode.OP_EQ: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result === 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_NE (0x13)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) inequality check: r[reg_a] !== r[reg_b].
-       */
-      case OpCode.OP_NE: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result !== 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_GT (0x14)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) greater-than comparison: r[reg_a] > r[reg_b].
-       */
-      case OpCode.OP_GT: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result > 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_GE (0x15)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) greater-than-or-equal comparison: r[reg_a] >= r[reg_b].
-       */
-      case OpCode.OP_GE: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result >= 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_LT (0x16)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) less-than comparison: r[reg_a] < r[reg_b].
-       */
-      case OpCode.OP_LT: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result < 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_LE (0x17)
-       * Operands: [reg_a: uint8] [reg_b: uint8] [jump_target: uint16] (4 bytes)
-       * Three-Valued Logic (3VL) less-than-or-equal comparison: r[reg_a] <= r[reg_b].
-       */
-      case OpCode.OP_LE: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const cmp = compare_3vl(ctx.registers[reg_a], ctx.registers[reg_b]);
-        if (!cmp.is_unknown && cmp.result <= 0) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_JUMP (0x18)
-       * Operands: [jump_target: uint16] (2 bytes)
-       * Unconditional jump. Sets the program counter ctx.pc directly to jump_target.
-       */
-      case OpCode.OP_JUMP: {
-        const jump_target = code_view.getUint16(ctx.pc, true);
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        ctx.pc = jump_target;
-        break;
-      }
-
-      /**
-       * OP_STR_LIKE (0x19)
-       * Operands: [reg_str: uint8] [reg_pat: uint8] [jump_target: uint16] (4 bytes)
-       * 3VL SQL LIKE: jumps to jump_target if r[reg_str] matches r[reg_pat].
-       */
-      case OpCode.OP_STR_LIKE: {
-        const reg_str = bytecode[ctx.pc];
-        const reg_pat = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        const val_str = ctx.registers[reg_str];
-        const val_pat = ctx.registers[reg_pat];
-        if (val_str === null || val_pat === null) {
-          break; // 3VL UNKNOWN: do not jump
-        }
-        if (sql_like_match(String(val_str), String(val_pat))) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_NOT_LIKE (0x1A)
-       * Operands: [reg_str: uint8] [reg_pat: uint8] [jump_target: uint16] (4 bytes)
-       * 3VL SQL NOT LIKE: jumps to jump_target if r[reg_str] does NOT match r[reg_pat].
-       */
-      case OpCode.OP_STR_NOT_LIKE: {
-        const reg_str = bytecode[ctx.pc];
-        const reg_pat = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        const val_str = ctx.registers[reg_str];
-        const val_pat = ctx.registers[reg_pat];
-        if (val_str === null || val_pat === null) {
-          break; // 3VL UNKNOWN: do not jump
-        }
-        if (!sql_like_match(String(val_str), String(val_pat))) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_CONTAINS (0x1B)
-       * Operands: [reg_str: uint8] [reg_sub: uint8] [jump_target: uint16] (4 bytes)
-       * 3VL Substring search: jumps to jump_target if r[reg_str] contains r[reg_sub].
-       */
-      case OpCode.OP_STR_CONTAINS: {
-        const reg_str = bytecode[ctx.pc];
-        const reg_sub = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        const val_str = ctx.registers[reg_str];
-        const val_sub = ctx.registers[reg_sub];
-        if (val_str === null || val_sub === null) {
-          break; // 3VL UNKNOWN: do not jump
-        }
-        if (String(val_str).includes(String(val_sub))) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_STARTS_WITH (0x1C)
-       * Operands: [reg_str: uint8] [reg_pfx: uint8] [jump_target: uint16] (4 bytes)
-       * 3VL Prefix check: jumps to jump_target if r[reg_str] starts with r[reg_pfx].
-       */
-      case OpCode.OP_STR_STARTS_WITH: {
-        const reg_str = bytecode[ctx.pc];
-        const reg_pfx = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        const val_str = ctx.registers[reg_str];
-        const val_pfx = ctx.registers[reg_pfx];
-        if (val_str === null || val_pfx === null) {
-          break; // 3VL UNKNOWN: do not jump
-        }
-        if (String(val_str).startsWith(String(val_pfx))) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_ENDS_WITH (0x1D)
-       * Operands: [reg_str: uint8] [reg_sfx: uint8] [jump_target: uint16] (4 bytes)
-       * 3VL Suffix check: jumps to jump_target if r[reg_str] ends with r[reg_sfx].
-       */
-      case OpCode.OP_STR_ENDS_WITH: {
-        const reg_str = bytecode[ctx.pc];
-        const reg_sfx = bytecode[ctx.pc + 1];
-        const jump_target = code_view.getUint16(ctx.pc + 2, true);
-        ctx.pc += 4;
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-        const val_str = ctx.registers[reg_str];
-        const val_sfx = ctx.registers[reg_sfx];
-        if (val_str === null || val_sfx === null) {
-          break; // 3VL UNKNOWN: do not jump
-        }
-        if (String(val_str).endsWith(String(val_sfx))) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_IN (0x1f)
-       * Operands: [reg_val: uint8] [set_idx: uint16] [jump_target: uint16] (5 bytes)
-       * Checks whether r[reg_val] exists in ctx.inSets[set_idx].
-       * If r[reg_val] is null or undefined, does not jump (3VL FALSE/UNKNOWN).
-       * If matched, jumps to jump_target.
-       */
-      case OpCode.OP_IN: {
-        const reg_val = bytecode[ctx.pc];
-        const set_idx = code_view.getUint16(ctx.pc + 1, true);
-        const jump_target = code_view.getUint16(ctx.pc + 3, true);
-        ctx.pc += 5;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const val = ctx.registers[reg_val];
-        if (val === null || val === undefined) {
-          break;
-        }
-
-        const set = ctx.inSets?.[set_idx];
-        if (set) {
-          if (
-            set.has(val) ||
-            (typeof val === "number" &&
-              Number.isSafeInteger(val) &&
-              set.has(BigInt(val))) ||
-            (typeof val === "bigint" && set.has(Number(val)))
-          ) {
-            ctx.pc = jump_target;
-          }
-        }
-        break;
-      }
-
-      /**
-       * OP_LOAD_INT (0x20)
-       * Operands: [reg_idx: uint8] [val: int32] (5 bytes)
-       * Loads a literal signed 32-bit integer constant into register r[reg_idx].
-       */
-      case OpCode.OP_LOAD_INT: {
-        const reg_idx = bytecode[ctx.pc];
-        const val = code_view.getInt32(ctx.pc + 1, true);
-        ctx.pc += 5;
-        ctx.registers[reg_idx] = val;
-        break;
-      }
-
-      /**
-       * OP_LOAD_FLOAT (0x21)
-       * Operands: [reg_idx: uint8] [val: float64] (9 bytes)
-       * Loads a literal 64-bit IEEE 754 float constant into register r[reg_idx].
-       */
-      case OpCode.OP_LOAD_FLOAT: {
-        const reg_idx = bytecode[ctx.pc];
-        const val = code_view.getFloat64(ctx.pc + 1, true);
-        ctx.pc += 9;
-        ctx.registers[reg_idx] = val;
-        break;
-      }
-
-      /**
-       * OP_LOAD_TEXT (0x22)
-       * Operands: [reg_idx: uint8] [len: uint16] [utf8_bytes: len bytes]
-       * Loads a literal UTF-8 string of length len into register r[reg_idx].
-       */
-      case OpCode.OP_LOAD_TEXT: {
-        const reg_idx = bytecode[ctx.pc];
-        const len = code_view.getUint16(ctx.pc + 1, true);
-        const text_bytes = new Uint8Array(
-          bytecode.buffer,
-          bytecode.byteOffset + ctx.pc + 3,
-          len,
-        );
-        ctx.registers[reg_idx] = text_decoder.decode(text_bytes);
-        ctx.pc += 3 + len;
-        break;
-      }
-
-      /**
-       * OP_LOAD_BLOB (0x1e)
-       * Operands: [reg_idx: uint8] [len: uint16] [blob_bytes: len bytes]
-       * Loads a raw byte array into register r[reg_idx].
-       */
-      case OpCode.OP_LOAD_BLOB: {
-        const reg_idx = bytecode[ctx.pc];
-        const len = code_view.getUint16(ctx.pc + 1, true);
-        const blob_bytes = new Uint8Array(len);
-        blob_bytes.set(
-          new Uint8Array(
-            bytecode.buffer,
-            bytecode.byteOffset + ctx.pc + 3,
-            len,
-          ),
-        );
-        ctx.registers[reg_idx] = blob_bytes;
-        ctx.pc += 3 + len;
-        break;
-      }
-
-      /**
-       * OP_LOAD_NULL (0x23)
-       * Operands: [reg_idx: uint8] (1 byte)
-       * Sets register r[reg_idx] to null (type = 0).
-       */
-      case OpCode.OP_LOAD_NULL: {
-        const reg_idx = bytecode[ctx.pc];
-        ctx.pc += 1;
-        ctx.registers[reg_idx] = null;
-        break;
-      }
-
-      /**
-       * OP_EMIT_ROW (0x24)
-       * Operands: [cursor_idx: uint8] (1 byte)
-       * Streams the current serialized row focused under cursor[cursor_idx]
-       * into the 64KB Output Result Buffer at RESULT_BUFFER_OFFSET + resultOffset.
-       * Prepends a 2-byte record length: [uint16 len] [row_bytes].
-       * If remaining buffer space is insufficient, yields STATUS_BUFFER_FULL.
-       */
-      case OpCode.OP_EMIT_ROW: {
-        const cursor_idx = bytecode[ctx.pc];
-        ctx.pc += 1;
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const total_row_length = view.getUint16(cursor.rowOffset + 1, true);
-        const row_bytes = new Uint8Array(
-          view.buffer,
-          view.byteOffset + cursor.rowOffset,
-          total_row_length,
-        );
-
-        const emit_status = emit_to_result_buffer(
-          ctx,
-          view,
-          row_bytes,
-          instr_pc,
-        );
-        if (emit_status !== VmStatus.RUNNING) {
-          return emit_status;
-        }
-        break;
-      }
-
-      /**
-       * OP_OFFSET (0x26)
-       * Operands: [offset_reg: uint8] [jump_target: uint16] (3 bytes)
-       * If r[offset_reg] > 0, decrements r[offset_reg] and branches to jump_target (skipping row emission).
-       */
-      case OpCode.OP_OFFSET: {
-        const offset_reg = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const offset_val = Number(ctx.registers[offset_reg] ?? 0);
-        if (offset_val > 0) {
-          ctx.registers[offset_reg] = offset_val - 1;
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_LIMIT (0x27)
-       * Operands: [limit_reg: uint8] [jump_target: uint16] (3 bytes)
-       * If r[limit_reg] <= 1, sets r[limit_reg] to 0 and branches to jump_target (early HALT).
-       * Otherwise decrements r[limit_reg] and falls through.
-       */
-      case OpCode.OP_LIMIT: {
-        const limit_reg = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const limit_val = Number(ctx.registers[limit_reg] ?? 0);
-        if (limit_val <= 1) {
-          ctx.registers[limit_reg] = 0;
-          ctx.pc = jump_target;
-        } else {
-          ctx.registers[limit_reg] = limit_val - 1;
-        }
-        break;
-      }
-      /**
-       * OP_CALL_UDF (0x28)
-       * Operands: [udf_id: uint16] [start_arg_reg: uint8] [num_args: uint8] [dest_reg: uint8] (5 bytes)
-       * Synchronously invokes registered Host UDF callback.
-       */
-      case OpCode.OP_CALL_UDF: {
-        const udf_id = code_view.getUint16(ctx.pc, true);
-        const start_arg_reg = bytecode[ctx.pc + 2];
-        const num_args = bytecode[ctx.pc + 3];
-        const dest_reg = bytecode[ctx.pc + 4];
-        ctx.pc += 5;
-
-        const fn = ctx.udfs?.[udf_id];
-        if (!fn) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const args: any[] = [];
-        for (let a = 0; a < num_args; a++) {
-          args.push(ctx.registers[start_arg_reg + a]);
-        }
-
-        try {
-          const res = fn(...args);
-          ctx.registers[dest_reg] = res !== undefined ? res : null;
-        } catch {
-          ctx.status = VmStatus.ERROR;
-          return VmStatus.ERROR;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_LOWER (0x29)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Converts string in r[src_reg] to lowercase and stores into r[dest_reg].
-       */
-      case OpCode.OP_STR_LOWER: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null ? String(val).toLowerCase() : null;
-        break;
-      }
-
-      /**
-       * OP_STR_UPPER (0x2A)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Converts string in r[src_reg] to uppercase and stores into r[dest_reg].
-       */
-      case OpCode.OP_STR_UPPER: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null ? String(val).toUpperCase() : null;
-        break;
-      }
-
-      /**
-       * OP_STR_LENGTH (0x2B)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Computes UTF-8 / character length of string in r[src_reg] and stores into r[dest_reg] (int32).
-       */
-      case OpCode.OP_STR_LENGTH: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] = val !== null ? String(val).length : null;
-        break;
-      }
-
-      /**
-       * OP_STR_SUBSTR (0x2C)
-       * Operands: [src_reg: uint8] [start_reg: uint8] [len_reg: uint8] [dest_reg: uint8] (4 bytes)
-       * 1-indexed SQL SUBSTR. Extracts substring from r[src_reg] starting at r[start_reg] for r[len_reg] characters.
-       */
-      case OpCode.OP_STR_SUBSTR: {
-        const src_reg = bytecode[ctx.pc];
-        const start_reg = bytecode[ctx.pc + 1];
-        const len_reg = bytecode[ctx.pc + 2];
-        const dest_reg = bytecode[ctx.pc + 3];
-        ctx.pc += 4;
-        const val = ctx.registers[src_reg];
-        const start = ctx.registers[start_reg];
-        const len = ctx.registers[len_reg];
-        if (val === null || start === null) {
-          ctx.registers[dest_reg] = null;
-          break;
-        }
-        const str = String(val);
-        const s_idx = Math.max(0, Number(start) - 1);
-        if (len === null) {
-          ctx.registers[dest_reg] = str.slice(s_idx);
-        } else {
-          const l = Math.max(0, Number(len));
-          ctx.registers[dest_reg] = str.slice(s_idx, s_idx + l);
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_TRIM (0x2D)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Strips leading and trailing whitespace from string in r[src_reg] into r[dest_reg].
-       */
-      case OpCode.OP_STR_TRIM: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null && val !== undefined ? String(val).trim() : null;
-        break;
-      }
-
-      /**
-       * OP_MATH_ABS (0x2E)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Computes absolute numeric value |r[src_reg]| into r[dest_reg].
-       */
-      case OpCode.OP_MATH_ABS: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null && val !== undefined ? Math.abs(Number(val)) : null;
-        break;
-      }
-
-      /**
-       * OP_MATH_ROUND (0x2F)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Rounds float in r[src_reg] to nearest integer into r[dest_reg].
-       */
-      case OpCode.OP_MATH_ROUND: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null && val !== undefined ? Math.round(Number(val)) : null;
-        break;
-      }
-
-      /**
-       * OP_RESULT_ROW (0x25)
-       * Operands: [start_reg: uint8] [num_cols: uint8] (2 bytes)
-       * Serializes num_cols registers (start_reg .. start_reg + num_cols - 1)
-       * into a binary row in the 64KB Result Buffer.
-       * If remaining space is insufficient, yields STATUS_BUFFER_FULL.
-       */
-      case OpCode.OP_RESULT_ROW: {
-        const start_reg = bytecode[ctx.pc];
-        const num_cols = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-
-        const serialized = serialize_result_registers(ctx, start_reg, num_cols);
-        const emit_status = emit_to_result_buffer(
-          ctx,
-          view,
-          serialized,
-          instr_pc,
-        );
-        if (emit_status !== VmStatus.RUNNING) {
-          return emit_status;
-        }
-        break;
-      }
-
-      /**
-       * OP_SORTER_OPEN (0x30)
-       * Operands: [sorter_id: uint8] [key_info_idx: uint8] (2 bytes)
-       * Initializes sorter in Transient Query Arena with KeyInfo descriptor.
-       */
-      case OpCode.OP_SORTER_OPEN: {
-        const sorter_id = bytecode[ctx.pc];
-        const key_info_idx = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-
-        const key_info = ctx.keyInfos[key_info_idx] ?? {
-          numKeys: 1,
-          directions: [0],
-          nullOrders: [0],
-        };
-
-        const requested_k =
-          key_info.limit !== undefined && key_info.limit > 0
-            ? (key_info.offset ?? 0) + key_info.limit
-            : 0;
-        const max_k =
-          requested_k > 0 && requested_k <= MAX_TOPK_HEAP_LIMIT
-            ? requested_k
-            : 0;
-
-        ctx.sorters[sorter_id] = {
-          keyInfo: key_info,
-          entries: [],
-          readIdx: 0,
-          isSorted: false,
-          maxK: max_k,
-        };
-        break;
-      }
-
-      /**
-       * OP_SORTER_INSERT (0x31)
-       * Operands: [sorter_id: uint8] [start_reg: uint8] [num_keys: uint8] [cursor_idx: uint8] (4 bytes)
-       * Packs extracted key registers and row reference into SorterEntry inside the Transient Query Arena.
-       * If arena allocation exceeds maxQueryMemory, yields STATUS_ERR_ARENA_EXHAUSTED.
-       */
-      case OpCode.OP_SORTER_INSERT: {
-        const sorter_id = bytecode[ctx.pc];
-        const start_reg = bytecode[ctx.pc + 1];
-        const num_keys = bytecode[ctx.pc + 2];
-        const cursor_idx = bytecode[ctx.pc + 3];
-        ctx.pc += 4;
-
-        const sorter = ctx.sorters[sorter_id];
-        if (!sorter) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const max_k = sorter.maxK ?? 0;
-
-        // Fast-path Top-K heap rejection:
-        // When heap is full (sorter.entries.length >= max_k), candidate rows worse than
-        // the worst element (heap root) are discarded immediately with 0 allocations.
-        if (max_k > 0 && sorter.entries.length >= max_k) {
-          if (num_keys === 1) {
-            const cand = ctx.registers[start_reg];
-            const root = sorter.entries[0].keys[0];
-            const dir = sorter.keyInfo.directions[0] ?? 0;
-            if (typeof cand === "number" && typeof root === "number") {
-              if (dir === 0 ? cand >= root : cand <= root) {
-                break;
-              }
-            } else if (typeof cand === "string" && typeof root === "string") {
-              if (dir === 0 ? cand >= root : cand <= root) {
-                break;
-              }
-            } else {
-              const cmp = compare_registers_to_sorter_keys(
-                ctx.registers,
-                start_reg,
-                sorter.entries[0].keys,
-                sorter.keyInfo,
-              );
-              if (cmp >= 0) break;
-            }
-          } else {
-            const cmp = compare_registers_to_sorter_keys(
-              ctx.registers,
-              start_reg,
-              sorter.entries[0].keys,
-              sorter.keyInfo,
-            );
-            if (cmp >= 0) break;
-          }
-        }
-
-        const cursor = get_cursor(ctx, cursor_idx);
-        const row_len = view.getUint16(cursor.rowOffset + 1, true);
-
-        const keys: any[] = new Array(num_keys);
-        for (let k = 0; k < num_keys; k++) {
-          keys[k] = ctx.registers[start_reg + k];
-        }
-
-        const insert_status = sorter_insert_row(
-          ctx,
-          sorter,
-          keys,
-          cursor.rowOffset,
-          row_len,
-          view,
-          max_k,
-        );
-        if (insert_status !== VmStatus.RUNNING) {
-          return insert_status;
-        }
-        break;
-      }
-
-      /**
-       * OP_SORTER_SORT (0x32)
-       * Operands: [sorter_id: uint8] (1 byte)
-       * Executes in-place Introsort on SorterEntry[] using multi-column collation.
-       */
-      case OpCode.OP_SORTER_SORT: {
-        const sorter_id = bytecode[ctx.pc];
-        ctx.pc += 1;
-
-        const sorter = ctx.sorters[sorter_id];
-        if (!sorter) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        sort_sorter_entries(sorter);
-        sorter.isSorted = true;
-        break;
-      }
-
-      /**
-       * OP_SORTER_NEXT (0x33)
-       * Operands: [sorter_id: uint8] [jump_target: uint16] (3 bytes)
-       * Yields next sorted row into 64KB Result Buffer; jumps to jump_target until all entries emitted.
-       * If Result Buffer is full, yields STATUS_BUFFER_FULL. Falls through on EOF.
-       */
-      case OpCode.OP_SORTER_NEXT: {
-        const sorter_id = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const sorter = ctx.sorters[sorter_id];
-        if (!sorter) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const max_read =
-          sorter.keyInfo.limit !== undefined
-            ? (sorter.keyInfo.offset ?? 0) + sorter.keyInfo.limit
-            : sorter.entries.length;
-
-        if (sorter.readIdx >= Math.min(sorter.entries.length, max_read)) {
-          // EOF: all requested sorted entries emitted, fall through
-          break;
-        }
-
-        const entry = sorter.entries[sorter.readIdx];
-        const row_bytes =
-          entry.rowData ??
-          new Uint8Array(
-            view.buffer,
-            view.byteOffset + entry.rowOffset,
-            entry.rowLen,
-          );
-
-        const emit_status = emit_to_result_buffer(
-          ctx,
-          view,
-          row_bytes,
-          instr_pc,
-        );
-        if (emit_status !== VmStatus.RUNNING) {
-          return emit_status;
-        }
-
-        sorter.readIdx++;
-        ctx.pc = jump_target;
-        break;
-      }
-
-      /**
-       * OP_MATH_FLOOR (0x34)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Computes mathematical floor ⌊r[src_reg]⌋ into r[dest_reg].
-       */
-      case OpCode.OP_MATH_FLOOR: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null && val !== undefined ? Math.floor(Number(val)) : null;
-        break;
-      }
-
-      /**
-       * OP_MATH_CEIL (0x35)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Computes mathematical ceiling ⌈r[src_reg]⌉ into r[dest_reg].
-       */
-      case OpCode.OP_MATH_CEIL: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        const val = ctx.registers[src_reg];
-        ctx.registers[dest_reg] =
-          val !== null && val !== undefined ? Math.ceil(Number(val)) : null;
-        break;
-      }
-
-      /**
-       * OP_ADD (0x36)
-       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
-       * 3VL addition: r[dest_reg] = r[regA] + r[regB].
-       */
-      case OpCode.OP_ADD: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
-        if (
-          val_a === null ||
-          val_a === undefined ||
-          val_b === null ||
-          val_b === undefined
-        ) {
-          ctx.registers[dest_reg] = null;
-        } else {
-          ctx.registers[dest_reg] = Number(val_a) + Number(val_b);
-        }
-        break;
-      }
-
-      /**
-       * OP_SUB (0x37)
-       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
-       * 3VL subtraction: r[dest_reg] = r[regA] - r[regB].
-       */
-      case OpCode.OP_SUB: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
-        if (
-          val_a === null ||
-          val_a === undefined ||
-          val_b === null ||
-          val_b === undefined
-        ) {
-          ctx.registers[dest_reg] = null;
-        } else {
-          ctx.registers[dest_reg] = Number(val_a) - Number(val_b);
-        }
-        break;
-      }
-
-      /**
-       * OP_MUL (0x38)
-       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
-       * 3VL multiplication: r[dest_reg] = r[regA] * r[regB].
-       */
-      case OpCode.OP_MUL: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
-        if (
-          val_a === null ||
-          val_a === undefined ||
-          val_b === null ||
-          val_b === undefined
-        ) {
-          ctx.registers[dest_reg] = null;
-        } else {
-          ctx.registers[dest_reg] = Number(val_a) * Number(val_b);
-        }
-        break;
-      }
-
-      /**
-       * OP_DIV (0x39)
-       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
-       * 3VL division: r[dest_reg] = r[regA] / r[regB] (null on divide by zero).
-       */
-      case OpCode.OP_DIV: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
-        if (
-          val_a === null ||
-          val_a === undefined ||
-          val_b === null ||
-          val_b === undefined
-        ) {
-          ctx.registers[dest_reg] = null;
-        } else {
-          const denom = Number(val_b);
-          ctx.registers[dest_reg] = denom === 0 ? null : Number(val_a) / denom;
-        }
-        break;
-      }
-
-      /**
-       * OP_MOD (0x3A)
-       * Operands: [regA: uint8] [regB: uint8] [dest_reg: uint8] (3 bytes)
-       * 3VL modulo: r[dest_reg] = r[regA] % r[regB] (null on divide by zero).
-       */
-      case OpCode.OP_MOD: {
-        const reg_a = bytecode[ctx.pc];
-        const reg_b = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        const val_a = ctx.registers[reg_a];
-        const val_b = ctx.registers[reg_b];
-        if (
-          val_a === null ||
-          val_a === undefined ||
-          val_b === null ||
-          val_b === undefined
-        ) {
-          ctx.registers[dest_reg] = null;
-        } else {
-          const denom = Number(val_b);
-          ctx.registers[dest_reg] = denom === 0 ? null : Number(val_a) % denom;
-        }
-        break;
-      }
-
-      /**
-       * OP_STR_CONCAT (0x3D)
-       * Operands: [start_reg: uint8] [num_regs: uint8] [dest_reg: uint8] (3 bytes)
-       * Concatenates registers r[start_reg ... start_reg + num_regs - 1] into r[dest_reg].
-       */
-      case OpCode.OP_STR_CONCAT: {
-        const start_reg = bytecode[ctx.pc];
-        const num_regs = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        let res = "";
-        let has_val = false;
-        for (let i = 0; i < num_regs; i++) {
-          const v = ctx.registers[start_reg + i];
-          if (v !== null && v !== undefined) {
-            has_val = true;
-            res += String(v);
-          }
-        }
-        ctx.registers[dest_reg] = has_val ? res : null;
-        break;
-      }
-
-      /**
-       * OP_COALESCE (0x3E)
-       * Operands: [start_reg: uint8] [num_regs: uint8] [dest_reg: uint8] (3 bytes)
-       * Scans registers r[start_reg ... start_reg + num_regs - 1], stores first non-null into r[dest_reg].
-       */
-      case OpCode.OP_COALESCE: {
-        const start_reg = bytecode[ctx.pc];
-        const num_regs = bytecode[ctx.pc + 1];
-        const dest_reg = bytecode[ctx.pc + 2];
-        ctx.pc += 3;
-        let first_non_null: any = null;
-        for (let i = 0; i < num_regs; i++) {
-          const v = ctx.registers[start_reg + i];
-          if (v !== null && v !== undefined) {
-            first_non_null = v;
-            break;
-          }
-        }
-        ctx.registers[dest_reg] = first_non_null;
-        break;
-      }
-
-      /**
-       * OP_COPY (0x3F)
-       * Operands: [src_reg: uint8] [dest_reg: uint8] (2 bytes)
-       * Copies r[src_reg] to r[dest_reg].
-       */
-      case OpCode.OP_COPY: {
-        const src_reg = bytecode[ctx.pc];
-        const dest_reg = bytecode[ctx.pc + 1];
-        ctx.pc += 2;
-        ctx.registers[dest_reg] = ctx.registers[src_reg];
-        break;
-      }
-
-      /**
-       * OP_AGG_INIT (0x40)
-       * Operands: [agg_id: uint8] [start_key_reg: uint8] [num_keys: uint8] [mode: uint8] (4 bytes)
-       * Initializes Hash Table in arena (0x00) or Stream Aggregation (0x01).
-       */
-      case OpCode.OP_AGG_INIT: {
-        const agg_id = bytecode[ctx.pc];
-        const start_key_reg = bytecode[ctx.pc + 1];
-        const num_keys = bytecode[ctx.pc + 2];
-        const mode = bytecode[ctx.pc + 3];
-        ctx.pc += 4;
-
-        if (mode === 0) {
-          const initial_capacity = 1024;
-          const alloc_size = initial_capacity * 40; // 40.96 KB
-          if (ctx.arenaOffset + alloc_size > ctx.maxQueryMemory) {
-            ctx.status = VmStatus.ARENA_EXHAUSTED;
-            return VmStatus.ARENA_EXHAUSTED;
-          }
-          ctx.arenaOffset += alloc_size;
-
-          const buckets: VmAggBucket[] = create_agg_buckets(initial_capacity);
-
-          if (num_keys === 0) {
-            const h = fnv1a_32([]);
-            const slot = h % initial_capacity;
-            buckets[slot].hash = h;
-            buckets[slot].keys = [];
-            buckets[slot].count = 0;
-            buckets[slot].sum = 0;
-            buckets[slot].min_val = Infinity;
-            buckets[slot].max_val = -Infinity;
-            buckets[slot].has_val = false;
-            buckets[slot].slots = [];
-          }
-
-          ctx.aggregators[agg_id] = {
-            mode: 0,
-            startKeyReg: start_key_reg,
-            numKeys: num_keys,
-            capacity: initial_capacity,
-            occupiedCount: num_keys === 0 ? 1 : 0,
-            readIdx: 0,
-            buckets,
-            currentBucket: null,
-          };
-        } else {
-          ctx.aggregators[agg_id] = {
-            mode: 1,
-            startKeyReg: start_key_reg,
-            numKeys: num_keys,
-            capacity: 1,
-            occupiedCount: 0,
-            readIdx: 0,
-            buckets: [],
-            currentBucket: null,
-          };
-        }
-        break;
-      }
-
-      /**
-       * OP_AGG_STEP (0x41)
-       * Operands: [agg_id: uint8] [start_key_reg: uint8] [num_keys: uint8] [val_reg: uint8] [func_id: uint8] (5 bytes)
-       * Updates AggBucket accumulators (low 3 bits = 0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX; upper 5 bits = slot index).
-       */
-      case OpCode.OP_AGG_STEP: {
-        const agg_id = bytecode[ctx.pc];
-        const start_key_reg = bytecode[ctx.pc + 1];
-        const num_keys = bytecode[ctx.pc + 2];
-        const val_reg = bytecode[ctx.pc + 3];
-        const raw_func_id = bytecode[ctx.pc + 4];
-        const func_id = raw_func_id & 0x07;
-        const slot_idx = raw_func_id >> 3;
-        ctx.pc += 5;
-
-        const agg = ctx.aggregators[agg_id];
-        if (!agg) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const keys: any[] = [];
-        for (let k = 0; k < num_keys; k++) {
-          keys.push(ctx.registers[start_key_reg + k]);
-        }
-        const val = val_reg === 255 ? null : ctx.registers[val_reg];
-
-        if (agg.mode === 0) {
-          const hash = fnv1a_32(keys);
-          const slot = hash % agg.capacity;
-          let target_bucket: VmAggBucket | null = null;
-
-          for (let probe = 0; probe < agg.capacity; probe++) {
-            const idx = (slot + probe) % agg.capacity;
-            const b = agg.buckets[idx];
-            if (b.hash === 0) {
-              b.hash = hash;
-              b.keys = keys.slice();
-              b.count = 0;
-              b.sum = 0;
-              b.min_val = Infinity;
-              b.max_val = -Infinity;
-              b.has_val = false;
-              b.slots = [];
-              agg.occupiedCount++;
-              target_bucket = b;
-              break;
-            } else if (b.hash === hash && group_keys_match(b.keys, keys)) {
-              target_bucket = b;
-              break;
-            }
-          }
-
-          if (!target_bucket) {
-            ctx.status = VmStatus.ARENA_EXHAUSTED;
-            return VmStatus.ARENA_EXHAUSTED;
-          }
-
-          if (!target_bucket.slots) {
-            target_bucket.slots = [];
-          }
-          let agg_slot = target_bucket.slots[slot_idx];
-          if (!agg_slot) {
-            agg_slot = {
-              count: 0,
-              sum: 0,
-              min_val: Infinity,
-              max_val: -Infinity,
-              has_val: false,
-            };
-            target_bucket.slots[slot_idx] = agg_slot;
-          }
-
-          // Accumulator updates (both per-aggregate slot and legacy bucket fields)
-          if (func_id === 0) {
-            if (val_reg === 255 || (val !== null && val !== undefined)) {
-              agg_slot.count++;
-              target_bucket.count++;
-            }
-          } else if (func_id === 1 || func_id === 2) {
-            if (val !== null && val !== undefined) {
-              const num = Number(val);
-              agg_slot.sum += num;
-              agg_slot.count++;
-              agg_slot.has_val = true;
-              target_bucket.sum += num;
-              target_bucket.has_val = true;
-            }
-          } else if (func_id === 3) {
-            if (val !== null && val !== undefined) {
-              const num = Number(val);
-              if (!agg_slot.has_val || num < agg_slot.min_val) {
-                agg_slot.min_val = num;
-              }
-              agg_slot.count++;
-              agg_slot.has_val = true;
-              if (!target_bucket.has_val || num < target_bucket.min_val) {
-                target_bucket.min_val = num;
-              }
-              target_bucket.has_val = true;
-            }
-          } else if (func_id === 4) {
-            if (val !== null && val !== undefined) {
-              const num = Number(val);
-              if (!agg_slot.has_val || num > agg_slot.max_val) {
-                agg_slot.max_val = num;
-              }
-              agg_slot.count++;
-              agg_slot.has_val = true;
-              if (!target_bucket.has_val || num > target_bucket.max_val) {
-                target_bucket.max_val = num;
-              }
-              target_bucket.has_val = true;
-            }
-          }
-
-          // Dynamic Doubling at 70% Load Factor
-          if (agg.occupiedCount > 0.7 * agg.capacity) {
-            const old_capacity = agg.capacity;
-            const new_capacity = old_capacity * 2;
-            const add_size = new_capacity * 40;
-            if (ctx.arenaOffset + add_size > ctx.maxQueryMemory) {
-              ctx.status = VmStatus.ARENA_EXHAUSTED;
-              return VmStatus.ARENA_EXHAUSTED;
-            }
-            ctx.arenaOffset += add_size;
-
-            const old_buckets = agg.buckets;
-            const new_buckets: VmAggBucket[] = create_agg_buckets(new_capacity);
-
-            for (let b_idx = 0; b_idx < old_buckets.length; b_idx++) {
-              const old_b = old_buckets[b_idx];
-              if (old_b.hash !== 0) {
-                const s = old_b.hash % new_capacity;
-                for (let p = 0; p < new_capacity; p++) {
-                  const pos = (s + p) % new_capacity;
-                  if (new_buckets[pos].hash === 0) {
-                    new_buckets[pos] = old_b;
-                    break;
-                  }
-                }
-              }
-            }
-
-            agg.capacity = new_capacity;
-            agg.buckets = new_buckets;
-          }
-        }
-        break;
-      }
-
-      /**
-       * OP_AGG_NEXT (0x42)
-       * Operands: [agg_id: uint8] [out_key_reg: uint8] [out_acc_reg: uint8] [jump_target: uint16] (5 bytes)
-       * Iterates next group bucket into registers; jumps to jump_target. Falls through on EOF.
-       */
-      case OpCode.OP_AGG_NEXT: {
-        const agg_id = bytecode[ctx.pc];
-        const out_key_reg = bytecode[ctx.pc + 1];
-        const out_acc_reg = bytecode[ctx.pc + 2];
-        const jump_target = code_view.getUint16(ctx.pc + 3, true);
-        ctx.pc += 5;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const agg = ctx.aggregators[agg_id];
-        if (!agg) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        while (
-          agg.readIdx < agg.buckets.length &&
-          agg.buckets[agg.readIdx].hash === 0
-        ) {
-          agg.readIdx++;
-        }
-
-        if (agg.readIdx >= agg.buckets.length) {
-          // All buckets processed, fall through
-          agg.currentBucket = null;
-          break;
-        }
-
-        const bucket = agg.buckets[agg.readIdx++];
-        agg.currentBucket = bucket;
-
-        for (let k = 0; k < bucket.keys.length; k++) {
-          ctx.registers[out_key_reg + k] = bucket.keys[k];
-        }
-
-        ctx.registers[out_acc_reg] = bucket.sum;
-        ctx.registers[out_acc_reg + 1] = bucket.count;
-        ctx.registers[out_acc_reg + 2] = bucket.has_val ? bucket.min_val : null;
-        ctx.registers[out_acc_reg + 3] = bucket.has_val ? bucket.max_val : null;
-
-        ctx.pc = jump_target;
-        break;
-      }
-
-      /**
-       * OP_AGG_FINAL (0x43)
-       * Operands: [sum_reg: uint8] [count_reg: uint8] [out_reg: uint8] [func_id: uint8] (4 bytes)
-       * Finalizes aggregate expression: (low 3 bits = 0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX; upper 5 bits = slot index).
-       */
-      case OpCode.OP_AGG_FINAL: {
-        const sum_reg = bytecode[ctx.pc];
-        const count_reg = bytecode[ctx.pc + 1];
-        const out_reg = bytecode[ctx.pc + 2];
-        const raw_func_id = bytecode[ctx.pc + 3];
-        const func_id = raw_func_id & 0x07;
-        const slot_idx = raw_func_id >> 3;
-        ctx.pc += 4;
-
-        const currentBucket = ctx.aggregators[0]?.currentBucket;
-        const agg_slot = currentBucket?.slots?.[slot_idx];
-
-        if (agg_slot) {
-          if (func_id === 0) {
-            ctx.registers[out_reg] = agg_slot.count;
-          } else if (func_id === 1) {
-            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.sum : null;
-          } else if (func_id === 2) {
-            ctx.registers[out_reg] =
-              agg_slot.count > 0 ? agg_slot.sum / agg_slot.count : null;
-          } else if (func_id === 3) {
-            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.min_val : null;
-          } else if (func_id === 4) {
-            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.max_val : null;
-          }
-        } else if (currentBucket) {
-          if (func_id === 0) {
-            ctx.registers[out_reg] = 0;
-          } else {
-            ctx.registers[out_reg] = null;
-          }
-        } else {
-          const sum = ctx.registers[sum_reg];
-          const count = Number(ctx.registers[count_reg] ?? 0);
-
-          if (func_id === 0) {
-            ctx.registers[out_reg] = count;
-          } else if (func_id === 1) {
-            ctx.registers[out_reg] = count > 0 ? Number(sum) : null;
-          } else if (func_id === 2) {
-            ctx.registers[out_reg] = count > 0 ? Number(sum) / count : null;
-          } else if (func_id === 3 || func_id === 4) {
-            ctx.registers[out_reg] = ctx.registers[sum_reg];
-          }
-        }
-        break;
-      }
-
-      /**
-       * OP_REG_IS_NULL (0x48)
-       * Operands: [reg: uint8] [jump_target: uint16] (3 bytes)
-       * Jumps to jump_target if r[reg] is NULL or undefined.
-       */
-      case OpCode.OP_REG_IS_NULL: {
-        const reg = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const val = ctx.registers[reg];
-        if (val === null || val === undefined) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      /**
-       * OP_REG_IS_NOT_NULL (0x49)
-       * Operands: [reg: uint8] [jump_target: uint16] (3 bytes)
-       * Jumps to jump_target if r[reg] is not NULL and not undefined.
-       */
-      case OpCode.OP_REG_IS_NOT_NULL: {
-        const reg = bytecode[ctx.pc];
-        const jump_target = code_view.getUint16(ctx.pc + 1, true);
-        ctx.pc += 3;
-
-        if (jump_target > code_len) {
-          ctx.status = VmStatus.INVALID_BYTECODE;
-          return VmStatus.INVALID_BYTECODE;
-        }
-
-        const val = ctx.registers[reg];
-        if (val !== null && val !== undefined) {
-          ctx.pc = jump_target;
-        }
-        break;
-      }
-
-      default:
-        ctx.status = VmStatus.INVALID_BYTECODE;
-        return VmStatus.INVALID_BYTECODE;
-    }
-  }
-
-  ctx.status = VmStatus.DONE;
-  return VmStatus.DONE;
 }

@@ -17,10 +17,6 @@ WEBDB_EXPORT uint32_t catalog_get_change_counter(uint32_t page1_offset);
 WEBDB_EXPORT uint32_t catalog_increment_change_counter(uint32_t page1_offset);
 WEBDB_EXPORT uint32_t catalog_update_page1_checksum(uint32_t page1_offset);
 WEBDB_EXPORT void catalog_write_fixed_string(uint32_t offset, const char * str, uint32_t max_len);
-WEBDB_EXPORT int32_t catalog_find_free_table_slot(uint32_t page1_offset);
-WEBDB_EXPORT int32_t catalog_find_free_index_slot(uint32_t page1_offset);
-WEBDB_EXPORT int32_t catalog_delete_index_descriptor(uint32_t page1_offset, uint32_t slot_idx);
-WEBDB_EXPORT int32_t catalog_delete_table_descriptor(uint32_t page1_offset, uint32_t slot_idx);
 WEBDB_EXPORT void catalog_init_page(uint32_t page_offset, uint16_t table_id, uint16_t start_col_index, uint32_t next_col_catalog_page_id);
 WEBDB_EXPORT void catalog_write_page_header(uint32_t page_offset, uint16_t col_count_in_page, uint16_t table_id, uint16_t start_col_index, uint32_t next_col_catalog_page_id);
 
