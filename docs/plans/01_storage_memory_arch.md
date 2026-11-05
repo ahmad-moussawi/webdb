@@ -16,8 +16,7 @@ WebDB enforces a strict physical separation of source code across two primary la
 1. **Host Layer (`src/host/`):** Written in modern TypeScript. Manages asynchronous browser APIs, user promises, compiler AST emission, VFS disk drivers (OPFS / IndexedDB), and the async event loop driver that steps the VM and handles page faults.
 2. **Core Engine (`src/core/`):** Deterministic, zero-dynamic-allocation byte manipulation engine. Structured with two subfolders:
    - `src/core/js/`: **Phase 1 Reference Engine** written in strict C-style TypeScript/JavaScript. Implements the buffer pool cache management (pin/unpin, Clock eviction, `0x401000` page table), slotted page packing, B+Tree traversal, and synchronous VDBE opcode loop using flat pointer arithmetic. To be ported 1:1 to C.
-   - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean (<50 KB) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
-   - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean (~13 KB Wasm core, <100 KB bundle) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
+   - `src/core/c/`: **Phase 2 Production Engine** written in C and compiled via `clang --target=wasm32 -nostdlib` into an ultra-lean ({{ $sizes.wasmGzip }} gzipped / {{ $sizes.wasmRaw }} raw Wasm core) WebAssembly binary sharing identical shared-memory offsets and FFI signatures.
 
 ```
 src/

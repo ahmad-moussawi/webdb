@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { withBase } from "vitepress";
+import { SIZE_METRICS } from "../constants";
 
 type CodeTab = "query" | "tx" | "http" | "explain";
 const activeTab = ref<CodeTab>("query");
@@ -117,7 +118,7 @@ const frameworkMeta: Record<
     label: "Plain JS / TS",
     badge: "Zero Dependencies",
     pkg: "@ahmadmoussawi/webdb",
-    size: "Built-in",
+    size: "",
     file: "live-query.ts",
   },
 };
@@ -127,8 +128,7 @@ const frameworkSnippets: Record<FrameworkTab, string> = {
 
 export function OrderDashboard({ status }: { status: string }) {
   // Automatically tracks 'orders' AND joined 'customers' table!
-  // Re-renders on local writes or commits from another browser tab.
-  const { data: orders, isLoading, error } = useLiveQuery(
+  const { data: orders, isLoading } = useLiveQuery(
     () =>
       db
         .from("orders")
@@ -139,8 +139,12 @@ export function OrderDashboard({ status }: { status: string }) {
     { initialData: [] }
   );
 
+  // Mutating 'orders' (here or in another tab) automatically updates 'orders' & re-renders!
+  const markPaid = (id: string) =>
+    db.from("orders").where("id", "=", id).update({ status: "paid" });
+
   if (isLoading) return <p>Loading live orders...</p>;
-  return <OrderTable rows={orders} />;
+  return <OrderTable rows={orders} onMarkPaid={markPaid} />;
 }`,
 
   vue: `<script setup lang="ts">
@@ -160,10 +164,14 @@ const { data: orders, isLoading } = useLiveQuery(
   [statusFilter], // Re-runs when statusFilter Ref or watched tables mutate
   { initialData: [] }
 );
+
+// Inserting or updating a row automatically refreshes the 'orders' Ref!
+const addOrder = (customerId: string, total: number) =>
+  db.insert("orders", { id: crypto.randomUUID(), customer_id: customerId, status: "paid", total });
 <\/script>`,
 
   angular: `import { Component, signal } from "@angular/core";
-import { injectWebDB, liveQuerySignal, liveQuery$ } from "@ahmadmoussawi/webdb/angular";
+import { injectWebDB, liveQuerySignal } from "@ahmadmoussawi/webdb/angular";
 
 @Component({
   selector: "app-orders",
@@ -182,6 +190,11 @@ export class OrdersComponent {
     () => this.db.from("orders").where("status", "=", this.status()),
     { initialData: [] }
   );
+
+  // Any insert/update to 'orders' automatically pushes a new value to the 'orders' Signal!
+  markPaid(id: string) {
+    return this.db.from("orders").where("id", "=", id).update({ status: "paid" });
+  }
 }`,
 
   vanilla: `import { WebDB } from "@ahmadmoussawi/webdb";
@@ -193,10 +206,12 @@ const sub = db
   .orderBy("id", "desc")
   .live((rows) => renderOrders(rows));
 
-// 2. Or consume live updates via standard Async Iteration (for await...of)
-for await (const rows of db.from("orders").where("status", "=", "paid").live()) {
-  renderOrders(rows);
-}`,
+// 2. Inserting or modifying a record in 'orders' automatically triggers the live callback!
+await db.insert("orders", {
+  id: crypto.randomUUID(),
+  status: "paid",
+  total: 149.99,
+});`,
 };
 
 function highlightCode(code: string, tab: string): string {
@@ -220,38 +235,57 @@ function highlightCode(code: string, tab: string): string {
     return html;
   }
 
-  const comments: string[] = [];
-  html = html.replace(/\/\/.*/g, (m) => {
-    comments.push(`<span class="hl-comment">${m}</span>`);
-    return `___COMMENT_${comments.length - 1}___`;
+  const tokens: string[] = [];
+  const saveToken = (wrapped: string) => {
+    const id = tokens.length;
+    tokens.push(wrapped);
+    return `___TOKEN_${id}___`;
+  };
+
+  // 1. Single-line comments
+  html = html.replace(/\/\/.*/g, (m) =>
+    saveToken(`<span class="hl-comment">${m}</span>`),
+  );
+
+  // 2. Strings ("...", '...', and multiline `...`)
+  html = html.replace(/(".*?"|'.*?'|`[\s\S]*?`)/g, (m) => {
+    const perLine = m
+      .split("\n")
+      .map((line) => `<span class="hl-str">${line}</span>`)
+      .join("\n");
+    return saveToken(perLine);
   });
 
-  html = html.replace(
-    /(&quot;.*?&quot;|'.*?'|`[\s\S]*?`)/g,
-    `<span class="hl-str">$1</span>`,
+  // 3. Angular / TS decorators
+  html = html.replace(/@(Component|Injectable)\b/g, (m) =>
+    saveToken(`<span class="hl-fn">${m}</span>`),
   );
 
+  // 4. Keywords (safe because strings & comments are already tokenized)
   html = html.replace(
     /\b(await|async|const|let|var|function|return|true|false|null|import|from|new|export|class|implements|for|of|if|throw|private)\b/g,
-    `<span class="hl-kw">$1</span>`,
+    (m) => saveToken(`<span class="hl-kw">${m}</span>`),
   );
 
+  // 5. Types
   html = html.replace(
     /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|HttpVfsAdapter|Promise|Uint8Array|Error|string|number|boolean)\b/g,
-    `<span class="hl-type">$1</span>`,
+    (m) => saveToken(`<span class="hl-type">${m}</span>`),
   );
 
-  html = html.replace(/\b(\d+(\.\d+)?)\b/g, `<span class="hl-num">$1</span>`);
-
+  // 6. Function calls
   html = html.replace(
-    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch)\b(?=\()/g,
-    `<span class="hl-fn">$1</span>`,
+    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|update|explain|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch|renderOrders)\b(?=\()/g,
+    (m) => saveToken(`<span class="hl-fn">${m}</span>`),
   );
 
-  html = html.replace(
-    /___COMMENT_(\d+)___/g,
-    (_, idx) => comments[Number(idx)],
+  // 7. Numbers
+  html = html.replace(/\b(\d+(\.\d+)?)\b/g, (m) =>
+    saveToken(`<span class="hl-num">${m}</span>`),
   );
+
+  // Restore tokens
+  html = html.replace(/___TOKEN_(\d+)___/g, (_, idx) => tokens[Number(idx)]);
 
   return html;
 }
@@ -287,6 +321,280 @@ const copyInstallCmd = () => {
   installCopied.value = true;
   setTimeout(() => (installCopied.value = false), 2000);
 };
+
+interface EngineBenchMetric {
+  ops: number;
+  opsFormatted: string;
+  meanMs: string;
+  minMs: string;
+  p95Ms: string;
+  pct: number;
+}
+
+interface BenchmarkScenario {
+  id: string;
+  name: string;
+  shortTitle: string;
+  shortDesc: string;
+  speedupVsSqlite: string;
+  speedupHeadline: string;
+  jsVsSqliteLabel: string;
+  jsBeatsSqlite: boolean;
+  webdbWasm: EngineBenchMetric;
+  webdbJs: EngineBenchMetric;
+  sqliteWasm: EngineBenchMetric;
+}
+
+const benchmarkScenarios: BenchmarkScenario[] = [
+  {
+    id: "range-scan",
+    name: "1. Range Filter Scan",
+    shortTitle: "RANGE FILTER SCAN",
+    shortDesc: "Multi-predicate range filtering over 5,000 rows in memory",
+    speedupVsSqlite: "8.7x faster",
+    speedupHeadline: "8.7x Faster",
+    jsVsSqliteLabel: "3.5x Faster",
+    jsBeatsSqlite: true,
+    webdbWasm: {
+      ops: 1091.7,
+      opsFormatted: "1,091.7 ops/s",
+      meanMs: "0.92 ms",
+      minMs: "0.88 ms",
+      p95Ms: "1.00 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 444.0,
+      opsFormatted: "444.0 ops/s",
+      meanMs: "2.25 ms",
+      minMs: "2.20 ms",
+      p95Ms: "2.32 ms",
+      pct: 40.7,
+    },
+    sqliteWasm: {
+      ops: 125.9,
+      opsFormatted: "125.9 ops/s",
+      meanMs: "7.94 ms",
+      minMs: "7.19 ms",
+      p95Ms: "10.46 ms",
+      pct: 11.5,
+    },
+  },
+  {
+    id: "bulk-insert",
+    name: "2. Bulk Batch Insert",
+    shortTitle: "BULK BATCH INSERT",
+    shortDesc: "5,000 rows inserted in a single ACID transaction",
+    speedupVsSqlite: "2.3x faster",
+    speedupHeadline: "2.3x Faster",
+    jsVsSqliteLabel: "1.9x Faster",
+    jsBeatsSqlite: true,
+    webdbWasm: {
+      ops: 359152.4,
+      opsFormatted: "359,152 ops/s",
+      meanMs: "13.92 ms",
+      minMs: "13.33 ms",
+      p95Ms: "14.41 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 301932.4,
+      opsFormatted: "301,932 ops/s",
+      meanMs: "16.56 ms",
+      minMs: "16.24 ms",
+      p95Ms: "17.14 ms",
+      pct: 84.1,
+    },
+    sqliteWasm: {
+      ops: 156576.2,
+      opsFormatted: "156,576 ops/s",
+      meanMs: "31.93 ms",
+      minMs: "30.82 ms",
+      p95Ms: "33.57 ms",
+      pct: 43.6,
+    },
+  },
+  {
+    id: "point-lookups",
+    name: "3. Batch Point Lookups (IN)",
+    shortTitle: "BATCH POINT LOOKUPS",
+    shortDesc: "Primary-key B+Tree point lookups via WHERE id IN (...)",
+    speedupVsSqlite: "2.3x faster",
+    speedupHeadline: "2.3x Faster",
+    jsVsSqliteLabel: "1.6x Faster",
+    jsBeatsSqlite: true,
+    webdbWasm: {
+      ops: 334448.2,
+      opsFormatted: "334,448 ops/s",
+      meanMs: "0.30 ms",
+      minMs: "0.26 ms",
+      p95Ms: "0.34 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 234192.0,
+      opsFormatted: "234,192 ops/s",
+      meanMs: "0.43 ms",
+      minMs: "0.41 ms",
+      p95Ms: "0.44 ms",
+      pct: 70.0,
+    },
+    sqliteWasm: {
+      ops: 148148.1,
+      opsFormatted: "148,148 ops/s",
+      meanMs: "0.68 ms",
+      minMs: "0.66 ms",
+      p95Ms: "0.69 ms",
+      pct: 44.3,
+    },
+  },
+  {
+    id: "indexed-join",
+    name: "4. Indexed 2-Table JOIN",
+    shortTitle: "INDEXED 2-TABLE JOIN",
+    shortDesc: "Relational INNER JOIN across 2 indexed tables",
+    speedupVsSqlite: "1.7x faster",
+    speedupHeadline: "1.7x Faster",
+    jsVsSqliteLabel: "1.1x Faster",
+    jsBeatsSqlite: true,
+    webdbWasm: {
+      ops: 755.3,
+      opsFormatted: "755.3 ops/s",
+      meanMs: "1.32 ms",
+      minMs: "1.28 ms",
+      p95Ms: "1.42 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 494.6,
+      opsFormatted: "494.6 ops/s",
+      meanMs: "2.02 ms",
+      minMs: "1.98 ms",
+      p95Ms: "2.07 ms",
+      pct: 65.5,
+    },
+    sqliteWasm: {
+      ops: 440.1,
+      opsFormatted: "440.1 ops/s",
+      meanMs: "2.27 ms",
+      minMs: "2.22 ms",
+      p95Ms: "2.36 ms",
+      pct: 58.3,
+    },
+  },
+  {
+    id: "filter-sort-limit",
+    name: "5. Filter + Sort + Limit",
+    shortTitle: "FILTER + SORT + LIMIT",
+    shortDesc: "Compound WHERE filter + ORDER BY + LIMIT pagination",
+    speedupVsSqlite: "1.6x faster",
+    speedupHeadline: "1.6x Faster",
+    jsVsSqliteLabel: "0.5x",
+    jsBeatsSqlite: false,
+    webdbWasm: {
+      ops: 2381.0,
+      opsFormatted: "2,381.0 ops/s",
+      meanMs: "0.42 ms",
+      minMs: "0.32 ms",
+      p95Ms: "0.47 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 681.7,
+      opsFormatted: "681.7 ops/s",
+      meanMs: "1.47 ms",
+      minMs: "1.44 ms",
+      p95Ms: "1.52 ms",
+      pct: 28.6,
+    },
+    sqliteWasm: {
+      ops: 1483.7,
+      opsFormatted: "1,483.7 ops/s",
+      meanMs: "0.67 ms",
+      minMs: "0.65 ms",
+      p95Ms: "0.74 ms",
+      pct: 62.3,
+    },
+  },
+  {
+    id: "analytics-agg",
+    name: "6. Analytics Aggregation",
+    shortTitle: "ANALYTICS AGGREGATION",
+    shortDesc: "GROUP BY with COUNT, SUM & AVG aggregate functions",
+    speedupVsSqlite: "1.4x faster",
+    speedupHeadline: "1.4x Faster",
+    jsVsSqliteLabel: "0.3x",
+    jsBeatsSqlite: false,
+    webdbWasm: {
+      ops: 2392.3,
+      opsFormatted: "2,392.3 ops/s",
+      meanMs: "0.42 ms",
+      minMs: "0.31 ms",
+      p95Ms: "0.56 ms",
+      pct: 100,
+    },
+    webdbJs: {
+      ops: 559.0,
+      opsFormatted: "559.0 ops/s",
+      meanMs: "1.79 ms",
+      minMs: "1.78 ms",
+      p95Ms: "1.81 ms",
+      pct: 23.4,
+    },
+    sqliteWasm: {
+      ops: 1689.2,
+      opsFormatted: "1,689.2 ops/s",
+      meanMs: "0.59 ms",
+      minMs: "0.58 ms",
+      p95Ms: "0.60 ms",
+      pct: 70.6,
+    },
+  },
+];
+
+const benchSectionRef = ref<HTMLElement | null>(null);
+const benchAnimated = ref(true);
+const heroBenchAnimated = ref(false);
+const activeBenchIndex = ref(0);
+const activeBenchSlide = computed(
+  () => benchmarkScenarios[activeBenchIndex.value],
+);
+let carouselTimer: ReturnType<typeof setInterval> | null = null;
+
+const startCarousel = () => {
+  stopCarousel();
+  carouselTimer = setInterval(() => {
+    activeBenchIndex.value =
+      (activeBenchIndex.value + 1) % benchmarkScenarios.length;
+  }, 3800);
+};
+
+const stopCarousel = () => {
+  if (carouselTimer) {
+    clearInterval(carouselTimer);
+    carouselTimer = null;
+  }
+};
+
+const selectBenchSlide = (idx: number) => {
+  activeBenchIndex.value = idx;
+  startCarousel();
+};
+
+const scrollToBenchmarks = () => {
+  benchSectionRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
+onMounted(() => {
+  setTimeout(() => {
+    heroBenchAnimated.value = true;
+  }, 120);
+  startCarousel();
+});
+
+onBeforeUnmount(() => {
+  stopCarousel();
+});
 </script>
 
 <template>
@@ -299,7 +607,9 @@ const copyInstallCmd = () => {
 
       <div class="hero-eyebrow">
         <span class="status-dot"></span>
-        <span class="eyebrow-tag">~13 KB WASM ENGINE</span>
+        <span class="eyebrow-tag"
+          >{{ SIZE_METRICS.wasmGzip }} GZIPPED WASM CORE</span
+        >
         <span class="eyebrow-sep">•</span>
         <span class="eyebrow-text">ACID + WAL</span>
         <span class="eyebrow-sep">•</span>
@@ -312,7 +622,9 @@ const copyInstallCmd = () => {
       </h1>
 
       <p class="hero-lead">
-        Powered by a <strong>~13 KB WebAssembly core</strong> (&lt;100 KB total
+        Powered by a
+        <strong>{{ SIZE_METRICS.wasmGzip }} gzipped WebAssembly core</strong>
+        ({{ SIZE_METRICS.wasmRaw }} raw, {{ SIZE_METRICS.totalBundle }} gzipped
         bundle) with B+Tree indexes, joins, crash-proof ACID transactions, and
         reactive multi-tab <strong>Live Queries</strong> over OPFS &amp;
         IndexedDB—with zero <code>COOP/COEP</code> server headers.
@@ -375,17 +687,18 @@ const copyInstallCmd = () => {
       <!-- 4 HIGH-SIGNAL ENGINEERING METRICS -->
       <div class="hero-metrics">
         <div class="metric-card">
-          <span class="metric-pill pill-emerald">WASM CORE</span>
-          <div class="metric-val">~13 KB</div>
+          <span class="metric-pill pill-emerald">WASM CORE (GZIP)</span>
+          <div class="metric-val">{{ SIZE_METRICS.wasmGzip }}</div>
           <div class="metric-label">Featherweight Binary</div>
           <div class="metric-desc">
-            95% smaller than desktop SQLite &amp; PGlite Wasm ports
+            {{ SIZE_METRICS.wasmRaw }} raw — 95% smaller than desktop SQLite
+            &amp; PGlite Wasm ports
           </div>
         </div>
 
         <div class="metric-card">
           <span class="metric-pill pill-cyan">LIVE SUBPATHS</span>
-          <div class="metric-val">&lt; 1 KB</div>
+          <div class="metric-val">{{ SIZE_METRICS.adapterSubpath }}</div>
           <div class="metric-label">Reactive Live Queries</div>
           <div class="metric-desc">
             Auto-tracked hooks for React, Vue 3, Angular &amp; Plain JS
@@ -410,6 +723,126 @@ const copyInstallCmd = () => {
           </div>
         </div>
       </div>
+
+      <!-- AUTOPLAY HERO BENCHMARK CAROUSEL (1 SCENARIO AT A TIME + DOTS) -->
+      <div
+        class="hero-bench-wrap"
+        @mouseenter="stopCarousel"
+        @mouseleave="startCarousel"
+      >
+        <div class="hero-bench-spotlight">
+          <div class="hero-bench-top">
+            <h3 class="hero-bench-headline">
+              <span class="hero-speed-highlight">{{
+                activeBenchSlide.speedupHeadline
+              }}</span>
+              Than SQLite WASM
+            </h3>
+            <p class="hero-bench-subdesc">{{ activeBenchSlide.shortDesc }}</p>
+          </div>
+
+          <div class="hero-bench-bars">
+            <!-- WebDB Wasm -->
+            <div class="hero-hbar-row row-winner">
+              <div class="hero-hbar-label">
+                <span class="dot dot-emerald-glow"></span>
+                <span class="engine-main">WebDB</span>
+                <span class="hero-hbar-tag tag-wasm">WASM</span>
+              </div>
+              <div class="hero-hbar-track">
+                <div
+                  class="hbar-fill hero-fill-wasm"
+                  :style="{
+                    width: heroBenchAnimated
+                      ? `${activeBenchSlide.webdbWasm.pct}%`
+                      : '0%',
+                  }"
+                >
+                  <span class="hbar-shimmer"></span>
+                </div>
+              </div>
+              <div class="hero-hbar-val val-winner">
+                {{ activeBenchSlide.speedupHeadline }}
+              </div>
+            </div>
+
+            <!-- WebDB JS -->
+            <div class="hero-hbar-row">
+              <div class="hero-hbar-label">
+                <span class="dot dot-violet"></span>
+                <span class="engine-main">WebDB</span>
+                <span class="hero-hbar-tag tag-js">JS</span>
+              </div>
+              <div class="hero-hbar-track">
+                <div
+                  class="hbar-fill hero-fill-js"
+                  :style="{
+                    width: heroBenchAnimated
+                      ? `${activeBenchSlide.webdbJs.pct}%`
+                      : '0%',
+                  }"
+                ></div>
+              </div>
+              <div class="hero-hbar-val val-js">
+                {{ activeBenchSlide.jsVsSqliteLabel }}
+              </div>
+            </div>
+
+            <!-- SQLite WASM -->
+            <div class="hero-hbar-row">
+              <div class="hero-hbar-label">
+                <span class="dot dot-amber"></span>
+                <span class="label-muted">SQLite WASM</span>
+              </div>
+              <div class="hero-hbar-track">
+                <div
+                  class="hbar-fill hero-fill-sqlite"
+                  :style="{
+                    width: heroBenchAnimated
+                      ? `${activeBenchSlide.sqliteWasm.pct}%`
+                      : '0%',
+                  }"
+                ></div>
+              </div>
+              <div class="hero-hbar-val val-muted">1x</div>
+            </div>
+          </div>
+
+          <!-- CAROUSEL NAVIGATION DOTS -->
+          <div
+            class="hero-carousel-dots"
+            role="tablist"
+            aria-label="Benchmark scenarios"
+          >
+            <button
+              v-for="(slide, idx) in benchmarkScenarios"
+              :key="slide.id"
+              type="button"
+              role="tab"
+              :aria-selected="activeBenchIndex === idx"
+              :aria-label="slide.name"
+              :title="slide.name"
+              :class="['carousel-dot', { active: activeBenchIndex === idx }]"
+              @click="selectBenchSlide(idx)"
+            ></button>
+          </div>
+        </div>
+
+        <div class="hero-bench-cta-below">
+          <div class="hero-bench-hw-note">
+            Benchmark run on <strong>MacBook Pro, M1 Max 2021</strong> (5,000
+            rows in memory)
+          </div>
+          <a
+            href="#benchmarks"
+            class="hero-bench-scroll-link"
+            @click.prevent="scrollToBenchmarks"
+          >
+            <span>View full benchmark table</span>
+            <span class="scroll-arrow">↓</span>
+          </a>
+        </div>
+      </div>
     </header>
 
     <!-- ======================================================================
@@ -426,7 +859,10 @@ const copyInstallCmd = () => {
           to re-parse them inside a multi-megabyte C parser. WebDB compiles
           fluent TypeScript directly into compact binary opcodes—delivering a
           full relational engine with a
-          <strong>~13 KB Wasm core</strong> (&lt;100 KB total bundle).
+          <strong>{{ SIZE_METRICS.wasmGzip }} gzipped Wasm core</strong> ({{
+            SIZE_METRICS.wasmRaw
+          }}
+          raw).
         </p>
       </div>
 
@@ -502,7 +938,10 @@ const copyInstallCmd = () => {
               <span class="track-sub">(Browser-Native Engine)</span>
             </div>
             <span class="track-badge badge-green-soft">
-              ~13 KB Wasm Core • &lt; 100 KB Bundle • 2 Stages
+              {{ SIZE_METRICS.wasmGzip }} Gzipped Wasm ({{
+                SIZE_METRICS.wasmRaw
+              }}
+              Raw) • 2 Stages
             </span>
           </div>
 
@@ -843,6 +1282,117 @@ const copyInstallCmd = () => {
     </section>
 
     <!-- ======================================================================
+         3.5 VERIFIED BENCHMARKS: WEBDB (C/WASM & JS) VS SQLITE WASM
+         ====================================================================== -->
+    <section
+      id="benchmarks"
+      ref="benchSectionRef"
+      class="section-block bench-section"
+    >
+      <div class="section-header-center">
+        <span class="section-eyebrow eyebrow-emerald">
+          IN-MEMORY BENCHMARKS • MACBOOK PRO, APPLE M1 MAX 2021 (5,000 ROWS)
+        </span>
+        <h2 class="section-title">
+          Up to 8.7x Faster Than Official SQLite WASM
+        </h2>
+        <p class="section-subtitle">
+          Because WebDB compiles TypeScript directly into VDBE binary
+          opcodes—skipping SQL string serialization and a multi-megabyte C
+          parser—our
+          <strong>{{ SIZE_METRICS.wasmGzip }} gzipped Wasm core</strong> ({{
+            SIZE_METRICS.wasmRaw
+          }}
+          raw) outperforms official
+          <code>SQLite WASM (:memory:)</code> across all 6 relational workloads,
+          while even <strong>WebDB Pure JS</strong> beats SQLite WASM in 4 out
+          of 6 benchmarks.
+        </p>
+      </div>
+
+      <!-- SIMPLE BENCHMARK RESULTS TABLE -->
+      <div class="compare-table-wrap bench-table-wrap">
+        <table class="compare-table bench-table">
+          <thead>
+            <tr>
+              <th>Workload Scenario (5,000 Rows • In-Memory)</th>
+              <th class="col-webdb-head">
+                <div class="webdb-th-inner">
+                  <span>WebDB (C / WASM)</span>
+                </div>
+              </th>
+              <th>
+                <div class="webdb-th-inner">
+                  <span>WebDB (Pure JS)</span>
+                </div>
+              </th>
+              <th>
+                <div class="webdb-th-inner">
+                  <span>SQLite WASM (:memory:)</span>
+                </div>
+              </th>
+              <th>WebDB vs SQLite</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in benchmarkScenarios" :key="row.id">
+              <td class="td-feature">
+                <div class="bench-td-scenario">{{ row.name }}</div>
+                <div class="bench-td-sub">{{ row.shortDesc }}</div>
+              </td>
+              <td class="td-good">
+                <div class="bench-cell-ops">
+                  <strong>{{ row.webdbWasm.opsFormatted }}</strong>
+                </div>
+                <div class="bench-cell-ms">
+                  Mean {{ row.webdbWasm.meanMs }} • P95
+                  {{ row.webdbWasm.p95Ms }}
+                </div>
+              </td>
+              <td class="td-neutral">
+                <div class="bench-cell-ops">
+                  <strong>{{ row.webdbJs.opsFormatted }}</strong>
+                </div>
+                <div class="bench-cell-ms">
+                  Mean {{ row.webdbJs.meanMs }} • P95 {{ row.webdbJs.p95Ms }}
+                </div>
+              </td>
+              <td class="td-neutral">
+                <div class="bench-cell-ops">
+                  {{ row.sqliteWasm.opsFormatted }}
+                </div>
+                <div class="bench-cell-ms">
+                  Mean {{ row.sqliteWasm.meanMs }} • P95
+                  {{ row.sqliteWasm.p95Ms }}
+                </div>
+              </td>
+              <td class="td-speedup">
+                <span class="table-speedup-badge">
+                  {{ row.speedupVsSqlite }}
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="bench-table-footer">
+          <span class="bench-env-note">
+            Hardware: <strong>MacBook Pro, Apple M1 Max 2021</strong> • Dataset:
+            <strong>5,000 rows in memory</strong> • Higher ops/s &amp; lower ms
+            is better
+          </span>
+          <a
+            :href="withBase('/benchmark/')"
+            target="_self"
+            class="bench-run-link"
+          >
+            Run this benchmark live on your machine →
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================================
          4. MODERN BENTO GRID: BUILT FOR THE WEB PLATFORM
          ====================================================================== -->
     <section class="section-block">
@@ -982,7 +1532,9 @@ const copyInstallCmd = () => {
               <td class="td-neutral">~15–40 KB (No SQL engine)</td>
               <td class="td-bad">1 MB – 5 MB+ Wasm binary</td>
               <td class="td-good">
-                <strong>~13 KB Wasm Core</strong> (&lt;100 KB total bundle)
+                <strong>{{ SIZE_METRICS.wasmGzip }} Gzipped Wasm Core</strong>
+                ({{ SIZE_METRICS.wasmRaw }} raw,
+                {{ SIZE_METRICS.totalBundle }} bundle)
               </td>
             </tr>
             <tr>
@@ -1379,6 +1931,312 @@ code {
   font-size: 0.8rem;
   line-height: 1.45;
   color: var(--vp-c-text-2);
+}
+
+/* HERO BENCHMARK SPOTLIGHT (BOLD MARKETING STYLE) */
+.hero-bench-wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 680px;
+  margin: 2rem auto 0;
+}
+
+.hero-bench-spotlight {
+  background: linear-gradient(
+    145deg,
+    rgba(16, 185, 129, 0.07) 0%,
+    var(--vp-c-bg-soft) 50%,
+    rgba(99, 102, 241, 0.07) 100%
+  );
+  border: 1.5px solid rgba(16, 185, 129, 0.4);
+  border-radius: 18px;
+  padding: 1.5rem 1.75rem;
+  text-align: left;
+  box-shadow:
+    0 14px 36px rgba(16, 185, 129, 0.08),
+    0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+:global(.dark) .hero-bench-spotlight {
+  background: linear-gradient(
+    145deg,
+    rgba(16, 185, 129, 0.11) 0%,
+    rgba(20, 28, 43, 0.92) 55%,
+    rgba(99, 102, 241, 0.11) 100%
+  );
+  border-color: rgba(16, 185, 129, 0.45);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.35);
+}
+
+.hero-bench-top {
+  text-align: center;
+  margin-bottom: 1.35rem;
+}
+
+.hero-bench-kicker {
+  display: inline-block;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.24rem 0.68rem;
+  border-radius: 999px;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.15);
+  margin-bottom: 0.55rem;
+}
+
+:global(.dark) .hero-bench-kicker {
+  color: #34d399;
+}
+
+.hero-bench-headline {
+  font-size: 1.5rem;
+  font-weight: 900;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+  color: var(--vp-c-text-1);
+  margin: 0 0 0.35rem;
+}
+
+.hero-bench-subdesc {
+  font-size: 0.82rem;
+  color: var(--vp-c-text-2);
+  margin: 0;
+}
+
+.hero-speed-highlight {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border-radius: 8px;
+  background: linear-gradient(
+    135deg,
+    rgba(16, 185, 129, 0.2) 0%,
+    rgba(6, 182, 212, 0.2) 100%
+  );
+  color: #059669;
+  font-weight: 900;
+}
+
+:global(.dark) .hero-speed-highlight {
+  color: #34d399;
+  background: linear-gradient(
+    135deg,
+    rgba(16, 185, 129, 0.25) 0%,
+    rgba(6, 182, 212, 0.25) 100%
+  );
+}
+
+.hero-bench-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.hero-hbar-row {
+  display: grid;
+  grid-template-columns: 145px 1fr 112px;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.hero-hbar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+  color: var(--vp-c-text-1);
+  white-space: nowrap;
+}
+
+.engine-main {
+  font-weight: 800;
+}
+
+.hero-hbar-tag {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.62rem;
+  font-weight: 800;
+  padding: 0.12rem 0.42rem;
+  border-radius: 5px;
+}
+
+.tag-wasm {
+  color: #059669;
+  background: rgba(16, 185, 129, 0.15);
+}
+
+:global(.dark) .tag-wasm {
+  color: #34d399;
+}
+
+.tag-js {
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.15);
+}
+
+:global(.dark) .tag-js {
+  color: #c4b5fd;
+}
+
+.label-muted {
+  color: var(--vp-c-text-2);
+  font-weight: 600;
+}
+
+.dot-emerald-glow {
+  background: #10b981;
+  box-shadow: 0 0 10px #10b981;
+}
+
+.dot-violet {
+  background: #8b5cf6;
+}
+
+.dot-amber {
+  background: #f59e0b;
+}
+
+.hero-hbar-track {
+  width: 100%;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  overflow: hidden;
+  position: relative;
+}
+
+.row-winner .hero-hbar-track {
+  height: 24px;
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.hero-fill-wasm {
+  background: linear-gradient(90deg, #10b981 0%, #06b6d4 55%, #3b82f6 100%);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
+}
+
+.hero-fill-js {
+  background: linear-gradient(90deg, #8b5cf6 0%, #ec4899 100%);
+}
+
+.hero-fill-sqlite {
+  background: linear-gradient(90deg, #f59e0b 0%, #ea580c 100%);
+}
+
+.hero-hbar-val {
+  font-family: var(--vp-font-family-mono);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.val-winner {
+  font-size: 0.96rem;
+  font-weight: 900;
+  color: #059669;
+}
+
+:global(.dark) .val-winner {
+  color: #34d399;
+}
+
+.val-js {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #7c3aed;
+}
+
+:global(.dark) .val-js {
+  color: #c4b5fd;
+}
+
+.val-muted {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #d97706;
+}
+
+:global(.dark) .val-muted {
+  color: #fbbf24;
+}
+
+.hero-carousel-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  margin-top: 1.25rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.carousel-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: none;
+  padding: 0;
+  background: rgba(148, 163, 184, 0.45);
+  cursor: pointer;
+  transition:
+    width 0.25s ease,
+    background-color 0.25s ease;
+}
+
+.carousel-dot:hover {
+  background: rgba(16, 185, 129, 0.7);
+}
+
+.carousel-dot.active {
+  width: 26px;
+  background: linear-gradient(90deg, #10b981, #06b6d4);
+}
+
+.hero-bench-cta-below {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+}
+
+.hero-bench-hw-note {
+  font-size: 0.74rem;
+  color: var(--vp-c-text-3);
+}
+
+.hero-bench-hw-note strong {
+  color: var(--vp-c-text-2);
+  font-weight: 600;
+}
+
+.hero-bench-scroll-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+  padding: 0.38rem 0.95rem;
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  transition:
+    border-color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.hero-bench-scroll-link:hover {
+  border-color: var(--vp-c-brand-1);
+  transform: translateY(2px);
+}
+
+.scroll-arrow {
+  font-size: 0.88rem;
+  line-height: 1;
 }
 
 /* ============================================================================
@@ -2167,8 +3025,354 @@ code {
 }
 
 /* ============================================================================
-   5. COMPARISON TABLE
+   5. BENCHMARK CHART & COMPARISON TABLES
    ============================================================================ */
+.bench-chart-card {
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  border-radius: 16px;
+  padding: 1.5rem 1.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.bench-chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-bottom: 1.15rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.bench-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  color: var(--vp-c-text-1);
+}
+
+.legend-sub {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.72rem;
+  color: var(--vp-c-text-3);
+}
+
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.swatch-wasm {
+  background: linear-gradient(90deg, #10b981, #06b6d4);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.45);
+}
+
+.swatch-js {
+  background: linear-gradient(90deg, #3b82f6, #6366f1);
+}
+
+.swatch-sqlite {
+  background: #94a3b8;
+}
+
+:global(.dark) .swatch-sqlite {
+  background: #64748b;
+}
+
+.bench-replay-btn {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.38rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.bench-replay-btn:hover {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+.bench-bars-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.15rem;
+}
+
+.bench-scenario-box {
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  padding: 1.15rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.bench-scenario-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.bench-scenario-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--vp-c-text-1);
+  margin: 0 0 0.2rem;
+}
+
+.bench-scenario-desc {
+  font-size: 0.76rem;
+  color: var(--vp-c-text-3);
+  margin: 0;
+  line-height: 1.35;
+}
+
+.bench-speedup-pill {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+:global(.dark) .bench-speedup-pill {
+  color: #34d399;
+}
+
+.bench-bars-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.hbar-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.hbar-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+}
+
+.hbar-engine {
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.engine-wasm {
+  color: #059669;
+}
+
+:global(.dark) .engine-wasm {
+  color: #34d399;
+}
+
+.engine-js {
+  color: #2563eb;
+}
+
+:global(.dark) .engine-js {
+  color: #60a5fa;
+}
+
+.engine-sqlite {
+  color: var(--vp-c-text-2);
+}
+
+.js-win-tag {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 0.08rem 0.4rem;
+  border-radius: 4px;
+  color: #2563eb;
+  background: rgba(59, 130, 246, 0.12);
+}
+
+:global(.dark) .js-win-tag {
+  color: #93c5fd;
+}
+
+.hbar-stats {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.74rem;
+  color: var(--vp-c-text-1);
+}
+
+.hbar-latency {
+  color: var(--vp-c-text-3);
+  margin-left: 0.25rem;
+}
+
+.hbar-track {
+  width: 100%;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  overflow: hidden;
+  position: relative;
+}
+
+.hbar-fill {
+  height: 100%;
+  border-radius: 999px;
+  width: 0%;
+  transition: width 1.05s cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.fill-wasm {
+  background: linear-gradient(90deg, #10b981 0%, #06b6d4 100%);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.35);
+}
+
+.fill-js {
+  background: linear-gradient(90deg, #3b82f6 0%, #6366f1 100%);
+}
+
+.fill-sqlite {
+  background: linear-gradient(90deg, #94a3b8 0%, #64748b 100%);
+}
+
+.hbar-shimmer {
+  position: absolute;
+  top: 0;
+  left: -35%;
+  width: 35%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.55),
+    transparent
+  );
+  animation: hbarShimmer 2.6s infinite linear;
+}
+
+@keyframes hbarShimmer {
+  0% {
+    left: -35%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.bench-table-wrap {
+  margin-top: 0.25rem;
+}
+
+.bench-th-sub {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.64rem;
+  padding: 0.14rem 0.45rem;
+  border-radius: 999px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-3);
+}
+
+.bench-td-scenario {
+  font-weight: 800;
+  color: var(--vp-c-text-1);
+}
+
+.bench-td-sub {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--vp-c-text-3);
+  margin-top: 0.15rem;
+}
+
+.bench-cell-ops {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.86rem;
+  color: var(--vp-c-text-1);
+}
+
+.bench-cell-ms {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.72rem;
+  color: var(--vp-c-text-3);
+  margin-top: 0.18rem;
+}
+
+.td-speedup {
+  white-space: nowrap;
+}
+
+.table-speedup-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.75rem;
+  font-weight: 800;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.14);
+}
+
+:global(.dark) .table-speedup-badge {
+  color: #34d399;
+}
+
+.bench-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.85rem 1.25rem;
+  background: var(--vp-c-bg-mute);
+  font-size: 0.78rem;
+  color: var(--vp-c-text-2);
+}
+
+.bench-run-link {
+  font-family: var(--vp-font-family-mono);
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.bench-run-link:hover {
+  text-decoration: underline;
+}
+
 .compare-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--vp-c-divider);
@@ -2323,6 +3527,13 @@ code {
   .hero-metrics {
     grid-template-columns: repeat(2, 1fr);
   }
+  .hero-hbar-row {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+  .hero-hbar-val {
+    text-align: left;
+  }
   .fw-selector-bar {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -2331,6 +3542,9 @@ code {
   }
   .bento-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .bench-bars-grid {
+    grid-template-columns: 1fr;
   }
   .track-grid {
     grid-template-columns: 1fr;

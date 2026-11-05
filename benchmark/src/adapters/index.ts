@@ -23,7 +23,7 @@ export const AVAILABLE_ENGINES: EngineInfo[] = [
   {
     id: 'webdb_wasm_mem',
     name: 'WebDB (C / WASM Memory)',
-    subtitle: 'Compiled C Core (<20KB) in Memory',
+    subtitle: 'Compiled C Core (~19KB gzip / ~51KB raw) in Memory',
     storage: 'memory',
     description: 'Relational engine with slotted pages and VDBE bytecode VM powered by compiled C WebAssembly.',
     badgeColor: '#6366f1',

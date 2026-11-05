@@ -5,12 +5,12 @@
 <h1 align="center">WebDB</h1>
 
 <p align="center">
-  <strong>An ultra-lean (&lt;100 KB bundle, ~13 KB Wasm core), powerful browser-native relational database engine built from scratch in C compiled to WASM.</strong>
+  <strong>An ultra-lean (~19 KB gzipped / ~51 KB raw Wasm core, &lt;100 KB bundle), powerful browser-native relational database engine built from scratch in C compiled to WASM.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/ahmad-moussawi/webdb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/wasm%20core-~13%20KB%20(%3C100%20KB%20bundle)-success.svg?logo=webassembly&logoColor=white" alt="Wasm Core: ~13KB (<100KB bundle)" />
+  <img src="https://img.shields.io/badge/wasm%20core-~19%20KB%20gzip%20(~51%20KB%20raw)-success.svg?logo=webassembly&logoColor=white" alt="Wasm Core: ~19KB gzip (~51KB raw)" />
   <a href="https://ahmad-moussawi.github.io/webdb/playground/"><img src="https://img.shields.io/badge/Studio%20IDE-live%20playground-7c3aed?logo=visualstudiocode&logoColor=white" alt="Studio IDE" /></a>
   <a href="https://ahmad-moussawi.github.io/webdb/benchmark/"><img src="https://img.shields.io/badge/benchmarks-live%20suite-059669?logo=speedtest&logoColor=white" alt="Live Benchmarks" /></a>
   <a href="https://www.npmjs.com/package/@ahmadmoussawi/webdb"><img src="https://img.shields.io/npm/v/@ahmadmoussawi/webdb/alpha?label=npm%20alpha&color=orange&logo=npm" alt="npm alpha" /></a>
@@ -28,7 +28,7 @@
 
 **WebDB** is an ultra-lightweight, relational database built from scratch specifically for the web. Think of it as **SQLite reimagined for modern browsers**—bringing true SQL capabilities, ACID transactions, and persistent storage to offline-first apps without multi-megabyte bundles or complex server headers.
 
-- 🪶 **Tiny Footprint (&lt;100 KB Gzipped, ~13 KB Wasm Core):** Up to 90%+ smaller than ported desktop SQLite or Postgres (PGlite) builds.
+- 🪶 **Tiny Footprint (~19 KB Gzipped Wasm Core / ~51 KB Raw):** Up to 90%+ smaller than ported desktop SQLite or Postgres (PGlite) builds.
 - ⚡ **True Relational Power:** Fast filtering, indexing, aggregations, multi-column sorting, and joins—replacing cumbersome IndexedDB cursor queries.
 - 📡 **Reactive Live Queries (React, Vue, Angular &amp; Plain JS):** First-class UI bindings (`< 1 KB` subpath exports) with automatic table dependency tracking across `JOIN`s, subqueries, and open browser tabs.
 - 🔄 **Async VFS by Heart:** Built from the ground up for asynchronous browser storage—clean non-blocking page faults with zero Emscripten `Asyncify` stack hacks or slow workarounds.
@@ -59,7 +59,7 @@ WebDB fills this gap by **reimagining a database engine from scratch for modern 
 ┌─────────────────────────────────┐       ┌─────────────────────────────────┐
 │  Ported Desktop DBs (Wasm)      │       │             WebDB               │
 ├─────────────────────────────────┤       ├─────────────────────────────────┤
-│ • 500 KB - 5 MB+ (SQLite/PGlite)│       │ • ~13 KB Wasm Core (<100 KB)    │
+│ • 500 KB - 5 MB+ (SQLite/PGlite)│       │ • ~19 KB Gzip Wasm (~51 KB raw) │
 │ • Bundles text SQL parser/lexer │  ──►  │ • Fluent TS Builder ➔ Bytecode  │
 │ • Bundles POSIX pthread/mutexes │       │ • Single-threaded by design     │
 │ • Bundles C date/regex/ICU shims│       │ • Embraces native Web APIs      │
@@ -84,7 +84,7 @@ WebDB fills this gap by **reimagining a database engine from scratch for modern 
 WebDB is currently in an **early prototype ("walking skeleton") stage**:
 
 - **V1 (C-Style JS Engine):** The initial release is built in **strict C-style TypeScript/JavaScript** (direct `ArrayBuffer` pointer arithmetic, flat structs, and zero heap allocations). Writing V1 in JS accelerates the development cycle, simplifies debugging, and creates an instant feedback loop with the web community.
-- **V2 (Drop-In C / Wasm Port):** Once the binary formats, VDBE opcodes, and APIs are battle-tested, the core engine is compiled to an ultra-lean Wasm binary (~13 KB Wasm core, &lt;100 KB total bundle)—with zero changes required to the host JS orchestration layer.
+- **V2 (Drop-In C / Wasm Port):** Once the binary formats, VDBE opcodes, and APIs are battle-tested, the core engine is compiled to an ultra-lean Wasm binary (~19 KB gzipped / ~51 KB raw Wasm core)—with zero changes required to the host JS orchestration layer.
 - **Current Milestone:** Slotted-page layouts, basic VDBE opcode execution, in-memory/IndexedDB adapters, and query planning are implemented and verified with automated test suites. Full V1 engine development is actively underway.
 - **Interactive Tools Live:** You can test queries in the [WebDB Studio Playground](https://ahmad-moussawi.github.io/webdb/playground/) or evaluate performance in the [In-Browser Benchmark Suite](https://ahmad-moussawi.github.io/webdb/benchmark/).
 
@@ -123,7 +123,7 @@ import { WebDB } from "@ahmadmoussawi/webdb";
 async function main() {
   // 1. Open a database
   //    storage: 'idb' (IndexedDB) | 'opfs' (Origin Private File System) | 'memory' (In-Memory)
-  //    core:    'wasm' (default ~13 KB Wasm engine) | 'js' (pure JS fallback)
+  //    core:    'wasm' (default ~19 KB gzipped Wasm engine) | 'js' (pure JS fallback)
   const db = await WebDB.open({
     name: "app_data",
     storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
@@ -261,7 +261,7 @@ users = liveQuerySignal(
 
 WebDB uses an automated **TypeScript-to-C Transpiler** (`scripts/transpiler/`) to maintain a single canonical source of truth for its core storage and execution engine (`src/core/js/*.c.ts`). 
 
-TypeScript code is written in a strict, zero-allocation, C-compatible style. The transpiler translates this code into freestanding C99 (`src/core/c/`), which is then compiled via Clang (`wasm32-unknown-unknown -nostdlib -O3`) and optimized with `wasm-opt` into an **ultra-lean ~13 KB WASM binary**.
+TypeScript code is written in a strict, zero-allocation, C-compatible style. The transpiler translates this code into freestanding C99 (`src/core/c/`), which is then compiled via Clang (`wasm32-unknown-unknown -nostdlib -O3`) and optimized with `wasm-opt` into an **ultra-lean ~19 KB gzipped (~51 KB raw) WASM binary**.
 
 ```
   ┌─────────────────────────────────────────────────────────────┐
@@ -281,7 +281,7 @@ TypeScript code is written in a strict, zero-allocation, C-compatible style. The
                                  │
                                  ▼
   ┌─────────────────────────────────────────────────────────────┐
-  │             WebAssembly Binary (~13 KB WASM)                │
+  │     WebAssembly Binary (~19 KB Gzipped / ~51 KB Raw)        │
   │     Embedded directly into npm package with zero bloat      │
   └─────────────────────────────────────────────────────────────┘
 ```

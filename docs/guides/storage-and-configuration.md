@@ -79,7 +79,7 @@ export interface WebDbOptions {
   /** Built-in storage adapter: 'memory' (default) | 'idb' | 'opfs'. */
   storage?: "memory" | "idb" | "opfs";
 
-  /** Execution core: 'wasm' (~13 KB WebAssembly binary) | 'js' (pure JS fallback). */
+  /** Execution core: 'wasm' (~19 KB gzipped / ~51 KB raw WebAssembly binary) | 'js' (pure JS fallback). */
   core?: "wasm" | "js";
 
   /** Pre-built binary snapshot (.webdb Uint8Array or ArrayBuffer) to seed the database on open. */
@@ -108,7 +108,7 @@ export interface WebDbOptions {
 
 WebDB includes two identical execution engines:
 
-- **`'wasm'`:** Executes page scans, B+Tree searches, sorting, and aggregations inside a compiled WebAssembly binary (~13 KB embedded directly in the package—no external `.wasm` fetch or Vite asset plugin needed).
+- **`'wasm'`:** Executes page scans, B+Tree searches, sorting, and aggregations inside a compiled WebAssembly binary ({{ $sizes.wasmGzip }} gzipped / {{ $sizes.wasmRaw }} raw embedded directly in the package—no external `.wasm` fetch or Vite asset plugin needed).
 - **`'js'`:** Runs the exact same engine logic in pure JavaScript/TypeScript. Useful for environments with strict Content Security Policies (`CSP`) that disallow `wasm-unsafe-eval` or when stepping through engine execution in a JS debugger.
 
 ```typescript
