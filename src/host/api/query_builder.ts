@@ -31,6 +31,8 @@ import {
 } from '../compiler/expr_parser.js';
 import {
   notifyLiveQueryTableRead,
+  getActiveLiveQueryTracker,
+  trackLiveQueryPromise,
   liveQuery,
   type LiveQueryController,
   type LiveQueryOptions,
@@ -611,6 +613,7 @@ export class QueryBuilder {
       op,
       rightCol: rCol,
     });
+    notifyLiveQueryTableRead(this.db, table);
     return this;
   }
 
@@ -660,6 +663,7 @@ export class QueryBuilder {
       op,
       rightCol: rCol,
     });
+    notifyLiveQueryTableRead(this.db, table);
     return this;
   }
 
@@ -3268,15 +3272,20 @@ export class QueryBuilder {
     });
   }
 
-  async toArray(): Promise<DbRow[]> {
+  toArray(): Promise<DbRow[]> {
     this.assertSubqueryDepth();
+    const callerTracker = getActiveLiveQueryTracker();
     notifyLiveQueryTableRead(this.db, this.getReferencedTables());
+    const promise = this._toArrayInternal();
+    return trackLiveQueryPromise(promise, callerTracker);
+  }
 
+  private async _toArrayInternal(): Promise<DbRow[]> {
     // 1. Derived table (`db.from(subquery)`)
     if (this.sourceSubquery) {
       const flattened = this.tryFlatten();
       if (flattened) {
-        return flattened.toArray();
+        return flattened._toArrayInternal();
       }
       return this.executeMaterializedDerivedTable();
     }
@@ -3470,9 +3479,15 @@ export class QueryBuilder {
     return rows;
   }
 
-  async first(): Promise<DbRow | null> {
-    const rows = await this.limit(1).toArray();
-    return rows.length > 0 ? rows[0] : null;
+  first(): Promise<DbRow | null> {
+    const callerTracker = getActiveLiveQueryTracker();
+    this.limit(1);
+    this.assertSubqueryDepth();
+    notifyLiveQueryTableRead(this.db, this.getReferencedTables());
+    const promise = this._toArrayInternal().then((rows) =>
+      rows.length > 0 ? rows[0] : null,
+    );
+    return trackLiveQueryPromise(promise, callerTracker);
   }
 
   /**

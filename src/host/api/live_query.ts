@@ -48,22 +48,79 @@ export interface LiveQueryController<T> extends AsyncIterable<T> {
 
 export type LiveQueryFn<T> = () => Promise<T> | T | QueryBuilder;
 
-interface ActiveReadTracker {
+export interface ActiveReadTracker {
   record(db: any, tables: string[]): void;
 }
 
-const activeTrackers = new Set<ActiveReadTracker>();
+const dbInstanceIds = new WeakMap<SubscribableDatabase, number>();
+let nextDbInstanceId = 1;
+
+function getDbInstanceKey(db: SubscribableDatabase): string {
+  const explicitId = (db as any)?.instanceId;
+  if (typeof explicitId === 'string' && explicitId.length > 0) {
+    return explicitId;
+  }
+  let id = dbInstanceIds.get(db);
+  if (id === undefined) {
+    id = nextDbInstanceId++;
+    dbInstanceIds.set(db, id);
+  }
+  return `db_${id}`;
+}
+
+let currentTracker: ActiveReadTracker | null = null;
+const trackerStack: Array<ActiveReadTracker | null> = [];
+
+export function pushLiveQueryTracker(tracker: ActiveReadTracker | null): void {
+  trackerStack.push(currentTracker);
+  currentTracker = tracker;
+}
+
+export function popLiveQueryTracker(): void {
+  currentTracker = trackerStack.length > 0 ? trackerStack.pop()! : null;
+}
+
+export function getActiveLiveQueryTracker(): ActiveReadTracker | null {
+  return currentTracker;
+}
+
+/**
+ * Wraps an async query execution promise so that `callerTracker` is NOT active
+ * while awaiting I/O or the lease queue (preventing cross-contamination from
+ * concurrent queries), and is atomically restored only for the synchronous
+ * continuation microtask of the `await` caller.
+ */
+export function trackLiveQueryPromise<R>(
+  promise: Promise<R>,
+  callerTracker: ActiveReadTracker | null,
+): Promise<R> {
+  if (!callerTracker) {
+    return promise;
+  }
+  return new Promise<R>((resolve, reject) => {
+    promise.then(
+      (val) => {
+        queueMicrotask(() => pushLiveQueryTracker(callerTracker));
+        resolve(val);
+        queueMicrotask(() => popLiveQueryTracker());
+      },
+      (err) => {
+        queueMicrotask(() => pushLiveQueryTracker(callerTracker));
+        reject(err);
+        queueMicrotask(() => popLiveQueryTracker());
+      },
+    );
+  });
+}
 
 /**
  * Internal hook called by QueryBuilder and WebDB read methods to record
  * which database instance and table names were accessed during a live query run.
  */
 export function notifyLiveQueryTableRead(db: any, tables: string | string[]): void {
-  if (activeTrackers.size === 0 || !db) return;
+  if (!currentTracker || !db) return;
   const list = Array.isArray(tables) ? tables : [tables];
-  for (const tracker of activeTrackers) {
-    tracker.record(db, list);
-  }
+  currentTracker.record(db, list);
 }
 
 /**
@@ -87,10 +144,20 @@ export function createLiveQuery<T = DbRow[]>(
   let dbUnsubscribes: Array<() => void> = [];
   let currentSubSignature = '';
   let currentRunId = 0;
+  let latestRunPromise: Promise<T | undefined> | null = null;
   let isDestroyed = false;
   let pendingMicrotask = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingEvent: TableChangeEvent | undefined = undefined;
+
+  const hasExplicitTables = options.tables !== undefined;
+  const normalizeExplicitTables = (): string[] => {
+    if (!options.tables || options.tables === '*') {
+      return ['*'];
+    }
+    const list = Array.isArray(options.tables) ? options.tables : [options.tables];
+    return list.map((t) => t.toLowerCase());
+  };
 
   const emit = () => {
     if (isDestroyed) return;
@@ -131,8 +198,8 @@ export function createLiveQuery<T = DbRow[]>(
     if (!pendingMicrotask) {
       pendingMicrotask = true;
       queueMicrotask(() => {
+        if (!pendingMicrotask || isDestroyed) return;
         pendingMicrotask = false;
-        if (isDestroyed) return;
         const ev = pendingEvent;
         pendingEvent = undefined;
         void execute(ev);
@@ -143,38 +210,27 @@ export function createLiveQuery<T = DbRow[]>(
   const updateDbSubscriptions = (trackedMap: Map<SubscribableDatabase, Set<string>>) => {
     if (isDestroyed) return;
 
-    // If user explicitly provided `options.db`, merge or override
-    if (options.db && typeof options.db.subscribe === 'function') {
-      if (!trackedMap.has(options.db)) {
-        trackedMap.set(options.db, new Set());
-      }
-      if (options.tables) {
-        const set = trackedMap.get(options.db)!;
-        if (options.tables === '*') {
-          set.add('*');
-        } else {
-          const list = Array.isArray(options.tables) ? options.tables : [options.tables];
-          for (const t of list) set.add(t.toLowerCase());
-        }
-      }
-    } else if (options.tables && trackedMap.size > 0) {
-      for (const [, set] of trackedMap) {
-        if (options.tables === '*') {
-          set.add('*');
-        } else {
-          const list = Array.isArray(options.tables) ? options.tables : [options.tables];
-          for (const t of list) set.add(t.toLowerCase());
-        }
+    // Only fall back to `options.db` when no database instance was dynamically tracked in `queryFn`
+    if (trackedMap.size === 0 && options.db && typeof options.db.subscribe === 'function') {
+      trackedMap.set(options.db, new Set());
+    }
+
+    // If `options.tables` is explicitly provided, treat it as authoritative
+    if (hasExplicitTables) {
+      const authoritativeTables = normalizeExplicitTables();
+      for (const [dbInst] of trackedMap) {
+        trackedMap.set(dbInst, new Set(authoritativeTables));
       }
     }
 
-    // Build a deterministic signature to avoid re-subscribing when watched tables haven't changed
+    // Build a deterministic signature that includes each database's unique instance identity
     const sigParts: string[] = [];
-    let dbIdx = 0;
-    for (const [, tableSet] of trackedMap) {
+    for (const [dbInst, tableSet] of trackedMap) {
+      const dbKey = getDbInstanceKey(dbInst);
       const sorted = tableSet.has('*') ? ['*'] : Array.from(tableSet).sort();
-      sigParts.push(`${dbIdx++}:${sorted.join(',')}`);
+      sigParts.push(`${dbKey}:${sorted.join(',')}`);
     }
+    sigParts.sort();
     const nextSignature = sigParts.join('|');
 
     if (nextSignature === currentSubSignature && dbUnsubscribes.length > 0) {
@@ -197,89 +253,130 @@ export function createLiveQuery<T = DbRow[]>(
     }
   };
 
-  const execute = async (triggerEvent?: TableChangeEvent): Promise<T | undefined> => {
-    if (isDestroyed) return state.data;
+  const execute = (triggerEvent?: TableChangeEvent): Promise<T | undefined> => {
+    if (isDestroyed) return Promise.resolve(state.data);
+
+    // Clear any pending microtask or debounce timer that hasn't fired yet
+    if (pendingMicrotask) {
+      pendingMicrotask = false;
+    }
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (triggerEvent === undefined && pendingEvent !== undefined) {
+      triggerEvent = pendingEvent;
+      pendingEvent = undefined;
+    }
+
     const runId = ++currentRunId;
 
-    const trackedMap = new Map<SubscribableDatabase, Set<string>>();
-    const tracker: ActiveReadTracker = {
-      record(db: any, tables: string[]) {
-        if (!db || typeof db.subscribe !== 'function') return;
-        let set = trackedMap.get(db);
-        if (!set) {
-          set = new Set<string>();
-          trackedMap.set(db, set);
-        }
-        for (const t of tables) {
-          if (t && t !== '__subquery__') {
-            set.add(t.toLowerCase());
+    const runPromise = (async (): Promise<T | undefined> => {
+      const trackedMap = new Map<SubscribableDatabase, Set<string>>();
+      const tracker: ActiveReadTracker = {
+        record(db: any, tables: string[]) {
+          if (!db || typeof db.subscribe !== 'function') return;
+          let set = trackedMap.get(db);
+          if (!set) {
+            set = new Set<string>();
+            trackedMap.set(db, set);
+          }
+          // When explicit `options.tables` is provided, ignore auto-tracked table names
+          if (hasExplicitTables) return;
+          for (const t of tables) {
+            if (t && t !== '__subquery__') {
+              set.add(t.toLowerCase());
+            }
+          }
+        },
+      };
+
+      const skipAutoTrack =
+        hasExplicitTables &&
+        Boolean(options.db && typeof options.db.subscribe === 'function');
+
+      try {
+        let rawResult: Promise<T> | T | QueryBuilder;
+        if (skipAutoTrack) {
+          rawResult = queryFn();
+        } else {
+          pushLiveQueryTracker(tracker);
+          try {
+            rawResult = queryFn();
+          } finally {
+            popLiveQueryTracker();
           }
         }
-      },
-    };
 
-    activeTrackers.add(tracker);
-    try {
-      const rawResult = queryFn();
-
-      let resolved: T;
-      if (isQueryBuilder(rawResult)) {
-        const qb = rawResult as QueryBuilder;
-        tracker.record(qb.getDb(), qb.getReferencedTables());
-        resolved = (await qb.toArray()) as unknown as T;
-      } else {
-        const awaited = await rawResult;
-        if (isQueryBuilder(awaited)) {
-          const qb = awaited as QueryBuilder;
-          tracker.record(qb.getDb(), qb.getReferencedTables());
+        let resolved: T;
+        if (isQueryBuilder(rawResult)) {
+          const qb = rawResult as QueryBuilder;
+          if (!skipAutoTrack) {
+            tracker.record(qb.getDb(), qb.getReferencedTables());
+          }
           resolved = (await qb.toArray()) as unknown as T;
         } else {
-          resolved = awaited;
+          const awaited = await rawResult;
+          if (isQueryBuilder(awaited)) {
+            const qb = awaited as QueryBuilder;
+            if (!skipAutoTrack) {
+              tracker.record(qb.getDb(), qb.getReferencedTables());
+            }
+            resolved = (await qb.toArray()) as unknown as T;
+          } else {
+            resolved = awaited;
+          }
         }
-      }
 
-      activeTrackers.delete(tracker);
+        if (isDestroyed) {
+          return state.data;
+        }
+        if (runId !== currentRunId) {
+          return latestRunPromise ? await latestRunPromise : state.data;
+        }
 
-      if (isDestroyed || runId !== currentRunId) {
-        return state.data;
-      }
-
-      updateDbSubscriptions(trackedMap);
-
-      state = {
-        data: resolved,
-        isLoading: false,
-        error: null,
-        lastUpdated: Date.now(),
-        lastEvent: triggerEvent ?? state.lastEvent,
-      };
-      emit();
-      return resolved;
-    } catch (err: any) {
-      activeTrackers.delete(tracker);
-      if (isDestroyed || runId !== currentRunId) {
-        return state.data;
-      }
-
-      // Still register any subscriptions discovered before the error so recovery mutations can re-trigger
-      if (trackedMap.size > 0 || options.db) {
         updateDbSubscriptions(trackedMap);
-      }
 
-      const errorObj = err instanceof Error ? err : new Error(String(err));
-      state = {
-        ...state,
-        isLoading: false,
-        error: errorObj,
-      };
-      if (options.onError) {
-        try {
-          options.onError(errorObj);
-        } catch {}
+        state = {
+          data: resolved,
+          isLoading: false,
+          error: null,
+          lastUpdated: Date.now(),
+          lastEvent: triggerEvent ?? state.lastEvent,
+        };
+        emit();
+        return resolved;
+      } catch (err: any) {
+        if (isDestroyed) {
+          return state.data;
+        }
+        if (runId !== currentRunId) {
+          return latestRunPromise ? await latestRunPromise : state.data;
+        }
+
+        // Still register any subscriptions discovered before the error so recovery mutations can re-trigger
+        if (trackedMap.size > 0 || options.db) {
+          updateDbSubscriptions(trackedMap);
+        }
+
+        const errorObj = err instanceof Error ? err : new Error(String(err));
+        state = {
+          ...state,
+          isLoading: false,
+          error: errorObj,
+        };
+        if (options.onError) {
+          try {
+            options.onError(errorObj);
+          } catch {}
+        }
+        emit();
+        return state.data;
       }
-      emit();
-      return state.data;
-    }
+    })();
+
+    latestRunPromise = runPromise;
+    return runPromise;
   };
 
   // Start initial execution immediately unless autoStart is false

@@ -523,4 +523,277 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
 
     await db.close();
   });
+
+  it('8. Bug 1 regression: createLiveQuery & liveQuerySignal re-subscribe when switching WebDB instances with identical schemas', async () => {
+    const db1 = await WebDB.open({ name: 'multi_company_1', storage: 'memory' });
+    const db2 = await WebDB.open({ name: 'multi_company_2', storage: 'memory' });
+
+    for (const db of [db1, db2]) {
+      await db.createTable('categories', [
+        { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+        { name: 'name', type: 'TEXT' },
+      ]);
+      await db.createTable('items', [
+        { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+        { name: 'category_id', type: 'INT32' },
+        { name: 'title', type: 'TEXT' },
+      ]);
+    }
+
+    await db1.insert('categories', { name: 'Beverages (Company 1)' });
+    await db1.insert('items', { category_id: 1, title: 'Coffee' });
+
+    await db2.insert('categories', { name: 'Hardware (Company 2)' });
+    await db2.insert('items', { category_id: 1, title: 'Wrench' });
+
+    const destroyRef = new DestroyRef();
+    const activeDb = signal<WebDB>(db1);
+    let executionCount = 0;
+
+    // Provide db1 in DI as well to verify switching to db2 overrides the fallback DI instance
+    const liveSig = runWithAngularProviders(
+      [provideWebDB(db1) as any],
+      destroyRef,
+      () =>
+        liveQuerySignal(
+          async () => {
+            const db = activeDb();
+            executionCount++;
+            const categories = await db.from('categories').orderBy('id', 'asc').toArray();
+            const items = await db.from('items').orderBy('id', 'asc').toArray();
+            return { categories, items };
+          },
+          { initialData: { categories: [], items: [] } },
+        ),
+    );
+
+    await waitForCondition(() => !liveSig.isLoading() && liveSig.data()?.categories.length === 1);
+    expect(liveSig.data()).toEqual({
+      categories: [{ id: 1, name: 'Beverages (Company 1)' }],
+      items: [{ id: 1, category_id: 1, title: 'Coffee' }],
+    });
+
+    // Mutate db1 -> liveSig updates
+    await db1.insert('items', { category_id: 1, title: 'Tea' });
+    await waitForCondition(() => liveSig.data()?.items.length === 2);
+    expect(liveSig.data()?.items.map((i: any) => i.title)).toEqual(['Coffee', 'Tea']);
+
+    // Switch activeDb signal from db1 -> db2
+    activeDb.set(db2);
+    await waitForCondition(
+      () =>
+        liveSig.data()?.categories[0]?.name === 'Hardware (Company 2)' &&
+        liveSig.data()?.items.length === 1,
+    );
+    expect(liveSig.data()).toEqual({
+      categories: [{ id: 1, name: 'Hardware (Company 2)' }],
+      items: [{ id: 1, category_id: 1, title: 'Wrench' }],
+    });
+
+    const countAfterSwitch = executionCount;
+
+    // Mutating db1 (old instance) must NOT trigger re-execution now that we are subscribed to db2
+    await db1.insert('items', { category_id: 1, title: 'Juice' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(executionCount).toBe(countAfterSwitch);
+
+    // Mutating db2 (new instance) MUST trigger live query update!
+    await db2.insert('items', { category_id: 1, title: 'Hammer' });
+    await waitForCondition(() => liveSig.data()?.items.length === 2);
+    expect(liveSig.data()?.items.map((i: any) => i.title)).toEqual(['Wrench', 'Hammer']);
+
+    await db2.insert('categories', { name: 'Power Tools (Company 2)' });
+    await waitForCondition(() => liveSig.data()?.categories.length === 2);
+
+    // Switch back from db2 -> db1 and verify re-subscription to db1
+    activeDb.set(db1);
+    await waitForCondition(
+      () => liveSig.data()?.categories[0]?.name === 'Beverages (Company 1)',
+    );
+    expect(liveSig.data()?.items.map((i: any) => i.title)).toEqual([
+      'Coffee',
+      'Tea',
+      'Juice',
+    ]);
+
+    await db1.insert('categories', { name: 'Bakery (Company 1)' });
+    await waitForCondition(() => liveSig.data()?.categories.length === 2);
+
+    destroyRef.destroy();
+    await db1.close();
+    await db2.close();
+  });
+
+  it('9. Bug 2a regression: concurrent liveQuerySignals and background queries do NOT cross-contaminate table subscriptions', async () => {
+    const db = await WebDB.open({ name: 'concurrent_trackers_test', storage: 'memory' });
+    await db.createTable('categories', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'name', type: 'TEXT' },
+    ]);
+    await db.createTable('items', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'name', type: 'TEXT' },
+    ]);
+    await db.createTable('orders', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'total', type: 'FLOAT64' },
+    ]);
+    await db.createTable('audit_logs', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'action', type: 'TEXT' },
+    ]);
+    await db.createTable('inventory_transactions', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'delta', type: 'INT32' },
+    ]);
+
+    await db.insert('categories', { name: 'Cat 1' });
+    await db.insert('items', { name: 'Item 1' });
+    await db.insert('orders', { total: 50 });
+    await db.insert('audit_logs', { action: 'init' });
+    await db.insert('inventory_transactions', { delta: 10 });
+
+    let categoriesRuns = 0;
+    let itemsRuns = 0;
+    let multiStepOrdersRuns = 0;
+
+    // Launch 3 concurrent live queries AND background non-live queries on audit_logs / inventory_transactions simultaneously
+    const categoriesLive = createLiveQuery(async () => {
+      categoriesRuns++;
+      return db.from('categories').orderBy('id', 'asc').toArray();
+    });
+
+    const itemsLive = createLiveQuery(async () => {
+      itemsRuns++;
+      return db.from('items').orderBy('id', 'asc').toArray();
+    });
+
+    const multiStepOrdersLive = createLiveQuery(async () => {
+      multiStepOrdersRuns++;
+      const orders = await db.from('orders').orderBy('id', 'asc').toArray();
+      const firstItem = await db.from('items').orderBy('id', 'asc').first();
+      return { orders, firstItem };
+    });
+
+    // Interleave background reads while the live queries above are in flight awaiting the lease queue
+    const bgAuditPromise = db.from('audit_logs').toArray();
+    const bgInvPromise = db.from('inventory_transactions').toArray();
+
+    await Promise.all([bgAuditPromise, bgInvPromise]);
+    await waitForCondition(
+      () =>
+        !categoriesLive.getState().isLoading &&
+        !itemsLive.getState().isLoading &&
+        !multiStepOrdersLive.getState().isLoading,
+    );
+
+    expect(categoriesRuns).toBe(1);
+    expect(itemsRuns).toBe(1);
+    expect(multiStepOrdersRuns).toBe(1);
+
+    // 1. Mutating `audit_logs` or `inventory_transactions` must NOT trigger ANY of the live queries
+    await db.insert('audit_logs', { action: 'user_login' });
+    await db.insert('inventory_transactions', { delta: -2 });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(categoriesRuns).toBe(1);
+    expect(itemsRuns).toBe(1);
+    expect(multiStepOrdersRuns).toBe(1);
+
+    // 2. Mutating `orders` must ONLY trigger `multiStepOrdersLive`, NOT `categoriesLive` or `itemsLive`
+    await db.insert('orders', { total: 75 });
+    await waitForCondition(() => multiStepOrdersRuns === 2);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(categoriesRuns).toBe(1);
+    expect(itemsRuns).toBe(1);
+    expect(multiStepOrdersRuns).toBe(2);
+
+    // 3. Mutating `items` must trigger `itemsLive` and `multiStepOrdersLive` (which read `items` after its first await), NOT `categoriesLive`
+    await db.insert('items', { name: 'Item 2' });
+    await waitForCondition(() => itemsRuns === 2 && multiStepOrdersRuns === 3);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(categoriesRuns).toBe(1);
+
+    // 4. Mutating `categories` must ONLY trigger `categoriesLive`
+    await db.insert('categories', { name: 'Cat 2' });
+    await waitForCondition(() => categoriesRuns === 2);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(itemsRuns).toBe(2);
+    expect(multiStepOrdersRuns).toBe(3);
+
+    categoriesLive.destroy();
+    itemsLive.destroy();
+    multiStepOrdersLive.destroy();
+    await db.close();
+  });
+
+  it('10. Bug 2b & 2c regression: explicit options.tables is authoritative, and explicit refresh() after mutation never resolves early with stale data', async () => {
+    const db = await WebDB.open({ name: 'authoritative_tables_and_refresh', storage: 'memory' });
+    await db.createTable('categories', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'name', type: 'TEXT' },
+    ]);
+    await db.createTable('audit_logs', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'msg', type: 'TEXT' },
+    ]);
+
+    await db.insert('categories', { name: 'Initial Category' });
+    await db.insert('audit_logs', { msg: 'boot' });
+
+    let runCount = 0;
+    const destroyRef = new DestroyRef();
+    const liveSig = runWithAngularProviders(
+      [provideWebDB(db) as any],
+      destroyRef,
+      () =>
+        liveQuerySignal(
+          async () => {
+            runCount++;
+            const cats = await db.from('categories').orderBy('id', 'asc').toArray();
+            // Even though queryFn reads `audit_logs`, explicit `{ tables: ['categories'] }` must be authoritative!
+            const logs = await db.from('audit_logs').toArray();
+            return cats.map((c) => ({ ...c, logCount: logs.length }));
+          },
+          { tables: ['categories'], initialData: [] },
+        ),
+    );
+
+    await waitForCondition(() => !liveSig.isLoading());
+    expect(liveSig.data()).toEqual([
+      { id: 1, name: 'Initial Category', logCount: 1 },
+    ]);
+    expect(runCount).toBe(1);
+
+    // 1. Mutating `audit_logs` must NOT re-trigger `liveSig` because `options.tables: ['categories']` is authoritative
+    await db.insert('audit_logs', { msg: 'should be ignored' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runCount).toBe(1);
+
+    // 2. Immediately calling `await liveSig.refresh()` right after a mutation on `categories`
+    // must resolve with the fresh post-mutation data (never early with stale `state.data`).
+    await db.insert('categories', { name: 'Second Category' });
+    const refreshedData = await liveSig.refresh();
+
+    expect(refreshedData).toEqual([
+      { id: 1, name: 'Initial Category', logCount: 2 },
+      { id: 2, name: 'Second Category', logCount: 2 },
+    ]);
+    expect(liveSig.data()).toEqual(refreshedData);
+
+    // 3. If a first refresh() is superseded mid-flight by a newer run (while state.data is still stale with 2 items),
+    // awaiting the first refresh() waits for the superseding run and returns the latest 3 items instead of stale state.data.
+    await db.insert('categories', { name: 'Third Category' });
+    const p1 = liveSig.refresh();
+    const p2 = liveSig.refresh();
+    const [res1, res2] = await Promise.all([p1, p2]);
+
+    expect(res1).toHaveLength(3);
+    expect(res2).toHaveLength(3);
+    expect(res1?.[2]?.name).toBe('Third Category');
+    expect(liveSig.data()).toHaveLength(3);
+
+    destroyRef.destroy();
+    await db.close();
+  });
 });
