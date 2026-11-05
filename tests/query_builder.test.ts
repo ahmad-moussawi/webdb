@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { QueryBuilder } from '../src/host/api/query_builder.js';
 import {
@@ -1279,6 +1279,202 @@ describe('QueryBuilder Unit & Integration Tests', () => {
         .toArray();
       expect(projected[0]).toEqual({ name: 'Apple iPhone 15', is_apple: 1 });
       expect(projected[1]).toEqual({ name: 'Google Pixel 8', is_apple: 0 });
+    });
+  });
+
+  describe('13. Bug 3 Regression: Multiple Chained Aggregates (.sum, .avg, .min, .max, .count)', () => {
+    let db: WebDB;
+
+    beforeEach(async () => {
+      db = await WebDB.open({ name: 'multi_agg_bug3_db', storage: 'memory' });
+    });
+
+    afterEach(async () => {
+      await db.close();
+    });
+
+    it('correctly computes multiple chained .sum() aggregates on a single-table query without overwriting slots', async () => {
+      await db.createTable('orders', [
+        { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+        { name: 'status', type: 'TEXT' },
+        { name: 'grand_total', type: 'FLOAT64' },
+        { name: 'discount_total', type: 'FLOAT64' },
+        { name: 'tax_total', type: 'FLOAT64' },
+        { name: 'cogs_total', type: 'FLOAT64' },
+        { name: 'gross_profit', type: 'FLOAT64' },
+      ]);
+
+      await db.insertMany('orders', [
+        {
+          status: 'COMPLETED',
+          grand_total: 22,
+          discount_total: 3,
+          tax_total: 2,
+          cogs_total: 10,
+          gross_profit: 12,
+        },
+        {
+          status: 'COMPLETED',
+          grand_total: 50,
+          discount_total: 5,
+          tax_total: 4,
+          cogs_total: 20,
+          gross_profit: 30,
+        },
+        {
+          status: 'CANCELLED',
+          grand_total: 100,
+          discount_total: 10,
+          tax_total: 8,
+          cogs_total: 40,
+          gross_profit: 60,
+        },
+      ]);
+
+      const row = await db
+        .from('orders')
+        .where('status', '=', 'COMPLETED')
+        .count('*', 'orders_count')
+        .sum('grand_total', 'total_sales')
+        .sum('discount_total', 'discount_total')
+        .sum('tax_total', 'tax_total')
+        .sum('cogs_total', 'cogs_total')
+        .sum('gross_profit', 'gross_profit')
+        .first();
+
+      expect(row).toEqual({
+        orders_count: 2,
+        total_sales: 72,
+        discount_total: 8,
+        tax_total: 6,
+        cogs_total: 30,
+        gross_profit: 42,
+      });
+    });
+
+    it('supports multiple .sum(), .avg(), .min(), .max(), and .count(col) in the same query with GROUP BY, HAVING, and ORDER BY', async () => {
+      await db.createTable('sales_metrics', [
+        { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+        { name: 'channel', type: 'TEXT' },
+        { name: 'revenue', type: 'FLOAT64' },
+        { name: 'cost', type: 'FLOAT64' },
+        { name: 'coupon_code', type: 'TEXT' },
+        { name: 'notes', type: 'TEXT' },
+      ]);
+
+      await db.insertMany('sales_metrics', [
+        { channel: 'web', revenue: 100, cost: 40, coupon_code: 'SAVE10', notes: null },
+        { channel: 'web', revenue: 200, cost: 60, coupon_code: null, notes: 'vip' },
+        { channel: 'web', revenue: 300, cost: 110, coupon_code: 'SAVE20', notes: 'fast' },
+        { channel: 'pos', revenue: 50, cost: 20, coupon_code: null, notes: null },
+        { channel: 'pos', revenue: 150, cost: 40, coupon_code: 'POS5', notes: null },
+      ]);
+
+      const rows = await db
+        .from('sales_metrics')
+        .select('channel')
+        .groupBy('channel')
+        .count('*', 'total_orders')
+        .count('coupon_code', 'coupon_orders')
+        .count('notes', 'noted_orders')
+        .sum('revenue', 'sum_revenue')
+        .sum('cost', 'sum_cost')
+        .avg('revenue', 'avg_revenue')
+        .avg('cost', 'avg_cost')
+        .min('revenue', 'min_revenue')
+        .min('cost', 'min_cost')
+        .max('revenue', 'max_revenue')
+        .max('cost', 'max_cost')
+        .having('sum_cost', '>=', 60)
+        .orderBy('sum_revenue', 'desc')
+        .toArray();
+
+      expect(rows).toEqual([
+        {
+          channel: 'web',
+          total_orders: 3,
+          coupon_orders: 2,
+          noted_orders: 2,
+          sum_revenue: 600,
+          sum_cost: 210,
+          avg_revenue: 200,
+          avg_cost: 70,
+          min_revenue: 100,
+          min_cost: 40,
+          max_revenue: 300,
+          max_cost: 110,
+        },
+        {
+          channel: 'pos',
+          total_orders: 2,
+          coupon_orders: 1,
+          noted_orders: 0,
+          sum_revenue: 200,
+          sum_cost: 60,
+          avg_revenue: 100,
+          avg_cost: 30,
+          min_revenue: 50,
+          min_cost: 20,
+          max_revenue: 150,
+          max_cost: 40,
+        },
+      ]);
+    });
+
+    it('handles nullable columns independently across multiple .avg() and .sum() aggregates and returns 0 / null on empty match', async () => {
+      await db.createTable('partial_metrics', [
+        { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+        { name: 'score_a', type: 'FLOAT64' },
+        { name: 'score_b', type: 'FLOAT64' },
+      ]);
+
+      await db.insertMany('partial_metrics', [
+        { score_a: 10, score_b: null },
+        { score_a: 20, score_b: 100 },
+        { score_a: null, score_b: 200 },
+      ]);
+
+      const summary = await db
+        .from('partial_metrics')
+        .count('*', 'all_rows')
+        .count('score_a', 'cnt_a')
+        .count('score_b', 'cnt_b')
+        .sum('score_a', 'sum_a')
+        .sum('score_b', 'sum_b')
+        .avg('score_a', 'avg_a')
+        .avg('score_b', 'avg_b')
+        .first();
+
+      expect(summary).toEqual({
+        all_rows: 3,
+        cnt_a: 2,
+        cnt_b: 2,
+        sum_a: 30,
+        sum_b: 300,
+        avg_a: 15,
+        avg_b: 150,
+      });
+
+      // Empty filter match without GROUP BY should return count = 0 and null for all sums/avgs/mins/maxs
+      const emptySummary = await db
+        .from('partial_metrics')
+        .where('id', '>', 999)
+        .count('*', 'all_rows')
+        .sum('score_a', 'sum_a')
+        .sum('score_b', 'sum_b')
+        .avg('score_a', 'avg_a')
+        .min('score_a', 'min_a')
+        .max('score_b', 'max_b')
+        .first();
+
+      expect(emptySummary).toEqual({
+        all_rows: 0,
+        sum_a: null,
+        sum_b: null,
+        avg_a: null,
+        min_a: null,
+        max_b: null,
+      });
     });
   });
 });

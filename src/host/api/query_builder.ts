@@ -1397,6 +1397,7 @@ export class QueryBuilder {
                 (a.colName === undefined && agg.colName === undefined)),
           );
           if (!already) {
+            agg.fromHaving = true;
             this.aggExprs.push(agg);
           }
         }
@@ -1412,6 +1413,7 @@ export class QueryBuilder {
                   (a.colName === undefined && agg.colName === undefined)),
             );
             if (!already) {
+              agg.fromHaving = true;
               this.aggExprs.push(agg);
             }
           }
@@ -3093,9 +3095,11 @@ export class QueryBuilder {
   private projectRow(row: DbRow): DbRow {
     // Fast-path: If rawRows was already projected by VDBE OP_RESULT_ROW,
     // the row contains exactly the target aliases.
+    const explicitAggs = this.aggExprs.filter((a) => !a.fromHaving);
     const keys = Object.keys(row);
     if (
       this.selectFields.length > 0 &&
+      explicitAggs.length === 0 &&
       keys.length === this.selectFields.length &&
       this.selectFields.every((f) => f.alias in row)
     ) {
@@ -3125,6 +3129,13 @@ export class QueryBuilder {
         projected[targetAlias] = evalExprNode(field.expr, row, udfs);
       } else {
         projected[targetAlias] = null;
+      }
+    }
+    for (const agg of explicitAggs) {
+      const aggName =
+        agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+      if (!(aggName in projected) && row[aggName] !== undefined) {
+        projected[aggName] = row[aggName];
       }
     }
     return projected;

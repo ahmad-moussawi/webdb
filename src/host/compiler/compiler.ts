@@ -115,6 +115,7 @@ export interface AggExpr {
   func: AggFunc;
   colName?: string;
   alias?: string;
+  fromHaving?: boolean;
 }
 
 export interface JoinPlan {
@@ -3247,101 +3248,57 @@ export function compileQuery(
       emitter.emitUint8(0);
     }
 
-    // Identify unique aggregate operations to step
-    const hasCount = aggregates.some((a) => a.func === "count");
-    const hasAvg = aggregates.some((a) => a.func === "avg");
-    const hasSum = aggregates.some((a) => a.func === "sum");
-    const hasMin = aggregates.some((a) => a.func === "min");
-    const hasMax = aggregates.some((a) => a.func === "max");
+    // Step each aggregate expression into its own dedicated accumulator slot (j = 0..A-1)
+    for (let j = 0; j < aggregates.length; j++) {
+      const agg = aggregates[j];
+      let baseFuncId = 0;
+      if (agg.func === "count") {
+        baseFuncId = 0;
+      } else if (agg.func === "sum") {
+        baseFuncId = 1;
+      } else if (agg.func === "avg") {
+        baseFuncId = 2;
+      } else if (agg.func === "min") {
+        baseFuncId = 3;
+      } else if (agg.func === "max") {
+        baseFuncId = 4;
+      }
 
-    // 1. COUNT step (funcId 0)
-    if (hasCount || hasAvg || hasSum) {
-      const countAgg = aggregates.find((a) => a.func === "count");
       let valReg = 255;
-      if (countAgg && countAgg.colName && countAgg.colName !== "*") {
-        const colIdx = table.columns.findIndex(
-          (c) => c.name === countAgg.colName,
-        );
+      if (agg.colName && agg.colName !== "*") {
+        const colIdx = table.columns.findIndex((c) => c.name === agg.colName);
         if (colIdx !== -1) {
           const col = table.columns[colIdx];
           valReg = aggValStartReg;
           emitReadColumn(emitter, 0, colIdx, valReg, col.type);
+        } else {
+          try {
+            const parsed = parseExpression(agg.colName);
+            let tempAggReg = Math.max(totalRegs + 4, 40);
+            const allocAggReg = () => {
+              if (tempAggReg >= 64) throw new TooManyRegistersError(tempAggReg);
+              return tempAggReg++;
+            };
+            valReg = aggValStartReg;
+            emitExpression(
+              parsed,
+              table,
+              emitter,
+              0,
+              valReg,
+              allocAggReg,
+              plan.udfNameMap,
+            );
+          } catch {}
         }
       }
-      emitter.emitUint8(OpCode.OP_AGG_STEP);
-      emitter.emitUint8(0);
-      emitter.emitUint8(groupKeyStartReg);
-      emitter.emitUint8(G);
-      emitter.emitUint8(valReg);
-      emitter.emitUint8(0);
-    }
 
-    // 2. SUM step (funcId 1) - used for SUM and AVG
-    if (hasSum || hasAvg) {
-      const sumAgg = aggregates.find(
-        (a) => a.func === "sum" || a.func === "avg",
-      );
-      let valReg = 255;
-      if (sumAgg && sumAgg.colName && sumAgg.colName !== "*") {
-        const colIdx = table.columns.findIndex(
-          (c) => c.name === sumAgg.colName,
-        );
-        if (colIdx !== -1) {
-          const col = table.columns[colIdx];
-          valReg = aggValStartReg + 1;
-          emitReadColumn(emitter, 0, colIdx, valReg, col.type);
-        }
-      }
       emitter.emitUint8(OpCode.OP_AGG_STEP);
       emitter.emitUint8(0);
       emitter.emitUint8(groupKeyStartReg);
       emitter.emitUint8(G);
       emitter.emitUint8(valReg);
-      emitter.emitUint8(1);
-    }
-
-    // 3. MIN step (funcId 3)
-    if (hasMin) {
-      const minAgg = aggregates.find((a) => a.func === "min");
-      let valReg = 255;
-      if (minAgg && minAgg.colName && minAgg.colName !== "*") {
-        const colIdx = table.columns.findIndex(
-          (c) => c.name === minAgg.colName,
-        );
-        if (colIdx !== -1) {
-          const col = table.columns[colIdx];
-          valReg = aggValStartReg + 2;
-          emitReadColumn(emitter, 0, colIdx, valReg, col.type);
-        }
-      }
-      emitter.emitUint8(OpCode.OP_AGG_STEP);
-      emitter.emitUint8(0);
-      emitter.emitUint8(groupKeyStartReg);
-      emitter.emitUint8(G);
-      emitter.emitUint8(valReg);
-      emitter.emitUint8(3);
-    }
-
-    // 4. MAX step (funcId 4)
-    if (hasMax) {
-      const maxAgg = aggregates.find((a) => a.func === "max");
-      let valReg = 255;
-      if (maxAgg && maxAgg.colName && maxAgg.colName !== "*") {
-        const colIdx = table.columns.findIndex(
-          (c) => c.name === maxAgg.colName,
-        );
-        if (colIdx !== -1) {
-          const col = table.columns[colIdx];
-          valReg = aggValStartReg + 3;
-          emitReadColumn(emitter, 0, colIdx, valReg, col.type);
-        }
-      }
-      emitter.emitUint8(OpCode.OP_AGG_STEP);
-      emitter.emitUint8(0);
-      emitter.emitUint8(groupKeyStartReg);
-      emitter.emitUint8(G);
-      emitter.emitUint8(valReg);
-      emitter.emitUint8(4);
+      emitter.emitUint8((j << 3) | baseFuncId);
     }
 
     // next_row_label
@@ -3380,34 +3337,34 @@ export function compileQuery(
     const processGroupPos = emitter.currentOffset();
     emitter.patchUint16(processGroupPatch, processGroupPos);
 
-    // Finalize each aggregate
+    // Finalize each aggregate from its dedicated accumulator slot (j = 0..A-1)
     for (let j = 0; j < aggregates.length; j++) {
       const agg = aggregates[j];
       const outReg = finalAggStartReg + j;
       let sumReg = outAccReg;
-      let funcId = 0;
+      let baseFuncId = 0;
       if (agg.func === "count") {
         sumReg = outAccReg;
-        funcId = 0;
+        baseFuncId = 0;
       } else if (agg.func === "sum") {
         sumReg = outAccReg;
-        funcId = 1;
+        baseFuncId = 1;
       } else if (agg.func === "avg") {
         sumReg = outAccReg;
-        funcId = 2;
+        baseFuncId = 2;
       } else if (agg.func === "min") {
         sumReg = outAccReg + 2;
-        funcId = 3;
+        baseFuncId = 3;
       } else if (agg.func === "max") {
         sumReg = outAccReg + 3;
-        funcId = 4;
+        baseFuncId = 4;
       }
 
       emitter.emitUint8(OpCode.OP_AGG_FINAL);
       emitter.emitUint8(sumReg);
       emitter.emitUint8(outAccReg + 1); // countReg
       emitter.emitUint8(outReg);
-      emitter.emitUint8(funcId);
+      emitter.emitUint8((j << 3) | baseFuncId);
     }
 
     // Symbol/register resolver for HAVING evaluation
@@ -5601,7 +5558,9 @@ export function disassembleBytecode(
         const startKeyReg = bytecode[pc++];
         const numKeys = bytecode[pc++];
         const valReg = bytecode[pc++];
-        const funcId = bytecode[pc++];
+        const rawFuncId = bytecode[pc++];
+        const funcId = rawFuncId & 0x07;
+        const slotIdx = rawFuncId >> 3;
         const funcNames = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
         instructions.push({
           addr,
@@ -5609,7 +5568,7 @@ export function disassembleBytecode(
           p1: `agg[${aggId}]`,
           p2: `val=${valReg === 255 ? "*" : `r[${valReg}]`}`,
           p3: funcNames[funcId] ?? `${funcId}`,
-          comment: `Update accumulator ${funcNames[funcId] ?? funcId} for group r[${startKeyReg}..+${numKeys}]`,
+          comment: `Update accumulator ${funcNames[funcId] ?? funcId} (slot ${slotIdx}) for group r[${startKeyReg}..+${numKeys}]`,
         });
         break;
       }
@@ -5635,7 +5594,9 @@ export function disassembleBytecode(
         const sumReg = bytecode[pc++];
         const countReg = bytecode[pc++];
         const outReg = bytecode[pc++];
-        const funcId = bytecode[pc++];
+        const rawFuncId = bytecode[pc++];
+        const funcId = rawFuncId & 0x07;
+        const slotIdx = rawFuncId >> 3;
         const funcNames = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
         instructions.push({
           addr,
@@ -5643,7 +5604,7 @@ export function disassembleBytecode(
           p1: `sum=r[${sumReg}], cnt=r[${countReg}]`,
           p2: `r[${outReg}]`,
           p3: funcNames[funcId] ?? `${funcId}`,
-          comment: `Finalize ${funcNames[funcId] ?? funcId} into r[${outReg}]`,
+          comment: `Finalize ${funcNames[funcId] ?? funcId} (slot ${slotIdx}) into r[${outReg}]`,
         });
         break;
       }

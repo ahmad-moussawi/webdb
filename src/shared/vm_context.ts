@@ -46,6 +46,14 @@ export interface VmSorter {
   maxK?: number;
 }
 
+export interface VmAggSlot {
+  count: number;
+  sum: number;
+  min_val: number;
+  max_val: number;
+  has_val: boolean;
+}
+
 export interface VmAggBucket {
   hash: number;
   keys: any[];
@@ -54,6 +62,7 @@ export interface VmAggBucket {
   min_val: number;
   max_val: number;
   has_val: boolean;
+  slots?: VmAggSlot[];
 }
 
 export interface VmAggregator {
@@ -64,6 +73,7 @@ export interface VmAggregator {
   occupiedCount: number;
   readIdx: number;
   buckets: VmAggBucket[];
+  currentBucket?: VmAggBucket | null;
 }
 
 export interface VmContext {

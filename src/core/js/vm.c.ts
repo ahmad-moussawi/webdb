@@ -2017,6 +2017,7 @@ export function vm_step(
             buckets[slot].min_val = Infinity;
             buckets[slot].max_val = -Infinity;
             buckets[slot].has_val = false;
+            buckets[slot].slots = [];
           }
 
           ctx.aggregators[agg_id] = {
@@ -2027,6 +2028,7 @@ export function vm_step(
             occupiedCount: num_keys === 0 ? 1 : 0,
             readIdx: 0,
             buckets,
+            currentBucket: null,
           };
         } else {
           ctx.aggregators[agg_id] = {
@@ -2037,6 +2039,7 @@ export function vm_step(
             occupiedCount: 0,
             readIdx: 0,
             buckets: [],
+            currentBucket: null,
           };
         }
         break;
@@ -2045,14 +2048,16 @@ export function vm_step(
       /**
        * OP_AGG_STEP (0x41)
        * Operands: [agg_id: uint8] [start_key_reg: uint8] [num_keys: uint8] [val_reg: uint8] [func_id: uint8] (5 bytes)
-       * Updates AggBucket accumulators (0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX).
+       * Updates AggBucket accumulators (low 3 bits = 0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX; upper 5 bits = slot index).
        */
       case OpCode.OP_AGG_STEP: {
         const agg_id = bytecode[ctx.pc];
         const start_key_reg = bytecode[ctx.pc + 1];
         const num_keys = bytecode[ctx.pc + 2];
         const val_reg = bytecode[ctx.pc + 3];
-        const func_id = bytecode[ctx.pc + 4];
+        const raw_func_id = bytecode[ctx.pc + 4];
+        const func_id = raw_func_id & 0x07;
+        const slot_idx = raw_func_id >> 3;
         ctx.pc += 5;
 
         const agg = ctx.aggregators[agg_id];
@@ -2083,6 +2088,7 @@ export function vm_step(
               b.min_val = Infinity;
               b.max_val = -Infinity;
               b.has_val = false;
+              b.slots = [];
               agg.occupiedCount++;
               target_bucket = b;
               break;
@@ -2097,19 +2103,44 @@ export function vm_step(
             return VmStatus.ARENA_EXHAUSTED;
           }
 
-          // Accumulator updates
+          if (!target_bucket.slots) {
+            target_bucket.slots = [];
+          }
+          let agg_slot = target_bucket.slots[slot_idx];
+          if (!agg_slot) {
+            agg_slot = {
+              count: 0,
+              sum: 0,
+              min_val: Infinity,
+              max_val: -Infinity,
+              has_val: false,
+            };
+            target_bucket.slots[slot_idx] = agg_slot;
+          }
+
+          // Accumulator updates (both per-aggregate slot and legacy bucket fields)
           if (func_id === 0) {
             if (val_reg === 255 || (val !== null && val !== undefined)) {
+              agg_slot.count++;
               target_bucket.count++;
             }
           } else if (func_id === 1 || func_id === 2) {
             if (val !== null && val !== undefined) {
-              target_bucket.sum += Number(val);
+              const num = Number(val);
+              agg_slot.sum += num;
+              agg_slot.count++;
+              agg_slot.has_val = true;
+              target_bucket.sum += num;
               target_bucket.has_val = true;
             }
           } else if (func_id === 3) {
             if (val !== null && val !== undefined) {
               const num = Number(val);
+              if (!agg_slot.has_val || num < agg_slot.min_val) {
+                agg_slot.min_val = num;
+              }
+              agg_slot.count++;
+              agg_slot.has_val = true;
               if (!target_bucket.has_val || num < target_bucket.min_val) {
                 target_bucket.min_val = num;
               }
@@ -2118,6 +2149,11 @@ export function vm_step(
           } else if (func_id === 4) {
             if (val !== null && val !== undefined) {
               const num = Number(val);
+              if (!agg_slot.has_val || num > agg_slot.max_val) {
+                agg_slot.max_val = num;
+              }
+              agg_slot.count++;
+              agg_slot.has_val = true;
               if (!target_bucket.has_val || num > target_bucket.max_val) {
                 target_bucket.max_val = num;
               }
@@ -2192,10 +2228,12 @@ export function vm_step(
 
         if (agg.readIdx >= agg.buckets.length) {
           // All buckets processed, fall through
+          agg.currentBucket = null;
           break;
         }
 
         const bucket = agg.buckets[agg.readIdx++];
+        agg.currentBucket = bucket;
 
         for (let k = 0; k < bucket.keys.length; k++) {
           ctx.registers[out_key_reg + k] = bucket.keys[k];
@@ -2213,26 +2251,52 @@ export function vm_step(
       /**
        * OP_AGG_FINAL (0x43)
        * Operands: [sum_reg: uint8] [count_reg: uint8] [out_reg: uint8] [func_id: uint8] (4 bytes)
-       * Finalizes aggregate expression: (0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX).
+       * Finalizes aggregate expression: (low 3 bits = 0: COUNT, 1: SUM, 2: AVG, 3: MIN, 4: MAX; upper 5 bits = slot index).
        */
       case OpCode.OP_AGG_FINAL: {
         const sum_reg = bytecode[ctx.pc];
         const count_reg = bytecode[ctx.pc + 1];
         const out_reg = bytecode[ctx.pc + 2];
-        const func_id = bytecode[ctx.pc + 3];
+        const raw_func_id = bytecode[ctx.pc + 3];
+        const func_id = raw_func_id & 0x07;
+        const slot_idx = raw_func_id >> 3;
         ctx.pc += 4;
 
-        const sum = ctx.registers[sum_reg];
-        const count = Number(ctx.registers[count_reg] ?? 0);
+        const currentBucket = ctx.aggregators[0]?.currentBucket;
+        const agg_slot = currentBucket?.slots?.[slot_idx];
 
-        if (func_id === 0) {
-          ctx.registers[out_reg] = count;
-        } else if (func_id === 1) {
-          ctx.registers[out_reg] = count > 0 ? Number(sum) : null;
-        } else if (func_id === 2) {
-          ctx.registers[out_reg] = count > 0 ? Number(sum) / count : null;
-        } else if (func_id === 3 || func_id === 4) {
-          ctx.registers[out_reg] = ctx.registers[sum_reg];
+        if (agg_slot) {
+          if (func_id === 0) {
+            ctx.registers[out_reg] = agg_slot.count;
+          } else if (func_id === 1) {
+            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.sum : null;
+          } else if (func_id === 2) {
+            ctx.registers[out_reg] =
+              agg_slot.count > 0 ? agg_slot.sum / agg_slot.count : null;
+          } else if (func_id === 3) {
+            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.min_val : null;
+          } else if (func_id === 4) {
+            ctx.registers[out_reg] = agg_slot.has_val ? agg_slot.max_val : null;
+          }
+        } else if (currentBucket) {
+          if (func_id === 0) {
+            ctx.registers[out_reg] = 0;
+          } else {
+            ctx.registers[out_reg] = null;
+          }
+        } else {
+          const sum = ctx.registers[sum_reg];
+          const count = Number(ctx.registers[count_reg] ?? 0);
+
+          if (func_id === 0) {
+            ctx.registers[out_reg] = count;
+          } else if (func_id === 1) {
+            ctx.registers[out_reg] = count > 0 ? Number(sum) : null;
+          } else if (func_id === 2) {
+            ctx.registers[out_reg] = count > 0 ? Number(sum) / count : null;
+          } else if (func_id === 3 || func_id === 4) {
+            ctx.registers[out_reg] = ctx.registers[sum_reg];
+          }
         }
         break;
       }
