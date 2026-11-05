@@ -84,11 +84,32 @@ export function getActiveLiveQueryTracker(): ActiveReadTracker | null {
   return currentTracker;
 }
 
+function scheduleNextHopPush(
+  callerTracker: ActiveReadTracker,
+  hopsLeft: number,
+): void {
+  queueMicrotask(() => {
+    pushLiveQueryTracker(callerTracker);
+    if (hopsLeft > 1) {
+      scheduleNextHopPush(callerTracker, hopsLeft - 1);
+    }
+  });
+}
+
+function scheduleNextHopPop(hopsLeft: number): void {
+  queueMicrotask(() => {
+    popLiveQueryTracker();
+    if (hopsLeft > 1) {
+      scheduleNextHopPop(hopsLeft - 1);
+    }
+  });
+}
+
 /**
  * Wraps an async query execution promise so that `callerTracker` is NOT active
  * while awaiting I/O or the lease queue (preventing cross-contamination from
- * concurrent queries), and is atomically restored only for the synchronous
- * continuation microtask of the `await` caller.
+ * concurrent queries), and is atomically restored across the continuation
+ * microtask window (including combinators like `await Promise.all(...)`).
  */
 export function trackLiveQueryPromise<R>(
   promise: Promise<R>,
@@ -97,17 +118,18 @@ export function trackLiveQueryPromise<R>(
   if (!callerTracker) {
     return promise;
   }
+  const CONTINUATION_HOPS = 3;
   return new Promise<R>((resolve, reject) => {
     promise.then(
       (val) => {
-        queueMicrotask(() => pushLiveQueryTracker(callerTracker));
+        scheduleNextHopPush(callerTracker, CONTINUATION_HOPS);
         resolve(val);
-        queueMicrotask(() => popLiveQueryTracker());
+        scheduleNextHopPop(CONTINUATION_HOPS);
       },
       (err) => {
-        queueMicrotask(() => pushLiveQueryTracker(callerTracker));
+        scheduleNextHopPush(callerTracker, CONTINUATION_HOPS);
         reject(err);
-        queueMicrotask(() => popLiveQueryTracker());
+        scheduleNextHopPop(CONTINUATION_HOPS);
       },
     );
   });

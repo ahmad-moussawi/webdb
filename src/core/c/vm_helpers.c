@@ -424,9 +424,9 @@ uint8_t vm_crockford_char(uint32_t idx) {
     return 77;
   if (idx == 21) 
     return 78;
-  if (idx < 26) 
+  if (idx < 27) 
     return (80 + (idx - 22));
-  return (86 + (idx - 26));
+  return (86 + (idx - 27));
 }
 
 void vm_uuid_decode_view(uint32_t src_off, uint32_t dst_off) {

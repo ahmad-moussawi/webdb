@@ -385,8 +385,8 @@ export function vm_crockford_char(idx: u32): u8 {
   if (idx === 19) return 75;
   if (idx === 20) return 77;
   if (idx === 21) return 78;
-  if (idx < 26) return (80 + (idx - 22)) as u8;
-  return (86 + (idx - 26)) as u8;
+  if (idx < 27) return (80 + (idx - 22)) as u8;
+  return (86 + (idx - 27)) as u8;
 }
 
 /**

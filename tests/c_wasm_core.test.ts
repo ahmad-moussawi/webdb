@@ -30,7 +30,9 @@ import {
   resetVmContext,
 } from "../src/index.ts";
 import * as jsCore from "../src/core/js/index.ts";
+import { CROCKFORD_ALPHABET } from "../src/core/js/codecs.c.ts";
 import {
+  vm_crockford_char,
   VM_CTX_REGISTERS_OFF,
   VM_REG_SIZE,
   VM_CTX_CURSORS_OFF,
@@ -569,6 +571,92 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       // Run step in both JS and WASM after exhausting VM_CTX_PHYS_ARENA_USED
       wasmCore.vm_step(ctx, view, code);
       expect(new Uint8Array(memory.buffer, 0, PAGE_SIZE)).toEqual(page1Snapshot);
+    });
+  });
+
+  describe("7. ULID Crockford Base32 Decoding & Index Comparison (T..Z Boundary)", () => {
+    it("maps all 32 indices (0..31) in vm_crockford_char to exact Crockford Base32 ASCII codes", () => {
+      expect(CROCKFORD_ALPHABET).toBe("0123456789ABCDEFGHJKMNPQRSTVWXYZ");
+      for (let idx = 0; idx < 32; idx++) {
+        const ch = String.fromCharCode(vm_crockford_char(idx));
+        expect(ch).toBe(CROCKFORD_ALPHABET[idx]);
+      }
+    });
+
+    it("round-trips and compares ULIDs containing P..T and V..Z across table scans and index scans on both JS and WASM", async () => {
+      const testUlids = [
+        "01ARZ3NDEKTSV4RRFFQ69G5PPT", // ends with P, T (idx 22, 26)
+        "01ARZ3NDEKTSV4RRFFQ69PQRST", // contains P, Q, R, S, T (indices 22..26)
+        "01ARZ3NDEKTSV4RRFFQ69VWXYZ", // contains V, W, X, Y, Z (indices 27..31)
+        "01HZXW9TSRQPNMKJHGFEDCBA98", // contains Z, X, W, T, S, R, Q, P, N, M, K, J
+        "7ZZZZZZZZZZZZZZZZZZZZZZZZZ", // max valid 128-bit ULID (all Z = idx 31)
+      ];
+
+      for (const engine of ["js", "wasm"] as const) {
+        const db = await WebDB.open({
+          name: `ulid_crockford_${engine}`,
+          storage: "memory",
+          core: engine,
+        });
+
+        await db.createTable("events", [
+          { name: "id", type: DataType.INT32, primaryKey: true },
+          { name: "ulid_col", type: DataType.ULID, indexed: true },
+          { name: "unindexed_ulid", type: DataType.ULID },
+        ]);
+
+        for (let i = 0; i < testUlids.length; i++) {
+          await db.insert("events", {
+            id: i + 1,
+            ulid_col: testUlids[i],
+            unindexed_ulid: testUlids[i],
+          });
+        }
+
+        // 1. Verify full table scan (OP_COLUMN_ULID) decodes every character 0..9, A..Z (including T..Z) accurately
+        const allRows = await db.from("events").orderBy("id", "asc").toArray();
+        expect(allRows.map((r) => r.ulid_col)).toEqual(testUlids);
+        expect(allRows.map((r) => r.unindexed_ulid)).toEqual(testUlids);
+
+        // 2. Verify point lookups via secondary index (vm_compare_index_cell) for each ULID
+        for (let i = 0; i < testUlids.length; i++) {
+          const matched = await db
+            .from("events")
+            .where("ulid_col", "=", testUlids[i])
+            .toArray();
+          expect(matched).toHaveLength(1);
+          expect(matched[0].id).toBe(i + 1);
+          expect(matched[0].ulid_col).toBe(testUlids[i]);
+        }
+
+        // 3. Verify unindexed filter comparisons (OP_COLUMN_ULID + OP_EQ / OP_GT / OP_LT)
+        for (let i = 0; i < testUlids.length; i++) {
+          const matched = await db
+            .from("events")
+            .where("unindexed_ulid", "=", testUlids[i])
+            .toArray();
+          expect(matched).toHaveLength(1);
+          expect(matched[0].id).toBe(i + 1);
+        }
+
+        // 4. Verify lexicographical ordering of decoded ULIDs matches sorted Crockford strings
+        const sortedExpected = [...testUlids].sort();
+        const orderedByIdx = await db
+          .from("events")
+          .orderBy("ulid_col", "asc")
+          .toArray();
+        expect(orderedByIdx.map((r) => r.ulid_col)).toEqual(sortedExpected);
+
+        const orderedByUnindexed = await db
+          .from("events")
+          .orderBy("unindexed_ulid", "asc")
+          .toArray();
+        expect(orderedByUnindexed.map((r) => r.unindexed_ulid)).toEqual(
+          sortedExpected,
+        );
+
+        await db.close();
+      }
     });
   });
 });

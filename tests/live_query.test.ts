@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
-import { WebDB, createLiveQuery, liveQuery } from '../src/index.js';
+import { WebDB, createLiveQuery, liveQuery, MemoryVfsAdapter } from '../src/index.js';
 import {
   WebDBProvider,
   useWebDB,
@@ -795,5 +795,226 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
 
     destroyRef.destroy();
     await db.close();
+  });
+
+  it('11. Ticket 2 regression: trackLiveQueryPromise preserves active tracker across Promise.all, .then() chains, and direct WebDB read methods', async () => {
+    const db = await WebDB.open({ name: 'promise_all_continuation_test', storage: 'memory' });
+    await db.createTable('table_a', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'val', type: 'TEXT' },
+    ]);
+    await db.createTable('table_b', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'val', type: 'TEXT' },
+    ]);
+    await db.createTable('table_c', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'val', type: 'TEXT' },
+    ]);
+    await db.createTable('table_d', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'val', type: 'TEXT' },
+    ]);
+    await db.createTable('unrelated_noise', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'val', type: 'TEXT' },
+    ]);
+
+    await db.insert('table_a', { val: 'A1' });
+    await db.insert('table_b', { val: 'B1' });
+    await db.insert('table_c', { val: 'C1' });
+    await db.insert('table_d', { val: 'D1' });
+    await db.insert('unrelated_noise', { val: 'N1' });
+
+    let runCount = 0;
+    const destroyRef = new DestroyRef();
+    const liveSig = runWithAngularProviders(
+      [provideWebDB(db) as any],
+      destroyRef,
+      () =>
+        liveQuerySignal(
+          async () => {
+            runCount++;
+            // Step 1: Parallel reads via Promise.all
+            const [rowsA, rowsB] = await Promise.all([
+              db.from('table_a').orderBy('id', 'asc').toArray(),
+              db.from('table_b').orderBy('id', 'asc').toArray(),
+            ]);
+
+            // Step 2: Sequential read AFTER Promise.all via QueryBuilder + .then()
+            const rowsC = await db
+              .from('table_c')
+              .orderBy('id', 'asc')
+              .toArray()
+              .then((r) => r.map((x) => x.val));
+
+            // Step 3: Direct WebDB read method (executeQuery) AFTER the .then() chain
+            const rowsD = await db.executeQuery('table_d', [], {
+              limit: null,
+              offset: null,
+              sortCol: 'id',
+              sortDir: 'asc',
+            });
+
+            return {
+              a: rowsA.map((r) => r.val),
+              b: rowsB.map((r) => r.val),
+              c: rowsC,
+              d: rowsD.map((r) => r.val),
+            };
+          },
+          { initialData: { a: [], b: [], c: [], d: [] } },
+        ),
+    );
+
+    // Interleave an unrelated background query while the initial run is in flight
+    await db.from('unrelated_noise').toArray();
+
+    await waitForCondition(() => !liveSig.isLoading());
+    expect(liveSig.data()).toEqual({
+      a: ['A1'],
+      b: ['B1'],
+      c: ['C1'],
+      d: ['D1'],
+    });
+    expect(runCount).toBe(1);
+
+    // 1. Mutating unrelated_noise must NOT trigger re-execution
+    await db.insert('unrelated_noise', { val: 'N2' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runCount).toBe(1);
+
+    // 2. Mutating table_c (queried AFTER await Promise.all) MUST trigger re-execution
+    await db.insert('table_c', { val: 'C2' });
+    await waitForCondition(() => liveSig.data()?.c.length === 2);
+    expect(liveSig.data()?.c).toEqual(['C1', 'C2']);
+    expect(runCount).toBe(2);
+
+    // 3. Mutating table_d (queried via direct db.executeQuery AFTER .then()) MUST trigger re-execution
+    await db.insert('table_d', { val: 'D2' });
+    await waitForCondition(() => liveSig.data()?.d.length === 2);
+    expect(liveSig.data()?.d).toEqual(['D1', 'D2']);
+    expect(runCount).toBe(3);
+
+    // 4. Mutating table_a and table_b (inside Promise.all) also triggers re-execution
+    await db.insert('table_a', { val: 'A2' });
+    await waitForCondition(() => liveSig.data()?.a.length === 2);
+    expect(liveSig.data()?.a).toEqual(['A1', 'A2']);
+
+    destroyRef.destroy();
+    await db.close();
+  });
+
+  it('12. Ticket 3 regression: WebDB.importBinary() notifies active local & cross-tab subscriptions (including empty DB reset)', async () => {
+    const sharedVfs = new MemoryVfsAdapter();
+    Object.defineProperty(sharedVfs, 'name', { value: 'idb_shared_sim' });
+
+    const dbA = await WebDB.open({ name: 'import_live_db', vfs: sharedVfs });
+    const dbB = await WebDB.open({ name: 'import_live_db', vfs: sharedVfs });
+
+    await dbA.createTable('users', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'name', type: 'TEXT' },
+    ]);
+    await dbA.insert('users', { name: 'Initial Alice' });
+
+    // Prepare a second database snapshot to import (with updated users + a new table)
+    const stagingDb = await WebDB.open({ name: 'staging_import', storage: 'memory' });
+    await stagingDb.createTable('users', [
+      { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
+      { name: 'name', type: 'TEXT' },
+    ]);
+    await stagingDb.insertMany('users', [
+      { name: 'Imported Bob' },
+      { name: 'Imported Charlie' },
+    ]);
+    const populatedBinary = await stagingDb.exportBinary();
+    await stagingDb.close();
+
+    // Also prepare a completely empty database binary snapshot (0 tables)
+    const emptyStagingDb = await WebDB.open({ name: 'empty_staging', storage: 'memory' });
+    const emptyBinary = await emptyStagingDb.exportBinary();
+    await emptyStagingDb.close();
+
+    // 1. Subscribe liveQuerySignal on dbA (local instance) and createLiveQuery on dbB (cross-tab instance)
+    const destroyRef = new DestroyRef();
+    const localSig = runWithAngularProviders(
+      [provideWebDB(dbA) as any],
+      destroyRef,
+      () =>
+        liveQuerySignal(
+          () => dbA.from('users').orderBy('id', 'asc'),
+          { initialData: [] },
+        ),
+    );
+
+    const crossTabUsersLive = createLiveQuery(
+      () => dbB.from('users').orderBy('id', 'asc'),
+      { initialData: [] },
+    );
+
+    const schemaTablesLive = createLiveQuery(
+      async () => {
+        const tables = await dbA.listTables();
+        return tables.map((t) => t.name);
+      },
+      { initialData: [] },
+    );
+
+    await waitForCondition(
+      () =>
+        !localSig.isLoading() &&
+        !crossTabUsersLive.getState().isLoading &&
+        !schemaTablesLive.getState().isLoading,
+    );
+    expect(localSig.data()).toEqual([{ id: 1, name: 'Initial Alice' }]);
+    expect(crossTabUsersLive.getState().data).toEqual([{ id: 1, name: 'Initial Alice' }]);
+    expect(schemaTablesLive.getState().data).toEqual(['users']);
+
+    // 2. Call dbA.importBinary(populatedBinary) -> both localSig (dbA) and crossTabUsersLive (dbB) must update!
+    await dbA.importBinary(populatedBinary);
+
+    await waitForCondition(
+      () =>
+        localSig.data()?.length === 2 &&
+        crossTabUsersLive.getState().data?.length === 2,
+    );
+    expect(localSig.data()).toEqual([
+      { id: 1, name: 'Imported Bob' },
+      { id: 2, name: 'Imported Charlie' },
+    ]);
+    expect(localSig.state().lastEvent?.origin).toBe('import');
+    expect(localSig.state().lastEvent?.crossTab).toBe(false);
+
+    expect(crossTabUsersLive.getState().data).toEqual([
+      { id: 1, name: 'Imported Bob' },
+      { id: 2, name: 'Imported Charlie' },
+    ]);
+    expect(crossTabUsersLive.getState().lastEvent?.origin).toBe('import');
+    expect(crossTabUsersLive.getState().lastEvent?.crossTab).toBe(true);
+
+    // 3. Import the empty binary snapshot (0 tables) into a fresh DB watched by schemaTablesLive
+    // and verify even when post-import tables is empty, subscribers are notified!
+    await dbA.importBinary(emptyBinary);
+    await waitForCondition(() => schemaTablesLive.getState().data?.length === 0);
+    expect(schemaTablesLive.getState().data).toEqual([]);
+
+    // Even importing emptyBinary AGAIN (when both oldTables and newTables are empty: tables.length === 0)
+    // must still notify active subscribers on importBinary!
+    let emptyToEmptyEvents = 0;
+    const unsubWildcard = dbA.subscribe('*', (ev) => {
+      if (ev.origin === 'import') {
+        emptyToEmptyEvents++;
+      }
+    });
+    await dbA.importBinary(emptyBinary);
+    expect(emptyToEmptyEvents).toBe(1);
+    unsubWildcard();
+
+    destroyRef.destroy();
+    crossTabUsersLive.destroy();
+    schemaTablesLive.destroy();
+    await dbA.close();
+    await dbB.close();
   });
 });

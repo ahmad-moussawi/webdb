@@ -347,6 +347,7 @@ export class TransactionCoordinator {
       const diskSchemaVersion = diskView.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
 
       if (
+        force ||
         walTouchedByOtherTab ||
         diskChangeCounter !== this.lastDiskChangeCounter ||
         diskSchemaVersion !== this.lastDiskSchemaVersion

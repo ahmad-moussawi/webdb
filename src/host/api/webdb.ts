@@ -147,6 +147,9 @@ import {
 } from "./query_builder.ts";
 import {
   liveQuery,
+  notifyLiveQueryTableRead,
+  getActiveLiveQueryTracker,
+  trackLiveQueryPromise,
   type LiveQueryController,
   type LiveQueryOptions,
   type LiveQueryState,
@@ -574,11 +577,14 @@ export class WebDB implements IDatabaseQueryExecutor {
     return table;
   }
 
-  async getTable(tableName: string): Promise<TableMeta> {
-    return this.coordinator.leaseQueue.enqueue(
+  getTable(tableName: string): Promise<TableMeta> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, tableName);
+    const promise = this.coordinator.leaseQueue.enqueue(
       () => this._getTableInternal(tableName),
       this.currentLeaseId ?? undefined,
     );
+    return trackLiveQueryPromise(promise, callerTracker);
   }
 
   private async _getTableInternal(tableName: string): Promise<TableMeta> {
@@ -620,8 +626,10 @@ export class WebDB implements IDatabaseQueryExecutor {
     return meta;
   }
 
-  async listTables(): Promise<TableMeta[]> {
-    return this.coordinator.leaseQueue.enqueue(async () => {
+  listTables(): Promise<TableMeta[]> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, "*");
+    const promise = this.coordinator.leaseQueue.enqueue(async () => {
       const page1View = this.pool.getSlotDataView(0);
       const descriptors = catalog_list_table_descriptors(page1View);
       const tables: TableMeta[] = [];
@@ -632,6 +640,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       return tables;
     }, this.currentLeaseId ?? undefined);
+    return trackLiveQueryPromise(promise, callerTracker);
   }
 
   private async freeTableTreePages(rootPageId: number): Promise<void> {
@@ -1769,10 +1778,13 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   private notifySubscriptions(event: TableChangeEvent): void {
-    if (event.tables.length === 0 || this.subscriptions.size === 0) return;
+    if (this.subscriptions.size === 0) return;
+    const isWildcardOrImport =
+      event.origin === "import" || event.tables.includes("*");
+    if (!isWildcardOrImport && event.tables.length === 0) return;
     const lowerChanged = new Set(event.tables.map((t) => t.toLowerCase()));
     for (const sub of this.subscriptions) {
-      if (sub.tables === "*") {
+      if (sub.tables === "*" || isWildcardOrImport) {
         sub.callback(event);
       } else {
         for (const t of lowerChanged) {
@@ -3404,7 +3416,9 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   from(tableOrSubquery: string | QueryBuilder): QueryBuilder {
-    return new QueryBuilder(this, tableOrSubquery);
+    const qb = new QueryBuilder(this, tableOrSubquery);
+    notifyLiveQueryTableRead(this, qb.getReferencedTables());
+    return qb;
   }
 
   async explainQuery(
@@ -3547,15 +3561,22 @@ export class WebDB implements IDatabaseQueryExecutor {
     };
   }
 
-  async executeQuery(
+  executeQuery(
     tableName: string,
     filters: QueryFilter[],
     options: QueryExecutionOptions,
   ): Promise<DbRow[]> {
-    return this.coordinator.leaseQueue.enqueue(
+    const callerTracker = getActiveLiveQueryTracker();
+    const referencedTables = [
+      tableName,
+      ...(options.joins ? options.joins.map((j) => j.table) : []),
+    ];
+    notifyLiveQueryTableRead(this, referencedTables);
+    const promise = this.coordinator.leaseQueue.enqueue(
       () => this._executeQueryInternal(tableName, filters, options),
       this.currentLeaseId ?? undefined,
     );
+    return trackLiveQueryPromise(promise, callerTracker);
   }
 
   private async _executeQueryInternal(
@@ -3897,6 +3918,12 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
+      // Capture pre-import table names for change notifications
+      const oldPage1View = this.pool.getSlotDataView(0);
+      const oldTables = catalog_list_table_descriptors(oldPage1View).map(
+        (d) => d.name,
+      );
+
       // Pass 2: Atomically replace storage, reset buffer pool & WAL, and pin imported catalog pages
       const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
       for (let p = 1; p <= numPages; p++) {
@@ -3927,6 +3954,34 @@ export class WebDB implements IDatabaseQueryExecutor {
       this.vmCtx.table = null;
 
       await WebDB.pinAllCatalogPages(this.driver);
+
+      const newPage1View = this.pool.getSlotDataView(0);
+      const newTables = catalog_list_table_descriptors(newPage1View).map(
+        (d) => d.name,
+      );
+      const affectedTables = Array.from(new Set([...oldTables, ...newTables]));
+
+      this.notifySubscriptions({
+        tables: affectedTables,
+        origin: "import",
+        changeCounter: header.changeCounter,
+        schemaVersion: header.schemaVersion,
+        crossTab: false,
+      });
+
+      if (this.broadcastChannel) {
+        try {
+          this.broadcastChannel.postMessage({
+            senderId: this.instanceId,
+            tables: affectedTables,
+            origin: "import",
+            changeCounter: header.changeCounter,
+            schemaVersion: header.schemaVersion,
+          });
+        } catch {
+          // Ignore broadcast errors
+        }
+      }
     });
   }
 
