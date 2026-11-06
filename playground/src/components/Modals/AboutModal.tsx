@@ -183,7 +183,7 @@ export const AboutModal: React.FC = () => {
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              onClick={() => window.open('/webdb/getting-started.html', '_blank')}
+              onClick={() => window.open('../getting-started.html', '_blank')}
             >
               <BookOpen size={12} />
               <span>Docs</span>

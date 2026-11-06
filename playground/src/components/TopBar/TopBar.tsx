@@ -654,7 +654,7 @@ export const TopBar: React.FC = () => {
                   className="menubar-option"
                   onClick={() =>
                     closeMenuAndRun(() => {
-                      window.open('/webdb/getting-started.html', '_blank');
+                      window.open('../getting-started.html', '_blank');
                     })
                   }
                 >
@@ -673,7 +673,7 @@ export const TopBar: React.FC = () => {
                   className="menubar-option"
                   onClick={() =>
                     closeMenuAndRun(() => {
-                      window.open('/webdb/offline-sync.html', '_blank');
+                      window.open('../guides/reactivity-and-sync.html', '_blank');
                     })
                   }
                 >

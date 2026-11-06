@@ -19,6 +19,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  deployments: write
 
 concurrency:
   group: pages
@@ -46,17 +47,38 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build with VitePress
-        env:
-          SITE_HOSTNAME: ${{ steps.pages.outputs.base_url }}
-        run: npm run docs:build
+      - name: Prepare Library, Playground & Benchmarks
+        run: npm run docs:prepare
 
-      - name: Upload artifact
+      - name: Build VitePress for GitHub Pages (/webdb/)
+        env:
+          DOCS_BASE: /webdb/
+          SITE_HOSTNAME: ${{ steps.pages.outputs.base_url }}
+        run: npx vitepress build docs
+
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/.vitepress/dist
 
-  deploy:
+      - name: Build VitePress for Cloudflare Pages (/)
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        env:
+          DOCS_BASE: ${{ vars.DOCS_BASE || '/' }}
+          SITE_HOSTNAME: ${{ vars.SITE_HOSTNAME || 'https://webdb.dev' }}
+        run: npx vitepress build docs
+
+      - name: Deploy to Cloudflare Pages
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        id: cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy docs/.vitepress/dist --project-name=${{ vars.CLOUDFLARE_PROJECT_NAME || 'webdb' }} --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-github-pages:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -67,3 +89,5 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+

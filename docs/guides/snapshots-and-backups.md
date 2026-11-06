@@ -90,7 +90,7 @@ The [**WebDB Studio Playground**](/playground/) natively supports exporting and 
 You can also create **shareable external links** that directly open a remote `.webdb` or `.webdb.gz` file inside the Studio IDE via URL query parameters:
 
 ```
-https://ahmad-moussawi.github.io/webdb/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory
+https://webdb.dev/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory
 ```
 
 | URL Parameter | Values | Description |

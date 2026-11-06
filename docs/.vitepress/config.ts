@@ -1,6 +1,7 @@
 import { defineConfig, type HeadConfig } from "vitepress";
 
 const siteHostname = process.env.SITE_HOSTNAME;
+const basePath = process.env.DOCS_BASE || "/";
 const isCI = Boolean(process.env.CI || process.env.SITE_HOSTNAME);
 
 const googleAnalyticsHead: HeadConfig[] = isCI
@@ -27,7 +28,7 @@ export default defineConfig({
   title: "WebDB",
   description:
     "Ultra-lean browser-native relational database engine with persistent OPFS & IndexedDB storage, ACID transactions, and fluent queries",
-  base: "/webdb/",
+  base: basePath,
   lastUpdated: true,
   ...(siteHostname
     ? {
@@ -49,7 +50,7 @@ export default defineConfig({
   },
 
   head: [
-    ["link", { rel: "icon", href: "/webdb/logo.svg", type: "image/svg+xml" }],
+    ["link", { rel: "icon", href: `${basePath}logo.svg`, type: "image/svg+xml" }],
     ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
     [
       "link",

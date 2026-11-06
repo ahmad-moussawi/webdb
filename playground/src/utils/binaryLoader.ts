@@ -246,7 +246,7 @@ export function buildShareablePlaygroundUrl(options: {
   const base =
     typeof window !== 'undefined'
       ? `${window.location.origin}${window.location.pathname}`
-      : 'https://ahmad-moussawi.github.io/webdb/playground/';
+      : 'https://webdb.dev/playground/';
 
   const trimmedUrl = options.remoteUrl.trim();
   // Keep clean unencoded URL when it doesn't contain query string delimiters (& or #)
