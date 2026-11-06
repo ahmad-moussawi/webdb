@@ -2489,6 +2489,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         desc.autoIncNext = table.autoIncNext;
       }
       catalog_write_table_descriptor(page1View, slotIdx, desc);
+      // Keep the cached TableMeta (returned by getTable/listTables) in sync with Page 1
+      const cachedMeta = this.tableMetaCache.get(tableName.toLowerCase());
+      if (cachedMeta) cachedMeta.rowCountEstimate = desc.rowCountEstimate;
       catalog_increment_change_counter(page1View);
       catalog_update_page1_checksum(page1View);
       this.pool.markDirty(0);
@@ -3030,6 +3033,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
       desc.rowCountEstimate = Math.max(0, desc.rowCountEstimate - totalDeleted);
       catalog_write_table_descriptor(page1View, slotIdx, desc);
+      const cachedMeta = this.tableMetaCache.get(tableName.toLowerCase());
+      if (cachedMeta) cachedMeta.rowCountEstimate = desc.rowCountEstimate;
     }
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
