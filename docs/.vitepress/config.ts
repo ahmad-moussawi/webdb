@@ -169,6 +169,7 @@ export default defineConfig({
         text: "Live Demos",
         items: [
           { text: "Overview", link: "/demos/" },
+          { text: "Two Tabs, One Database", link: "/demos/multi-tab" },
           { text: "Todo List", link: "/demos/todo" },
           { text: "Kanban Board", link: "/demos/kanban" },
           { text: "Calendar & Appointments", link: "/demos/calendar" },

@@ -1,5 +1,7 @@
 # Demo: Todo List
 
+<DemoBanner demo="todo" />
+
 A todo app where **the database is the only state**. The list and the counters are two independent
 [live queries](/guides/live-queries-and-frameworks); add, tick, rename or delete an item (here or in another tab)
 and both update on their own.

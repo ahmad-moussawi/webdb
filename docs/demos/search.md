@@ -1,5 +1,7 @@
 # Demo: Typo-Tolerant Search with UDFs
 
+<DemoBanner demo="search" />
+
 WebDB has no built-in full-text engine, on purpose. Instead you write the search logic in plain JavaScript and
 register it as a **user-defined function (UDF)**, then call it from `SELECT`, `WHERE` and `ORDER BY` like any
 built-in function. This demo builds a small search engine that way: **ranking, typo tolerance, accent-insensitive

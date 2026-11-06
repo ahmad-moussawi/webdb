@@ -1,5 +1,7 @@
 # Demo: Kanban Board
 
+<DemoBanner demo="kanban" />
+
 A Trello-style board with drag &amp; drop. Three live queries (lists, cards, per-list counts) keep the board in
 sync; every drop is saved as **one atomic transaction** that renumbers the source and target lists.
 

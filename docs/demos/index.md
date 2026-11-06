@@ -6,6 +6,11 @@ just re-renders whenever the data it queries changes.
 
 <div class="demo-cards">
 
+<a class="demo-card" href="./multi-tab">
+  <h3>🪟 Two tabs, one database</h3>
+  <p>Two browser windows side by side sharing one database: change one and watch the other update.</p>
+</a>
+
 <a class="demo-card" href="./todo">
   <h3>✅ Todo list</h3>
   <p>The classic. Filters, search, inline editing and live counters from a <code>GROUP BY</code> query.</p>
@@ -34,6 +39,7 @@ just re-renders whenever the data it queries changes.
 2. Open the same demo in **two tabs side by side** and edit in one: the other updates instantly, because live
    queries listen to changes across tabs.
 3. Click **Reset data** at the top of a demo to restore the sample data.
+4. Every demo page starts with an **Open this demo as a full page** banner: it runs the demo on its own, without the documentation around it.
 
 ## What they demonstrate
 
@@ -46,7 +52,7 @@ just re-renders whenever the data it queries changes.
 | Atomic multi-row writes with `db.transaction()` | Kanban, resets |
 | Indexed range queries (`start_at >= … AND < …`) | Calendar |
 | JavaScript UDFs in `SELECT`, `WHERE` and `ORDER BY` | Search |
-| Cross-tab sync over `BroadcastChannel` | all demos |
+| Cross-tab sync over `BroadcastChannel` + Web Locks | [Two tabs](./multi-tab), all demos |
 
 The demos are plain Vue 3 components with no state library: the database *is* the state. Each page links to
 the full source on GitHub.

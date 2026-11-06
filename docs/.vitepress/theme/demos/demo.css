@@ -183,3 +183,63 @@
   font-size: 0.8rem;
   line-height: 1.5;
 }
+
+/* ---- Standalone (full page) mode ---- */
+.wd-frame.wd-full {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+.wd-full .wd-header,
+.wd-full .wd-persist,
+.wd-full .wd-footer {
+  padding-left: max(1rem, calc((100% - 1100px) / 2));
+  padding-right: max(1rem, calc((100% - 1100px) / 2));
+}
+.wd-full .wd-body {
+  flex: 1;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(1100px + 2rem);
+  margin: 0 auto;
+  padding: 1.5rem 1rem 2rem;
+}
+.wd-back {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.wd-back:hover {
+  color: var(--vp-c-brand-1);
+}
+
+/* ---- Embedded in an iframe (multi-tab demo): compact, scrolls inside the frame ---- */
+.wd-frame.wd-embed {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+.wd-embed .wd-persist,
+.wd-embed .wd-tip,
+.wd-embed .wd-back,
+.wd-embed .wd-header .wd-btn-primary,
+.wd-embed .wd-header .wd-badge:not(.wd-badge-live) {
+  display: none;
+}
+.wd-embed .wd-header {
+  padding-top: 0.45rem;
+  padding-bottom: 0.45rem;
+}
+.wd-embed .wd-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.9rem;
+}
+.wd-embed .wd-footer {
+  justify-content: flex-end;
+}

@@ -4,12 +4,16 @@
  * idempotent setup, renders the demo app with the `db`, and shows source / reset / activity.
  */
 import { computed, markRaw, onMounted, onUnmounted, ref, shallowRef, type Component } from 'vue';
+import { withBase } from 'vitepress';
 import { WebDB, type TableChangeEvent } from '@ahmadmoussawi/webdb';
 import { DEMOS, sourceUrl, type DemoId } from './registry';
 import './demo.css';
 
-const props = defineProps<{ demo: DemoId }>();
+/** `full`: render as a standalone page (no docs chrome) instead of inside the documentation. */
+const props = defineProps<{ demo: DemoId; full?: boolean }>();
 const meta = DEMOS[props.demo];
+/** `?embed=1`: rendered inside an iframe (e.g. the multi-tab demo), so drop the chrome that wastes space. */
+const embed = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('embed');
 
 const db = shallowRef<WebDB | null>(null);
 const App = shallowRef<Component | null>(null);
@@ -23,6 +27,13 @@ let unsubscribe: (() => void) | null = null;
 let changes = 0;
 
 const source = computed(() => sourceUrl(meta.sourcePath));
+const docsUrl = computed(() => withBase(`/demos/${props.demo}`));
+
+async function withSetupLock<T>(name: string, task: () => Promise<T>): Promise<T> {
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+  if (!locks) return task();
+  return locks.request(`webdb_demo_setup_${name}`, { mode: 'exclusive' }, task) as Promise<T>;
+}
 
 onMounted(async () => {
   try {
@@ -30,8 +41,13 @@ onMounted(async () => {
       throw new Error('IndexedDB is not available in this browser, so the demo cannot persist data.');
     }
     const mod = await meta.load();
-    const instance = await WebDB.open({ name: meta.dbName, storage: 'idb' });
-    await mod.setup(instance);
+    // Two tabs (or frames) may load at the same instant on a brand-new database: serialise
+    // "open + create tables + seed" across them so the seed data is only inserted once.
+    const instance = await withSetupLock(meta.dbName, async () => {
+      const db = await WebDB.open({ name: meta.dbName, storage: 'idb' });
+      await mod.setup(db);
+      return db;
+    });
     unsubscribe = instance.subscribe('*', (ev: TableChangeEvent) => {
       changes++;
       lastChange.value = {
@@ -68,9 +84,10 @@ async function reset() {
 </script>
 
 <template>
-  <section class="wd-frame" :aria-label="`${meta.title} live demo`">
+  <section :class="['wd-frame', { 'wd-full': full, 'wd-embed': embed }]" :aria-label="`${meta.title} live demo`">
     <header class="wd-header">
       <div class="wd-title">
+        <a v-if="full" class="wd-back" :href="docsUrl" title="Back to the documentation page">← Docs</a>
         {{ meta.title }}
         <span class="wd-badge wd-badge-live"><i class="wd-pulse" />LIVE</span>
       </div>
@@ -100,7 +117,7 @@ async function reset() {
     </div>
 
     <footer class="wd-footer">
-      <span>💡 Open this page in a second tab: changes sync between tabs in real time.</span>
+      <span class="wd-tip">💡 Open this page in a second tab: changes sync between tabs in real time.</span>
       <span v-if="lastChange" class="wd-activity" aria-live="polite">
         change #{{ lastChange.n }} · <code>{{ lastChange.tables }}</code> · from {{ lastChange.origin }}
       </span>

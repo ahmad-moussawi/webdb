@@ -1,5 +1,7 @@
 # Demo: Calendar & Appointments
 
+<DemoBanner demo="calendar" />
+
 A month calendar backed by a single `appointments` table. The grid only loads the **visible range**, and three
 independent live queries (the grid, "upcoming" and a month counter) all stay current as you add, edit or delete
 appointments.

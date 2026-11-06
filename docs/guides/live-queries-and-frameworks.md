@@ -3,6 +3,7 @@
 ::: tip ⚡ See it running
 Try live queries in the browser, with data kept in IndexedDB. Open a demo in two tabs and watch them sync:
 
+- **[Two tabs, one database →](/demos/multi-tab)**: two browser windows side by side, changes sync live
 - **[Todo list →](/demos/todo)**: filters, search and live counters from a `GROUP BY` query
 - **[Kanban board →](/demos/kanban)**: drag & drop, each move saved as one transaction
 - **[Calendar →](/demos/calendar)**: loads only the visible month, plus "upcoming" and counters
