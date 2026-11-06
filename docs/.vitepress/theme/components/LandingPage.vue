@@ -1643,6 +1643,8 @@ onBeforeUnmount(() => {
   padding: 2.5rem 1.75rem 6rem;
   font-family: var(--vp-font-family-base);
   color: var(--vp-c-text-1);
+  /* Decorative glows / wide children must never create a horizontal page scrollbar */
+  overflow-x: clip;
 }
 
 code {
@@ -1665,7 +1667,7 @@ code {
   top: -40px;
   left: 50%;
   transform: translateX(-50%);
-  width: 680px;
+  width: min(680px, 100vw);
   height: 320px;
   background: var(--webdb-hero-glow);
   pointer-events: none;
@@ -1818,6 +1820,8 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 0.65rem;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 0.5rem 0.65rem 0.5rem 1rem;
   border-radius: 999px;
   background: var(--vp-c-bg-soft);
@@ -1838,7 +1842,14 @@ code {
   font-weight: 700;
 }
 
+.install-pill code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 .install-copy-badge {
+  flex: none;
   font-size: 0.7rem;
   font-weight: 700;
   padding: 0.2rem 0.6rem;
@@ -1853,7 +1864,7 @@ code {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1rem;
   text-align: left;
 }
@@ -2744,7 +2755,7 @@ code {
 
 .fw-selector-bar {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.85rem;
 }
 
@@ -2880,7 +2891,7 @@ code {
 
 .live-highlights-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -2929,11 +2940,13 @@ code {
    ============================================================================ */
 .bento-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1.15rem;
 }
 
 .bento-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
   background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
   border-radius: 14px;
@@ -3449,7 +3462,7 @@ code {
    ============================================================================ */
 .tools-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.25rem;
 }
 
@@ -3525,35 +3538,35 @@ code {
     font-size: 2.65rem;
   }
   .hero-metrics {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hero-hbar-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.25rem;
   }
   .hero-hbar-val {
     text-align: left;
   }
   .fw-selector-bar {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .live-highlights-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .bento-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .bench-bars-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .track-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .pipe-bypass {
     grid-column: span 1;
   }
   .tools-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -3574,16 +3587,16 @@ code {
     justify-content: center;
   }
   .hero-metrics {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .bento-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .bento-wide {
     grid-column: span 1;
   }
   .fw-selector-bar {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
