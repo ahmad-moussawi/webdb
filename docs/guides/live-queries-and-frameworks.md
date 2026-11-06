@@ -1,5 +1,16 @@
 # Reactive Live Queries (Plain JS, React, Vue & Angular)
 
+::: tip ⚡ See it running
+Try live queries in the browser, with data kept in IndexedDB. Open a demo in two tabs and watch them sync:
+
+- **[Todo list →](/demos/todo)**: filters, search and live counters from a `GROUP BY` query
+- **[Kanban board →](/demos/kanban)**: drag & drop, each move saved as one transaction
+- **[Calendar →](/demos/calendar)**: loads only the visible month, plus "upcoming" and counters
+- **[Typo-Tolerant Search with UDFs →](/demos/search)**: a query that re-runs as you type
+
+Each demo links to its full source on GitHub.
+:::
+
 WebDB includes first-class **reactive live queries** that automatically keep your UI in sync with your database. Whenever rows are inserted, updated, or deleted—whether in the current tab, a background Web Worker, or another open browser tab—active live queries automatically re-execute and push fresh results to your components.
 
 ---

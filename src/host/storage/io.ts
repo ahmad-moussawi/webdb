@@ -41,10 +41,33 @@ export class Io {
     hasSpilledPage(pageId: number): boolean;
     getSpilledPage(pageId: number): Uint8Array | null;
     onDirectPageWrite(pageId: number, data: Uint8Array): void;
+    hasCommittedWalPage(pageId: number): boolean;
+    commitDirectPagesViaWal(
+      pages: Array<{ pageId: number; data: Uint8Array }>,
+    ): Promise<void>;
   } | null = null;
 
   setTransactionCoordinator(coordinator: any): void {
     this.coordinator = coordinator;
+  }
+
+  /**
+   * True when an autocommit flush of these pages must go through the WAL: at least one of them
+   * still has an older committed image in the WAL.
+   */
+  shouldWriteThroughWal(pageIds: number[]): boolean {
+    const c = this.coordinator;
+    return !!c && !c.isInTransaction() && pageIds.some((id) => c.hasCommittedWalPage(id));
+  }
+
+  /** Atomically logs several slots to the WAL as one committed mini-transaction. */
+  async writeSlotsViaWal(slots: Array<{ slotIdx: number; pageId: number }>): Promise<void> {
+    const pages = slots.map(({ slotIdx, pageId }) => {
+      this.stampSlotChecksum(slotIdx, pageId);
+      const offset = slotIdx * PAGE_SIZE;
+      return { pageId, data: this.uint8.slice(offset, offset + PAGE_SIZE) };
+    });
+    await this.coordinator!.commitDirectPagesViaWal(pages);
   }
 
   isInTransaction(): boolean {
@@ -200,6 +223,26 @@ export class Io {
     this.stampSlotChecksum(slotIdx, pageId);
 
     const write_snapshot = page_bytes.slice();
+
+    // Autocommit write of a page whose older image is still in the WAL: log the new image to
+    // the WAL too, otherwise crash recovery would replay the stale WAL frame over it.
+    if (
+      this.coordinator &&
+      !this.coordinator.isInTransaction() &&
+      this.coordinator.hasCommittedWalPage(pageId)
+    ) {
+      const wal_promise = this.coordinator.commitDirectPagesViaWal([
+        { pageId, data: write_snapshot },
+      ]);
+      this.in_flight_flushes.set(pageId, wal_promise);
+      try {
+        await wal_promise;
+      } finally {
+        this.in_flight_flushes.delete(pageId);
+      }
+      return;
+    }
+
     if (this.coordinator) {
       this.coordinator.onDirectPageWrite(pageId, write_snapshot);
     }

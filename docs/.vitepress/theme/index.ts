@@ -1,3 +1,4 @@
+import { defineAsyncComponent } from 'vue';
 import DefaultTheme from 'vitepress/theme';
 import LandingPage from './components/LandingPage.vue';
 import { SIZE_METRICS } from './constants';
@@ -8,5 +9,10 @@ export default {
   enhanceApp({ app }: { app: any }) {
     app.config.globalProperties.$sizes = SIZE_METRICS;
     app.component('LandingPage', LandingPage);
+    // Loaded on demand so the database library only ships with the demo pages
+    app.component(
+      'DemoFrame',
+      defineAsyncComponent(() => import('./demos/DemoFrame.vue')),
+    );
   },
 };

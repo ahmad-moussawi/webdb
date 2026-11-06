@@ -539,6 +539,29 @@ export class BufferPoolDriver {
   }
 
   async flushAllDirty(): Promise<void> {
+    const dirty: Array<{ slotIdx: number; pageId: number; generation: number }> = [];
+    for (let i = 0; i < this.slotCount; i++) {
+      if (this.isDirty(i)) {
+        const pageId = this.getAssignedPage(i);
+        if (pageId > 0) {
+          dirty.push({ slotIdx: i, pageId, generation: this.slot_dirty_generations[i] });
+        }
+      }
+    }
+
+    // If any dirty page still has an older image in the WAL, commit the whole batch through the
+    // WAL atomically (a direct write to main storage would be overwritten by WAL replay).
+    if (this.io.shouldWriteThroughWal(dirty.map((d) => d.pageId))) {
+      await this.io.writeSlotsViaWal(dirty);
+      for (const d of dirty) {
+        if (this.slot_dirty_generations[d.slotIdx] === d.generation) {
+          this.clearDirty(d.slotIdx);
+        }
+      }
+      await this.io.flush();
+      return;
+    }
+
     for (let i = 0; i < this.slotCount; i++) {
       if (this.isDirty(i)) {
         await this.flushSlot(i);

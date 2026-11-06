@@ -1,4 +1,7 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, type HeadConfig } from "vitepress";
+
+const src = (p: string) => fileURLToPath(new URL(`../../src/${p}`, import.meta.url));
 
 const siteHostname = process.env.SITE_HOSTNAME;
 const basePath = process.env.DOCS_BASE || "/";
@@ -49,6 +52,16 @@ export default defineConfig({
     math: true,
   },
 
+  // The live demos import the library from source (more specific aliases first)
+  vite: {
+    resolve: {
+      alias: [
+        { find: "@ahmadmoussawi/webdb/vue", replacement: src("vue/index.ts") },
+        { find: /^@ahmadmoussawi\/webdb$/, replacement: src("index.ts") },
+      ],
+    },
+  },
+
   head: [
     ["link", { rel: "icon", href: `${basePath}logo.svg`, type: "image/svg+xml" }],
     ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
@@ -72,6 +85,7 @@ export default defineConfig({
 
     nav: [
       { text: "Docs", link: "/getting-started" },
+      { text: "Live Demos", link: "/demos/" },
       { text: "API", link: "/reference/api-reference" },
       { text: "Studio IDE", link: "/playground/", target: "_self" },
       { text: "Benchmarks", link: "/benchmark/", target: "_self" },
@@ -149,6 +163,16 @@ export default defineConfig({
             text: "Binary Snapshots & Backups",
             link: "/guides/snapshots-and-backups",
           },
+        ],
+      },
+      {
+        text: "Live Demos",
+        items: [
+          { text: "Overview", link: "/demos/" },
+          { text: "Todo List", link: "/demos/todo" },
+          { text: "Kanban Board", link: "/demos/kanban" },
+          { text: "Calendar & Appointments", link: "/demos/calendar" },
+          { text: "Typo-Tolerant Search with UDFs", link: "/demos/search" },
         ],
       },
       {

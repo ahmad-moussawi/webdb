@@ -332,8 +332,16 @@ export function vm_step_raw(
         const cell_count: u16 = page_get_cell_count(view, page_offset);
 
         if (cell_count === 0) {
-          // JS: pc = jump_target; (empty table -> jump to EOF)
-          pc = jump_target;
+          // The first page can be empty (e.g. every row was deleted) while later pages of the
+          // chain hold rows: keep walking the chain instead of treating it as an empty table.
+          const chain_next: u32 = page_get_next_page_id(view, page_offset);
+          if (chain_next !== 0) {
+            write_u32(view, cur_off + VM_CUR_PAGE_ID, chain_next);
+            pc = instr_pc; // re-run REWIND on the next page (also handles a page fault)
+          } else {
+            // JS: pc = jump_target; (empty table -> jump to EOF)
+            pc = jump_target;
+          }
         } else {
           // JS:
           //   cursor.cellIdx = 0;
@@ -432,7 +440,10 @@ export function vm_step_raw(
                 next_offset + rel_cell_offset,
               );
             } else {
-              pc = jump_target;
+              // Empty page in the middle of the chain: step onto it and re-run NEXT_ROW so the
+              // scan continues with the following page instead of ending early.
+              write_i32(view, cur_off + VM_CUR_CELL_IDX, -1);
+              pc = instr_pc;
             }
           } else {
             pc = jump_target;

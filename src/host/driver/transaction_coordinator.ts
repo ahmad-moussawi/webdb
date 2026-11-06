@@ -151,6 +151,14 @@ export class ExclusiveLeaseQueue {
   }
 
   /**
+   * Allocates a unique transaction id (shared with explicit transactions) for work that is
+   * logged to the WAL outside of an explicit `begin()` / `commit()` pair.
+   */
+  allocateTxId(): number {
+    return this.nextTxId++;
+  }
+
+  /**
    * Acquires the Exclusive Transaction Lease.
    * Blocks until all in-flight non-transactional operations finish and acquires the cross-tab Web Lock.
    */
@@ -375,6 +383,92 @@ export class TransactionCoordinator {
 
   hasSpilledPage(pageId: number): boolean {
     return this.spilledPages.has(pageId) || this.committedWalPages.has(pageId);
+  }
+
+  /**
+   * True when the newest committed image of `pageId` lives in the WAL (not yet checkpointed
+   * into main storage). Writing such a page straight to main storage would be undone by WAL
+   * replay after a crash, so autocommit writes of it must be logged to the WAL instead.
+   */
+  hasCommittedWalPage(pageId: number): boolean {
+    return this.committedWalPages.has(pageId);
+  }
+
+  /**
+   * Durably commits already-stamped page images through the WAL as one atomic mini-transaction
+   * (PAGE_DATA frames + TX_COMMIT). Used for autocommit writes that touch pages whose older
+   * images are still in the WAL. Must run inside a queued operation (exclusive access).
+   */
+  async commitDirectPagesViaWal(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
+    if (pages.length === 0) return;
+    const txId = this.queue.allocateTxId();
+    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+
+    await this.ensureWalHeader();
+
+    const frames: Uint8Array[] = [];
+    for (const { pageId, data } of pages) {
+      const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
+      pageCopy.set(data);
+      this.committedWalPages.set(pageId, pageCopy);
+      frames.push(
+        encodeWalFrame(
+          {
+            frameType: WAL_FRAME_TYPE_PAGE_DATA,
+            flags: 0,
+            txId,
+            pageId,
+            dbSizePages,
+            frameSeq: ++this.walFrameSeq,
+          },
+          pageCopy,
+        ),
+      );
+    }
+    frames.push(
+      encodeWalFrame({
+        frameType: WAL_FRAME_TYPE_TX_COMMIT,
+        flags: 0,
+        txId,
+        pageId: 0,
+        dbSizePages,
+        frameSeq: ++this.walFrameSeq,
+      }),
+    );
+
+    await this.vfs.appendWalFrames(frames);
+    await this.vfs.flushWal?.();
+    const currentFrames = await this.vfs.getWalFrameCount();
+    this.expectedWalFrameCount = currentFrames;
+    this.txCommitCount++;
+    this.scheduleIdleTimer();
+
+    if (currentFrames >= 256 || this.txCommitCount >= 100) {
+      this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
+    }
+  }
+
+  /** Makes sure the WAL header carries this instance's salt before frames are appended. */
+  private async ensureWalHeader(): Promise<void> {
+    const currentFrames = await this.vfs.getWalFrameCount();
+    const existingHeader = await this.vfs.readWalHeader();
+    let headerValid = false;
+    if (existingHeader && currentFrames > 0) {
+      try {
+        const decoded = decodeWalFileHeader(existingHeader, true);
+        headerValid = decoded.salt1 === this.instanceSalt;
+      } catch {
+        headerValid = false;
+      }
+    }
+    if (!headerValid) {
+      await this.vfs.writeWalHeader(
+        encodeWalFileHeader({
+          checkpointSeq: this.checkpointSeq,
+          salt1: this.instanceSalt,
+        }),
+      );
+    }
   }
 
   getSpilledPage(pageId: number): Uint8Array | null {

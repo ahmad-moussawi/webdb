@@ -1,0 +1,185 @@
+/* Shared styles for the live demos. All classes are namespaced with `wd-`. */
+.wd-frame {
+  /* demos adapt to the width of the frame (the docs column), not the screen */
+  container-type: inline-size;
+  container-name: wd;
+  margin: 1.5rem 0 2rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+  background: var(--vp-c-bg);
+  overflow: hidden;
+  max-width: 100%;
+  min-width: 0;
+}
+.wd-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  padding: 0.7rem 1rem;
+  background: var(--vp-c-bg-soft);
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+.wd-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.wd-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.wd-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.wd-badge-live {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+.wd-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  animation: wd-pulse 1.6s ease-in-out infinite;
+}
+@keyframes wd-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+.wd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.wd-btn:hover:not(:disabled) {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+.wd-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.wd-btn-primary,
+.wd-btn-primary:hover:not(:disabled),
+.vp-doc a.wd-btn-primary,
+.vp-doc a.wd-btn-primary:hover {
+  /* beat the docs theme's link colour so the label stays readable */
+  color: #fff !important;
+  text-decoration: none;
+}
+.wd-btn-primary {
+  background: var(--vp-c-brand-1);
+  border-color: var(--vp-c-brand-1);
+}
+.wd-btn-primary:hover:not(:disabled) {
+  background: var(--vp-c-brand-2);
+  border-color: var(--vp-c-brand-2);
+}
+.wd-btn-danger:hover:not(:disabled) {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+.wd-btn-sm {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+}
+.wd-body {
+  padding: 1rem;
+  min-width: 0;
+  position: relative;
+}
+.wd-state {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--vp-c-text-2);
+}
+.wd-state-error {
+  color: #ef4444;
+}
+.wd-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.4rem 1rem;
+  padding: 0.55rem 1rem;
+  border-top: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  font-size: 0.74rem;
+  color: var(--vp-c-text-2);
+}
+.wd-activity code {
+  font-size: 0.72rem;
+}
+.wd-input {
+  min-width: 0;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+.wd-input:focus {
+  outline: none;
+  border-color: var(--vp-c-brand-1);
+}
+.wd-code {
+  margin: 1rem 0 0;
+  font-size: 0.78rem;
+}
+.wd-code summary {
+  cursor: pointer;
+  color: var(--vp-c-text-2);
+  font-weight: 600;
+}
+.wd-code pre {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.wd-persist {
+  margin: 0;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-text-1);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}

@@ -77,7 +77,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
           uint16_t cell_count = page_get_cell_count(page_offset);
           if (cell_count == 0) {
-            pc = jump_target;
+            uint32_t chain_next = page_get_next_page_id(page_offset);
+            if (chain_next != 0) {
+              store_u32((void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID), chain_next);
+              pc = instr_pc;
+            } else {
+              pc = jump_target;
+            }
           } else {
             store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
             uint16_t rel_cell_offset = page_get_cell_offset(page_offset, 0);
@@ -125,7 +131,8 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
                 uint16_t rel_cell_offset = page_get_cell_offset(next_offset, 0);
                 store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), next_offset + rel_cell_offset);
               } else {
-                pc = jump_target;
+                store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), -1);
+                pc = instr_pc;
               }
             } else {
               pc = jump_target;
