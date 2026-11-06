@@ -23,6 +23,10 @@ import {
 } from '../utils/storage';
 import { seedDatabaseTemplate } from '../utils/seeder';
 import { SNIPPETS } from '../constants/snippets';
+import { useResultEditing, type PendingEdit } from '../hooks/useResultEditing';
+import { useQueryHistory, type QueryHistory } from '../hooks/useQueryHistory';
+import { dbKeyFor } from '../utils/history';
+import { resolveEditability, type EditabilityResult } from '../utils/resultEditing';
 import {
   fetchRemoteWebDb,
   isRemoteDbParam,
@@ -50,6 +54,16 @@ interface StudioContextValue {
   resultColumns: string[];
   selectedRowIndex: number;
   selectedRow: any;
+  /** Result-grid editing: which cells are editable, staged edits, and actions. */
+  resultEditability: EditabilityResult;
+  pendingEdits: Record<string, PendingEdit>;
+  pendingEditCount: number;
+  isApplyingEdits: boolean;
+  stageEdit: (row: number, col: string, value: PendingEdit['value']) => void;
+  applyEdits: () => Promise<void>;
+  discardEdits: () => void;
+  /** Query history of the open database. */
+  history: QueryHistory;
   rowInspectorMode: RowInspectorMode;
   timingMs: string;
   statusText: string;
@@ -401,6 +415,20 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }, 3500);
   }, []);
 
+  const {
+    editability: resultEditability,
+    setEditability: setResultEditability,
+    pendingEdits,
+    pendingCount: pendingEditCount,
+    isApplyingEdits,
+    stageEdit,
+    discardEdits,
+    applyEdits,
+    confirmDiscardEdits,
+  } = useResultEditing({ db, resultRows, setResultRows, showToast });
+
+  const history = useQueryHistory(dbKeyFor(activeStorage, activeDbName), showToast);
+
   // Save tabs debounce
   const saveTimerRef = useRef<any>(null);
   const persistTabs = useCallback((currentTabs: EditorTab[], curActiveId: string, counter: number) => {
@@ -510,6 +538,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     initialData?: Uint8Array,
     preserveRemoteUrl?: string | null,
   ) => {
+    if (!confirmDiscardEdits()) return;
+    discardEdits();
+    setResultEditability(null);
     const activeCore = coreModeOverride ?? coreMode;
     setStatusText(`OPENING DB (${activeCore.toUpperCase()})...`);
     setStatusColor('#f59e0b');
@@ -583,7 +614,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setStatusText(`READY (${activeCore.toUpperCase()})`);
       setStatusColor('var(--emerald)');
     }
-  }, [coreMode, db, showToast]);
+  }, [coreMode, db, showToast, confirmDiscardEdits, discardEdits, setResultEditability]);
 
   const setCoreMode = useCallback(async (mode: CoreEngineMode) => {
     setCoreModeState(mode);
@@ -848,6 +879,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Execute User Code
   const executeCode = useCallback(async (codeOverride?: string) => {
+    const pendingTab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    const pendingCode = typeof codeOverride === 'string' ? codeOverride : (pendingTab?.code || '');
+    if (pendingCode && typeof pendingCode === 'string' && pendingCode.trim()) {
+      if (!confirmDiscardEdits()) return;
+    }
+
     let currentDb = db;
     if (!currentDb) {
       currentDb = await WebDB.open({ name: activeDbName, storage: activeStorage, core: coreMode });
@@ -880,6 +917,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       },
     };
 
+    let canonical: string | null = null;
     try {
       const trimmed = rawCode.trim();
       let codeToRun = rawCode;
@@ -917,7 +955,22 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       let result = await fn(studioDbProxy, WebDB, customConsole);
 
+      let queryShape: any = null;
       if (result && typeof result.toArray === 'function') {
+        if (typeof result.getQueryShape === 'function') {
+          try {
+            queryShape = result.getQueryShape();
+          } catch {
+            queryShape = null;
+          }
+        }
+        if (typeof result.toCanonicalString === 'function') {
+          try {
+            canonical = result.toCanonicalString();
+          } catch {
+            canonical = null;
+          }
+        }
         try {
           const exp = await result.explain();
           setExplainOutput(exp);
@@ -960,6 +1013,33 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setResultTab('results');
       const meta = await currentDb.listTables();
       setTables(meta);
+
+      void history.record({
+        code: rawCode,
+        canonical,
+        status: 'success',
+        durationMs: Number(totalMs),
+        rowCount: Array.isArray(result) ? result.length : result !== undefined ? 1 : 0,
+      });
+
+      discardEdits();
+      if (queryShape && Array.isArray(result)) {
+        const cols: string[] = [];
+        const seen = new Set<string>();
+        for (const r of result) {
+          if (r && typeof r === 'object') {
+            for (const k of Object.keys(r)) {
+              if (!seen.has(k)) {
+                seen.add(k);
+                cols.push(k);
+              }
+            }
+          }
+        }
+        setResultEditability(resolveEditability(queryShape, cols, meta as any));
+      } else {
+        setResultEditability(null);
+      }
     } catch (err: any) {
       const totalMs = (performance.now() - t0).toFixed(2);
       setTimingMs(`${totalMs} ms`);
@@ -972,11 +1052,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
       captured.push(`[Execution Error] ${err.stack || err.message}`);
       setLogs(captured);
+      void history.record({
+        code: rawCode,
+        canonical,
+        status: 'error',
+        error: err.message || String(err),
+        durationMs: Number(totalMs),
+        rowCount: 0,
+      });
       setResultRows([]);
       setResultColumns([]);
       setSelectedRowIndex(-1);
+      discardEdits();
+      setResultEditability(null);
     }
-  }, [db, activeDbName, activeStorage]);
+  }, [db, activeDbName, activeStorage, confirmDiscardEdits, discardEdits, setResultEditability, history.record]);
 
   const selectRow = useCallback((idx: number) => {
     setSelectedRowIndex(idx);
@@ -1069,6 +1159,14 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         resultColumns,
         selectedRowIndex,
         selectedRow,
+        resultEditability,
+        pendingEdits,
+        pendingEditCount,
+        isApplyingEdits,
+        stageEdit,
+        applyEdits,
+        discardEdits,
+        history,
         rowInspectorMode,
         timingMs,
         statusText,

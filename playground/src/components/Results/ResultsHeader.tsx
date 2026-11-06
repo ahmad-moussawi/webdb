@@ -14,6 +14,7 @@ export const ResultsHeader: React.FC = () => {
     statusColor,
     isResultsOpen,
     toggleResults,
+    history,
   } = useStudio();
 
   return (
@@ -66,6 +67,22 @@ export const ResultsHeader: React.FC = () => {
           {logs.length > 0 && (
             <span id="logCountBadge" className="badge-count">
               {logs.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          id="tabHistoryBtn"
+          className={`result-tab-btn ${resultTab === 'history' ? 'active' : ''}`}
+          onClick={() => {
+            if (!isResultsOpen) toggleResults();
+            setResultTab('history');
+          }}
+        >
+          HISTORY
+          {history.entries.length > 0 && (
+            <span id="historyCountBadge" className="badge-count">
+              {history.entries.length}
             </span>
           )}
         </button>

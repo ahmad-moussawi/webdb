@@ -293,7 +293,7 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
         storage: 'memory',
       }),
     ).toBe(
-      'https://ahmad-moussawi.github.io/webdb/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory',
+      'https://webdb.dev/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory',
     );
   });
 });

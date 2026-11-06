@@ -1,18 +1,27 @@
 import type { EditorTab, VfsType, ThemeMode, RowInspectorMode } from '../types/studio';
 
+export const STUDIO_DB_NAME = 'WebDBStudioDB';
+/** v2 added the `history` object store (query history, per database). */
+export const STUDIO_DB_VERSION = 2;
+
 export function openStudioMetaDB(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
     if (typeof window === 'undefined' || !window.indexedDB) return resolve(null);
     try {
-      const req = indexedDB.open('WebDBStudioDB', 1);
+      const req = indexedDB.open(STUDIO_DB_NAME, STUDIO_DB_VERSION);
       req.onupgradeneeded = (e) => {
         const d = (e.target as IDBOpenDBRequest).result;
         if (!d.objectStoreNames.contains('state')) {
           d.createObjectStore('state');
         }
+        if (!d.objectStoreNames.contains('history')) {
+          const store = d.createObjectStore('history', { keyPath: 'id' });
+          store.createIndex('byDb', 'dbKey', { unique: false });
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
     } catch {
       resolve(null);
     }

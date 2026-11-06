@@ -351,6 +351,17 @@ export interface ExplainOutput {
   assembly: string;
 }
 
+export interface QueryShape {
+  /** Source table name, or `'__subquery__'` when selecting from a derived table. */
+  table: string;
+  fromSubquery: boolean;
+  joins: Array<{ type: JoinType; table: string }>;
+  /** Explicit projections. Empty when the query selects all columns. */
+  select: Array<{ alias: string; sourceCol?: string; computed: boolean }>;
+  /** True when the query groups, aggregates or uses HAVING. */
+  grouped: boolean;
+}
+
 export interface JoinClause {
   type: JoinType;
   table: string;
@@ -667,8 +678,79 @@ export class QueryBuilder {
     return this;
   }
 
+  /**
+   * Deterministic string describing everything that affects this query's result
+   * (source, joins, filters with their values, projections, grouping, ordering, limits).
+   * Two builders written differently but meaning the same query produce the same string.
+   * Useful for de-duplicating queries (e.g. history, caching keys).
+   */
+  toCanonicalString(): string {
+    const replacer = (_key: string, value: unknown): unknown => {
+      if (value === undefined || typeof value === 'function') return undefined;
+      if (typeof value === 'bigint') return `${value}n`;
+      if (value instanceof Uint8Array) {
+        return `0x${Array.from(value, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+      }
+      if (isQueryBuilder(value)) return `(${(value as QueryBuilder).toCanonicalString()})`;
+      return value;
+    };
+    return JSON.stringify(
+      {
+        from: this.sourceSubquery ?? this.tableName,
+        joins: this.joins.map((j) => ({
+          type: j.type,
+          table: j.table,
+          leftCol: j.leftCol,
+          op: j.op,
+          rightCol: j.rightCol,
+        })),
+        filters: this.filters,
+        select: this.selectFields,
+        groupCols: this.groupCols,
+        groupKeys: this.groupKeys,
+        aggs: this.aggExprs,
+        having: this.havingFilters,
+        order:
+          this.orderKeys.length > 0
+            ? this.orderKeys
+            : this.sortCol
+              ? [{ col: this.sortCol, dir: this.sortDir }]
+              : [],
+        limit: this.limitCount,
+        offset: this.offsetCount,
+      },
+      replacer,
+    );
+  }
+
   getJoins(): JoinClause[] {
     return this.joins;
+  }
+
+  /**
+   * Returns a read-only structural description of this query (source table,
+   * joined tables, projected columns and grouping). Tools such as result grids
+   * use it to decide whether result rows map 1:1 onto records of real tables.
+   */
+  getQueryShape(): QueryShape {
+    return {
+      table: this.tableName,
+      fromSubquery: this.sourceSubquery !== undefined,
+      joins: this.joins.map((j) => ({ type: j.type, table: j.table })),
+      select: this.selectFields.map((f) => ({
+        alias: f.alias,
+        sourceCol: f.sourceCol,
+        computed:
+          f.subquery !== undefined ||
+          typeof f.fn === 'string' ||
+          (f.expr !== undefined && f.expr.type !== 'col'),
+      })),
+      grouped:
+        this.groupCols.length > 0 ||
+        this.groupKeys.length > 0 ||
+        this.aggExprs.length > 0 ||
+        this.havingFilters.length > 0,
+    };
   }
 
   where(exprSql: string): this;

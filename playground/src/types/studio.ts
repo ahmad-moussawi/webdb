@@ -33,7 +33,7 @@ export interface TypeTagMeta {
 export type ThemeMode = 'auto' | 'dark' | 'light';
 export type VfsType = 'memory' | 'idb';
 export type CoreEngineMode = 'js' | 'wasm';
-export type ResultTabType = 'results' | 'structure' | 'bytecode' | 'console' | 'pages' | 'pool';
+export type ResultTabType = 'results' | 'structure' | 'bytecode' | 'console' | 'history' | 'pages' | 'pool';
 export type RowInspectorMode = 'fields' | 'json';
 
 export interface SeedingProgress {

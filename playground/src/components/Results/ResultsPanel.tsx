@@ -5,6 +5,7 @@ import { DataGrid } from './DataGrid';
 import { StructureView } from './StructureView';
 import { BytecodeView } from './BytecodeView';
 import { ConsoleView } from './ConsoleView';
+import { HistoryView } from './HistoryView';
 import { PageInspector } from './PageInspector';
 import { BufferPoolInspector } from './BufferPoolInspector';
 
@@ -25,6 +26,7 @@ export const ResultsPanel: React.FC = () => {
           {resultTab === 'pool' && <BufferPoolInspector />}
           {resultTab === 'bytecode' && <BytecodeView />}
           {resultTab === 'console' && <ConsoleView />}
+          {resultTab === 'history' && <HistoryView />}
         </div>
       )}
     </div>
