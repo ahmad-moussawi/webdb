@@ -6,25 +6,48 @@ const src = (p: string) => fileURLToPath(new URL(`../../src/${p}`, import.meta.u
 const siteHostname = process.env.SITE_HOSTNAME;
 const basePath = process.env.DOCS_BASE || "/";
 const isCI = Boolean(process.env.CI || process.env.SITE_HOSTNAME);
+const isWebDbDev = Boolean(
+  siteHostname &&
+    (siteHostname === "https://webdb.dev" ||
+      siteHostname === "http://webdb.dev" ||
+      siteHostname.includes("webdb.dev"))
+);
 
 const googleAnalyticsHead: HeadConfig[] = isCI
-  ? [
-      [
-        "script",
-        {
-          async: "",
-          src: "https://www.googletagmanager.com/gtag/js?id=G-SK750XLF2Y",
-        },
-      ],
-      [
-        "script",
-        {},
-        `window.dataLayer = window.dataLayer || [];
+  ? isWebDbDev
+    ? [
+        [
+          "script",
+          {
+            async: "",
+            src: "https://www.googletagmanager.com/gtm.js?id=GTM-TTVXTF3R",
+          },
+        ],
+        [
+          "script",
+          {},
+          `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());`,
+        ],
+      ]
+    : [
+        [
+          "script",
+          {
+            async: "",
+            src: "https://www.googletagmanager.com/gtag/js?id=G-SK750XLF2Y",
+          },
+        ],
+        [
+          "script",
+          {},
+          `window.dataLayer = window.dataLayer || [];
 function gtag(){dataLayer.push(arguments);}
 gtag('js', new Date());
 gtag('config', 'G-SK750XLF2Y');`,
-      ],
-    ]
+        ],
+      ]
   : [];
 
 export default defineConfig({
