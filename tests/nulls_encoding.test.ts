@@ -7,10 +7,11 @@ import {
   DataType,
   ColumnFlag,
   TableMeta,
+  attachTableMetaHelpers,
 } from '../src/types/index.js';
 
 describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_encoding.test.ts)', () => {
-  const table: TableMeta = {
+  const table: TableMeta = attachTableMetaHelpers({
     tableId: 1,
     columnCount: 6,
     rootPageId: 2,
@@ -27,7 +28,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
       { type: DataType.UUID, flags: ColumnFlag.NONE, colOffset: 24, name: 'uuid_val' },
       { type: DataType.TEXT, flags: ColumnFlag.NONE, colOffset: 40, name: 'text_val' },
     ],
-  };
+  });
 
   it('1. Zero-Byte NULL Storage: Rows with NULL columns occupy strictly fewer bytes', () => {
     const fullRow = {
@@ -72,7 +73,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
     const uuidStr = '550e8400-e29b-41d4-a716-446655440000';
     const ulidStr = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 
-    const testTable: TableMeta = {
+    const testTable: TableMeta = attachTableMetaHelpers({
       tableId: 2,
       columnCount: 5,
       rootPageId: 3,
@@ -88,7 +89,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
         { type: DataType.UUID, flags: 0, colOffset: 20, name: 'uid' },
         { type: DataType.ULID, flags: 0, colOffset: 36, name: 'ulid' },
       ],
-    };
+    });
 
     // Test minimum values
     const minRow = {
@@ -126,7 +127,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
   });
 
   it('3. Empty String vs. NULL Text are strictly distinguished', () => {
-    const textTable: TableMeta = {
+    const textTable: TableMeta = attachTableMetaHelpers({
       tableId: 3,
       columnCount: 2,
       rootPageId: 4,
@@ -139,7 +140,7 @@ describe('Test Suite 4: SQLite 3VL NULL & Data Type Serialization (tests/nulls_e
         { type: DataType.INT32, flags: 0, colOffset: 0, name: 'id' },
         { type: DataType.TEXT, flags: 0, colOffset: 0, name: 'txt' },
       ],
-    };
+    });
 
     const emptyRow = { id: 1, txt: '' }; // Non-null empty string
     const nullRow = { id: 2, txt: null }; // NULL

@@ -88,15 +88,12 @@ export async function runMigrations(
   db: WebDB,
   migrations: Migration[] = MIGRATIONS,
 ): Promise<void> {
-  // 1. Ensure the _migrations tracking table exists
-  const tables = await db.listTables();
-  if (!tables.some((t) => t.name === "_migrations")) {
-    await db.createTable("_migrations", [
-      { name: "version", type: "INT32", primaryKey: true },
-      { name: "name", type: "TEXT", notNull: true },
-      { name: "applied_at", type: "INT64", notNull: true },
-    ]);
-  }
+  // 1. Ensure the _migrations tracking table exists idempotently
+  await db.createTableIfNotExists("_migrations", [
+    { name: "version", type: "INT32", primaryKey: true },
+    { name: "name", type: "TEXT", notNull: true },
+    { name: "applied_at", type: "INT64", notNull: true },
+  ]);
 
   // 2. Read already-applied versions
   const appliedRows = await db
@@ -130,52 +127,70 @@ export async function runMigrations(
 
 ---
 
-## 2. Idempotent Migration Helpers
+## 2. Built-in Idempotent DDL & Schema Inspection
 
-When recovering from custom initialization scripts or sharing migration utilities across multi-tenant databases, idempotent helpers (`createTableIfNotExists`, `addColumnIfNotExists`, `createIndexIfNotExists`) prevent duplicate-object errors:
+WebDB provides first-class idempotent DDL methods and schema inspection APIs directly on `db` (and inside transactions via `tx`), removing the need for custom userland wrapper helpers:
 
 ```typescript
-import { WebDB, type ColumnDef, type CreateIndexOptions } from "@ahmadmoussawi/webdb";
+// --- Idempotent Tables ---
+// Creates table if missing; returns existing TableMeta without error if it already exists
+await tx.createTableIfNotExists("users", [
+  { name: "id", type: "UUID", primaryKey: true },
+  { name: "email", type: "TEXT", notNull: true },
+]);
 
-export async function createTableIfNotExists(
-  tx: WebDB,
-  tableName: string,
-  columns: ColumnDef[],
-): Promise<void> {
-  const tables = await tx.listTables();
-  if (!tables.some((t) => t.name.toLowerCase() === tableName.toLowerCase())) {
-    await tx.createTable(tableName, columns);
-  }
+// Drops table if present; returns false without throwing if table doesn't exist
+const dropped = await tx.dropTableIfExists("deprecated_table");
+
+// --- Idempotent Columns ---
+// Safely adds column if missing; no-op if column already exists
+await tx.addColumnIfNotExists(
+  "users",
+  { name: "is_active", type: "INT32", notNull: true },
+  1, // defaultValue applied to all existing rows
+);
+
+// Safely drops column if present; no-op if already dropped
+await tx.dropColumnIfExists("users", "legacy_status");
+
+// --- Idempotent Indexes ---
+// Safely creates index if missing; no-op if index with same name or columns exists
+await tx.createIndexIfNotExists("users", ["email"], {
+  name: "idx_users_email",
+  unique: true,
+});
+
+// Safely drops index; returns false without throwing if index is not found
+await tx.dropIndexIfExists("idx_users_old_index");
+```
+
+### Inspecting Schemas Before Running DDL
+
+You can also inspect database schema and table metadata directly:
+
+```typescript
+// Fast table & column checks on db / tx:
+if (!(await tx.hasTable("orders"))) {
+  // table does not exist
 }
 
-export async function addColumnIfNotExists(
-  tx: WebDB,
-  tableName: string,
-  column: ColumnDef,
-  defaultValue?: unknown,
-): Promise<void> {
-  const table = await tx.getTable(tableName);
-  const exists = table.columns.some(
-    (c) => c.name.toLowerCase() === column.name.toLowerCase(),
-  );
-  if (!exists) {
-    await tx.addColumn(tableName, column, defaultValue);
-  }
+if (!(await tx.hasColumn("users", "phone"))) {
+  await tx.addColumn("users", { name: "phone", type: "TEXT" });
 }
 
-export async function createIndexIfNotExists(
-  tx: WebDB,
-  tableName: string,
-  columns: string | string[],
-  options?: CreateIndexOptions,
-): Promise<void> {
-  const cols = Array.isArray(columns) ? columns : [columns];
-  const expectedName = options?.name ?? `idx_${tableName}_${cols.join("_")}`;
+if (!(await tx.hasIndex("users", "idx_users_phone"))) {
+  await tx.createIndex("users", "phone", { name: "idx_users_phone" });
+}
 
-  const existing = await tx.listIndexes(tableName);
-  if (!existing.some((idx) => idx.name.toLowerCase() === expectedName.toLowerCase())) {
-    await tx.createIndex(tableName, cols, { ...options, name: expectedName });
-  }
+// Inspect table metadata and columns:
+const meta = await tx.getTable("users");
+if (meta.hasColumn("phone")) {
+  const col = meta.getColumn("phone");
+  console.log(`Column ${col?.name} has type ${col?.type}`);
+}
+
+if (meta.hasIndex("idx_users_phone") || meta.hasIndex(["phone"])) {
+  console.log("Index is active on users(phone)");
 }
 ```
 

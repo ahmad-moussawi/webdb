@@ -10,6 +10,7 @@ import {
   DataType,
   ColumnFlag,
   TableMeta,
+  attachTableMetaHelpers,
   createWasmMemory,
   createWasmCore,
 } from "../src/index.ts";
@@ -363,7 +364,7 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   });
 
   it("5. validates record bounds and rejects corrupt/mismatched cells in page_deserialize_row (JS and WASM parity)", () => {
-    const table: TableMeta = {
+    const table: TableMeta = attachTableMetaHelpers({
       tableId: 1,
       flags: 1,
       rootPageId: 2,
@@ -392,7 +393,7 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
           name: "payload",
         },
       ],
-    };
+    });
 
     // Allocate a multi-page buffer (like the buffer pool) to ensure adjacent slot bytes exist
     const mem = createWasmMemory();

@@ -217,6 +217,125 @@ export interface TableMeta {
   primaryKey?: string[];
   indexes?: IndexDescriptor[];
   schemaVersion?: number;
+
+  hasColumn(columnName: string): boolean;
+  getColumn(columnName: string): ColumnMeta | undefined;
+  hasIndex(indexNameOrColumns: string | string[]): boolean;
+  getIndex(indexNameOrColumns: string | string[]): IndexDescriptor | undefined;
+}
+
+export function attachTableMetaHelpers<
+  T extends {
+    columns: ColumnMeta[];
+    indexes?: IndexDescriptor[];
+  },
+>(
+  meta: T,
+): T & {
+  hasColumn(columnName: string): boolean;
+  getColumn(columnName: string): ColumnMeta | undefined;
+  hasIndex(indexNameOrColumns: string | string[]): boolean;
+  getIndex(indexNameOrColumns: string | string[]): IndexDescriptor | undefined;
+} {
+  const m = meta as any;
+  m.hasColumn = function (columnName: string): boolean {
+    const target = columnName.toLowerCase();
+    return this.columns.some((c: ColumnMeta) => c.name.toLowerCase() === target);
+  };
+  m.getColumn = function (columnName: string): ColumnMeta | undefined {
+    const target = columnName.toLowerCase();
+    return this.columns.find((c: ColumnMeta) => c.name.toLowerCase() === target);
+  };
+  m.hasIndex = function (indexNameOrColumns: string | string[]): boolean {
+    return this.getIndex(indexNameOrColumns) !== undefined;
+  };
+  m.getIndex = function (
+    indexNameOrColumns: string | string[],
+  ): IndexDescriptor | undefined {
+    const indexes: IndexDescriptor[] = this.indexes ?? [];
+    if (typeof indexNameOrColumns === 'string') {
+      const target = indexNameOrColumns.toLowerCase();
+      const byName = indexes.find((idx) => idx.name.toLowerCase() === target);
+      if (byName) return byName;
+      return indexes.find((idx) => {
+        if (idx.columnCount === 1) {
+          const col = this.columns[idx.columnIndices[0]];
+          return col && col.name.toLowerCase() === target;
+        }
+        return false;
+      });
+    }
+    const targetCols = indexNameOrColumns.map((c) => c.toLowerCase());
+    return indexes.find((idx) => {
+      if (idx.columnCount !== targetCols.length) return false;
+      for (let i = 0; i < idx.columnCount; i++) {
+        const col = this.columns[idx.columnIndices[i]];
+        if (!col || col.name.toLowerCase() !== targetCols[i]) return false;
+      }
+      return true;
+    });
+  };
+  return m;
+}
+
+export function hasColumn(meta: TableMeta, columnName: string): boolean {
+  if (typeof meta.hasColumn === 'function') {
+    return meta.hasColumn(columnName);
+  }
+  const target = columnName.toLowerCase();
+  return meta.columns.some((c) => c.name.toLowerCase() === target);
+}
+
+export function getColumn(
+  meta: TableMeta,
+  columnName: string,
+): ColumnMeta | undefined {
+  if (typeof meta.getColumn === 'function') {
+    return meta.getColumn(columnName);
+  }
+  const target = columnName.toLowerCase();
+  return meta.columns.find((c) => c.name.toLowerCase() === target);
+}
+
+export function hasIndex(
+  meta: TableMeta,
+  indexNameOrColumns: string | string[],
+): boolean {
+  if (typeof meta.hasIndex === 'function') {
+    return meta.hasIndex(indexNameOrColumns);
+  }
+  return getIndex(meta, indexNameOrColumns) !== undefined;
+}
+
+export function getIndex(
+  meta: TableMeta,
+  indexNameOrColumns: string | string[],
+): IndexDescriptor | undefined {
+  if (typeof meta.getIndex === 'function') {
+    return meta.getIndex(indexNameOrColumns);
+  }
+  const indexes: IndexDescriptor[] = meta.indexes ?? [];
+  if (typeof indexNameOrColumns === 'string') {
+    const target = indexNameOrColumns.toLowerCase();
+    const byName = indexes.find((idx) => idx.name.toLowerCase() === target);
+    if (byName) return byName;
+    return indexes.find((idx) => {
+      if (idx.columnCount === 1) {
+        const col = meta.columns[idx.columnIndices[0]];
+        return col && col.name.toLowerCase() === target;
+      }
+      return false;
+    });
+  }
+  const targetCols = indexNameOrColumns.map((c) => c.toLowerCase());
+  return indexes.find((idx) => {
+    if (idx.columnCount !== targetCols.length) return false;
+    for (let i = 0; i < idx.columnCount; i++) {
+      const col = meta.columns[idx.columnIndices[i]];
+      if (!col || col.name.toLowerCase() !== targetCols[i]) return false;
+    }
+    return true;
+  });
 }
 
 // Backward-compat alias
@@ -304,7 +423,9 @@ export type AlterTableOperation =
   | { type: 'renameTable'; newName: string }
   | { type: 'renameColumn'; from: string; to: string }
   | { type: 'addColumn'; column: ColumnDefinition; defaultValue?: DbValue }
-  | { type: 'dropColumn'; column: string };
+  | { type: 'addColumnIfNotExists'; column: ColumnDefinition; defaultValue?: DbValue }
+  | { type: 'dropColumn'; column: string }
+  | { type: 'dropColumnIfExists'; column: string };
 
 export class IdentifierTooLongError extends Error {
   constructor(identifier: string, limit: number = 64) {

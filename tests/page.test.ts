@@ -13,11 +13,12 @@ import {
   TableMeta,
   RowSizeLimitExceededError,
   NotNullConstraintError,
+  attachTableMetaHelpers,
 } from '../src/types/index.js';
 import { PAGE_SIZE } from '../src/constants.js';
 
 describe('Slotted Page & Row Format', () => {
-  const table: TableMeta = {
+  const table: TableMeta = attachTableMetaHelpers({
     tableId: 1,
     flags: 1,
     rootPageId: 2,
@@ -32,7 +33,7 @@ describe('Slotted Page & Row Format', () => {
       { type: DataType.INT32, flags: ColumnFlag.NONE, colOffset: 4, name: 'age' },
       { type: DataType.FLOAT64, flags: ColumnFlag.NONE, colOffset: 8, name: 'score' },
     ],
-  };
+  });
 
   it('initializes an empty slotted page with 4KB size', () => {
     const buffer = new ArrayBuffer(PAGE_SIZE);

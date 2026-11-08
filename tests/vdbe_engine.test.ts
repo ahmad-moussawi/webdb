@@ -16,6 +16,7 @@ import {
   DataType,
   ColumnFlag,
   TableMeta,
+  attachTableMetaHelpers,
   OpCode,
   VmStatus,
   TooManyOrderByColumnsError,
@@ -36,7 +37,7 @@ import {
 } from "../src/host/driver/buffer_pool_driver.js";
 
 describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", () => {
-  const testTable: TableMeta = {
+  const testTable: TableMeta = attachTableMetaHelpers({
     tableId: 1,
     flags: 1,
     rootPageId: 2,
@@ -65,7 +66,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
         name: "val",
       },
     ],
-  };
+  });
 
   describe("Milestone 1 & 2: 3-Valued Logic (3VL) & Register Comparisons", () => {
     it("evaluates NULL comparisons as UNKNOWN and never jumps on =, !=, <, <=, >, >=", () => {
@@ -902,7 +903,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     });
 
     it("enforces hard compile-time ceilings: max 8 sort columns and max 8 grouping columns", () => {
-      const dummyTable: TableMeta = {
+      const dummyTable: TableMeta = attachTableMetaHelpers({
         tableId: 1,
         flags: 1,
         rootPageId: 2,
@@ -919,7 +920,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
             colOffset: 0,
           },
         ],
-      };
+      });
 
       // 9 sort columns -> throws TooManyOrderByColumnsError
       expect(() =>
@@ -962,7 +963,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
       const view = new DataView(buffer);
 
-      const tableMeta: TableMeta = {
+      const tableMeta: TableMeta = attachTableMetaHelpers({
         tableId: 10,
         flags: 1,
         rootPageId: 2,
@@ -991,7 +992,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
             colOffset: 0,
           },
         ],
-      };
+      });
 
       page_init(view, 4096);
 
@@ -1055,7 +1056,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
       const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
       const view = new DataView(buffer);
 
-      const tableMeta: TableMeta = {
+      const tableMeta: TableMeta = attachTableMetaHelpers({
         tableId: 20,
         flags: 1,
         rootPageId: 2,
@@ -1084,7 +1085,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
             colOffset: 0,
           },
         ],
-      };
+      });
 
       page_init(view, 4096);
 

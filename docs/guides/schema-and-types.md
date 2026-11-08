@@ -86,37 +86,93 @@ const rows = await db.from("logs").toArray();
 
 ## 4. Inspecting & Dropping Tables
 
-### Get Metadata for a Single Table (`db.getTable`)
+### Check If a Table Exists (`db.hasTable`)
 
-Returns the [`TableMeta`](./src/types/index.ts#L203-L216) descriptor including column definitions, primary key, row count estimate, and attached indexes. Throws `TableNotFoundError` if the table does not exist.
+Checks whether a table is registered in the database catalog:
+
+```typescript
+if (await db.hasTable("users")) {
+  console.log("Users table exists!");
+}
+```
+
+### Fast Table Name Listing (`db.getTableNames`)
+
+Returns an array of string table names. This is an $O(1)$-per-table call that reads only Page 1 active table descriptors without decoding column catalog chains:
+
+```typescript
+const tableNames = await db.getTableNames();
+console.log(tableNames); // ['users', 'orders', 'items']
+```
+
+### Idempotent Table Creation (`db.createTableIfNotExists`)
+
+Creates the table if it does not already exist, or returns the existing table's metadata without throwing `TableAlreadyExistsError`:
+
+```typescript
+const meta = await db.createTableIfNotExists("users", [
+  { name: "id", type: "UUID", primaryKey: true },
+  { name: "name", type: "TEXT", notNull: true },
+]);
+```
+
+### Get Table Metadata (`db.getTable`)
+
+Returns the [`TableMeta`](./src/types/index.ts#L207-L230) descriptor including column definitions, primary key, row count estimate, and attached indexes. Throws `TableNotFoundError` if the table does not exist.
+
+`TableMeta` includes built-in helper methods for inspecting columns and indexes:
 
 ```typescript
 const meta = await db.getTable("users");
 console.log(meta.name); // 'users'
-console.log(meta.columns); // [{ name: 'id', type: 6, ... }, ...]
 console.log(meta.rowCountEstimate); // 42
+
+// Check columns (case-insensitive):
+if (meta.hasColumn("email")) {
+  const col = meta.getColumn("email");
+  console.log(`Column ${col?.name} has type ${col?.type}`);
+}
+
+// Check indexes by name or column sequence:
+if (meta.hasIndex("idx_users_email") || meta.hasIndex(["email"])) {
+  const idx = meta.getIndex("email");
+  console.log(`Index ${idx?.name} is active`);
+}
+```
+
+### Inspect Columns & Indexes Directly (`db.hasColumn`, `db.hasIndex`)
+
+You can also check column or index existence directly on the database handle without manually fetching `TableMeta`:
+
+```typescript
+if (await db.hasColumn("users", "email")) {
+  console.log("Email column is present");
+}
+
+if (await db.hasIndex("users", "email")) {
+  console.log("Email column is indexed");
+}
 ```
 
 ### List All Tables (`db.listTables`)
 
-Returns an array of `TableMeta` objects for all tables currently in the database. This is also a convenient way to check if a table already exists when initializing your app:
+Returns an array of full `TableMeta` objects for all tables currently in the database:
 
 ```typescript
 const tables = await db.listTables();
-const existingNames = new Set(tables.map((t) => t.name));
-
-if (!existingNames.has("users")) {
-  await db.createTable("users", [
-    { name: "id", type: "UUID", primaryKey: true },
-    { name: "name", type: "TEXT", notNull: true },
-  ]);
+for (const table of tables) {
+  console.log(`Table ${table.name} has ${table.columns.length} columns`);
 }
 ```
 
-### Drop a Table (`db.dropTable`)
+### Drop a Table (`db.dropTable` & `db.dropTableIfExists`)
 
 Deletes the table, frees all of its data pages, and removes all associated indexes:
 
 ```typescript
+// Throws TableNotFoundError if table does not exist:
 await db.dropTable("logs");
+
+// Idempotent: returns true if dropped, false if table didn't exist (no error):
+const dropped = await db.dropTableIfExists("logs");
 ```

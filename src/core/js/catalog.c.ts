@@ -39,6 +39,7 @@ import {
   IndexDescriptor,
   CatalogPageHeader,
   TableMeta,
+  attachTableMetaHelpers,
   TableAlreadyExistsError,
   TableNotFoundError,
   TooManyColumnsError,
@@ -1496,12 +1497,12 @@ export function catalog_create_table(
     primary_key.push(pk_cols[i].name);
   }
 
-  return {
+  return attachTableMetaHelpers({
     ...desc,
     columns,
     primaryKey: primary_key.length > 0 ? primary_key : undefined,
     indexes: indexes.length > 0 ? indexes : undefined,
-  };
+  });
 }
 
 /**
@@ -1547,12 +1548,12 @@ export function catalog_load_table_meta(
     }
   }
 
-  return {
+  return attachTableMetaHelpers({
     ...desc,
     columns,
     primaryKey: primary_key.length > 0 ? primary_key : undefined,
     indexes: indexes.length > 0 ? indexes : undefined,
-  };
+  });
 }
 
 /**

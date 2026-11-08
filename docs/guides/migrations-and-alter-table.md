@@ -68,6 +68,20 @@ await db.alterTable("users", {
   column: { name: "points", type: "INT32", notNull: true },
   defaultValue: 0,
 });
+
+// Idempotent variant (skips without error if column already exists):
+await db.addColumnIfNotExists(
+  "users",
+  { name: "points", type: "INT32", notNull: true },
+  0,
+);
+
+// Or via alterTable with addColumnIfNotExists:
+await db.alterTable("users", {
+  type: "addColumnIfNotExists",
+  column: { name: "points", type: "INT32", notNull: true },
+  defaultValue: 0,
+});
 ```
 
 > [!IMPORTANT]
@@ -88,6 +102,15 @@ await db.dropColumn("users", "bio");
 // Or via alterTable:
 await db.alterTable("users", {
   type: "dropColumn",
+  column: "points",
+});
+
+// Idempotent variant (skips without error if column does not exist):
+await db.dropColumnIfExists("users", "points");
+
+// Or via alterTable with dropColumnIfExists:
+await db.alterTable("users", {
+  type: "dropColumnIfExists",
   column: "points",
 });
 ```

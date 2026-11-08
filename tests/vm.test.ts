@@ -15,13 +15,14 @@ import {
   ColumnFlag,
   TableMeta,
   VmStatus,
+  attachTableMetaHelpers,
 } from '../src/types/index.js';
 import {
   TOTAL_MEMORY_BYTES,
 } from '../src/constants.js';
 
 describe('Bytecode Virtual Machine (VDBE)', () => {
-  const table: TableMeta = {
+  const table: TableMeta = attachTableMetaHelpers({
     tableId: 1,
     flags: 1,
     rootPageId: 2,
@@ -35,7 +36,7 @@ describe('Bytecode Virtual Machine (VDBE)', () => {
       { type: DataType.TEXT, flags: ColumnFlag.NONE, colOffset: 0, name: 'title' },
       { type: DataType.FLOAT64, flags: ColumnFlag.NONE, colOffset: 4, name: 'price' },
     ],
-  };
+  });
 
   it('compiles and executes a bytecode plan to filter and emit matching rows', () => {
     const buffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);

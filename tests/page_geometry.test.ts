@@ -25,11 +25,12 @@ import {
   ColumnFlag,
   TableMeta,
   RowSizeLimitExceededError,
+  attachTableMetaHelpers,
 } from "../src/types/index.ts";
 import { WebDB } from "../src/host/api/webdb.ts";
 
 describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)", () => {
-  const table: TableMeta = {
+  const table: TableMeta = attachTableMetaHelpers({
     tableId: 1,
     columnCount: 3,
     rootPageId: 2,
@@ -58,7 +59,7 @@ describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
         name: "extra",
       },
     ],
-  };
+  });
 
   it("1. Empty Page Initialization", () => {
     // Test Page 1 initialization

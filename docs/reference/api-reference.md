@@ -39,27 +39,50 @@ import {
 
 ### Schema & DDL (`CREATE`, `ALTER`, `DROP`)
 
-| Method                | Signature                                                                                            | Description                                                                   |
-| :-------------------- | :--------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
-| **`db.createTable`**  | `createTable(name: string, columns: ColumnDefinition[]): Promise<TableMeta>`                         | Creates a new table and persists its schema.                                  |
-| **`db.getTable`**     | `getTable(tableName: string): Promise<TableMeta>`                                                    | Returns metadata for `tableName` (throws `TableNotFoundError` if missing).    |
-| **`db.listTables`**   | `listTables(): Promise<TableMeta[]>`                                                                 | Lists metadata for all tables in the database.                                |
-| **`db.dropTable`**    | `dropTable(tableName: string): Promise<void>`                                                        | Drops a table, frees its pages, and removes all of its indexes.               |
-| **`db.renameTable`**  | `renameTable(oldName: string, newName: string): Promise<TableMeta>`                                  | Renames a table in $O(1)$ time and updates auto-named indexes.                |
-| **`db.renameColumn`** | `renameColumn(tableName: string, oldCol: string, newCol: string): Promise<TableMeta>`                | Renames a column in $O(1)$ time while preserving all indexes.                 |
-| **`db.addColumn`**    | `addColumn(tableName: string, column: ColumnDefinition, defaultValue?: DbValue): Promise<TableMeta>` | Adds a column and populates existing rows with `defaultValue` (or `null`).    |
-| **`db.dropColumn`**   | `dropColumn(tableName: string, columnName: string): Promise<TableMeta>`                              | Drops a non-PK column and rebuilds rows and surviving indexes atomically.     |
-| **`db.alterTable`**   | `alterTable(tableName: string, op: AlterTableOperation): Promise<TableMeta>`                         | Unified API for `renameTable`, `renameColumn`, `addColumn`, and `dropColumn`. |
+| Method                          | Signature                                                                                            | Description                                                                                       |
+| :------------------------------ | :--------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------ |
+| **`db.createTable`**            | `createTable(name: string, columns: ColumnDefinition[]): Promise<TableMeta>`                         | Creates a new table and persists its schema.                                                      |
+| **`db.createTableIfNotExists`** | `createTableIfNotExists(name: string, columns: ColumnDefinition[]): Promise<TableMeta>`             | Idempotently creates a table if absent; returns existing metadata without error if present.       |
+| **`db.getTable`**               | `getTable(tableName: string): Promise<TableMeta>`                                                    | Returns metadata for `tableName` (throws `TableNotFoundError` if missing).                        |
+| **`db.hasTable`**               | `hasTable(tableName: string): Promise<boolean>`                                                     | Checks whether a table exists in the database catalog.                                           |
+| **`db.getTableNames`**          | `getTableNames(): Promise<string[]>`                                                                 | Returns list of all active table names in $O(1)$ time without decoding column descriptor chains.  |
+| **`db.hasColumn`**              | `hasColumn(tableName: string, columnName: string): Promise<boolean>`                                 | Checks whether a column exists on a table (returns `false` if table is absent).                   |
+| **`db.hasIndex`**               | `hasIndex(tableName: string, indexOrCols: string \| string[]): Promise<boolean>`                    | Checks whether an index exists by name or column sequence.                                        |
+| **`db.listTables`**             | `listTables(): Promise<TableMeta[]>`                                                                 | Lists full metadata for all tables in the database.                                              |
+| **`db.dropTable`**              | `dropTable(tableName: string): Promise<void>`                                                        | Drops a table, frees its pages, and removes all of its indexes.                                   |
+| **`db.dropTableIfExists`**      | `dropTableIfExists(tableName: string): Promise<boolean>`                                            | Idempotently drops a table if present; returns `false` without error if absent.                   |
+| **`db.renameTable`**            | `renameTable(oldName: string, newName: string): Promise<TableMeta>`                                  | Renames a table in $O(1)$ time and updates auto-named indexes.                                    |
+| **`db.renameColumn`**           | `renameColumn(tableName: string, oldCol: string, newCol: string): Promise<TableMeta>`                | Renames a column in $O(1)$ time while preserving all indexes.                                     |
+| **`db.addColumn`**              | `addColumn(tableName: string, column: ColumnDefinition, defaultValue?: DbValue): Promise<TableMeta>` | Adds a column and populates existing rows with `defaultValue` (or `null`).                        |
+| **`db.addColumnIfNotExists`**   | `addColumnIfNotExists(tableName: string, column: ColumnDefinition, defaultValue?: DbValue): Promise<TableMeta>` | Idempotently adds a column if missing; returns existing table metadata if already present.       |
+| **`db.dropColumn`**             | `dropColumn(tableName: string, columnName: string): Promise<TableMeta>`                              | Drops a non-PK column and rebuilds rows and surviving indexes atomically.                         |
+| **`db.dropColumnIfExists`**     | `dropColumnIfExists(tableName: string, columnName: string): Promise<TableMeta>`                     | Idempotently drops a column if present; returns existing metadata without error if absent.       |
+| **`db.alterTable`**             | `alterTable(tableName: string, op: AlterTableOperation): Promise<TableMeta>`                         | Unified API for `renameTable`, `renameColumn`, `addColumn`, `addColumnIfNotExists`, `dropColumn`, and `dropColumnIfExists`. |
 
 ---
 
 ### Indexing
 
-| Method               | Signature                                                                                                       | Description                                                                                      |
-| :------------------- | :-------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------- |
-| **`db.createIndex`** | `createIndex(tableName: string, columns: string \| string[], options?: IndexOptions): Promise<IndexDescriptor>` | Creates a single-column or composite (up to 8 cols) B+Tree index, optionally `{ unique: true }`. |
-| **`db.dropIndex`**   | `dropIndex(indexName: string): Promise<void>`                                                                   | Drops a secondary index and frees its pages.                                                     |
-| **`db.listIndexes`** | `listIndexes(tableName?: string): Promise<IndexDescriptor[]>`                                                   | Lists all indexes in the database, or only those on `tableName`.                                 |
+| Method                          | Signature                                                                                                       | Description                                                                                      |
+| :------------------------------ | :-------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------- |
+| **`db.createIndex`**            | `createIndex(tableName: string, columns: string \| string[], options?: IndexOptions): Promise<IndexDescriptor>` | Creates a single-column or composite (up to 8 cols) B+Tree index, optionally `{ unique: true }`. |
+| **`db.createIndexIfNotExists`** | `createIndexIfNotExists(tableName: string, columns: string \| string[], options?: IndexOptions): Promise<void>` | Idempotently creates an index if not already present by name or column sequence.                 |
+| **`db.dropIndex`**              | `dropIndex(indexName: string): Promise<void>`                                                                   | Drops a secondary index and frees its pages.                                                     |
+| **`db.dropIndexIfExists`**      | `dropIndexIfExists(indexName: string): Promise<boolean>`                                                        | Idempotently drops a secondary index if present; returns `false` without error if absent.        |
+| **`db.listIndexes`**            | `listIndexes(tableName?: string): Promise<IndexDescriptor[]>`                                                   | Lists all indexes in the database, or only those on `tableName`.                                 |
+
+---
+
+### `TableMeta` Helper Methods
+
+Every `TableMeta` returned by `getTable`, `createTable`, `listTables`, or `alterTable` includes the following methods:
+
+| Method                 | Signature                                                               | Description                                                                        |
+| :--------------------- | :---------------------------------------------------------------------- | :--------------------------------------------------------------------------------- |
+| **`meta.hasColumn`**   | `hasColumn(columnName: string): boolean`                                | Returns `true` if the column exists on this table (case-insensitive).              |
+| **`meta.getColumn`**   | `getColumn(columnName: string): ColumnMeta \| undefined`                | Retrieves the column metadata descriptor by name (case-insensitive).               |
+| **`meta.hasIndex`**    | `hasIndex(indexNameOrColumns: string \| string[]): boolean`             | Returns `true` if an index exists by name, single column, or composite columns.   |
+| **`meta.getIndex`**    | `getIndex(indexNameOrColumns: string \| string[]): IndexDescriptor \| undefined` | Retrieves the matching index descriptor by name or column sequence.       |
 
 ---
 

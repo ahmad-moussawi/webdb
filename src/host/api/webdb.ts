@@ -458,6 +458,26 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
   }
 
+  async createTableIfNotExists(
+    name: string,
+    columns: ColumnDefinition[],
+  ): Promise<TableMeta> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._createTableIfNotExistsInternal(name, columns),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _createTableIfNotExistsInternal(
+    name: string,
+    columns: ColumnDefinition[],
+  ): Promise<TableMeta> {
+    if (await this._hasTableInternal(name)) {
+      return this._getTableInternal(name);
+    }
+    return this._createTableInternal(name, columns);
+  }
+
   private async _createTableInternal(
     name: string,
     columns: ColumnDefinition[],
@@ -644,6 +664,66 @@ export class WebDB implements IDatabaseQueryExecutor {
     return trackLiveQueryPromise(promise, callerTracker);
   }
 
+  hasTable(tableName: string): Promise<boolean> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, tableName);
+    const promise = this.coordinator.leaseQueue.enqueue(
+      () => this._hasTableInternal(tableName),
+      this.currentLeaseId ?? undefined,
+    );
+    return trackLiveQueryPromise(promise, callerTracker);
+  }
+
+  private async _hasTableInternal(tableName: string): Promise<boolean> {
+    const key = tableName.toLowerCase();
+    if (this.tableMetaCache.has(key)) {
+      return true;
+    }
+    const page1View = this.pool.getSlotDataView(0);
+    const slotIdx = catalog_find_table_slot(page1View, tableName);
+    if (slotIdx !== -1) return true;
+    const descriptors = catalog_list_table_descriptors(page1View);
+    return descriptors.some((desc) => desc.name.toLowerCase() === key);
+  }
+
+  getTableNames(): Promise<string[]> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, "*");
+    const promise = this.coordinator.leaseQueue.enqueue(async () => {
+      const page1View = this.pool.getSlotDataView(0);
+      const descriptors = catalog_list_table_descriptors(page1View);
+      return descriptors.map((desc) => desc.name);
+    }, this.currentLeaseId ?? undefined);
+    return trackLiveQueryPromise(promise, callerTracker);
+  }
+
+  hasColumn(tableName: string, columnName: string): Promise<boolean> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, tableName);
+    const promise = this.coordinator.leaseQueue.enqueue(async () => {
+      const has = await this._hasTableInternal(tableName);
+      if (!has) return false;
+      const table = await this._getTableInternal(tableName);
+      return table.hasColumn(columnName);
+    }, this.currentLeaseId ?? undefined);
+    return trackLiveQueryPromise(promise, callerTracker);
+  }
+
+  hasIndex(
+    tableName: string,
+    indexNameOrColumns: string | string[],
+  ): Promise<boolean> {
+    const callerTracker = getActiveLiveQueryTracker();
+    notifyLiveQueryTableRead(this, tableName);
+    const promise = this.coordinator.leaseQueue.enqueue(async () => {
+      const has = await this._hasTableInternal(tableName);
+      if (!has) return false;
+      const table = await this._getTableInternal(tableName);
+      return table.hasIndex(indexNameOrColumns);
+    }, this.currentLeaseId ?? undefined);
+    return trackLiveQueryPromise(promise, callerTracker);
+  }
+
   private async freeTableTreePages(rootPageId: number): Promise<void> {
     if (rootPageId <= 1) return;
 
@@ -718,6 +798,22 @@ export class WebDB implements IDatabaseQueryExecutor {
       () => this._dropTableInternal(tableName),
       this.currentLeaseId ?? undefined,
     );
+  }
+
+  async dropTableIfExists(tableName: string): Promise<boolean> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._dropTableIfExistsInternal(tableName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _dropTableIfExistsInternal(tableName: string): Promise<boolean> {
+    const exists = await this._hasTableInternal(tableName);
+    if (!exists) {
+      return false;
+    }
+    await this._dropTableInternal(tableName);
+    return true;
   }
 
   private async _dropTableInternal(tableName: string): Promise<void> {
@@ -953,15 +1049,25 @@ export class WebDB implements IDatabaseQueryExecutor {
   async addColumn(
     tableName: string,
     column: ColumnDefinition,
-    options?: { defaultValue?: DbValue },
+    options?: { defaultValue?: DbValue } | DbValue,
   ): Promise<TableMeta> {
     this.validateIdentifier(column.name, "Column name");
     const defaultVal: DbValue =
-      options?.defaultValue !== undefined
-        ? options.defaultValue
+      options !== undefined &&
+      options !== null &&
+      typeof options === "object" &&
+      !("byteLength" in options) &&
+      (options as any).defaultValue !== undefined
+        ? (options as { defaultValue?: DbValue }).defaultValue!
         : (column as any).defaultValue !== undefined
           ? (column as any).defaultValue
-          : null;
+          : options !== undefined &&
+              (typeof options !== "object" ||
+                options === null ||
+                options instanceof Uint8Array ||
+                !("defaultValue" in options))
+            ? (options as DbValue)
+            : null;
 
     return this._executeTableRebuildAtomic(tableName, (table) => {
       if (table.columns.some((c) => c.name === column.name)) {
@@ -1024,6 +1130,18 @@ export class WebDB implements IDatabaseQueryExecutor {
     });
   }
 
+  async addColumnIfNotExists(
+    tableName: string,
+    column: ColumnDefinition,
+    optionsOrDefaultValue?: { defaultValue?: DbValue } | DbValue,
+  ): Promise<TableMeta> {
+    const table = await this.getTable(tableName);
+    if (table.hasColumn(column.name)) {
+      return table;
+    }
+    return this.addColumn(tableName, column, optionsOrDefaultValue);
+  }
+
   async dropColumn(tableName: string, columnName: string): Promise<TableMeta> {
     this.validateIdentifier(columnName, "Column name");
 
@@ -1070,6 +1188,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     });
   }
 
+  async dropColumnIfExists(
+    tableName: string,
+    columnName: string,
+  ): Promise<TableMeta> {
+    const table = await this.getTable(tableName);
+    if (!table.hasColumn(columnName)) {
+      return table;
+    }
+    return this.dropColumn(tableName, columnName);
+  }
+
   async alterTable(
     tableName: string,
     operation: AlterTableOperation,
@@ -1083,8 +1212,14 @@ export class WebDB implements IDatabaseQueryExecutor {
         return this.addColumn(tableName, operation.column, {
           defaultValue: operation.defaultValue,
         });
+      case "addColumnIfNotExists":
+        return this.addColumnIfNotExists(tableName, operation.column, {
+          defaultValue: operation.defaultValue,
+        });
       case "dropColumn":
         return this.dropColumn(tableName, operation.column);
+      case "dropColumnIfExists":
+        return this.dropColumnIfExists(tableName, operation.column);
       default:
         throw new Error(
           `Unsupported alterTable operation: ${(operation as any)?.type}`,
@@ -1444,6 +1579,58 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
   }
 
+  async createIndexIfNotExists(
+    tableName: string,
+    columns: string | string[],
+    options?: IndexOptions,
+  ): Promise<void> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._createIndexIfNotExistsInternal(tableName, columns, options),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _createIndexIfNotExistsInternal(
+    tableName: string,
+    columns: string | string[],
+    options?: IndexOptions,
+  ): Promise<void> {
+    const table = await this._getTableInternal(tableName);
+    const colNames = Array.isArray(columns) ? columns : [columns];
+    const indexName = options?.name ?? `idx_${tableName}_${colNames.join("_")}`;
+
+    const page1View = this.pool.getSlotDataView(0);
+    const existingByName = catalog_find_index_by_name(page1View, indexName);
+    if (existingByName !== null) {
+      return;
+    }
+
+    const colIndices: number[] = [];
+    for (const name of colNames) {
+      const idx = table.columns.findIndex(
+        (c) => c.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (idx === -1) {
+        throw new ColumnNotFoundError(name, tableName);
+      }
+      colIndices.push(idx);
+    }
+
+    const tableIndexes = catalog_list_table_indexes(page1View, table.tableId);
+    const duplicateColIndex = tableIndexes.find((idx) => {
+      if (idx.columnCount !== colIndices.length) return false;
+      for (let i = 0; i < idx.columnCount; i++) {
+        if (idx.columnIndices[i] !== colIndices[i]) return false;
+      }
+      return true;
+    });
+    if (duplicateColIndex) {
+      return;
+    }
+
+    await this._createIndexInternal(tableName, columns, options);
+  }
+
   async dropIndex(indexName: string): Promise<void> {
     return this.coordinator.leaseQueue.enqueue(
       () => this._dropIndexInternal(indexName),
@@ -1486,6 +1673,23 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (!this.coordinator.isInTransaction()) {
       await this.driver.flushAllDirty();
     }
+  }
+
+  async dropIndexIfExists(indexName: string): Promise<boolean> {
+    return this.coordinator.leaseQueue.enqueue(
+      () => this._dropIndexIfExistsInternal(indexName),
+      this.currentLeaseId ?? undefined,
+    );
+  }
+
+  private async _dropIndexIfExistsInternal(indexName: string): Promise<boolean> {
+    const page1View = this.pool.getSlotDataView(0);
+    const found = catalog_find_index_by_name(page1View, indexName);
+    if (!found) {
+      return false;
+    }
+    await this._dropIndexInternal(indexName);
+    return true;
   }
 
   async listIndexes(tableName?: string): Promise<IndexDescriptor[]> {

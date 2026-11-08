@@ -14,17 +14,20 @@ import {
   TooManyOrderByColumnsError,
   TooManyGroupByColumnsError,
   TooManyRegistersError,
+  attachTableMetaHelpers,
 } from "../src/types/index.js";
 
 function createMockTable(numCols = 4): TableMeta {
-  return {
+  return attachTableMetaHelpers({
+    tableId: 1,
+    columnCount: numCols,
     name: "users",
+    rowCountEstimate: 100,
+    autoIncNext: 1n,
     rootPageId: 2,
     schemaVersion: 1,
     flags: 1,
     colCatalogPageId: 0,
-    totalRows: 100,
-    autoIncNext: 1n,
     columns: [
       { name: "id", type: DataType.INT32, flags: ColumnFlag.PRIMARY_KEY, colOffset: 0 },
       { name: "name", type: DataType.TEXT, flags: ColumnFlag.NOT_NULL, colOffset: 1 },
@@ -39,7 +42,7 @@ function createMockTable(numCols = 4): TableMeta {
           }))
         : []),
     ],
-  };
+  });
 }
 
 describe("Bytecode Compiler & Emitter Unit Tests", () => {
