@@ -75,10 +75,14 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
           }
           uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
+            pc = jump_target;
+            break;
+          }
           uint16_t cell_count = page_get_cell_count(page_offset);
           if (cell_count == 0) {
             uint32_t chain_next = page_get_next_page_id(page_offset);
-            if (chain_next != 0) {
+            if (chain_next != 0 && chain_next != page_id) {
               store_u32((void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID), chain_next);
               pc = instr_pc;
             } else {
@@ -104,6 +108,10 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
           uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
+            pc = jump_target;
+            break;
+          }
           int32_t cell_count = page_get_cell_count(page_offset);
           int32_t next_cell_idx = load_i32((const void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX)) + 1;
           if (next_cell_idx < cell_count) {
@@ -112,7 +120,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), page_offset + rel_cell_offset);
           } else {
             uint32_t next_page_id = page_get_next_page_id(page_offset);
-            if (next_page_id != 0) {
+            if (next_page_id != 0 && next_page_id != page_id) {
               if (has_buffer_pool != 0) {
                 int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, next_page_id);
                 if (slot < 0) {
@@ -123,9 +131,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
                 }
                 store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
               }
+              uint32_t next_offset = vm_resolve_page_offset(has_buffer_pool, next_page_id);
+              if (page_get_type(next_offset) != PAGE_TYPE_LEAF_DATA) {
+                pc = jump_target;
+                break;
+              }
               store_u32((void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID), next_page_id);
               store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
-              uint32_t next_offset = vm_resolve_page_offset(has_buffer_pool, next_page_id);
               uint16_t next_count = page_get_cell_count(next_offset);
               if (next_count > 0) {
                 uint16_t rel_cell_offset = page_get_cell_offset(next_offset, 0);
@@ -153,6 +165,10 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
           uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
+            pc = jump_target;
+            break;
+          }
           int32_t cell_count = page_get_cell_count(page_offset);
           if (cell_count == 0) {
             pc = jump_target;
@@ -276,11 +292,20 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             }
             break;
           }
+          uint16_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
           uint32_t var_table_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, num_cols);
           uint32_t var_idx = vm_compute_var_col_idx(tbl_off, col_idx);
           uint32_t entry_offset = var_table_offset + (var_idx << 2);
+          if (row_len > MAX_ROW_SIZE || entry_offset + 4 > row_offset + row_len) {
+            vm_reg_set_null(reg_off);
+            break;
+          }
           uint16_t rel_offset = load_u16((const void *)(uintptr_t)(entry_offset));
           uint16_t len = load_u16((const void *)(uintptr_t)(entry_offset + 2));
+          if (rel_offset + len > row_len || (len > 0 && row_offset + rel_offset < entry_offset + 4)) {
+            vm_reg_set_null(reg_off);
+            break;
+          }
           vm_reg_set_slice(reg_off, TYPE_TEXT, row_offset + rel_offset, len);
           break;
         }
@@ -301,11 +326,20 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             vm_reg_set_null(reg_off);
             break;
           }
+          uint16_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
           uint32_t var_table_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, num_cols);
           uint32_t var_idx = vm_compute_var_col_idx(tbl_off, col_idx);
           uint32_t entry_offset = var_table_offset + (var_idx << 2);
+          if (row_len > MAX_ROW_SIZE || entry_offset + 4 > row_offset + row_len) {
+            vm_reg_set_null(reg_off);
+            break;
+          }
           uint16_t rel_offset = load_u16((const void *)(uintptr_t)(entry_offset));
           uint16_t len = load_u16((const void *)(uintptr_t)(entry_offset + 2));
+          if (rel_offset + len > row_len || (len > 0 && row_offset + rel_offset < entry_offset + 4)) {
+            vm_reg_set_null(reg_off);
+            break;
+          }
           vm_reg_set_slice(reg_off, TYPE_BLOB, row_offset + rel_offset, len);
           break;
         }
@@ -850,6 +884,9 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
           uint16_t total_row_length = load_u16((const void *)(uintptr_t)(row_offset + 1));
+          if (total_row_length < 3 || total_row_length > MAX_ROW_SIZE) {
+            break;
+          }
           int32_t emit_status = vm_emit_raw_row(ctx_off, row_offset, total_row_length, instr_pc);
           if (emit_status != VM_STATUS_RUNNING) {
             return emit_status;

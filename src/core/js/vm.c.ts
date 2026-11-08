@@ -13,10 +13,13 @@ import {
   BYTECODE_OFFSET,
   TRANSIENT_ARENA_OFFSET,
   TOTAL_MEMORY_BYTES,
+  PAGE_TYPE_LEAF_DATA,
+  MAX_ROW_SIZE,
 } from "../../constants.ts";
 import { OpCode, VmStatus, DataType } from "../../types/index.ts";
 import { u8, u16, u32, i32, i64, f64 } from "../types.ts";
 import {
+  page_get_type,
   page_get_cell_count,
   page_get_cell_offset,
   page_get_next_page_id,
@@ -329,13 +332,17 @@ export function vm_step_raw(
           has_buffer_pool,
           page_id,
         );
+        if (page_get_type(view, page_offset) !== PAGE_TYPE_LEAF_DATA) {
+          pc = jump_target;
+          break;
+        }
         const cell_count: u16 = page_get_cell_count(view, page_offset);
 
         if (cell_count === 0) {
           // The first page can be empty (e.g. every row was deleted) while later pages of the
           // chain hold rows: keep walking the chain instead of treating it as an empty table.
           const chain_next: u32 = page_get_next_page_id(view, page_offset);
-          if (chain_next !== 0) {
+          if (chain_next !== 0 && chain_next !== page_id) {
             write_u32(view, cur_off + VM_CUR_PAGE_ID, chain_next);
             pc = instr_pc; // re-run REWIND on the next page (also handles a page fault)
           } else {
@@ -377,6 +384,10 @@ export function vm_step_raw(
           has_buffer_pool,
           page_id,
         );
+        if (page_get_type(view, page_offset) !== PAGE_TYPE_LEAF_DATA) {
+          pc = jump_target;
+          break;
+        }
         const cell_count: i32 = page_get_cell_count(view, page_offset);
 
         // JS: const next_cell_idx = cursor.cellIdx + 1;
@@ -399,7 +410,7 @@ export function vm_step_raw(
         } else {
           // Follow leaf page chain (`next_page_id`) when current page is exhausted
           const next_page_id: u32 = page_get_next_page_id(view, page_offset);
-          if (next_page_id !== 0) {
+          if (next_page_id !== 0 && next_page_id !== page_id) {
             if (has_buffer_pool !== 0) {
               const slot: i32 = buf_pool_get_resident_slot(
                 view,
@@ -418,14 +429,19 @@ export function vm_step_raw(
               write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
             }
 
-            // JS: cursor.pageId = next_page_id; cursor.cellIdx = 0;
-            write_u32(view, cur_off + VM_CUR_PAGE_ID, next_page_id);
-            write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
             const next_offset: u32 = vm_resolve_page_offset(
               view,
               has_buffer_pool,
               next_page_id,
             );
+            if (page_get_type(view, next_offset) !== PAGE_TYPE_LEAF_DATA) {
+              pc = jump_target;
+              break;
+            }
+
+            // JS: cursor.pageId = next_page_id; cursor.cellIdx = 0;
+            write_u32(view, cur_off + VM_CUR_PAGE_ID, next_page_id);
+            write_i32(view, cur_off + VM_CUR_CELL_IDX, 0);
             const next_count: u16 = page_get_cell_count(view, next_offset);
             if (next_count > 0) {
               const rel_cell_offset: u16 = page_get_cell_offset(
@@ -474,6 +490,10 @@ export function vm_step_raw(
           has_buffer_pool,
           page_id,
         );
+        if (page_get_type(view, page_offset) !== PAGE_TYPE_LEAF_DATA) {
+          pc = jump_target;
+          break;
+        }
         const cell_count: i32 = page_get_cell_count(view, page_offset);
 
         if (cell_count === 0) {
@@ -666,6 +686,7 @@ export function vm_step_raw(
           break;
         }
 
+        const row_len: u16 = read_u16(view, row_offset + 1);
         const var_table_offset: u32 = vm_compute_fixed_col_offset(
           view,
           null_bitmap_offset,
@@ -675,8 +696,22 @@ export function vm_step_raw(
         );
         const var_idx: u32 = vm_compute_var_col_idx(view, tbl_off, col_idx);
         const entry_offset: u32 = var_table_offset + (var_idx << 2);
+        if (
+          row_len > MAX_ROW_SIZE ||
+          entry_offset + 4 > row_offset + row_len
+        ) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
         const rel_offset: u16 = read_u16(view, entry_offset);
         const len: u16 = read_u16(view, entry_offset + 2);
+        if (
+          rel_offset + len > row_len ||
+          (len > 0 && row_offset + rel_offset < entry_offset + 4)
+        ) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
 
         vm_reg_set_slice(
           view,
@@ -711,6 +746,7 @@ export function vm_step_raw(
           break;
         }
 
+        const row_len: u16 = read_u16(view, row_offset + 1);
         const var_table_offset: u32 = vm_compute_fixed_col_offset(
           view,
           null_bitmap_offset,
@@ -720,8 +756,22 @@ export function vm_step_raw(
         );
         const var_idx: u32 = vm_compute_var_col_idx(view, tbl_off, col_idx);
         const entry_offset: u32 = var_table_offset + (var_idx << 2);
+        if (
+          row_len > MAX_ROW_SIZE ||
+          entry_offset + 4 > row_offset + row_len
+        ) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
         const rel_offset: u16 = read_u16(view, entry_offset);
         const len: u16 = read_u16(view, entry_offset + 2);
+        if (
+          rel_offset + len > row_len ||
+          (len > 0 && row_offset + rel_offset < entry_offset + 4)
+        ) {
+          vm_reg_set_null(view, reg_off);
+          break;
+        }
 
         vm_reg_set_slice(
           view,
@@ -1568,6 +1618,9 @@ export function vm_step_raw(
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
         const total_row_length: u16 = read_u16(view, row_offset + 1);
+        if (total_row_length < 3 || total_row_length > MAX_ROW_SIZE) {
+          break;
+        }
 
         const emit_status: i32 = vm_emit_raw_row(
           view,

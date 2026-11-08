@@ -914,15 +914,38 @@ export function page_deserialize_row(
   const bitmap_start = record_offset + 3;
   const fixed_start = bitmap_start + null_bitmap_bytes;
 
+  if (record_offset < 0 || fixed_start > view.byteLength) {
+    return null as any;
+  }
+
+  const record_flags = view.getUint8(record_offset);
+  if ((record_flags & 0x01) === 0) {
+    return null as any;
+  }
+
+  const record_length = view.getUint16(record_offset + 1, true);
+  const record_end = record_offset + record_length;
+  if (
+    record_length < 3 + null_bitmap_bytes ||
+    record_length > MAX_ROW_SIZE ||
+    record_end > view.byteLength
+  ) {
+    return null as any;
+  }
+
   // Calculate where the var-offset table starts without allocating a Uint8Array for null_bitmap
   let current_fixed_offset = fixed_start;
+  let total_var_cols = 0;
   let cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
   for (let i = 0; i < col_count; i++) {
     if ((i & 7) === 0 && i > 0) {
       cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
     }
+    const c_type = columns[i].type;
+    if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+      total_var_cols++;
+    }
     if ((cur_bitmap_byte & (1 << (i & 7))) === 0) {
-      const c_type = columns[i].type;
       if (c_type === DataType.INT32) current_fixed_offset += 4;
       else if (c_type === DataType.INT64 || c_type === DataType.FLOAT64)
         current_fixed_offset += 8;
@@ -932,6 +955,11 @@ export function page_deserialize_row(
   }
 
   const var_offset_table_start = current_fixed_offset;
+  const var_offset_table_end = var_offset_table_start + (total_var_cols << 2);
+  if (var_offset_table_end > record_end) {
+    return null as any;
+  }
+  const min_payload_rel_offset = var_offset_table_end - record_offset;
   current_fixed_offset = fixed_start;
 
   let var_col_idx = 0;
@@ -992,6 +1020,13 @@ export function page_deserialize_row(
         if (len === 0) {
           row[col.name] = "";
         } else {
+          if (
+            rel_offset < min_payload_rel_offset ||
+            rel_offset + len > record_length ||
+            record_offset + rel_offset + len > view.byteLength
+          ) {
+            return null as any;
+          }
           const payload_offset = view.byteOffset + record_offset + rel_offset;
           const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
           row[col.name] = text_decoder.decode(text_bytes);
@@ -1003,6 +1038,14 @@ export function page_deserialize_row(
         const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
         const rel_offset = view.getUint16(table_entry_offset, true);
         const len = view.getUint16(table_entry_offset + 2, true);
+        if (
+          len > 0 &&
+          (rel_offset < min_payload_rel_offset ||
+            rel_offset + len > record_length ||
+            record_offset + rel_offset + len > view.byteLength)
+        ) {
+          return null as any;
+        }
         const payload_offset = view.byteOffset + record_offset + rel_offset;
         const blob_bytes = new Uint8Array(len);
         if (len > 0) {

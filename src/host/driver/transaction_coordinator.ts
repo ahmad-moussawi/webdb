@@ -1,13 +1,13 @@
-import { IVfsAdapter } from '../storage/vfs.js';
-import { Io } from '../storage/io.js';
-import { BufferPoolDriver } from './buffer_pool_driver.js';
-import { recoverFromWal } from './crash_recovery.js';
+import { IVfsAdapter } from "../storage/vfs.js";
+import { Io } from "../storage/io.js";
+import { BufferPoolDriver } from "./buffer_pool_driver.js";
+import { recoverFromWal } from "./crash_recovery.js";
 import {
   decodeWalFileHeader,
   encodeWalFileHeader,
   encodeWalFrame,
   validateWalFrame,
-} from '../storage/wal_codec.js';
+} from "../storage/wal_codec.js";
 import {
   HEADER_OFFSET_CHANGE_COUNTER,
   HEADER_OFFSET_SCHEMA_VERSION,
@@ -17,7 +17,7 @@ import {
   WAL_FRAME_TYPE_TX_COMMIT,
   WAL_FRAME_TYPE_TX_UNCOMMITTED,
   WAL_PAGE_SIZE,
-} from '../../constants.js';
+} from "../../constants.js";
 
 export interface TransactionLease {
   readonly leaseId: number;
@@ -35,7 +35,8 @@ export class ExclusiveLeaseQueue {
   private activeLease: TransactionLease | null = null;
   private inFlightNonTxCount = 0;
   private queue: Array<() => Promise<void>> = [];
-  private leaseWaiters: Array<{ resolve: (lease: TransactionLease) => void }> = [];
+  private leaseWaiters: Array<{ resolve: (lease: TransactionLease) => void }> =
+    [];
   private nextLeaseId = 1;
   private nextTxId = 1;
 
@@ -51,8 +52,8 @@ export class ExclusiveLeaseQueue {
   hasWebLocks(): boolean {
     return (
       !!this.crossTabLockName &&
-      typeof navigator !== 'undefined' &&
-      typeof navigator?.locks?.request === 'function'
+      typeof navigator !== "undefined" &&
+      typeof navigator?.locks?.request === "function"
     );
   }
 
@@ -60,7 +61,7 @@ export class ExclusiveLeaseQueue {
     if (!this.hasWebLocks() || this.releaseWebLock) return;
     await new Promise<void>((resolveAcquired) => {
       navigator.locks
-        .request(this.crossTabLockName!, { mode: 'exclusive' }, () => {
+        .request(this.crossTabLockName!, { mode: "exclusive" }, () => {
           return new Promise<void>((resolveRelease) => {
             this.releaseWebLock = resolveRelease;
             resolveAcquired();
@@ -99,12 +100,11 @@ export class ExclusiveLeaseQueue {
     }
 
     // If an exclusive transaction lease is active, there are pending transaction waiters,
-    // or (in cross-tab Web Locks mode) another non-tx task is currently holding the lock,
-    // queue the external task in FIFO order.
+    // or another non-tx task is currently in flight, queue the external task in FIFO order.
     if (
       this.activeLease ||
       this.leaseWaiters.length > 0 ||
-      (this.hasWebLocks() && this.inFlightNonTxCount > 0)
+      this.inFlightNonTxCount > 0
     ) {
       return new Promise<T>((resolve, reject) => {
         this.queue.push(async () => {
@@ -163,7 +163,11 @@ export class ExclusiveLeaseQueue {
    * Blocks until all in-flight non-transactional operations finish and acquires the cross-tab Web Lock.
    */
   async acquireExclusiveLease(): Promise<TransactionLease> {
-    if (!this.activeLease && this.inFlightNonTxCount === 0 && this.queue.length === 0) {
+    if (
+      !this.activeLease &&
+      this.inFlightNonTxCount === 0 &&
+      this.queue.length === 0
+    ) {
       const lease: TransactionLease = {
         leaseId: this.nextLeaseId++,
         txId: this.nextTxId++,
@@ -218,12 +222,12 @@ export class ExclusiveLeaseQueue {
       return;
     }
 
-    // Drain queued external non-transaction tasks
+    // Drain queued external non-transaction tasks one at a time
     while (
       this.queue.length > 0 &&
       !this.activeLease &&
       this.leaseWaiters.length === 0 &&
-      (!this.hasWebLocks() || this.inFlightNonTxCount === 0)
+      this.inFlightNonTxCount === 0
     ) {
       const nextTask = this.queue.shift();
       if (nextTask) {
@@ -250,7 +254,10 @@ export class TransactionCoordinator {
   private activeLease: TransactionLease | null = null;
   private snapshotFrameCount = 0;
   private snapshotWalFrameSeq = 0;
-  private slotSnapshots = new Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>();
+  private slotSnapshots = new Map<
+    number,
+    { pageId: number; dirty: boolean; data: Uint8Array }
+  >();
   private pinCountsSnapshot: Uint32Array | null = null;
   private spilledPages = new Map<number, Uint8Array>();
   private committedWalPages = new Map<number, Uint8Array>();
@@ -259,7 +266,7 @@ export class TransactionCoordinator {
   private checkpointSeq = 0;
 
   // Cross-tab state tracking
-  private instanceSalt = (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+  private instanceSalt = Math.floor(Math.random() * 0xffffffff) >>> 0 || 1;
   private expectedWalFrameCount = 0;
   private lastDiskChangeCounter = 0;
   private lastDiskSchemaVersion = 0;
@@ -278,9 +285,8 @@ export class TransactionCoordinator {
     this.vfs = vfs;
     this.pool = pool;
     this.io = io;
-    this.queue = new ExclusiveLeaseQueue(
-      crossTabLockName,
-      () => this.syncCrossTabState(),
+    this.queue = new ExclusiveLeaseQueue(crossTabLockName, () =>
+      this.syncCrossTabState(),
     );
   }
 
@@ -290,8 +296,14 @@ export class TransactionCoordinator {
 
   recordDiskPage1State(): void {
     const view = this.pool.getSlotDataView(0);
-    this.lastDiskChangeCounter = view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
-    this.lastDiskSchemaVersion = view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+    this.lastDiskChangeCounter = view.getUint32(
+      HEADER_OFFSET_CHANGE_COUNTER,
+      true,
+    );
+    this.lastDiskSchemaVersion = view.getUint32(
+      HEADER_OFFSET_SCHEMA_VERSION,
+      true,
+    );
   }
 
   private async reloadFromDisk(
@@ -332,7 +344,10 @@ export class TransactionCoordinator {
           headerSalt = 0;
         }
       }
-      if (headerSalt !== this.instanceSalt || walFrameCount !== this.expectedWalFrameCount) {
+      if (
+        headerSalt !== this.instanceSalt ||
+        walFrameCount !== this.expectedWalFrameCount
+      ) {
         walTouchedByOtherTab = true;
         await recoverFromWal(this.vfs);
         this.committedWalPages.clear();
@@ -349,10 +364,22 @@ export class TransactionCoordinator {
     }
 
     const [diskPage1] = await this.vfs.readPages([1]);
-    if (diskPage1) {
-      const diskView = new DataView(diskPage1.buffer, diskPage1.byteOffset, diskPage1.byteLength);
-      const diskChangeCounter = diskView.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
-      const diskSchemaVersion = diskView.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+    const latestPage1 =
+      (!walTouchedByOtherTab && this.committedWalPages.get(1)) || diskPage1;
+    if (latestPage1) {
+      const diskView = new DataView(
+        latestPage1.buffer,
+        latestPage1.byteOffset,
+        latestPage1.byteLength,
+      );
+      const diskChangeCounter = diskView.getUint32(
+        HEADER_OFFSET_CHANGE_COUNTER,
+        true,
+      );
+      const diskSchemaVersion = diskView.getUint32(
+        HEADER_OFFSET_SCHEMA_VERSION,
+        true,
+      );
 
       if (
         force ||
@@ -360,7 +387,11 @@ export class TransactionCoordinator {
         diskChangeCounter !== this.lastDiskChangeCounter ||
         diskSchemaVersion !== this.lastDiskSchemaVersion
       ) {
-        await this.reloadFromDisk(diskPage1, diskChangeCounter, diskSchemaVersion);
+        await this.reloadFromDisk(
+          latestPage1,
+          diskChangeCounter,
+          diskSchemaVersion,
+        );
       }
     }
   }
@@ -399,10 +430,14 @@ export class TransactionCoordinator {
    * (PAGE_DATA frames + TX_COMMIT). Used for autocommit writes that touch pages whose older
    * images are still in the WAL. Must run inside a queued operation (exclusive access).
    */
-  async commitDirectPagesViaWal(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
+  async commitDirectPagesViaWal(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+  ): Promise<void> {
     if (pages.length === 0) return;
     const txId = this.queue.allocateTxId();
-    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+    const dbSizePages = this.pool
+      .getSlotDataView(0)
+      .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
     await this.ensureWalHeader();
 
@@ -472,7 +507,8 @@ export class TransactionCoordinator {
   }
 
   getSpilledPage(pageId: number): Uint8Array | null {
-    const data = this.spilledPages.get(pageId) ?? this.committedWalPages.get(pageId);
+    const data =
+      this.spilledPages.get(pageId) ?? this.committedWalPages.get(pageId);
     return data ? new Uint8Array(data) : null;
   }
 
@@ -482,8 +518,14 @@ export class TransactionCoordinator {
     }
     if (pageId === 1) {
       const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-      this.lastDiskChangeCounter = view.getUint32(HEADER_OFFSET_CHANGE_COUNTER, true);
-      this.lastDiskSchemaVersion = view.getUint32(HEADER_OFFSET_SCHEMA_VERSION, true);
+      this.lastDiskChangeCounter = view.getUint32(
+        HEADER_OFFSET_CHANGE_COUNTER,
+        true,
+      );
+      this.lastDiskSchemaVersion = view.getUint32(
+        HEADER_OFFSET_SCHEMA_VERSION,
+        true,
+      );
     }
   }
 
@@ -506,7 +548,9 @@ export class TransactionCoordinator {
 
     this.spilledPages.set(pageId, pageCopy);
 
-    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+    const dbSizePages = this.pool
+      .getSlotDataView(0)
+      .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
     // Append FRAME_TX_UNCOMMITTED frame to WAL
     const frame = encodeWalFrame(
@@ -531,13 +575,19 @@ export class TransactionCoordinator {
    */
   async captureSavepoint(): Promise<{
     frameCount: number;
-    slotSnapshots: Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>;
+    slotSnapshots: Map<
+      number,
+      { pageId: number; dirty: boolean; data: Uint8Array }
+    >;
     pinCounts: Uint32Array;
     spilledPages: Map<number, Uint8Array>;
     walFrameSeq: number;
   }> {
     const frameCount = await this.vfs.getWalFrameCount();
-    const slotSnapshots = new Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>();
+    const slotSnapshots = new Map<
+      number,
+      { pageId: number; dirty: boolean; data: Uint8Array }
+    >();
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
       const pageId = this.pool.getAssignedPage(slot);
       if (pageId > 0) {
@@ -565,7 +615,10 @@ export class TransactionCoordinator {
    */
   async restoreSavepoint(savepoint: {
     frameCount: number;
-    slotSnapshots: Map<number, { pageId: number; dirty: boolean; data: Uint8Array }>;
+    slotSnapshots: Map<
+      number,
+      { pageId: number; dirty: boolean; data: Uint8Array }
+    >;
     pinCounts: Uint32Array;
     spilledPages: Map<number, Uint8Array>;
     walFrameSeq: number;
@@ -668,7 +721,9 @@ export class TransactionCoordinator {
 
     const txId = this.activeLease.txId;
     const framesToAppend: Uint8Array[] = [];
-    const dbSizePages = this.pool.getSlotDataView(0).getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+    const dbSizePages = this.pool
+      .getSlotDataView(0)
+      .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
     // Promote any spilled pages from this transaction into committedWalPages first
     for (const [pageId, data] of this.spilledPages.entries()) {
@@ -757,7 +812,8 @@ export class TransactionCoordinator {
     await this.restoreSavepoint({
       frameCount: this.snapshotFrameCount,
       slotSnapshots: this.slotSnapshots,
-      pinCounts: this.pinCountsSnapshot ?? new Uint32Array(this.pool.pin_counts),
+      pinCounts:
+        this.pinCountsSnapshot ?? new Uint32Array(this.pool.pin_counts),
       spilledPages: new Map(),
       walFrameSeq: this.snapshotWalFrameSeq,
     });
@@ -792,7 +848,10 @@ export class TransactionCoordinator {
     const walIndex = new Map<number, Uint8Array>();
     if (frameCount > 0) {
       const rawFrames = await this.vfs.readWalFrames(0, frameCount);
-      const txGroups = new Map<number, Array<{ pageId: number; data: Uint8Array }>>();
+      const txGroups = new Map<
+        number,
+        Array<{ pageId: number; data: Uint8Array }>
+      >();
       const committedTxs = new Set<number>();
 
       for (const frameBytes of rawFrames) {
@@ -837,7 +896,10 @@ export class TransactionCoordinator {
     }
 
     // 2. Inspect resident dirty slots in memory (memory_override)
-    const memoryOverride = new Map<number, { slotIdx: number; data: Uint8Array }>();
+    const memoryOverride = new Map<
+      number,
+      { slotIdx: number; data: Uint8Array }
+    >();
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
       if (this.pool.isDirty(slot)) {
         const pageId = this.pool.getAssignedPage(slot);

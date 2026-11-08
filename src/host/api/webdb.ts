@@ -13,6 +13,7 @@ import {
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_INDEX_LEAF,
   PAGE_TYPE_LEAF_DATA,
+  PAGE_TYPE_CATALOG_PAGE,
   HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
   HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
 } from "../../constants.ts";
@@ -665,6 +666,16 @@ export class WebDB implements IDatabaseQueryExecutor {
         continue;
       }
 
+      // Only free and traverse actual table/index tree pages; never free catalog pages or unknown page types
+      if (
+        pType !== PAGE_TYPE_TABLE_INTERIOR &&
+        pType !== PAGE_TYPE_INDEX_INTERIOR &&
+        pType !== PAGE_TYPE_LEAF_DATA &&
+        pType !== PAGE_TYPE_INDEX_LEAF
+      ) {
+        continue;
+      }
+
       toFree.push(pId);
 
       if (
@@ -754,12 +765,17 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // 3. Free all column catalog pages belonging to this table
     let curCatPageId = desc.colCatalogPageId;
-    while (curCatPageId > 1) {
+    const visitedCatPages = new Set<number>();
+    while (curCatPageId > 1 && !visitedCatPages.has(curCatPageId)) {
+      visitedCatPages.add(curCatPageId);
       const slot = await this.driver.acquirePage(curCatPageId);
       const view = this.pool.getSlotDataView(slot);
       const pType = page_get_type(view, 0);
       if (pType === PAGE_TYPE_FREE) {
         this.driver.forceUnpinPage(curCatPageId);
+        break;
+      }
+      if (pType !== PAGE_TYPE_CATALOG_PAGE) {
         break;
       }
       const header = catalog_read_page_header(view, 0);
@@ -1120,23 +1136,61 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // 1. Read all existing rows across the table's data pages
     const migratedRows: DbRow[] = [];
+    const visitedPages = new Set<number>();
     let currentPageId = table.rootPageId;
-    while (currentPageId !== 0) {
+    let prevPageId = 0;
+    while (currentPageId > 1 && !visitedPages.has(currentPageId)) {
+      visitedPages.add(currentPageId);
       let pageSlot = await this.driver.acquirePage(currentPageId);
       let pageView = this.pool.getSlotDataView(pageSlot);
+      if (page_get_type(pageView, 0) !== PAGE_TYPE_LEAF_DATA) {
+        if (prevPageId > 1) {
+          const prevSlot = await this.driver.acquirePage(prevPageId);
+          const prevView = this.pool.getSlotDataView(prevSlot);
+          page_set_next_page_id(prevView, 0, 0);
+          this.pool.markDirty(prevSlot);
+        }
+        break;
+      }
       const cellCount = page_get_cell_count(pageView, 0);
       const nextPageId = page_get_next_page_id(pageView, 0);
 
+      const pageRows: DbRow[] = [];
       for (let i = 0; i < cellCount; i++) {
         pageSlot = await this.driver.acquirePage(currentPageId);
         pageView = this.pool.getSlotDataView(pageSlot);
         const cellOffset = page_get_cell_offset(pageView, 0, i);
         const row = page_deserialize_row(table.columns, pageView, cellOffset);
         if (row) {
-          migratedRows.push(transformRow(row));
+          pageRows.push(transformRow(row));
         }
       }
 
+      // If a non-empty page yielded zero valid rows for this table's schema, it is a cross-linked foreign page:
+      // unlink it from the previous page so `_dropTableInternal` does not free another table's page.
+      if (cellCount > 0 && pageRows.length === 0) {
+        if (prevPageId > 1) {
+          const prevSlot = await this.driver.acquirePage(prevPageId);
+          const prevView = this.pool.getSlotDataView(prevSlot);
+          page_set_next_page_id(prevView, 0, 0);
+          this.pool.markDirty(prevSlot);
+        }
+        break;
+      }
+
+      for (let i = 0; i < pageRows.length; i++) {
+        migratedRows.push(pageRows[i]);
+      }
+
+      if (nextPageId > 1 && visitedPages.has(nextPageId)) {
+        pageSlot = await this.driver.acquirePage(currentPageId);
+        pageView = this.pool.getSlotDataView(pageSlot);
+        page_set_next_page_id(pageView, 0, 0);
+        this.pool.markDirty(pageSlot);
+        break;
+      }
+
+      prevPageId = currentPageId;
       currentPageId = nextPageId;
     }
 
@@ -1292,7 +1346,9 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // Backfill: iterate all data pages and insert existing rows into new index
     let currentPageId = table.rootPageId;
-    while (currentPageId !== 0) {
+    const visitedPages = new Set<number>();
+    while (currentPageId > 1 && !visitedPages.has(currentPageId)) {
+      visitedPages.add(currentPageId);
       let pageSlot = this.pool.getResidentSlot(currentPageId);
       if (pageSlot !== -1) {
         this.pool.setRefBit(pageSlot, 1);
@@ -1300,6 +1356,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         pageSlot = await this.driver.acquirePage(currentPageId);
       }
       let pageView = this.pool.getSlotDataView(pageSlot);
+      if (page_get_type(pageView, 0) !== PAGE_TYPE_LEAF_DATA) {
+        break;
+      }
       const cellCount = page_get_cell_count(pageView, 0);
       const nextPageId = page_get_next_page_id(pageView, 0);
 
@@ -2056,7 +2115,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       // 1. Remove index entries for all deleted cells at their original cellIdx
       for (const delIdx of deletedCellIndicesAsc) {
         const entry = allCellsOnPage[delIdx];
-        if (!entry) continue;
+        if (!entry || !entry.row) continue;
         const oldRowid = (BigInt(pageId) << 16n) | BigInt(delIdx);
         for (const idx of indexes) {
           const { keyVal, keyType } = this.extractIndexKey(
@@ -2080,7 +2139,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       for (let origIdx = 0; origIdx < allCellsOnPage.length; origIdx++) {
         if (deletedSet.has(origIdx)) continue;
         if (newCellIdx !== origIdx) {
-          const survivingRow = allCellsOnPage[origIdx].row;
+          const survivingRow = allCellsOnPage[origIdx]?.row;
+          if (!survivingRow) {
+            newCellIdx++;
+            continue;
+          }
           const prevRowid = (BigInt(pageId) << 16n) | BigInt(origIdx);
           const shiftedRowid = (BigInt(pageId) << 16n) | BigInt(newCellIdx);
           for (const idx of indexes) {
@@ -2370,18 +2433,34 @@ export class WebDB implements IDatabaseQueryExecutor {
       slot = await this.driver.acquirePage(currentPageId);
     }
     let view = this.pool.getSlotDataView(slot);
+    if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
+      currentPageId = table.rootPageId;
+      slot = await this.driver.acquirePage(currentPageId);
+      view = this.pool.getSlotDataView(slot);
+    }
 
+    const visitedTailPages = new Set<number>([currentPageId]);
     while (true) {
       const nextPageId = page_get_next_page_id(view, 0);
-      if (nextPageId === 0) break;
-      currentPageId = nextPageId;
-      slot = this.pool.getResidentSlot(currentPageId);
-      if (slot !== -1) {
-        this.pool.setRefBit(slot, 1);
+      if (nextPageId <= 1 || visitedTailPages.has(nextPageId)) break;
+      visitedTailPages.add(nextPageId);
+      let nextSlot = this.pool.getResidentSlot(nextPageId);
+      if (nextSlot !== -1) {
+        this.pool.setRefBit(nextSlot, 1);
       } else {
-        slot = await this.driver.acquirePage(currentPageId);
+        nextSlot = await this.driver.acquirePage(nextPageId);
       }
-      view = this.pool.getSlotDataView(slot);
+      const nextView = this.pool.getSlotDataView(nextSlot);
+      if (page_get_type(nextView, 0) !== PAGE_TYPE_LEAF_DATA) {
+        slot = await this.driver.acquirePage(currentPageId);
+        view = this.pool.getSlotDataView(slot);
+        page_set_next_page_id(view, 0, 0);
+        this.pool.markDirty(slot);
+        break;
+      }
+      currentPageId = nextPageId;
+      slot = nextSlot;
+      view = nextView;
     }
     this.tableTailPages.set(tableName, currentPageId);
 
@@ -2618,9 +2697,14 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // Pass 1: Scan pages, identify matching rows, build newRow, validate NOT NULL & row size
     let currPageId = table.rootPageId;
-    while (currPageId !== 0) {
+    const visitedPages = new Set<number>();
+    while (currPageId > 1 && !visitedPages.has(currPageId)) {
+      visitedPages.add(currPageId);
       const slot = await this.driver.acquirePage(currPageId);
       const view = this.pool.getSlotDataView(slot);
+      if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
+        break;
+      }
       const cellCount = page_get_cell_count(view, 0);
       const nextPageId = page_get_next_page_id(view, 0);
 
@@ -2632,7 +2716,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         const row = page_deserialize_row(table.columns, view, off);
         allCells.push({ cellIdx: i, row });
 
-        if (this.matchesFilters(table, row, filters)) {
+        if (row && this.matchesFilters(table, row, filters)) {
           const newRow: DbRow = { ...row };
           for (const [k, v] of Object.entries(patch)) {
             if (v !== undefined) {
@@ -2800,12 +2884,22 @@ export class WebDB implements IDatabaseQueryExecutor {
         this.tableTailPages.get(tableName) ?? table.rootPageId;
       let slot = await this.driver.acquirePage(currentPageId);
       let view = this.pool.getSlotDataView(slot);
-      while (true) {
-        const nextPageId = page_get_next_page_id(view, 0);
-        if (nextPageId === 0) break;
-        currentPageId = nextPageId;
+      if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
+        currentPageId = table.rootPageId;
         slot = await this.driver.acquirePage(currentPageId);
         view = this.pool.getSlotDataView(slot);
+      }
+      const visitedTailPages = new Set<number>([currentPageId]);
+      while (true) {
+        const nextPageId = page_get_next_page_id(view, 0);
+        if (nextPageId <= 1 || visitedTailPages.has(nextPageId)) break;
+        visitedTailPages.add(nextPageId);
+        const nextSlot = await this.driver.acquirePage(nextPageId);
+        const nextView = this.pool.getSlotDataView(nextSlot);
+        if (page_get_type(nextView, 0) !== PAGE_TYPE_LEAF_DATA) break;
+        currentPageId = nextPageId;
+        slot = nextSlot;
+        view = nextView;
       }
       this.tableTailPages.set(tableName, currentPageId);
 
@@ -2979,9 +3073,14 @@ export class WebDB implements IDatabaseQueryExecutor {
     let totalDeleted = 0;
 
     let currPageId = table.rootPageId;
-    while (currPageId !== 0) {
+    const visitedPages = new Set<number>();
+    while (currPageId > 1 && !visitedPages.has(currPageId)) {
+      visitedPages.add(currPageId);
       const slot = await this.driver.acquirePage(currPageId);
       const view = this.pool.getSlotDataView(slot);
+      if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
+        break;
+      }
       const cellCount = page_get_cell_count(view, 0);
       const nextPageId = page_get_next_page_id(view, 0);
 
@@ -2994,7 +3093,7 @@ export class WebDB implements IDatabaseQueryExecutor {
           const row = page_deserialize_row(table.columns, view, off);
           allCells.push({ cellIdx: i, row });
 
-          if (this.matchesFilters(table, row, filters)) {
+          if (row && this.matchesFilters(table, row, filters)) {
             deletedIndices.push(i);
             const rec: MutationRecord = {
               table: table.name,
@@ -3223,16 +3322,21 @@ export class WebDB implements IDatabaseQueryExecutor {
     filters: QueryFilter[],
   ): Promise<DbRow | null> {
     let currPageId = table.rootPageId;
-    while (currPageId !== 0) {
+    const visitedPages = new Set<number>();
+    while (currPageId > 1 && !visitedPages.has(currPageId)) {
+      visitedPages.add(currPageId);
       const slot = await this.driver.acquirePage(currPageId);
       const view = this.pool.getSlotDataView(slot);
+      if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
+        break;
+      }
       const cellCount = page_get_cell_count(view, 0);
       const nextPageId = page_get_next_page_id(view, 0);
 
       for (let i = 0; i < cellCount; i++) {
         const off = page_get_cell_offset(view, 0, i);
         const row = page_deserialize_row(table.columns, view, off);
-        if (this.matchesFilters(table, row, filters)) {
+        if (row && this.matchesFilters(table, row, filters)) {
           return row;
         }
       }
@@ -3728,7 +3832,9 @@ export class WebDB implements IDatabaseQueryExecutor {
           this.pool.view,
           rowRecordOffset,
         );
-        rows.push(record);
+        if (record) {
+          rows.push(record);
+        }
 
         currentOffset += 2 + rowLen;
       }
