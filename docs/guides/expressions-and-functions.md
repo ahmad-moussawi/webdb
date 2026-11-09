@@ -158,7 +158,7 @@ const inactiveUsers = await db
 
 When evaluating queries over hundreds or thousands of rows, executing an individual JavaScript function call per row introduces noticeable function call overhead (call frame construction and V8 execution boundaries).
 
-To maximize throughput across row sets, WebDB supports **Vectorized UDF Batching**. Instead of calling your function one row at a time, WebDB dispatches arguments in chunks (default **128 rows**, power-of-two aligned for CPU cache lines and V8 memory allocation buckets):
+To maximize throughput across row sets, WebDB supports **Vectorized UDF Batching**. Instead of calling your function one row at a time, WebDB dispatches arguments in fixed chunks of **128 rows** (power-of-two aligned for CPU cache lines and V8 memory allocation buckets):
 
 ```typescript
 import { DataType } from "@ahmadmoussawi/webdb";
@@ -188,7 +188,8 @@ const orders = await db
 #### How `db.registerBatchedFunction` Works
 
 1. **Automatic Scalar Fallback**: `registerBatchedFunction` automatically defines a scalar fallback `call: (...args) => batchFn([args])[0]`, so the function also works seamlessly for single-row evaluations or constant expressions.
-2. **Signature**:
+2. **Fixed Internal Batch Sizing**: Batches are automatically fixed to 128 rows internally (`VECTOR_BATCH_SIZE = 128`) with zero heap allocation per batch. You do not need to configure or pass a `batchSize` parameter.
+3. **Signature**:
    ```typescript
    db.registerBatchedFunction(
      name: string,

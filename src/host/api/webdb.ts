@@ -1,6 +1,7 @@
 import {
   PAGE_SIZE,
   RESULT_BUFFER_OFFSET,
+  RESULT_BUFFER_SIZE,
   DEFAULT_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_INDEXES_PAGE1,
@@ -121,7 +122,7 @@ import {
   VmContext,
   IPageProvider,
 } from "../../shared/index.ts";
-import { vm_step } from "../../core/index.ts";
+import { vm_step, VM_CTX_PHYS_ARENA_USED, UuidCodec, UlidCodec } from "../../core/index.ts";
 import {
   compileQuery,
   QueryFilter,
@@ -137,6 +138,10 @@ import {
   ParsedSelectExpr,
   deriveDefaultAlias,
   evalExprNode,
+  evalExprNodeBatch,
+  extractReferencedColumns,
+  canonicalExpr,
+  VECTOR_BATCH_SIZE,
 } from "../compiler/expr_parser.ts";
 import { QueryPlanner } from "../compiler/planner/index.ts";
 import {
@@ -3714,6 +3719,10 @@ export class WebDB implements IDatabaseQueryExecutor {
     return this;
   }
 
+  /**
+   * Registers a vectorized JavaScript UDF dispatched in fixed 128-row chunks (VECTOR_BATCH_SIZE = 128)
+   * to eliminate per-row function call overhead without requiring batchSize configuration.
+   */
   registerBatchedFunction(
     name: string,
     batchFn: (argsBatch: any[][]) => any[],
@@ -3911,6 +3920,233 @@ export class WebDB implements IDatabaseQueryExecutor {
     return trackLiveQueryPromise(promise, callerTracker);
   }
 
+  private _extractColumnarBatch(
+    outputColumns: ColumnMeta[],
+    view: DataView,
+    offsets: Int32Array,
+    neededCols: Set<string>,
+  ): Record<string, any[]> {
+    const count = offsets.length;
+    const col_count = outputColumns.length;
+    const null_bitmap_bytes = (col_count + 7) >> 3;
+
+    const result: Record<string, any[]> = {};
+    for (let i = 0; i < col_count; i++) {
+      const c = outputColumns[i];
+      if (
+        neededCols.has(c.name) ||
+        (c.name.includes(".") &&
+          neededCols.has(c.name.slice(c.name.lastIndexOf(".") + 1)))
+      ) {
+        const arr = new Array(count);
+        result[c.name] = arr;
+        if (c.name.includes(".")) {
+          const short = c.name.slice(c.name.lastIndexOf(".") + 1);
+          if (!result[short]) {
+            result[short] = arr;
+          }
+        }
+      }
+    }
+
+    const textDecoder = new TextDecoder();
+    const hasVarColsNeeded = outputColumns.some(
+      (c) =>
+        (c.type === DataType.TEXT || c.type === DataType.BLOB) &&
+        (neededCols.has(c.name) ||
+          (c.name.includes(".") &&
+            neededCols.has(c.name.slice(c.name.lastIndexOf(".") + 1)))),
+    );
+
+    let lastNeededColIdx = -1;
+    for (let i = 0; i < col_count; i++) {
+      const c = outputColumns[i];
+      if (
+        neededCols.has(c.name) ||
+        (c.name.includes(".") &&
+          neededCols.has(c.name.slice(c.name.lastIndexOf(".") + 1)))
+      ) {
+        lastNeededColIdx = i;
+      }
+    }
+
+    for (let rowIdx = 0; rowIdx < count; rowIdx++) {
+      const record_offset = offsets[rowIdx];
+      const record_flags = view.getUint8(record_offset);
+      if ((record_flags & 0x01) === 0) {
+        continue;
+      }
+      const record_length = view.getUint16(record_offset + 1, true);
+      const record_end = record_offset + record_length;
+      if (
+        record_length < 3 + null_bitmap_bytes ||
+        record_end > view.byteLength
+      ) {
+        continue;
+      }
+
+      const bitmap_start = record_offset + 3;
+      const fixed_start = bitmap_start + null_bitmap_bytes;
+
+      let var_offset_table_start = 0;
+      let min_payload_rel_offset = 0;
+
+      if (hasVarColsNeeded) {
+        let current_fixed_offset = fixed_start;
+        let total_var_cols = 0;
+        let cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
+        for (let i = 0; i < col_count; i++) {
+          if ((i & 7) === 0 && i > 0) {
+            cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
+          }
+          const c_type = outputColumns[i].type;
+          if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+            total_var_cols++;
+          }
+          if ((cur_bitmap_byte & (1 << (i & 7))) === 0) {
+            if (c_type === DataType.INT32) current_fixed_offset += 4;
+            else if (c_type === DataType.INT64 || c_type === DataType.FLOAT64)
+              current_fixed_offset += 8;
+            else if (c_type === DataType.UUID || c_type === DataType.ULID)
+              current_fixed_offset += 16;
+          }
+        }
+
+        var_offset_table_start = current_fixed_offset;
+        const var_offset_table_end =
+          var_offset_table_start + (total_var_cols << 2);
+        if (var_offset_table_end > record_end) {
+          continue;
+        }
+        min_payload_rel_offset = var_offset_table_end - record_offset;
+      }
+
+      let current_fixed_offset = fixed_start;
+      let var_col_idx = 0;
+      let cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
+      const endColIdx = hasVarColsNeeded ? col_count : lastNeededColIdx + 1;
+      for (let i = 0; i < endColIdx; i++) {
+        if ((i & 7) === 0 && i > 0) {
+          cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
+        }
+        const col = outputColumns[i];
+        const c_type = col.type;
+        const is_null = (cur_bitmap_byte & (1 << (i & 7))) !== 0;
+        const colArr = result[col.name];
+
+        if (is_null) {
+          if (colArr) {
+            colArr[rowIdx] = null;
+          }
+          if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+            var_col_idx++;
+          }
+          continue;
+        }
+
+        switch (c_type) {
+          case DataType.INT32:
+            if (colArr) {
+              colArr[rowIdx] = view.getInt32(current_fixed_offset, true);
+            }
+            current_fixed_offset += 4;
+            break;
+          case DataType.INT64:
+            if (colArr) {
+              colArr[rowIdx] = view.getBigInt64(current_fixed_offset, true);
+            }
+            current_fixed_offset += 8;
+            break;
+          case DataType.FLOAT64:
+            if (colArr) {
+              colArr[rowIdx] = view.getFloat64(current_fixed_offset, true);
+            }
+            current_fixed_offset += 8;
+            break;
+          case DataType.UUID: {
+            if (colArr) {
+              const slice = new Uint8Array(
+                view.buffer,
+                view.byteOffset + current_fixed_offset,
+                16,
+              );
+              colArr[rowIdx] = UuidCodec.decode(slice, 0);
+            }
+            current_fixed_offset += 16;
+            break;
+          }
+          case DataType.ULID: {
+            if (colArr) {
+              const slice = new Uint8Array(
+                view.buffer,
+                view.byteOffset + current_fixed_offset,
+                16,
+              );
+              colArr[rowIdx] = UlidCodec.decode(slice, 0);
+            }
+            current_fixed_offset += 16;
+            break;
+          }
+          case DataType.TEXT: {
+            if (colArr) {
+              const table_entry_offset =
+                var_offset_table_start + (var_col_idx << 2);
+              const rel_offset = view.getUint16(table_entry_offset, true);
+              const len = view.getUint16(table_entry_offset + 2, true);
+              if (len === 0) {
+                colArr[rowIdx] = "";
+              } else if (
+                rel_offset >= min_payload_rel_offset &&
+                rel_offset + len <= record_length &&
+                record_offset + rel_offset + len <= view.byteLength
+              ) {
+                const payload_offset =
+                  view.byteOffset + record_offset + rel_offset;
+                const text_bytes = new Uint8Array(
+                  view.buffer,
+                  payload_offset,
+                  len,
+                );
+                colArr[rowIdx] = textDecoder.decode(text_bytes);
+              } else {
+                colArr[rowIdx] = null;
+              }
+            }
+            var_col_idx++;
+            break;
+          }
+          case DataType.BLOB: {
+            if (colArr) {
+              const table_entry_offset =
+                var_offset_table_start + (var_col_idx << 2);
+              const rel_offset = view.getUint16(table_entry_offset, true);
+              const len = view.getUint16(table_entry_offset + 2, true);
+              if (len === 0) {
+                colArr[rowIdx] = new Uint8Array(0);
+              } else if (
+                rel_offset >= min_payload_rel_offset &&
+                rel_offset + len <= record_length &&
+                record_offset + rel_offset + len <= view.byteLength
+              ) {
+                const payload_offset =
+                  view.byteOffset + record_offset + rel_offset;
+                colArr[rowIdx] = new Uint8Array(
+                  view.buffer.slice(payload_offset, payload_offset + len),
+                );
+              } else {
+                colArr[rowIdx] = null;
+              }
+            }
+            var_col_idx++;
+            break;
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
   private async _executeQueryInternal(
     tableName: string,
     filters: QueryFilter[],
@@ -3945,6 +4181,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     const hasUdfs = this.udfs.size > 0;
+    const hasBatchedWhere = Boolean(
+      options.batchedWhereFilters && options.batchedWhereFilters.length > 0,
+    );
     const plan: QueryPlan = {
       table,
       joinedTables: joinPlans.length > 0 ? joinPlans : undefined,
@@ -3956,8 +4195,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       selectExprs: options.selectExprs,
       udfNameMap: hasUdfs ? this.getUdfMap() : undefined,
       udfDefs: hasUdfs ? this.getUdfDefs() : undefined,
-      limit: options.limit !== null ? options.limit : undefined,
-      offset: options.offset !== null ? options.offset : undefined,
+      limit: hasBatchedWhere ? undefined : (options.limit !== null ? options.limit : undefined),
+      offset: hasBatchedWhere ? undefined : (options.offset !== null ? options.offset : undefined),
       planner: options.planner ?? this.planner,
     };
 
@@ -3969,6 +4208,11 @@ export class WebDB implements IDatabaseQueryExecutor {
     ];
 
     resetVmContext(this.vmCtx, executionTables[0], executionTables);
+    this.pool.view.setUint32(
+      this.pool.offsets.vmContextOffset + VM_CTX_PHYS_ARENA_USED,
+      0,
+      true,
+    );
     if ((bytecode as any).inSets) {
       this.vmCtx.inSets = (bytecode as any).inSets;
     }
@@ -4038,41 +4282,33 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     this.vmCtx.outputColumns = outputColumns;
 
+    let filterCols: Set<string> | undefined;
+    if (hasBatchedWhere) {
+      filterCols = new Set<string>();
+      for (const f of options.batchedWhereFilters!) {
+        if (f.expr) {
+          for (const c of extractReferencedColumns(f.expr)) {
+            filterCols.add(c);
+            if (c.includes(".")) {
+              filterCols.add(c.slice(c.lastIndexOf(".") + 1));
+            }
+          }
+        }
+        if (f.colName) {
+          filterCols.add(f.colName);
+          if (f.colName.includes(".")) {
+            filterCols.add(f.colName.slice(f.colName.lastIndexOf(".") + 1));
+          }
+        }
+      }
+    }
+
     const rows: DbRow[] = [];
     const stepFn = this.wasmCore ? this.wasmCore.vm_step : vm_step;
     while (true) {
       const status = stepFn(this.vmCtx, this.pool.view, bytecode);
 
-      // Hydrate rows from Output Result Buffer for current chunk
-      let currentOffset = 0;
-      for (let i = 0; i < this.vmCtx.resultCount; i++) {
-        const rowLen = this.pool.view.getUint16(
-          RESULT_BUFFER_OFFSET + currentOffset,
-          true,
-        );
-        const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
-
-        const record = page_deserialize_row(
-          outputColumns,
-          this.pool.view,
-          rowRecordOffset,
-        );
-        if (record) {
-          rows.push(record);
-        }
-
-        currentOffset += 2 + rowLen;
-      }
-
-      if (status === VmStatus.DONE) {
-        break;
-      } else if (status === VmStatus.BUFFER_FULL) {
-        this.vmCtx.resultOffset = 0;
-        this.vmCtx.resultCount = 0;
-        this.vmCtx.status = VmStatus.RUNNING;
-      } else if (status === VmStatus.PAGE_FAULT) {
-        this.vmCtx.resultOffset = 0;
-        this.vmCtx.resultCount = 0;
+      if (status === VmStatus.PAGE_FAULT) {
         // Temporarily pin any currently resident active cursor pages so acquiring fault_page_id
         // does not evict the page a cursor is actively transitioning from.
         const pinnedCursorSlots: number[] = [];
@@ -4094,6 +4330,131 @@ export class WebDB implements IDatabaseQueryExecutor {
           }
         }
         this.vmCtx.status = VmStatus.RUNNING;
+
+        if (hasBatchedWhere && this.vmCtx.resultOffset + 4096 < RESULT_BUFFER_SIZE) {
+          continue;
+        }
+      }
+
+      // Hydrate rows from Output Result Buffer for current chunk
+      if (hasBatchedWhere) {
+        const count = this.vmCtx.resultCount;
+        if (count > 0) {
+          const offsets = new Int32Array(count);
+          let curOff = 0;
+          for (let i = 0; i < count; i++) {
+            const rowLen = this.pool.view.getUint16(
+              RESULT_BUFFER_OFFSET + curOff,
+              true,
+            );
+            offsets[i] = RESULT_BUFFER_OFFSET + curOff + 2;
+            curOff += 2 + rowLen;
+          }
+
+          const colData = this._extractColumnarBatch(
+            outputColumns,
+            this.pool.view,
+            offsets,
+            filterCols!,
+          );
+
+          let surviving = new Uint32Array(count);
+          for (let i = 0; i < count; i++) surviving[i] = i;
+          let survivingCount = count;
+
+          const udfs = (name: string) => this.getUdf(name)?.def;
+          const rowCache = options.exprCache ? new Array<Map<string, any>>(count) : undefined;
+
+          for (const f of options.batchedWhereFilters!) {
+            if (survivingCount === 0) break;
+            if (f.type === "expr" && f.expr) {
+              const batchResults = evalExprNodeBatch(
+                f.expr,
+                colData,
+                udfs,
+                VECTOR_BATCH_SIZE,
+                rowCache,
+              );
+              let nextCount = 0;
+              for (let i = 0; i < survivingCount; i++) {
+                const idx = surviving[i];
+                const val = batchResults[idx];
+                if (val && val !== 0) {
+                  surviving[nextCount++] = idx;
+                }
+              }
+              survivingCount = nextCount;
+            }
+          }
+
+          for (let i = 0; i < survivingCount; i++) {
+            const idx = surviving[i];
+            const record = page_deserialize_row(
+              outputColumns,
+              this.pool.view,
+              offsets[idx],
+            );
+            if (record) {
+              if (options.exprCache && rowCache && rowCache[idx]) {
+                options.exprCache.set(record, rowCache[idx]);
+              }
+              rows.push(record);
+            }
+          }
+        }
+      } else {
+        let currentOffset = 0;
+        for (let i = 0; i < this.vmCtx.resultCount; i++) {
+          const rowLen = this.pool.view.getUint16(
+            RESULT_BUFFER_OFFSET + currentOffset,
+            true,
+          );
+          const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
+
+          const record = page_deserialize_row(
+            outputColumns,
+            this.pool.view,
+            rowRecordOffset,
+          );
+          if (record) {
+            rows.push(record);
+          }
+
+          currentOffset += 2 + rowLen;
+        }
+      }
+
+      const canEarlyExitLimit =
+        !options.orderBy &&
+        (!options.aggregates || options.aggregates.length === 0) &&
+        (!options.groupBy || options.groupBy.length === 0) &&
+        options.limit !== null &&
+        options.limit !== undefined;
+
+      if (
+        canEarlyExitLimit &&
+        options.limit != null &&
+        rows.length >= (options.offset ?? 0) + options.limit
+      ) {
+        break;
+      }
+
+      if (status === VmStatus.DONE) {
+        break;
+      } else if (status === VmStatus.BUFFER_FULL || status === VmStatus.PAGE_FAULT) {
+        this.vmCtx.resultOffset = 0;
+        this.vmCtx.resultCount = 0;
+        this.vmCtx.status = VmStatus.RUNNING;
+        if (
+          (!this.vmCtx.sorters || this.vmCtx.sorters.length === 0) &&
+          (!this.vmCtx.aggregators || this.vmCtx.aggregators.length === 0)
+        ) {
+          this.pool.view.setUint32(
+            this.pool.offsets.vmContextOffset + VM_CTX_PHYS_ARENA_USED,
+            0,
+            true,
+          );
+        }
       } else if (status === VmStatus.ARENA_EXHAUSTED) {
         this.vmCtx.arenaOffset = 0;
         throw new QueryArenaExhaustedError();
@@ -4112,6 +4473,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       enumerable: false,
       configurable: true,
     });
+
+    if (hasBatchedWhere) {
+      Object.defineProperty(rows, "batchedWhereFiltered", {
+        value: true,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
 
     return rows;
   }

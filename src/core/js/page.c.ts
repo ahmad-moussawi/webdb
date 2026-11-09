@@ -890,6 +890,7 @@ export function page_deserialize_row(
   arg1: TableMeta | ColumnMeta[] | DataView,
   arg2: DataView | number,
   arg3?: number | TableMeta | ColumnMeta[],
+  selectedCols?: Set<string>,
 ): DbRow {
   let columns: ColumnMeta[];
   let view: DataView;
@@ -971,9 +972,16 @@ export function page_deserialize_row(
     const col = columns[i];
     const c_type = col.type;
     const is_null = (cur_bitmap_byte & (1 << (i & 7))) !== 0;
+    const is_wanted =
+      !selectedCols ||
+      selectedCols.has(col.name) ||
+      (col.name.includes('.') &&
+        selectedCols.has(col.name.slice(col.name.lastIndexOf('.') + 1)));
 
     if (is_null) {
-      row[col.name] = null;
+      if (is_wanted) {
+        row[col.name] = null;
+      }
       if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
         var_col_idx++;
       }
@@ -982,76 +990,90 @@ export function page_deserialize_row(
 
     switch (c_type) {
       case DataType.INT32:
-        row[col.name] = view.getInt32(current_fixed_offset, true);
+        if (is_wanted) {
+          row[col.name] = view.getInt32(current_fixed_offset, true);
+        }
         current_fixed_offset += 4;
         break;
       case DataType.INT64:
-        row[col.name] = view.getBigInt64(current_fixed_offset, true);
+        if (is_wanted) {
+          row[col.name] = view.getBigInt64(current_fixed_offset, true);
+        }
         current_fixed_offset += 8;
         break;
       case DataType.FLOAT64:
-        row[col.name] = view.getFloat64(current_fixed_offset, true);
+        if (is_wanted) {
+          row[col.name] = view.getFloat64(current_fixed_offset, true);
+        }
         current_fixed_offset += 8;
         break;
       case DataType.UUID: {
-        const slice = new Uint8Array(
-          view.buffer,
-          view.byteOffset + current_fixed_offset,
-          16,
-        );
-        row[col.name] = UuidCodec.decode(slice, 0);
+        if (is_wanted) {
+          const slice = new Uint8Array(
+            view.buffer,
+            view.byteOffset + current_fixed_offset,
+            16,
+          );
+          row[col.name] = UuidCodec.decode(slice, 0);
+        }
         current_fixed_offset += 16;
         break;
       }
       case DataType.ULID: {
-        const slice = new Uint8Array(
-          view.buffer,
-          view.byteOffset + current_fixed_offset,
-          16,
-        );
-        row[col.name] = UlidCodec.decode(slice, 0);
+        if (is_wanted) {
+          const slice = new Uint8Array(
+            view.buffer,
+            view.byteOffset + current_fixed_offset,
+            16,
+          );
+          row[col.name] = UlidCodec.decode(slice, 0);
+        }
         current_fixed_offset += 16;
         break;
       }
       case DataType.TEXT: {
-        const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
-        const rel_offset = view.getUint16(table_entry_offset, true);
-        const len = view.getUint16(table_entry_offset + 2, true);
-        if (len === 0) {
-          row[col.name] = "";
-        } else {
-          if (
-            rel_offset < min_payload_rel_offset ||
-            rel_offset + len > record_length ||
-            record_offset + rel_offset + len > view.byteLength
-          ) {
-            return null as any;
+        if (is_wanted) {
+          const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
+          const rel_offset = view.getUint16(table_entry_offset, true);
+          const len = view.getUint16(table_entry_offset + 2, true);
+          if (len === 0) {
+            row[col.name] = "";
+          } else {
+            if (
+              rel_offset < min_payload_rel_offset ||
+              rel_offset + len > record_length ||
+              record_offset + rel_offset + len > view.byteLength
+            ) {
+              return null as any;
+            }
+            const payload_offset = view.byteOffset + record_offset + rel_offset;
+            const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
+            row[col.name] = text_decoder.decode(text_bytes);
           }
-          const payload_offset = view.byteOffset + record_offset + rel_offset;
-          const text_bytes = new Uint8Array(view.buffer, payload_offset, len);
-          row[col.name] = text_decoder.decode(text_bytes);
         }
         var_col_idx++;
         break;
       }
       case DataType.BLOB: {
-        const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
-        const rel_offset = view.getUint16(table_entry_offset, true);
-        const len = view.getUint16(table_entry_offset + 2, true);
-        if (
-          len > 0 &&
-          (rel_offset < min_payload_rel_offset ||
-            rel_offset + len > record_length ||
-            record_offset + rel_offset + len > view.byteLength)
-        ) {
-          return null as any;
+        if (is_wanted) {
+          const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
+          const rel_offset = view.getUint16(table_entry_offset, true);
+          const len = view.getUint16(table_entry_offset + 2, true);
+          if (
+            len > 0 &&
+            (rel_offset < min_payload_rel_offset ||
+              rel_offset + len > record_length ||
+              record_offset + rel_offset + len > view.byteLength)
+          ) {
+            return null as any;
+          }
+          const payload_offset = view.byteOffset + record_offset + rel_offset;
+          const blob_bytes = new Uint8Array(len);
+          if (len > 0) {
+            blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
+          }
+          row[col.name] = blob_bytes;
         }
-        const payload_offset = view.byteOffset + record_offset + rel_offset;
-        const blob_bytes = new Uint8Array(len);
-        if (len > 0) {
-          blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
-        }
-        row[col.name] = blob_bytes;
         var_col_idx++;
         break;
       }

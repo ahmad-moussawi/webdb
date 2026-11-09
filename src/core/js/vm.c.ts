@@ -2362,6 +2362,9 @@ function writeValueToSlot(
       vm_reg_set_slice(view, slot_off, DataType.TEXT, 0, 0);
     } else {
       const dst = vm_phys_alloc(view, ctx_off, arena_base, bytes.byteLength);
+      if (dst === 0) {
+        throw new Error("Arena memory exhausted for UDF return value");
+      }
       new Uint8Array(view.buffer, view.byteOffset + dst, bytes.byteLength).set(
         bytes,
       );
@@ -2372,6 +2375,9 @@ function writeValueToSlot(
       vm_reg_set_slice(view, slot_off, DataType.BLOB, 0, 0);
     } else {
       const dst = vm_phys_alloc(view, ctx_off, arena_base, val.byteLength);
+      if (dst === 0) {
+        throw new Error("Arena memory exhausted for UDF return value");
+      }
       new Uint8Array(view.buffer, view.byteOffset + dst, val.byteLength).set(
         val,
       );

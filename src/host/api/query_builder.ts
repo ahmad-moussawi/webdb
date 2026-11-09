@@ -388,6 +388,8 @@ export interface QueryExecutionOptions {
   selectExprs?: ParsedSelectExpr[];
   joins?: JoinClause[];
   planner?: QueryPlanner;
+  batchedWhereFilters?: QueryFilter[];
+  exprCache?: WeakMap<DbRow, Map<string, any>>;
 }
 
 export interface IDatabaseQueryExecutor {
@@ -2935,9 +2937,15 @@ export class QueryBuilder {
           udfs = (name: string) => (this.db as any).getUdf(name)?.def;
         }
         const batchResults = evalExprNodeBatch(f.expr, currentRows, udfs, 128, exprCache);
-        currentRows = currentRows.filter(
-          (_, idx) => Boolean(batchResults[idx] && batchResults[idx] !== 0),
-        );
+        const out: DbRow[] = [];
+        const n = currentRows.length;
+        for (let i = 0; i < n; i++) {
+          const val = batchResults[i];
+          if (val && val !== 0) {
+            out.push(currentRows[i]);
+          }
+        }
+        currentRows = out;
       } else {
         const out: DbRow[] = [];
         for (const row of currentRows) {
@@ -3222,63 +3230,77 @@ export class QueryBuilder {
     }
 
     const n = rows.length;
-    const projectedRows: DbRow[] = new Array(n);
-    for (let i = 0; i < n; i++) {
-      projectedRows[i] = {};
-    }
-
     let udfs: any;
     if (typeof (this.db as any).getUdf === 'function') {
       udfs = (name: string) => (this.db as any).getUdf(name)?.def;
     }
 
+    // Pre-resolve mappings for all select fields
+    const mappings: Array<{
+      targetAlias: string;
+      sourceKey?: string;
+      expr?: any;
+    }> = [];
+
+    const sampleRow = rows[0];
     for (const field of this.selectFields) {
       const targetAlias = field.alias;
       const defaultAlias = field.expr ? deriveDefaultAlias(field.expr) : undefined;
       const sourceCol = field.sourceCol;
 
-      let hasTarget = true;
-      let hasDefault = defaultAlias !== undefined;
-      let hasSource = sourceCol !== undefined;
-      for (let i = 0; i < n; i++) {
-        const r = rows[i];
-        if (r[targetAlias] === undefined) hasTarget = false;
-        if (hasDefault && r[defaultAlias!] === undefined) hasDefault = false;
-        if (hasSource && r[sourceCol!] === undefined) hasSource = false;
-      }
-
-      if (hasTarget) {
-        for (let i = 0; i < n; i++) {
-          projectedRows[i][targetAlias] = rows[i][targetAlias];
-        }
-      } else if (hasDefault) {
-        for (let i = 0; i < n; i++) {
-          projectedRows[i][targetAlias] = rows[i][defaultAlias!];
-        }
-      } else if (hasSource) {
-        for (let i = 0; i < n; i++) {
-          projectedRows[i][targetAlias] = rows[i][sourceCol!];
-        }
+      if (sampleRow[targetAlias] !== undefined) {
+        mappings.push({ targetAlias, sourceKey: targetAlias });
+      } else if (defaultAlias !== undefined && sampleRow[defaultAlias] !== undefined) {
+        mappings.push({ targetAlias, sourceKey: defaultAlias });
+      } else if (sourceCol !== undefined && sampleRow[sourceCol] !== undefined) {
+        mappings.push({ targetAlias, sourceKey: sourceCol });
       } else if (field.expr) {
-        const batchVals = evalExprNodeBatch(field.expr, rows, udfs, 128, exprCache);
-        for (let i = 0; i < n; i++) {
-          projectedRows[i][targetAlias] = batchVals[i];
-        }
+        mappings.push({ targetAlias, expr: field.expr });
       } else {
-        for (let i = 0; i < n; i++) {
-          projectedRows[i][targetAlias] = null;
-        }
+        mappings.push({ targetAlias });
       }
     }
 
+    // Evaluate any missing batch expressions upfront across all rows
+    const evalResults: Record<string, any[]> = {};
+    for (const m of mappings) {
+      if (m.expr) {
+        evalResults[m.targetAlias] = evalExprNodeBatch(m.expr, rows, udfs, 128, exprCache);
+      }
+    }
+
+    const aggNames: string[] = [];
     for (const agg of explicitAggs) {
-      const aggName =
-        agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
-      for (let i = 0; i < n; i++) {
-        if (!(aggName in projectedRows[i]) && rows[i][aggName] !== undefined) {
-          projectedRows[i][aggName] = rows[i][aggName];
+      const name = agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+      if (sampleRow[name] !== undefined) {
+        aggNames.push(name);
+      }
+    }
+
+    const numMappings = mappings.length;
+    const numAggs = aggNames.length;
+    const projectedRows: DbRow[] = new Array(n);
+
+    for (let i = 0; i < n; i++) {
+      const r = rows[i];
+      const obj: DbRow = {};
+      for (let j = 0; j < numMappings; j++) {
+        const m = mappings[j];
+        if (m.sourceKey) {
+          obj[m.targetAlias] = r[m.sourceKey];
+        } else if (m.expr) {
+          obj[m.targetAlias] = evalResults[m.targetAlias][i];
+        } else {
+          obj[m.targetAlias] = null;
         }
       }
+      for (let k = 0; k < numAggs; k++) {
+        const aName = aggNames[k];
+        if (obj[aName] === undefined) {
+          obj[aName] = r[aName];
+        }
+      }
+      projectedRows[i] = obj;
     }
 
     return projectedRows;
@@ -3709,6 +3731,8 @@ export class QueryBuilder {
     const passSelectToVdbe =
       !hasCorrelatedSelectSubqueries || hasAggsOrGrouping;
 
+    const exprCache = new WeakMap<DbRow, Map<string, any>>();
+
     const rawRows = await this.db.executeQuery(
       this.tableName,
       vdbeWhereFilters,
@@ -3716,14 +3740,14 @@ export class QueryBuilder {
         limit:
           (hasJoins && hasOrderBy && hasAggsOrGrouping) ||
           hasCorrelatedHaving ||
-          batchedWhereFilters.length > 0 ||
+          (batchedWhereFilters.length > 0 && hasOrderBy) ||
           orderByReferencesBatchedUdf
             ? null
             : this.limitCount,
         offset:
           (hasJoins && hasOrderBy && hasAggsOrGrouping) ||
           hasCorrelatedHaving ||
-          batchedWhereFilters.length > 0 ||
+          (batchedWhereFilters.length > 0 && hasOrderBy) ||
           orderByReferencesBatchedUdf
             ? null
             : this.offsetCount,
@@ -3752,14 +3776,17 @@ export class QueryBuilder {
         selectExprs:
           passSelectToVdbe && vdbeSelectExprs.length > 0 ? vdbeSelectExprs : undefined,
         planner: this.planner,
+        batchedWhereFilters:
+          batchedWhereFilters.length > 0 ? batchedWhereFilters : undefined,
+        exprCache,
       },
     );
 
-    const exprCache = new WeakMap<DbRow, Map<string, any>>();
-
     let rows = rawRows;
     if (batchedWhereFilters.length > 0) {
-      rows = await this.evalFiltersOnRows(rows, batchedWhereFilters, exprCache);
+      if (!(rawRows as any).batchedWhereFiltered) {
+        rows = await this.evalFiltersOnRows(rows, batchedWhereFilters, exprCache);
+      }
       if (this.offsetCount !== null && this.offsetCount > 0 && !hasOrderBy) {
         rows = rows.slice(this.offsetCount);
       }

@@ -111,7 +111,7 @@ Every `TableMeta` returned by `getTable`, `createTable`, `listTables`, or `alter
 | **`db.liveQuery`**        | `liveQuery<T>(queryFn: LiveQueryFn<T>, cbOrOpts?: ..., opts?: LiveQueryOptions<T>): LiveQueryController<T>` | Creates a reactive live query bound to `db` that automatically tracks accessed tables and re-executes on change. |
 | **`db.getSyncState`**     | `getSyncState(): { changeCounter: number; schemaVersion: number }`                                | Returns current Page 1 `changeCounter` and `schemaVersion`.                                              |
 | **`db.registerFunction`**        | `registerFunction(name: string, def: UdfDefinition \| ((...args: any[]) => any)): this`           | Registers a custom synchronous JavaScript UDF callable in queries.                                       |
-| **`db.registerBatchedFunction`** | `registerBatchedFunction(name: string, batchFn: (argsBatch: any[][]) => any[], options?: ...): this` | Registers a vectorized JavaScript UDF dispatched in chunks (default 128 rows) to eliminate per-row call overhead. |
+| **`db.registerBatchedFunction`** | `registerBatchedFunction(name: string, batchFn: (argsBatch: any[][]) => any[], options?: ...): this` | Registers a vectorized JavaScript UDF dispatched in fixed 128-row chunks (`VECTOR_BATCH_SIZE = 128`) to eliminate per-row call overhead. |
 
 ---
 

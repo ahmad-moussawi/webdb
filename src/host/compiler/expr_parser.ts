@@ -1068,23 +1068,44 @@ export function evalExprNode(
   }
 }
 
+export const VECTOR_BATCH_SIZE = 128;
+
+const BATCH_ARG_BUFFERS: any[][][] = [];
+function getReusableBatch(batchSize: number, numArgs: number): any[][] {
+  let byArgs = BATCH_ARG_BUFFERS[numArgs];
+  if (!byArgs) {
+    byArgs = [];
+    BATCH_ARG_BUFFERS[numArgs] = byArgs;
+  }
+  let buf = byArgs[batchSize];
+  if (!buf) {
+    buf = new Array(batchSize);
+    for (let j = 0; j < batchSize; j++) {
+      buf[j] = new Array(numArgs);
+    }
+    byArgs[batchSize] = buf;
+  }
+  return buf;
+}
+
 /**
- * Evaluates an ExprNode AST in vector batches against a slice of database rows.
- * If any UDF provides `batchCall`, calls are dispatched in power-of-two batches (e.g. 128 rows per call)
+ * Evaluates an ExprNode AST in vector batches against a slice of database rows or columnar buffers.
+ * If any UDF provides `batchCall`, calls are dispatched in fixed power-of-two batches (128 rows per call)
  * instead of incurring per-row call overhead. Power-of-two sizing (128) aligns with CPU cache lines
  * and V8 memory allocation buckets.
  */
 export function evalExprNodeBatch(
   expr: ExprNode,
-  rows: DbRow[],
+  rows: DbRow[] | Record<string, ArrayLike<any>>,
   udfs?:
     | Map<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any)>
     | Record<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any)>
     | ((name: string) => { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any) | undefined),
-  batchSize: number = 128,
-  exprCache?: WeakMap<DbRow, Map<string, any>>,
+  batchSize: number = VECTOR_BATCH_SIZE,
+  exprCache?: WeakMap<DbRow, Map<string, any>> | Array<Map<string, any>>,
 ): any[] {
-  const n = rows.length;
+  const isArray = Array.isArray(rows);
+  const n = isArray ? rows.length : (Object.values(rows)[0]?.length ?? 0);
   if (n === 0) return [];
 
   switch (expr.type) {
@@ -1094,15 +1115,27 @@ export function evalExprNodeBatch(
       return out;
     }
     case 'col': {
-      const out = new Array(n);
       if (expr.name === '*') {
+        const out = new Array(n);
         for (let i = 0; i < n; i++) out[i] = null;
-      } else {
-        const colName = expr.name;
-        for (let i = 0; i < n; i++) {
-          const val = rows[i][colName];
-          out[i] = val !== undefined ? val : null;
+        return out;
+      }
+      if (!isArray) {
+        const colMap = rows as Record<string, ArrayLike<any>>;
+        if (colMap[expr.name] !== undefined) return colMap[expr.name] as any[];
+        const shortName = expr.name.includes('.')
+          ? expr.name.slice(expr.name.lastIndexOf('.') + 1)
+          : undefined;
+        if (shortName && colMap[shortName] !== undefined) {
+          return colMap[shortName] as any[];
         }
+      }
+      const out = new Array(n);
+      const colName = expr.name;
+      const rowList = rows as DbRow[];
+      for (let i = 0; i < n; i++) {
+        const val = rowList[i][colName];
+        out[i] = val !== undefined ? val : null;
       }
       return out;
     }
@@ -1163,7 +1196,10 @@ export function evalExprNodeBatch(
     case 'fn': {
       const name = expr.name.toLowerCase();
       if (isAggregateFunction(name)) {
-        return rows.map((r) => evalExprNode(expr, r, udfs as any));
+        if (isArray) {
+          return (rows as DbRow[]).map((r) => evalExprNode(expr, r, udfs as any));
+        }
+        return new Array(n).fill(null);
       }
 
       let udfEntry: any;
@@ -1180,11 +1216,14 @@ export function evalExprNodeBatch(
           ? Boolean(udfEntry.deterministic)
           : name !== 'random';
 
-      const cacheKey = exprCache && isDeterministic ? canonicalExpr(expr) : null;
+      const cacheKey =
+        exprCache && isDeterministic ? canonicalExpr(expr) : null;
       if (cacheKey) {
         let allCached = true;
         for (let i = 0; i < n; i++) {
-          const rowMap = exprCache!.get(rows[i]);
+          const rowMap = Array.isArray(exprCache)
+            ? exprCache[i]
+            : (isArray ? (exprCache as WeakMap<DbRow, Map<string, any>>).get((rows as DbRow[])[i]) : undefined);
           if (!rowMap || !rowMap.has(cacheKey)) {
             allCached = false;
             break;
@@ -1193,7 +1232,10 @@ export function evalExprNodeBatch(
         if (allCached) {
           const out = new Array(n);
           for (let i = 0; i < n; i++) {
-            out[i] = exprCache!.get(rows[i])!.get(cacheKey);
+            const rowMap = Array.isArray(exprCache)
+              ? exprCache[i]
+              : (exprCache as WeakMap<DbRow, Map<string, any>>).get((rows as DbRow[])[i]);
+            out[i] = rowMap!.get(cacheKey);
           }
           return out;
         }
@@ -1215,35 +1257,45 @@ export function evalExprNodeBatch(
         const numArgs = expr.args.length;
         if (batchFn) {
           out = new Array(n);
+          const reusableBatch = getReusableBatch(batchSize, numArgs);
+
           for (let start = 0; start < n; start += batchSize) {
             const end = Math.min(start + batchSize, n);
             const batchLen = end - start;
-            const batchArgList: any[][] = new Array(batchLen);
+            const batchArgList: any[][] =
+              batchLen === batchSize
+                ? reusableBatch
+                : reusableBatch.slice(0, batchLen);
+
             if (numArgs === 1) {
               const a0 = argsVals[0];
               for (let i = start; i < end; i++) {
-                batchArgList[i - start] = [a0[i]];
+                batchArgList[i - start][0] = a0[i];
               }
             } else if (numArgs === 2) {
               const a0 = argsVals[0];
               const a1 = argsVals[1];
               for (let i = start; i < end; i++) {
-                batchArgList[i - start] = [a0[i], a1[i]];
+                const sub = batchArgList[i - start];
+                sub[0] = a0[i];
+                sub[1] = a1[i];
               }
             } else if (numArgs === 3) {
               const a0 = argsVals[0];
               const a1 = argsVals[1];
               const a2 = argsVals[2];
               for (let i = start; i < end; i++) {
-                batchArgList[i - start] = [a0[i], a1[i], a2[i]];
+                const sub = batchArgList[i - start];
+                sub[0] = a0[i];
+                sub[1] = a1[i];
+                sub[2] = a2[i];
               }
             } else {
               for (let i = start; i < end; i++) {
-                const rowArgs = new Array(numArgs);
+                const sub = batchArgList[i - start];
                 for (let aIdx = 0; aIdx < numArgs; aIdx++) {
-                  rowArgs[aIdx] = argsVals[aIdx][i];
+                  sub[aIdx] = argsVals[aIdx][i];
                 }
-                batchArgList[i - start] = rowArgs;
               }
             }
             const resBatch = batchFn(batchArgList);
@@ -1288,13 +1340,26 @@ export function evalExprNodeBatch(
       }
 
       if (cacheKey) {
-        for (let i = 0; i < n; i++) {
-          let rowMap = exprCache!.get(rows[i]);
-          if (!rowMap) {
-            rowMap = new Map<string, any>();
-            exprCache!.set(rows[i], rowMap);
+        if (Array.isArray(exprCache)) {
+          for (let i = 0; i < n; i++) {
+            let rowMap = exprCache[i];
+            if (!rowMap) {
+              rowMap = new Map<string, any>();
+              exprCache[i] = rowMap;
+            }
+            rowMap.set(cacheKey, out[i]);
           }
-          rowMap.set(cacheKey, out[i]);
+        } else if (isArray) {
+          const weakMap = exprCache as WeakMap<DbRow, Map<string, any>>;
+          const rowList = rows as DbRow[];
+          for (let i = 0; i < n; i++) {
+            let rowMap = weakMap.get(rowList[i]);
+            if (!rowMap) {
+              rowMap = new Map<string, any>();
+              weakMap.set(rowList[i], rowMap);
+            }
+            rowMap.set(cacheKey, out[i]);
+          }
         }
       }
       return out;

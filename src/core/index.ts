@@ -201,3 +201,6 @@ export {
   WEBDB_CORE_WASM_BASE64,
 } from "./wasm/embedded_wasm.js";
 
+export { VM_CTX_PHYS_ARENA_USED } from "./js/vm.helpers.c.js";
+export { UuidCodec, UlidCodec } from "./js/codecs.c.js";
+
