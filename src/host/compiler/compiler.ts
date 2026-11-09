@@ -67,6 +67,8 @@ export function getCmpOpcode(op: string | undefined): OpCode {
       return OpCode.OP_STR_STARTS_WITH;
     case "ends_with":
       return OpCode.OP_STR_ENDS_WITH;
+    case "fuzzy":
+      return OpCode.OP_STR_FUZZY_MATCH;
     default:
       return OpCode.OP_EQ;
   }
@@ -1902,6 +1904,9 @@ export function inferExprType(
         "endswith",
         "like",
         "contains",
+        "levenshtein",
+        "edit_distance",
+        "fuzzy",
       ].includes(fn)
     )
       return DataType.INT32;
@@ -2163,6 +2168,38 @@ export function emitExpression(
       return;
     }
 
+    if (fnName === "levenshtein" || fnName === "edit_distance") {
+      const regStr1 = allocReg();
+      const regStr2 = allocReg();
+      emitExpression(
+        expr.args[0] ?? { type: "literal", value: null },
+        table,
+        emitter,
+        cursor,
+        regStr1,
+        allocReg,
+        udfNameMap,
+        resolveReg,
+        tables,
+      );
+      emitExpression(
+        expr.args[1] ?? { type: "literal", value: null },
+        table,
+        emitter,
+        cursor,
+        regStr2,
+        allocReg,
+        udfNameMap,
+        resolveReg,
+        tables,
+      );
+      emitter.emitUint8(OpCode.OP_STR_LEVENSHTEIN);
+      emitter.emitUint8(regStr1);
+      emitter.emitUint8(regStr2);
+      emitter.emitUint8(targetReg);
+      return;
+    }
+
     const patternOps: Record<string, OpCode> = {
       starts_with: OpCode.OP_STR_STARTS_WITH,
       startswith: OpCode.OP_STR_STARTS_WITH,
@@ -2170,6 +2207,7 @@ export function emitExpression(
       endswith: OpCode.OP_STR_ENDS_WITH,
       like: OpCode.OP_STR_LIKE,
       contains: OpCode.OP_STR_CONTAINS,
+      fuzzy: OpCode.OP_STR_FUZZY_MATCH,
     };
     if (patternOps[fnName]) {
       const regStr = allocReg();
@@ -5175,13 +5213,15 @@ export function disassembleBytecode(
       case OpCode.OP_STR_NOT_LIKE:
       case OpCode.OP_STR_CONTAINS:
       case OpCode.OP_STR_STARTS_WITH:
-      case OpCode.OP_STR_ENDS_WITH: {
+      case OpCode.OP_STR_ENDS_WITH:
+      case OpCode.OP_STR_FUZZY_MATCH: {
         const opNames: Record<number, string> = {
           [OpCode.OP_STR_LIKE]: "OP_STR_LIKE",
           [OpCode.OP_STR_NOT_LIKE]: "OP_STR_NOT_LIKE",
           [OpCode.OP_STR_CONTAINS]: "OP_STR_CONTAINS",
           [OpCode.OP_STR_STARTS_WITH]: "OP_STR_STARTS_WITH",
           [OpCode.OP_STR_ENDS_WITH]: "OP_STR_ENDS_WITH",
+          [OpCode.OP_STR_FUZZY_MATCH]: "OP_STR_FUZZY_MATCH",
         };
         const descriptions: Record<number, string> = {
           [OpCode.OP_STR_LIKE]: "LIKE",
@@ -5189,6 +5229,7 @@ export function disassembleBytecode(
           [OpCode.OP_STR_CONTAINS]: "CONTAINS",
           [OpCode.OP_STR_STARTS_WITH]: "STARTS_WITH",
           [OpCode.OP_STR_ENDS_WITH]: "ENDS_WITH",
+          [OpCode.OP_STR_FUZZY_MATCH]: "FUZZY_MATCH",
         };
         const regA = bytecode[pc++];
         const regB = bytecode[pc++];
@@ -5418,6 +5459,21 @@ export function disassembleBytecode(
           p2: `start=r[${startReg}], len=r[${lenReg}]`,
           p3: `r[${destReg}]`,
           comment: `Extract substring from r[${srcReg}] into r[${destReg}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_STR_LEVENSHTEIN: {
+        const regA = bytecode[pc++];
+        const regB = bytecode[pc++];
+        const regDest = bytecode[pc++];
+        instructions.push({
+          addr,
+          opcode: "OP_STR_LEVENSHTEIN",
+          p1: `r[${regA}]`,
+          p2: `r[${regB}]`,
+          p3: `r[${regDest}]`,
+          comment: `r[${regDest}] = levenshtein(r[${regA}], r[${regB}])`,
         });
         break;
       }

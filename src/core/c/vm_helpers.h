@@ -40,6 +40,8 @@ WEBDB_EXPORT int32_t sql_like_match_view(uint32_t str_off, uint32_t str_len, uin
 WEBDB_EXPORT int32_t vm_str_contains_view(uint32_t str_off, uint32_t str_len, uint32_t sub_off, uint32_t sub_len);
 WEBDB_EXPORT int32_t vm_str_starts_with_view(uint32_t str_off, uint32_t str_len, uint32_t pfx_off, uint32_t pfx_len);
 WEBDB_EXPORT int32_t vm_str_ends_with_view(uint32_t str_off, uint32_t str_len, uint32_t sfx_off, uint32_t sfx_len);
+WEBDB_EXPORT int32_t vm_str_levenshtein_view(uint32_t s1_off, uint32_t s1_len, uint32_t s2_off, uint32_t s2_len, uint32_t max_dist);
+WEBDB_EXPORT int32_t vm_str_fuzzy_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len, uint32_t max_dist, uint32_t allow_prefix);
 WEBDB_EXPORT int32_t vm_utf8_char_count(uint32_t str_off, uint32_t byte_len);
 WEBDB_EXPORT void vm_str_lower(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off);
 WEBDB_EXPORT void vm_str_upper(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off);

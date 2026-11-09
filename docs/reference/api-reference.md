@@ -110,7 +110,8 @@ Every `TableMeta` returned by `getTable`, `createTable`, `listTables`, or `alter
 | **`db.subscribe`**        | `subscribe(tables: string \| string[] \| '*', cb: (event: TableChangeEvent) => void): () => void` | Subscribes to local and cross-tab (`BroadcastChannel`) table mutations. Returns an unsubscribe function. |
 | **`db.liveQuery`**        | `liveQuery<T>(queryFn: LiveQueryFn<T>, cbOrOpts?: ..., opts?: LiveQueryOptions<T>): LiveQueryController<T>` | Creates a reactive live query bound to `db` that automatically tracks accessed tables and re-executes on change. |
 | **`db.getSyncState`**     | `getSyncState(): { changeCounter: number; schemaVersion: number }`                                | Returns current Page 1 `changeCounter` and `schemaVersion`.                                              |
-| **`db.registerFunction`** | `registerFunction(name: string, def: UdfDefinition \| ((...args: any[]) => any)): this`           | Registers a custom synchronous JavaScript UDF callable in queries.                                       |
+| **`db.registerFunction`**        | `registerFunction(name: string, def: UdfDefinition \| ((...args: any[]) => any)): this`           | Registers a custom synchronous JavaScript UDF callable in queries.                                       |
+| **`db.registerBatchedFunction`** | `registerBatchedFunction(name: string, batchFn: (argsBatch: any[][]) => any[], options?: ...): this` | Registers a vectorized JavaScript UDF dispatched in chunks (default 128 rows) to eliminate per-row call overhead. |
 
 ---
 
@@ -211,4 +212,45 @@ See the [**Reactive Live Queries Guide**](/guides/live-queries-and-frameworks) f
 | **`liveQueryState$`** | `liveQueryState$<T>(queryFn, options?): Observable<LiveQueryState<T>>` | Cold RxJS `Observable<LiveQueryState<T>>` emitting full state transitions. |
 | **`provideWebDB`** | `provideWebDB(dbOrFactory: WebDB \| (() => WebDB)): EnvironmentProviders` | Provides a `WebDB` instance in an Angular `ApplicationConfig` or route config. |
 | **`injectWebDB`** | `injectWebDB(): WebDB` | Injects the configured `WebDB` instance via `WEBDB_TOKEN`. |
+
+---
+
+## Add-on Packages
+
+### Database Migrations (`@ahmadmoussawi/webdb/migrations`)
+
+Standalone schema migration manager with transactional execution and atomic locking.
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`runMigrations`** | `runMigrations(db: WebDB, migrations: Migration[], options?: MigratorOptions): Promise<MigrationResult>` | One-line helper that initializes the migration table, discovers applied versions, and runs pending migrations sequentially. |
+| **`Migrator`** | `new Migrator(db: WebDB, options?: MigratorOptions)` | Class with `.up()`, `.down()`, `.getAppliedMigrations()`, `.getPendingMigrations()`, `.reset()`. |
+
+### Fuzzy & Typo-Tolerant Search (`@ahmadmoussawi/webdb/search`)
+
+Zero-dependency browser-native full-text and typo-tolerant search extension powered by `Intl.Segmenter` and Damerau-Levenshtein distance.
+
+| Export | Signature | Description |
+| :--- | :--- | :--- |
+| **`SearchIndex`** | `new SearchIndex(db, config)` | High-level search manager coordinating field weighting, ranking, snippets, and highlights. Has `.search(q, opts)` and `.buildQuery(q, opts)`. |
+| **`createSearchIndex`** | `createSearchIndex(db, config)` | Factory function returning a `SearchIndex` instance. |
+| **`registerFuzzySearch`** | `registerFuzzySearch(db: WebDB): void` | Registers low-level UDFs (`fuzzy`, `fuzzy_score`, `search_score`, `highlight`, `snippet`, `word_count`, `normalize_text`). |
+| **`fuzzyMatch`** | `fuzzyMatch(field, query, options?): ExpressionBuilder` | QueryBuilder helper for `.where()` filtering with typo tolerance. |
+| **`fuzzyScore`** | `fuzzyScore(field, query, options?): ExpressionBuilder` | Computes single-column relevance score in `.select()` and `.orderBy()`. |
+| **`multiFuzzyScore`**| `multiFuzzyScore(fields, query, options?): ExpressionBuilder` | Computes weighted multi-column relevance score in `.select()` and `.orderBy()`. |
+| **`highlightExpr`** | `highlightExpr(field, query, options?): ExpressionBuilder` | QueryBuilder expression projecting HTML-escaped text with `<mark>` tags around matches. |
+| **`snippetExpr`** | `snippetExpr(field, query, options?): ExpressionBuilder` | QueryBuilder expression projecting highlighted context excerpts around matches with ellipses. |
+| **`searchInMemory`** | `searchInMemory(items, query, options): SearchResult<T>` | Pure in-memory search utility over arbitrary JavaScript arrays without touching the database. |
+| **`BM25Index`** | `new BM25Index(config)` | Probabilistic BM25 index with Robertson-Spärck Jones IDF and document length normalization. |
+| **`bm25Score`** | `bm25Score(fields, query, config?): ExpressionBuilder` | QueryBuilder expression computing multi-field BM25 score. |
+| **`ngrams`** | `ngrams(val: unknown, n = 3, options?): string[]` | Splits text into character n-grams (e.g. trigrams) with optional boundary padding. |
+| **`wordNgrams`** | `wordNgrams(val: unknown, n = 2, options?): string[]` | Splits text into word-level n-grams (e.g. bigrams) for phrase searching. |
+| **`ngramSimilarity`** | `ngramSimilarity(a, b, n = 3, options?): number` | Computes Sørensen-Dice similarity coefficient (0.0 to 1.0) over character n-grams. |
+| **`ngramSimilarityExpr`** | `ngramSimilarityExpr(field, query, n = 3): ExpressionBuilder` | QueryBuilder expression computing n-gram similarity in `.select()` or `.where()`. |
+| **`normalizeText`** | `normalizeText(val: unknown): string` | Strips diacritics/accents and lowercases text. |
+| **`tokenize`** | `tokenize(val: unknown, locale?: string): string[]` | Word tokenization using native `Intl.Segmenter`. |
+| **`damerauLevenshtein`** | `damerauLevenshtein(a, b, maxDistance?): number` | Optimal string alignment edit distance accounting for adjacent transpositions. |
+| **`highlight`** | `highlight(text, query, options?): string` | Pure HTML highlighting function. |
+| **`snippet`** | `snippet(text, query, options?): string` | Pure contextual excerpt function. |
+
 

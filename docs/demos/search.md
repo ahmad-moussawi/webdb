@@ -1,11 +1,10 @@
-# Demo: Typo-Tolerant Search with UDFs
+# Demo: Instant Typo-Tolerant Search
 
 <DemoBanner demo="search" />
 
-WebDB has no built-in full-text engine, on purpose. Instead you write the search logic in plain JavaScript and
-register it as a **user-defined function (UDF)**, then call it from `SELECT`, `WHERE` and `ORDER BY` like any
-built-in function. This demo builds a small search engine that way: **ranking, typo tolerance, accent-insensitive
-matching, highlighted snippets**, all re-run by a [live query](/guides/live-queries-and-frameworks) as you type.
+WebDB features an official, browser-native search extension via **`@ahmadmoussawi/webdb/search`**. Instead of bundling megabytes of heavy C search libraries or creating complex shadow tables, it leverages modern web platform primitives (`Intl.Segmenter` for word segmentation, Unicode normalization for accent stripping, and bounded Damerau-Levenshtein distance) paired with WebDB's query builder and vectorized execution.
+
+This demo demonstrates **multi-field relevance ranking, typo tolerance, accent-insensitive matching, and highlighted snippets**, all driven in real time by a **[live query](/guides/live-queries-and-frameworks)** as you type.
 
 <ClientOnly>
   <DemoFrame demo="search" />
@@ -19,102 +18,103 @@ matching, highlighted snippets**, all re-run by a [live query](/guides/live-quer
 - Open **Add an article**, add "Quantum notes", then search `quantum`: the result appears as soon as it is saved.
 :::
 
-## How it works
+---
 
-### 1. Write the search logic as plain functions
+## How It Works
 
-Each UDF is an ordinary synchronous function. This is the heart of it: a relevance score where every query word
-must match, with exact words beating prefixes, and prefixes beating typos:
+### 1. Initialize `SearchIndex` on Your Table
 
-```ts
-export function relevance(title, body, tags, query, fuzzy) {
-  const tokens = words(query);                    // lower-cased, accents stripped
-  if (tokens.length === 0) return 0;
-  let total = 0;
-  for (const token of tokens) {
-    const inTitle = best(words(title), token, fuzzy);   // 0 none, 1 typo, 2 prefix, 3 exact
-    const inTags  = best(words(tags),  token, fuzzy);
-    const inBody  = best(words(body),  token, fuzzy);
-    if (!inTitle && !inTags && !inBody) return 0;       // every word must match somewhere
-    total += TITLE_WEIGHT[inTitle] + TAG_WEIGHT[inTags] + BODY_WEIGHT[inBody];
-  }
-  return total;
-}
-```
-
-Accent-insensitivity is one line of built-in browser API, no library needed:
+Define a `SearchIndex` coordinator pointing to your existing table:
 
 ```ts
-const norm = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-```
+import { WebDB } from '@ahmadmoussawi/webdb';
+import { createSearchIndex } from '@ahmadmoussawi/webdb/search';
 
-Typo tolerance is a small bounded Levenshtein function ([`withinEdits`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/udfs.ts)),
-and `highlight()` / `snippet()` wrap matches in `<mark>` after HTML-escaping the text, so the result is safe to render.
-
-### 2. Register them once
-
-```ts
 const db = await WebDB.open({ name: 'demo_search', storage: 'idb' });
 
-db.registerFunction('relevance', relevance);
-db.registerFunction('highlight', highlight);
-db.registerFunction('snippet', snippet);
-db.registerFunction('word_count', wordCount);
+// Create a search index over the articles table
+export const articleSearch = createSearchIndex(db, {
+  table: 'articles',
+  fields: [
+    { name: 'title', weight: 10, highlight: true },
+    { name: 'tags', weight: 5 },
+    { name: 'body', weight: 1, snippet: true },
+  ],
+  idField: 'id',
+});
 ```
 
-::: warning UDFs live in memory
-Registered functions are not stored in the database. Register them on every page load, before you query.
-:::
+Key features configured here:
+- **Zero Storage Overhead**: No separate shadow tables or index tables are created. It queries your existing `articles` table directly.
+- **Field Weights**: Matches in `title` (weight 10) outrank matches in `tags` (weight 5), which outrank `body` (weight 1).
+- **Automated Highlighting & Snippets**: Setting `highlight: true` generates safe `<mark>` tags around matches, while `snippet: true` extracts a bounded contextual excerpt (~140 characters).
+- **Always 100% in Sync**: Because it operates directly over table rows, new inserts or edits are searchable immediately without background re-indexing.
 
-### 3. Call them from a query
+---
 
-UDFs work in `SELECT`, `WHERE` and `ORDER BY`, and mix freely with normal filters. Pass the user's text as a
-**literal** (so quotes and symbols are harmless), not by building SQL strings:
+### 2. Build Search Queries with Filters
+
+`articleSearch.buildQuery()` returns WebDB's standard `QueryBuilder`, making it easy to compose search with regular SQL-like filters:
 
 ```ts
-const lit = (value) => new ExpressionBuilder({ type: 'literal', value });
-const score = fn('relevance', col('title'), col('body'), col('tags'), lit(q), lit(1));
-
-db.from('articles')
-  .select(['id', 'title', 'category',
-           fn('highlight', col('title'), lit(q), lit(1)).as('title_html'),   // UDF in SELECT
-           fn('snippet',   col('body'),  lit(q), lit(1)).as('snippet_html'),
-           score.as('score')])
-  .where(score.gt(0))                                                         // UDF in WHERE
-  .where('category', '=', category)                                           // normal filter
-  .orderBy('score', 'desc');                                                  // sort by the UDF result
+// Returns a QueryBuilder ready for execution or live query binding:
+const query = articleSearch.buildQuery(searchQueryText, {
+  fuzzy: true,   // enables typo tolerance (e.g. "reactve" -> "reactive")
+  prefix: true,  // enables prefix matching (e.g. "persist" -> "persistent")
+  filter: (qb) => category ? qb.where('category', '=', category) : qb,
+  limit: 20,
+});
 ```
 
-### 4. Make it live
+WebDB's query planner uses any existing B+Tree index (such as an index on `category`) to narrow down candidate rows first, running fuzzy scoring only on the matching subset.
 
-Wrap the query in `useLiveQuery` and pass the inputs as dependencies. Typing, toggling an option, switching category,
-or adding an article in another tab all re-run it:
+---
+
+### 3. Make It Reactive with Live Queries
+
+Pass `buildQuery()` directly to `useLiveQuery`. The UI updates automatically as the user types or toggles search options:
 
 ```ts
+import { useLiveQuery } from '@ahmadmoussawi/webdb/vue'; // or /react, /angular
+
 const { data: results } = useLiveQuery(
-  () => searchQuery(db, { q: debounced.value, fuzzy: fuzzy.value, category: category.value }),
-  [debounced, fuzzy, category],
-  { db },
+  () =>
+    articleSearch.buildQuery(debouncedQuery.value, {
+      fuzzy: fuzzy.value,
+      filter: (qb) => (category.value ? qb.where('category', '=', category.value) : qb),
+    }),
+  [debouncedQuery, fuzzy, category],
+  { db }
 );
 ```
 
-::: tip When is this the right approach?
-UDF search runs in your JavaScript for every candidate row, which is perfect for thousands of records, small
-catalogues, notes, settings or command palettes. For millions of rows you would pre-filter with an indexed column
-(like the `category` filter above) so the UDF only sees a small slice.
-:::
+Every returned row automatically includes:
+- `row._search_score`: The computed relevance score (used for `ORDER BY _search_score DESC`).
+- `row._search_hl_title`: The highlighted title HTML with `<mark>` tags around matches.
+- `row._search_snip_body`: The truncated body snippet centered around the matched keywords.
 
-## Source code
+---
+
+### 4. Under the Hood: Vectorized UDFs & Native Opcodes
+
+Under the hood, `SearchIndex` compiles to WebDB's search extension helpers (`multiFuzzyScore`, `highlightExpr`, `snippetExpr`). 
+
+- **Vectorized UDF Batching**: Scoring is dispatched across rows in power-of-two batches (128 rows per chunk) to eliminate per-row JavaScript call frame overhead.
+- **Native VDBE Opcodes**: Core filters can also leverage WebDB's native bytecode opcodes (`OP_STR_FUZZY_MATCH` `0x44` and `OP_STR_LEVENSHTEIN` `0x45`) to run typo-matching inside C/Wasm linear memory.
+- **Low-Level Custom Queries**: If you prefer building custom expressions manually instead of using `SearchIndex`, you can call `registerFuzzySearch(db)` and write custom queries with `fuzzy()`, `fuzzy_score()`, `bm25_score()`, or `ngram_similarity()`.
+
+---
+
+## Source Code
 
 | File | What it does |
 | :-- | :-- |
-| [`search/udfs.ts`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/udfs.ts) | The UDFs: normalise, fuzzy match, `relevance`, `highlight`, `snippet`, `word_count` |
-| [`search/db.ts`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/db.ts) | Schema, seed articles and the `searchQuery()` builder |
-| [`search/SearchApp.vue`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/SearchApp.vue) | The Vue component with the live query |
-| [`DemoFrame.vue`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/DemoFrame.vue) | Opens the IndexedDB database and renders the app |
+| [`search/db.ts`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/db.ts) | Schema, seed articles, and search query integration with `@ahmadmoussawi/webdb/search` |
+| [`search/SearchApp.vue`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/search/SearchApp.vue) | The Vue component with live query reactivity, filters, and snippet rendering |
+| [`DemoFrame.vue`](https://github.com/ahmad-moussawi/webdb/blob/main/docs/.vitepress/theme/demos/DemoFrame.vue) | Opens the IndexedDB database and mounts the demo |
 
-👉 [**Browse the full source on GitHub**](https://github.com/ahmad-moussawi/webdb/tree/main/docs/.vitepress/theme/demos/search)
+👉 [**Browse the full demo source on GitHub**](https://github.com/ahmad-moussawi/webdb/tree/main/docs/.vitepress/theme/demos/search)
 
-Learn more about UDFs in [Expressions, Functions & UDFs](/guides/expressions-and-functions).
+Learn more in the [Fuzzy & Typo-Tolerant Search Guide](/guides/fuzzy-search) and [Expressions, Functions & UDFs](/guides/expressions-and-functions).
 
 **Next:** [Todo list](./todo) · [Kanban board](./kanban) · [Calendar](./calendar)

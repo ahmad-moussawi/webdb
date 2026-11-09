@@ -24,6 +24,7 @@ import {
   parseSelectExpr,
   parseExpression,
   evalExprNode,
+  evalExprNodeBatch,
   validateClause,
   isAggregateFunction,
   ExpressionBuilder,
@@ -2841,7 +2842,7 @@ export class QueryBuilder {
     if (filter.type === 'expr' && filter.expr) {
       let udfs: any;
       if (typeof (this.db as any).getUdf === 'function') {
-        udfs = (name: string) => (this.db as any).getUdf(name)?.def?.call;
+        udfs = (name: string) => (this.db as any).getUdf(name)?.def;
       }
       const res = evalExprNode(filter.expr, row, udfs);
       return Boolean(res && res !== 0);
@@ -2920,22 +2921,31 @@ export class QueryBuilder {
     rows: DbRow[],
     filters: QueryFilter[],
   ): Promise<DbRow[]> {
-    if (filters.length === 0) return rows;
+    if (filters.length === 0 || rows.length === 0) return rows;
     const resolved = await this.resolveUncorrelatedFilters(filters);
-    const out: DbRow[] = [];
-    for (const row of rows) {
-      let pass = true;
-      for (const f of resolved) {
-        if (!(await this.evalFilterOnRow(row, f))) {
-          pass = false;
-          break;
+    let currentRows = rows;
+    for (const f of resolved) {
+      if (currentRows.length === 0) break;
+      if (f.type === 'expr' && f.expr) {
+        let udfs: any;
+        if (typeof (this.db as any).getUdf === 'function') {
+          udfs = (name: string) => (this.db as any).getUdf(name)?.def;
         }
-      }
-      if (pass) {
-        out.push(row);
+        const batchResults = evalExprNodeBatch(f.expr, currentRows, udfs);
+        currentRows = currentRows.filter(
+          (_, idx) => Boolean(batchResults[idx] && batchResults[idx] !== 0),
+        );
+      } else {
+        const out: DbRow[] = [];
+        for (const row of currentRows) {
+          if (await this.evalFilterOnRow(row, f)) {
+            out.push(row);
+          }
+        }
+        currentRows = out;
       }
     }
-    return out;
+    return currentRows;
   }
 
   private performInMemoryAggregation(rows: DbRow[]): DbRow[] {
@@ -3164,10 +3174,91 @@ export class QueryBuilder {
     }
 
     if (this.selectFields.length > 0) {
-      rows = rows.map((r) => this.projectRow(r));
+      rows = this.projectRows(rows);
     }
 
     return rows;
+  }
+
+  /**
+   * Post-processes raw VDBE result rows into projected output records in vector batches
+   * according to select fields, expressions, aliases, and registered UDFs.
+   */
+  private projectRows(rows: DbRow[]): DbRow[] {
+    if (rows.length === 0) return rows;
+
+    const explicitAggs = this.aggExprs.filter((a) => !a.fromHaving);
+    const firstKeys = Object.keys(rows[0]);
+    if (
+      this.selectFields.length > 0 &&
+      explicitAggs.length === 0 &&
+      firstKeys.length === this.selectFields.length &&
+      this.selectFields.every((f) => f.alias in rows[0])
+    ) {
+      return rows;
+    }
+
+    const n = rows.length;
+    const projectedRows: DbRow[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      projectedRows[i] = {};
+    }
+
+    let udfs: any;
+    if (typeof (this.db as any).getUdf === 'function') {
+      udfs = (name: string) => (this.db as any).getUdf(name)?.def;
+    }
+
+    for (const field of this.selectFields) {
+      const targetAlias = field.alias;
+      const defaultAlias = field.expr ? deriveDefaultAlias(field.expr) : undefined;
+      const sourceCol = field.sourceCol;
+
+      let hasTarget = true;
+      let hasDefault = defaultAlias !== undefined;
+      let hasSource = sourceCol !== undefined;
+      for (let i = 0; i < n; i++) {
+        const r = rows[i];
+        if (r[targetAlias] === undefined) hasTarget = false;
+        if (hasDefault && r[defaultAlias!] === undefined) hasDefault = false;
+        if (hasSource && r[sourceCol!] === undefined) hasSource = false;
+      }
+
+      if (hasTarget) {
+        for (let i = 0; i < n; i++) {
+          projectedRows[i][targetAlias] = rows[i][targetAlias];
+        }
+      } else if (hasDefault) {
+        for (let i = 0; i < n; i++) {
+          projectedRows[i][targetAlias] = rows[i][defaultAlias!];
+        }
+      } else if (hasSource) {
+        for (let i = 0; i < n; i++) {
+          projectedRows[i][targetAlias] = rows[i][sourceCol!];
+        }
+      } else if (field.expr) {
+        const batchVals = evalExprNodeBatch(field.expr, rows, udfs);
+        for (let i = 0; i < n; i++) {
+          projectedRows[i][targetAlias] = batchVals[i];
+        }
+      } else {
+        for (let i = 0; i < n; i++) {
+          projectedRows[i][targetAlias] = null;
+        }
+      }
+    }
+
+    for (const agg of explicitAggs) {
+      const aggName =
+        agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
+      for (let i = 0; i < n; i++) {
+        if (!(aggName in projectedRows[i]) && rows[i][aggName] !== undefined) {
+          projectedRows[i][aggName] = rows[i][aggName];
+        }
+      }
+    }
+
+    return projectedRows;
   }
 
   /**
@@ -3206,7 +3297,7 @@ export class QueryBuilder {
       } else if (field.expr) {
         let udfs: any;
         if (typeof (this.db as any).getUdf === 'function') {
-          udfs = (name: string) => (this.db as any).getUdf(name)?.def?.call;
+          udfs = (name: string) => (this.db as any).getUdf(name)?.def;
         }
         projected[targetAlias] = evalExprNode(field.expr, row, udfs);
       } else {
@@ -3449,7 +3540,7 @@ export class QueryBuilder {
       }
 
       if (this.selectFields.length > 0) {
-        rows = rows.map((r) => this.projectRow(r));
+        rows = this.projectRows(rows);
       }
       return rows;
     }
@@ -3566,7 +3657,7 @@ export class QueryBuilder {
     }
 
     if (this.selectFields.length > 0) {
-      rows = rows.map((r) => this.projectRow(r));
+      rows = this.projectRows(rows);
     }
 
     return rows;

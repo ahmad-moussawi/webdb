@@ -80,6 +80,7 @@ export default defineConfig({
     resolve: {
       alias: [
         { find: "@ahmadmoussawi/webdb/vue", replacement: src("vue/index.ts") },
+        { find: "@ahmadmoussawi/webdb/search", replacement: src("search/index.ts") },
         { find: /^@ahmadmoussawi\/webdb$/, replacement: src("index.ts") },
       ],
     },
@@ -164,6 +165,10 @@ export default defineConfig({
           {
             text: "Expressions, Functions & UDFs",
             link: "/guides/expressions-and-functions",
+          },
+          {
+            text: "Fuzzy & Typo-Tolerant Search",
+            link: "/guides/fuzzy-search",
           },
         ],
       },

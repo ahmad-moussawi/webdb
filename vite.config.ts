@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [
     dts({
       include: ['src/**/*'],
-      exclude: ['src/react/**/*', 'src/angular/**/*', 'src/vue/**/*', 'src/migrations/**/*'],
+      exclude: ['src/react/**/*', 'src/angular/**/*', 'src/vue/**/*', 'src/migrations/**/*', 'src/search/**/*'],
       entryRoot: 'src',
       rollupTypes: true,
     }),
@@ -14,6 +14,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@ahmadmoussawi/webdb/migrations': resolve(__dirname, 'src/migrations/index.ts'),
+      '@ahmadmoussawi/webdb/search': resolve(__dirname, 'src/search/index.ts'),
       '@ahmadmoussawi/webdb/react': resolve(__dirname, 'src/react/index.ts'),
       '@ahmadmoussawi/webdb/angular': resolve(__dirname, 'src/angular/index.ts'),
       '@ahmadmoussawi/webdb/vue': resolve(__dirname, 'src/vue/index.ts'),

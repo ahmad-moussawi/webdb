@@ -36,6 +36,11 @@
       "import": "./dist/migrations.js",
       "require": "./dist/migrations.cjs"
     },
+    "./search": {
+      "types": "./dist/search.d.ts",
+      "import": "./dist/search.js",
+      "require": "./dist/search.cjs"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",

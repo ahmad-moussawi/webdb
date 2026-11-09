@@ -315,6 +315,90 @@ const copyFrameworkCode = () => {
   setTimeout(() => (copyFrameworkStatus.value = false), 2000);
 };
 
+const searchSnippet = `import { WebDB } from "@ahmadmoussawi/webdb";
+import { createSearchIndex } from "@ahmadmoussawi/webdb/search";
+import { useLiveQuery } from "@ahmadmoussawi/webdb/react"; // or vue, angular
+
+const db = await WebDB.open({ name: "docs_app", storage: "idb" });
+
+// 1. Create a zero-overhead search index over your table (0 shadow tables!)
+const articleSearch = createSearchIndex(db, {
+  table: "articles",
+  fields: [
+    { name: "title", weight: 10, highlight: true }, // exact > prefix > typos
+    { name: "tags", weight: 5 },
+    { name: "body", weight: 1, snippet: true },     // extracts contextual <mark> snippets
+  ],
+});
+
+// 2. Reactively search with typo tolerance and live query updates as you type
+const { data: results } = useLiveQuery(
+  () =>
+    articleSearch.buildQuery(searchQuery.value, {
+      fuzzy: true,  // Damerau-Levenshtein typo tolerance ("reactve" -> "reactive")
+      prefix: true, // Auto-completes word prefixes ("persist" -> "persistence")
+      filter: (qb) => (category.value ? qb.where("category", "=", category.value) : qb),
+      limit: 20,
+    }),
+  [searchQuery, category],
+  { db }
+);`;
+
+const renderedSearchLines = computed(() =>
+  highlightCode(searchSnippet, "react").split("\n"),
+);
+
+const copySearchStatus = ref(false);
+const copySearchCode = () => {
+  navigator.clipboard.writeText(searchSnippet);
+  copySearchStatus.value = true;
+  setTimeout(() => (copySearchStatus.value = false), 2000);
+};
+
+const udfSnippet = `import { WebDB, DataType } from "@ahmadmoussawi/webdb";
+
+const db = await WebDB.open({ name: "app_db", storage: "idb" });
+
+// 1. Leverage native Browser Web APIs as SQL functions (zero binary bloat!)
+db.registerFunction("format_money", (amount, currency = "USD") => {
+  if (amount === null) return null;
+  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(Number(amount));
+});
+
+// 2. Vectorized batching: processes 128 rows at once to eliminate call overhead
+db.registerBatchedFunction(
+  "calc_discount",
+  (argsBatch) => {
+    // Called once per 128-row slice instead of 128 individual JS call frames:
+    return argsBatch.map(([price, discountPercent]) =>
+      Number(price) * (1 - Number(discountPercent) / 100)
+    );
+  },
+  { returnType: DataType.FLOAT64, deterministic: true }
+);
+
+// 3. Use seamlessly inside fluent queries: .select(), .where(), .orderBy()
+const deals = await db
+  .from("products")
+  .select([
+    "id",
+    "name",
+    "format_money(calc_discount(price, 20)) as discounted_price",
+  ])
+  .where("calc_discount(price, 20) < 50")
+  .toArray();`;
+
+const renderedUdfLines = computed(() =>
+  highlightCode(udfSnippet, "react").split("\n"),
+);
+
+const copyUdfStatus = ref(false);
+const copyUdfCode = () => {
+  navigator.clipboard.writeText(udfSnippet);
+  copyUdfStatus.value = true;
+  setTimeout(() => (copyUdfStatus.value = false), 2000);
+};
+
 const installCopied = ref(false);
 const copyInstallCmd = () => {
   navigator.clipboard.writeText("npm install @ahmadmoussawi/webdb@alpha");
@@ -697,29 +781,38 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="metric-card">
-          <span class="metric-pill pill-cyan">LIVE SUBPATHS</span>
-          <div class="metric-val">{{ SIZE_METRICS.adapterSubpath }}</div>
-          <div class="metric-label">Reactive Live Queries</div>
+          <span class="metric-pill pill-cyan">REACTIVE QUERIES</span>
+          <div class="metric-val">Reactive</div>
+          <div class="metric-label">Live Queries, UI Updates Automatically</div>
           <div class="metric-desc">
-            Auto-tracked hooks for React, Vue 3, Angular &amp; Plain JS
+            Auto-tracked live queries across React, Vue 3, Angular &amp; Plain JS
           </div>
         </div>
 
         <div class="metric-card">
           <span class="metric-pill pill-violet">ASYNC VFS</span>
           <div class="metric-val">OPFS + IDB</div>
-          <div class="metric-label">Universal Storage</div>
+          <div class="metric-label">Bring Your Own VFS</div>
           <div class="metric-desc">
-            Non-blocking 4KB page faults + S3 HTTP Range streaming
+            OPFS + IDB + bring your own VFS with S3 HTTP Range streaming
           </div>
         </div>
 
         <div class="metric-card">
-          <span class="metric-pill pill-amber">STATIC READY</span>
-          <div class="metric-val">0 Headers</div>
-          <div class="metric-label">Zero Server Config</div>
+          <span class="metric-pill pill-amber">SEARCH EXTENSION</span>
+          <div class="metric-val">Search</div>
+          <div class="metric-label">Fuzzy &amp; BM25 Ranking</div>
           <div class="metric-desc">
-            Works everywhere without COOP/COEP isolation headers
+            Zero-dependency typo tolerance, BM25 scoring, highlights &amp; snippets
+          </div>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-pill pill-rose">CUSTOM UDFS</span>
+          <div class="metric-val">JS UDFs</div>
+          <div class="metric-label">Vector Batching</div>
+          <div class="metric-desc">
+            Native Intl, RegExp &amp; crypto with 128-row vectorized execution
           </div>
         </div>
       </div>
@@ -1282,6 +1375,250 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- ======================================================================
+         3.25 ZERO-DEPENDENCY SEARCH EXTENSION (SEARCHINDEX & BM25)
+         ====================================================================== -->
+    <section class="section-block search-section">
+      <div class="section-header-center">
+        <span class="section-eyebrow eyebrow-amber">
+          ZERO-DEPENDENCY SEARCH EXTENSION
+        </span>
+        <h2 class="section-title">
+          Instant Typo-Tolerant &amp; BM25 Full-Text Search
+        </h2>
+        <p class="section-subtitle">
+          No bloated C engines or heavy shadow tables. Powered entirely by web
+          platform primitives (<code>Intl.Segmenter</code>, Unicode
+          normalization, bounded Damerau-Levenshtein) and vectorized BM25
+          ranking right inside WebDB's query engine.
+        </p>
+      </div>
+
+      <div class="live-showcase-stack">
+        <!-- SEARCH CODE TERMINAL -->
+        <div class="terminal-window fw-code-window">
+          <div class="terminal-header">
+            <div class="terminal-dots" aria-hidden="true">
+              <span class="tdot tdot-red"></span>
+              <span class="tdot tdot-amber"></span>
+              <span class="tdot tdot-green"></span>
+            </div>
+            <div class="terminal-title">
+              <span class="fw-file-pill">SearchComponent.tsx</span>
+              <span
+                class="fw-badge-pill"
+                style="color: #f59e0b; background: rgba(245, 158, 11, 0.14)"
+              >
+                @ahmadmoussawi/webdb/search
+              </span>
+            </div>
+            <button class="terminal-copy" @click="copySearchCode">
+              {{ copySearchStatus ? "Copied ✓" : "Copy" }}
+            </button>
+          </div>
+
+          <div class="terminal-body">
+            <div
+              v-for="(line, index) in renderedSearchLines"
+              :key="index"
+              class="code-line"
+            >
+              <span class="line-num">{{ index + 1 }}</span>
+              <span class="line-content" v-html="line || '&nbsp;'"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3 HORIZONTAL SEARCH HIGHLIGHT CARDS -->
+        <div class="live-highlights-grid">
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #f59e0b; background: rgba(245, 158, 11, 0.12)"
+            >
+              TABLE-NATIVE
+            </div>
+            <h4 class="lh-title">Zero Storage Overhead</h4>
+            <p class="lh-desc">
+              Unlike SQLite FTS5 which creates 3–5 shadow tables,
+              <code>SearchIndex</code> queries your existing tables directly.
+              Always 100% in sync with zero write penalties.
+            </p>
+          </div>
+
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #10b981; background: rgba(16, 185, 129, 0.12)"
+            >
+              PROBABILISTIC RANKING
+            </div>
+            <h4 class="lh-title">Fuzzy &amp; BM25 Ranking</h4>
+            <p class="lh-desc">
+              Weighted multi-field scoring, prefix matching, and
+              Robertson-Spärck Jones BM25 term frequency / document length
+              normalization with zero external dependencies.
+            </p>
+          </div>
+
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #06b6d4; background: rgba(6, 182, 212, 0.12)"
+            >
+              UI-READY
+            </div>
+            <h4 class="lh-title">Hit Highlights &amp; Snippets</h4>
+            <p class="lh-desc">
+              Automatically wraps matched keywords in safe
+              <code>&lt;mark&gt;</code> tags and extracts contextual snippets
+              (~140 chars) around matches for instant rendering.
+            </p>
+          </div>
+        </div>
+
+        <!-- SEARCH CTAS -->
+        <div class="fw-guide-row">
+          <a
+            :href="withBase('/guides/fuzzy-search')"
+            class="btn btn-primary"
+          >
+            <span>Explore Fuzzy &amp; BM25 Search Guide</span>
+            <span class="btn-arrow">→</span>
+          </a>
+          <a
+            :href="withBase('/demos/search')"
+            class="btn btn-secondary"
+          >
+            <span>Try Interactive Live Search Demo</span>
+            <span class="btn-arrow">→</span>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         3.3 EXTENSIBLE JAVASCRIPT UDFs & VECTOR BATCHING
+         ====================================================================== -->
+    <section class="section-block udf-section">
+      <div class="section-header-center">
+        <span class="section-eyebrow eyebrow-rose">
+          ZERO-BLOAT EXTENSIBILITY
+        </span>
+        <h2 class="section-title">
+          Native JavaScript UDFs &amp; Vector Batching
+        </h2>
+        <p class="section-subtitle">
+          Instead of compiling megabytes of ICU, PCRE, and date libraries into
+          WebAssembly, run JavaScript functions directly inside your queries.
+          Leverage native browser APIs (<code>Intl</code>, <code>RegExp</code>,
+          <code>crypto</code>) with 128-row vectorized execution.
+        </p>
+      </div>
+
+      <div class="live-showcase-stack">
+        <!-- UDF CODE TERMINAL -->
+        <div class="terminal-window fw-code-window">
+          <div class="terminal-header">
+            <div class="terminal-dots" aria-hidden="true">
+              <span class="tdot tdot-red"></span>
+              <span class="tdot tdot-amber"></span>
+              <span class="tdot tdot-green"></span>
+            </div>
+            <div class="terminal-title">
+              <span class="fw-file-pill">custom-functions.ts</span>
+              <span
+                class="fw-badge-pill"
+                style="color: #f43f5e; background: rgba(244, 63, 94, 0.14)"
+              >
+                db.registerBatchedFunction()
+              </span>
+            </div>
+            <button class="terminal-copy" @click="copyUdfCode">
+              {{ copyUdfStatus ? "Copied ✓" : "Copy" }}
+            </button>
+          </div>
+
+          <div class="terminal-body">
+            <div
+              v-for="(line, index) in renderedUdfLines"
+              :key="index"
+              class="code-line"
+            >
+              <span class="line-num">{{ index + 1 }}</span>
+              <span class="line-content" v-html="line || '&nbsp;'"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3 HORIZONTAL UDF HIGHLIGHT CARDS -->
+        <div class="live-highlights-grid">
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #f43f5e; background: rgba(244, 63, 94, 0.12)"
+            >
+              BROWSER-NATIVE
+            </div>
+            <h4 class="lh-title">Web APIs in Queries</h4>
+            <p class="lh-desc">
+              Call <code>Intl.DateTimeFormat</code>,
+              <code>Intl.NumberFormat</code>, and <code>RegExp</code> directly
+              in SQL-like expressions without bloating the core Wasm binary.
+            </p>
+          </div>
+
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #10b981; background: rgba(16, 185, 129, 0.12)"
+            >
+              HIGH-THROUGHPUT
+            </div>
+            <h4 class="lh-title">Vectorized 128-Row Batching</h4>
+            <p class="lh-desc">
+              <code>registerBatchedFunction</code> dispatches rows in
+              power-of-two chunks (128 rows), eliminating per-row JS call frame
+              overhead and aligning with CPU cache lines.
+            </p>
+          </div>
+
+          <div class="live-highlight-card">
+            <div
+              class="lh-badge"
+              style="color: #8b5cf6; background: rgba(139, 92, 246, 0.12)"
+            >
+              QUERY OPTIMIZER
+            </div>
+            <h4 class="lh-title">Typed Returns &amp; Determinism</h4>
+            <p class="lh-desc">
+              Declare return types (<code>INT32</code>, <code>FLOAT64</code>,
+              <code>TEXT</code>) and deterministic flags so the query compiler
+              optimizes VDBE registers and bytecode dispatch.
+            </p>
+          </div>
+        </div>
+
+        <!-- UDF CTAS -->
+        <div class="fw-guide-row">
+          <a
+            :href="withBase('/guides/expressions-and-functions')"
+            class="btn btn-primary"
+          >
+            <span>Read Expressions &amp; UDFs Guide</span>
+            <span class="btn-arrow">→</span>
+          </a>
+          <a
+            :href="withBase('/demos/search')"
+            class="btn btn-secondary"
+          >
+            <span>Explore Live Demo with UDFs</span>
+            <span class="btn-arrow">→</span>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================================
          3.5 VERIFIED BENCHMARKS: WEBDB (C/WASM & JS) VS SQLITE WASM
          ====================================================================== -->
     <section
@@ -1474,14 +1811,14 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <!-- BENTO 5: ZERO-OVERHEAD JS UDFs -->
+        <!-- BENTO 5: ZERO-OVERHEAD JS UDFs & FUZZY/BM25 SEARCH -->
         <div class="bento-card">
-          <div class="bento-tag tag-rose">WEB PLATFORM NATIVE</div>
-          <h3 class="bento-title">Native Browser JS Functions (UDFs)</h3>
+          <div class="bento-tag tag-rose">SEARCH &amp; EXTENSIBILITY</div>
+          <h3 class="bento-title">Fuzzy Search &amp; Browser UDFs</h3>
           <p class="bento-desc">
-            Instead of bundling heavy C ICU/regex libraries into Wasm, register
-            custom JS functions using native <code>Intl</code>,
-            <code>RegExp</code>, and <code>crypto</code>.
+            Official <code>@ahmadmoussawi/webdb/search</code> extension with
+            typo-tolerant matching, BM25 ranking, and highlights—plus custom JS
+            functions using native <code>Intl</code> and <code>RegExp</code>.
           </p>
         </div>
 
@@ -1553,6 +1890,15 @@ onBeforeUnmount(() => {
               <td class="td-good">
                 <strong>&lt;1 KB Subpaths</strong> for React, Vue, Angular &amp;
                 JS with auto-JOIN tracking
+              </td>
+            </tr>
+            <tr>
+              <td class="td-feature">Fuzzy &amp; Full-Text Search</td>
+              <td class="td-bad">Manual regex / external deps</td>
+              <td class="td-neutral">FTS5 (heavy shadow tables)</td>
+              <td class="td-good">
+                <strong>Zero-Dependency Search</strong> — Fuzzy, BM25 &amp;
+                highlighting with 0 shadow tables
               </td>
             </tr>
             <tr>
@@ -1859,12 +2205,12 @@ code {
   border: 1px solid var(--vp-c-divider);
 }
 
-/* 4 METRICS STRIP */
+/* 5 METRICS STRIP */
 .hero-metrics {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1rem;
   text-align: left;
 }
@@ -1929,6 +2275,11 @@ code {
 .pill-amber {
   color: #f59e0b;
   background: rgba(245, 158, 11, 0.12);
+}
+
+.pill-rose {
+  color: #f43f5e;
+  background: rgba(244, 63, 94, 0.12);
 }
 
 .metric-label {
@@ -2279,6 +2630,16 @@ code {
 .eyebrow-emerald {
   color: #10b981;
   background: rgba(16, 185, 129, 0.12);
+}
+
+.eyebrow-amber {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.eyebrow-rose {
+  color: #f43f5e;
+  background: rgba(244, 63, 94, 0.12);
 }
 
 .section-title {
@@ -2932,7 +3293,10 @@ code {
 .fw-guide-row {
   display: flex;
   justify-content: center;
-  margin-top: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.5rem;
 }
 
 /* ============================================================================
@@ -3533,6 +3897,12 @@ code {
 /* ============================================================================
    RESPONSIVE BREAKPOINTS
    ============================================================================ */
+@media (max-width: 1100px) {
+  .hero-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 960px) {
   .hero-title {
     font-size: 2.65rem;
@@ -3583,6 +3953,14 @@ code {
     width: 100%;
   }
   .hero-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .fw-guide-row {
+    flex-direction: column;
+    width: 100%;
+  }
+  .fw-guide-row .btn {
     width: 100%;
     justify-content: center;
   }

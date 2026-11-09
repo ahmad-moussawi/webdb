@@ -5,13 +5,19 @@ import dts from 'vite-plugin-dts';
 export default defineConfig({
   plugins: [
     dts({
-      include: ['src/react/**/*', 'src/angular/**/*', 'src/vue/**/*', 'src/migrations/**/*', 'src/index.ts', 'src/host/api/live_query.ts', 'src/types/**/*'],
+      include: ['src/react/**/*', 'src/angular/**/*', 'src/vue/**/*', 'src/migrations/**/*', 'src/search/**/*', 'src/index.ts', 'src/host/api/live_query.ts', 'src/types/**/*'],
       entryRoot: 'src',
       outDir: 'dist',
       beforeWriteFile: (filePath, content) => {
         if (filePath.endsWith('migrations/index.d.ts')) {
           return {
             filePath: resolve(__dirname, 'dist/migrations.d.ts'),
+            content,
+          };
+        }
+        if (filePath.endsWith('search/index.d.ts')) {
+          return {
+            filePath: resolve(__dirname, 'dist/search.d.ts'),
             content,
           };
         }
@@ -42,6 +48,7 @@ export default defineConfig({
     lib: {
       entry: {
         migrations: resolve(__dirname, 'src/migrations/index.ts'),
+        search: resolve(__dirname, 'src/search/index.ts'),
         react: resolve(__dirname, 'src/react/index.ts'),
         angular: resolve(__dirname, 'src/angular/index.ts'),
         vue: resolve(__dirname, 'src/vue/index.ts'),

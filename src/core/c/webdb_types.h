@@ -319,6 +319,9 @@ typedef enum {
   OP_AGG_NEXT           = 0x42,
   OP_AGG_FINAL          = 0x43,
 
+  OP_STR_FUZZY_MATCH    = 0x44,
+  OP_STR_LEVENSHTEIN    = 0x45,
+
   OP_REG_IS_NULL        = 0x48,
   OP_REG_IS_NOT_NULL    = 0x49,
 

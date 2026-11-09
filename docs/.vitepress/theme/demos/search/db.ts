@@ -1,5 +1,5 @@
 import { col, ExpressionBuilder, fn, type WebDB } from '@ahmadmoussawi/webdb';
-import { registerSearchUdfs } from './udfs';
+import { registerFuzzySearch } from '@ahmadmoussawi/webdb/search';
 
 export const SEARCH_DB_NAME = 'demo_search';
 
@@ -99,7 +99,7 @@ export const SEED_ARTICLES: Seed[] = [
 ];
 
 export async function setupSearchDb(db: WebDB): Promise<void> {
-  registerSearchUdfs(db); // UDFs live in memory: register them on every page load
+  registerFuzzySearch(db); // Register official search extension functions
   const tables = await db.listTables();
   if (tables.some((t) => t.name === 'articles')) return;
   await db.createTable('articles', [

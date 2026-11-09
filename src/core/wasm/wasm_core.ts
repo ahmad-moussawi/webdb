@@ -453,6 +453,23 @@ export function createWasmCore(
 
     compare_sorter_keys: jsCore.compare_sorter_keys,
     vm_step: (ctx, view, bytecode) => {
+      let hasNativeSearchOp = false;
+      for (let i = 0; i < bytecode.length; i++) {
+        const op = bytecode[i];
+        if (op === 0x44 || op === 0x45) {
+          hasNativeSearchOp = true;
+          break;
+        }
+      }
+      if (hasNativeSearchOp) {
+        return jsCore.executeVmStepWithRunner(
+          ctx,
+          view,
+          bytecode,
+          jsCore.vm_step_raw,
+          memory.buffer,
+        );
+      }
       return jsCore.executeVmStepWithRunner(
         ctx,
         view,

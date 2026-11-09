@@ -131,6 +131,8 @@ import {
   vm_str_contains_view,
   vm_str_starts_with_view,
   vm_str_ends_with_view,
+  vm_str_fuzzy_match_view,
+  vm_str_levenshtein_view,
   vm_utf8_char_count,
   vm_str_lower,
   vm_str_upper,
@@ -1527,6 +1529,40 @@ export function vm_step_raw(
         break;
       }
 
+      case OpCode.OP_STR_FUZZY_MATCH: {
+        const reg_str: u32 = read_u8(view, code_off + pc);
+        const reg_pat: u32 = read_u8(view, code_off + pc + 1);
+        const jump_target: u32 = read_u16(view, code_off + pc + 2);
+        pc += 4;
+        if (jump_target > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
+        const s_off: u32 = vm_reg_off(ctx_off, reg_str);
+        const p_off: u32 = vm_reg_off(ctx_off, reg_pat);
+        if (
+          read_u8(view, s_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, p_off + VM_REG_IS_NULL) !== 0
+        ) {
+          break;
+        }
+        if (
+          vm_str_fuzzy_match_view(
+            view,
+            read_u32(view, s_off + VM_REG_DATA_OFF),
+            read_u32(view, s_off + VM_REG_DATA_LEN),
+            read_u32(view, p_off + VM_REG_DATA_OFF),
+            read_u32(view, p_off + VM_REG_DATA_LEN),
+            1,
+            1,
+          ) !== 0
+        ) {
+          pc = jump_target;
+        }
+        break;
+      }
+
       case OpCode.OP_IN: {
         const reg_val: u32 = read_u8(view, code_off + pc);
         const set_idx: u32 = read_u16(view, code_off + pc + 1);
@@ -1780,6 +1816,33 @@ export function vm_step_raw(
           vm_reg_off(ctx_off, src_reg),
           vm_reg_off(ctx_off, dest_reg),
         );
+        break;
+      }
+
+      case OpCode.OP_STR_LEVENSHTEIN: {
+        const reg_str1: u32 = read_u8(view, code_off + pc);
+        const reg_str2: u32 = read_u8(view, code_off + pc + 1);
+        const dest_reg: u32 = read_u8(view, code_off + pc + 2);
+        pc += 3;
+        const s1_off: u32 = vm_reg_off(ctx_off, reg_str1);
+        const s2_off: u32 = vm_reg_off(ctx_off, reg_str2);
+        const dest_off: u32 = vm_reg_off(ctx_off, dest_reg);
+        if (
+          read_u8(view, s1_off + VM_REG_IS_NULL) !== 0 ||
+          read_u8(view, s2_off + VM_REG_IS_NULL) !== 0
+        ) {
+          vm_reg_set_null(view, dest_off);
+          break;
+        }
+        const dist: i32 = vm_str_levenshtein_view(
+          view,
+          read_u32(view, s1_off + VM_REG_DATA_OFF),
+          read_u32(view, s1_off + VM_REG_DATA_LEN),
+          read_u32(view, s2_off + VM_REG_DATA_OFF),
+          read_u32(view, s2_off + VM_REG_DATA_LEN),
+          255,
+        );
+        vm_reg_set_i32(view, dest_off, dist);
         break;
       }
 

@@ -149,26 +149,25 @@ async function submit() {
     </details>
 
     <details class="wd-code">
-      <summary>Show the UDFs and the query</summary>
-      <pre><code>// 1) Plain JavaScript functions, registered once after WebDB.open()
-db.registerFunction('relevance', relevance);   // (title, body, tags, q, fuzzy) =&gt; score
-db.registerFunction('highlight', highlight);   // (text, q, fuzzy) =&gt; HTML with &lt;mark&gt;
-db.registerFunction('snippet', snippet);       // (body, q, fuzzy) =&gt; excerpt HTML
-db.registerFunction('word_count', wordCount);  // (text) =&gt; number
+      <summary>Show the SearchIndex query</summary>
+      <pre><code>// 1) Initialize SearchIndex with field weighting, highlighting, and snippets
+const searchIndex = createSearchIndex(db, {
+  table: 'articles',
+  fields: [
+    { name: 'title', weight: 10, highlight: true },
+    { name: 'tags',  weight: 5 },
+    { name: 'body',  weight: 1, snippet: true },
+  ],
+});
 
-// 2) Use them anywhere in a query: SELECT, WHERE and ORDER BY
-const score = fn('relevance', col('title'), col('body'), col('tags'), lit(q), lit(1));
-
+// 2) Search reactively with live queries as you type
 const { data: results } = useLiveQuery(
-  () =&gt; db.from('articles')
-        .select(['id', 'title', 'category',
-                 fn('highlight', col('title'), lit(q), lit(1)).as('title_html'),
-                 fn('snippet',   col('body'),  lit(q), lit(1)).as('snippet_html'),
-                 score.as('score')])
-        .where(score.gt(0))                    // UDF in WHERE
-        .where('category', '=', category)      // mixes with normal filters
-        .orderBy('score', 'desc'),             // UDF result in ORDER BY
-  [query, category],
+  () =&gt; searchIndex.buildQuery(query.value, {
+    fuzzy: fuzzy.value,
+    filter: (qb) =&gt; category.value ? qb.where('category', '=', category.value) : qb,
+  }),
+  [query, fuzzy, category],
+  { db },
 );</code></pre>
     </details>
   </div>

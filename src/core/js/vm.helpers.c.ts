@@ -947,6 +947,156 @@ export function vm_str_ends_with_view(
 /**
  * @export_c
  */
+export function vm_str_levenshtein_view(
+  view: DataView,
+  s1_off: u32,
+  s1_len: u32,
+  s2_off: u32,
+  s2_len: u32,
+  max_dist: u32,
+): i32 {
+  if (s1_len === 0) return s2_len <= max_dist ? (s2_len as i32) : ((max_dist + 1) as i32);
+  if (s2_len === 0) return s1_len <= max_dist ? (s1_len as i32) : ((max_dist + 1) as i32);
+
+  const diff: i32 = (s1_len as i32) - (s2_len as i32);
+  const abs_diff: u32 = (diff < 0 ? -diff : diff) as u32;
+  if (abs_diff > max_dist) return (max_dist + 1) as i32;
+
+  const l1: u32 = s1_len > 64 ? 64 : s1_len;
+  const l2: u32 = s2_len > 64 ? 64 : s2_len;
+
+  const prev = new Uint32Array(65);
+  const cur = new Uint32Array(65);
+  const prev2 = new Uint32Array(65);
+
+  for (let j: u32 = 0; j <= l2; j++) {
+    prev[j] = j;
+    prev2[j] = j;
+  }
+
+  for (let i: u32 = 1; i <= l1; i++) {
+    cur[0] = i;
+    let row_min: u32 = i;
+    const c1: i32 = to_lower_char(read_u8(view, s1_off + i - 1));
+
+    for (let j: u32 = 1; j <= l2; j++) {
+      const c2: i32 = to_lower_char(read_u8(view, s2_off + j - 1));
+      const cost: u32 = c1 === c2 ? 0 : 1;
+
+      const del: u32 = prev[j] + 1;
+      const ins: u32 = cur[j - 1] + 1;
+      const sub: u32 = prev[j - 1] + cost;
+
+      let min_val: u32 = del < ins ? del : ins;
+      if (sub < min_val) min_val = sub;
+
+      if (i > 1 && j > 1) {
+        const c1_prev: i32 = to_lower_char(read_u8(view, s1_off + i - 2));
+        const c2_prev: i32 = to_lower_char(read_u8(view, s2_off + j - 2));
+        if (c1 === c2_prev && c1_prev === c2) {
+          const trans: u32 = prev2[j - 2] + 1;
+          if (trans < min_val) min_val = trans;
+        }
+      }
+
+      cur[j] = min_val;
+      if (min_val < row_min) row_min = min_val;
+    }
+
+    if (row_min > max_dist) {
+      return (max_dist + 1) as i32;
+    }
+
+    for (let k: u32 = 0; k <= l2; k++) {
+      prev2[k] = prev[k];
+      prev[k] = cur[k];
+    }
+  }
+
+  return cur[l2] as i32;
+}
+
+/**
+ * @export_c
+ */
+export function vm_str_fuzzy_match_view(
+  view: DataView,
+  str_off: u32,
+  str_len: u32,
+  pat_off: u32,
+  pat_len: u32,
+  max_dist: u32,
+  allow_prefix: u32,
+): i32 {
+  if (pat_len === 0) return 1;
+  if (str_len === 0) return 0;
+
+  if (vm_str_contains_view(view, str_off, str_len, pat_off, pat_len) !== 0) {
+    return 1;
+  }
+
+  const whole_dist: i32 = vm_str_levenshtein_view(view, str_off, str_len, pat_off, pat_len, max_dist);
+  if (whole_dist <= (max_dist as i32)) {
+    return 1;
+  }
+
+  let word_start: u32 = 0;
+  while (word_start < str_len) {
+    while (word_start < str_len) {
+      const b: i32 = read_u8(view, str_off + word_start);
+      if (
+        b <= 32 || b === 44 || b === 46 || b === 58 || b === 59 ||
+        b === 45 || b === 95 || b === 47 || b === 39 || b === 34 ||
+        b === 40 || b === 41 || b === 91 || b === 93
+      ) {
+        word_start++;
+      } else {
+        break;
+      }
+    }
+    if (word_start >= str_len) break;
+
+    let word_end: u32 = word_start;
+    while (word_end < str_len) {
+      const b: i32 = read_u8(view, str_off + word_end);
+      if (
+        b <= 32 || b === 44 || b === 46 || b === 58 || b === 59 ||
+        b === 45 || b === 95 || b === 47 || b === 39 || b === 34 ||
+        b === 40 || b === 41 || b === 91 || b === 93
+      ) {
+        break;
+      }
+      word_end++;
+    }
+
+    const word_len: u32 = word_end - word_start;
+    const w_off: u32 = str_off + word_start;
+
+    if (allow_prefix !== 0 && pat_len >= 2 && word_len >= pat_len) {
+      let is_pfx: i32 = 1;
+      for (let p: u32 = 0; p < pat_len; p++) {
+        if (to_lower_char(read_u8(view, w_off + p)) !== to_lower_char(read_u8(view, pat_off + p))) {
+          is_pfx = 0;
+          break;
+        }
+      }
+      if (is_pfx !== 0) return 1;
+    }
+
+    const w_dist: i32 = vm_str_levenshtein_view(view, w_off, word_len, pat_off, pat_len, max_dist);
+    if (w_dist <= (max_dist as i32)) {
+      return 1;
+    }
+
+    word_start = word_end;
+  }
+
+  return 0;
+}
+
+/**
+ * @export_c
+ */
 export function vm_utf8_char_count(
   view: DataView,
   str_off: u32,

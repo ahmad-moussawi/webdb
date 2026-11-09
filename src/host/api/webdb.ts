@@ -160,7 +160,8 @@ import {
 export interface UdfDefinition {
   deterministic?: boolean;
   returnType?: DataType;
-  call: (...args: any[]) => any;
+  call?: (...args: any[]) => any;
+  batchCall?: (argsBatch: any[][]) => any[];
 }
 
 export {
@@ -3672,7 +3673,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     const fnDef: UdfDefinition =
       typeof def === "function" ? { call: def } : { ...def };
 
-    if (!fnDef.returnType) {
+    if (!fnDef.call && fnDef.batchCall) {
+      const bCall = fnDef.batchCall;
+      fnDef.call = (...args: any[]) => bCall([args])[0];
+    }
+
+    if (!fnDef.returnType && fnDef.call) {
       try {
         const sample = fnDef.call(1, 1, 1, 1, 1);
         if (typeof sample === "number") {
@@ -3706,6 +3712,19 @@ export class WebDB implements IDatabaseQueryExecutor {
       entry.def = fnDef;
     }
     return this;
+  }
+
+  registerBatchedFunction(
+    name: string,
+    batchFn: (argsBatch: any[][]) => any[],
+    options?: { deterministic?: boolean; returnType?: DataType },
+  ): this {
+    return this.registerFunction(name, {
+      deterministic: options?.deterministic,
+      returnType: options?.returnType,
+      batchCall: batchFn,
+      call: (...args: any[]) => batchFn([args])[0],
+    });
   }
 
   getUdf(name: string): { id: number; def: UdfDefinition } | undefined {
@@ -3961,7 +3980,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (hasUdfs) {
       const udfsRecord: Record<number, (...args: any[]) => any> = {};
       for (const entry of this.udfs.values()) {
-        udfsRecord[entry.id] = entry.def.call;
+        if (entry.def.call) {
+          udfsRecord[entry.id] = entry.def.call;
+        }
       }
       this.vmCtx.udfs = udfsRecord;
     } else {

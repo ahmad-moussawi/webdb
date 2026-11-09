@@ -820,6 +820,27 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           break;
         }
+      case OP_STR_FUZZY_MATCH:
+{
+          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
+          uint32_t reg_pat = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
+          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
+          pc += 4;
+          if (jump_target > code_len) {
+            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
+            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+            return VM_STATUS_INVALID_BYTECODE;
+          }
+          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
+          uint32_t p_off = vm_reg_off(ctx_off, reg_pat);
+          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(p_off + VM_REG_IS_NULL)) != 0) {
+            break;
+          }
+          if (vm_str_fuzzy_match_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_LEN)), 1, 1) != 0) {
+            pc = jump_target;
+          }
+          break;
+        }
       case OP_IN:
 {
           uint32_t reg_val = load_u8((const void *)(uintptr_t)(code_off + pc));
@@ -993,6 +1014,23 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 2;
           vm_str_trim(vm_reg_off(ctx_off, src_reg), vm_reg_off(ctx_off, dest_reg));
+          break;
+        }
+      case OP_STR_LEVENSHTEIN:
+{
+          uint32_t reg_str1 = load_u8((const void *)(uintptr_t)(code_off + pc));
+          uint32_t reg_str2 = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
+          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
+          pc += 3;
+          uint32_t s1_off = vm_reg_off(ctx_off, reg_str1);
+          uint32_t s2_off = vm_reg_off(ctx_off, reg_str2);
+          uint32_t dest_off = vm_reg_off(ctx_off, dest_reg);
+          if (load_u8((const void *)(uintptr_t)(s1_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(s2_off + VM_REG_IS_NULL)) != 0) {
+            vm_reg_set_null(dest_off);
+            break;
+          }
+          int32_t dist = vm_str_levenshtein_view(load_u32((const void *)(uintptr_t)(s1_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s1_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(s2_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s2_off + VM_REG_DATA_LEN)), 255);
+          vm_reg_set_i32(dest_off, dist);
           break;
         }
       case OP_MATH_ABS:

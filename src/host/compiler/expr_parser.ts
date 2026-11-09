@@ -43,6 +43,15 @@ export const BUILTIN_SCALARS = new Set([
   'ceil',
   'concat',
   'coalesce',
+  'starts_with',
+  'startswith',
+  'ends_with',
+  'endswith',
+  'contains',
+  'like',
+  'levenshtein',
+  'edit_distance',
+  'fuzzy',
 ]);
 
 export function isAggregateFunction(name: string): boolean {
@@ -652,6 +661,12 @@ export interface FnNamespace {
   max(expr: ExprNode | ExpressionBuilder | string): ExpressionBuilder;
   concat(...exprs: (ExprNode | ExpressionBuilder | string)[]): ExpressionBuilder;
   coalesce(...exprs: (ExprNode | ExpressionBuilder | string | null)[]): ExpressionBuilder;
+  levenshtein(s1: ExprNode | ExpressionBuilder | string, s2: ExprNode | ExpressionBuilder | string): ExpressionBuilder;
+  fuzzy(
+    str: ExprNode | ExpressionBuilder | string,
+    pattern: ExprNode | ExpressionBuilder | string,
+    maxDistance?: number | ExprNode | ExpressionBuilder,
+  ): ExpressionBuilder;
 }
 
 function wrapFn(name: string, args: (ExprNode | ExpressionBuilder | any)[]): ExpressionBuilder {
@@ -690,6 +705,12 @@ const fnMethods = {
   max: (expr: any) => wrapFn('max', [expr]),
   concat: (...exprs: any[]) => wrapFn('concat', exprs),
   coalesce: (...exprs: any[]) => wrapFn('coalesce', exprs),
+  levenshtein: (s1: any, s2: any) => wrapFn('levenshtein', [s1, s2]),
+  fuzzy: (str: any, pattern: any, maxDistance?: any) => {
+    const args = [str, pattern];
+    if (maxDistance !== undefined) args.push(maxDistance);
+    return wrapFn('fuzzy', args);
+  },
 };
 
 for (const [key, value] of Object.entries(fnMethods)) {
@@ -703,6 +724,170 @@ for (const [key, value] of Object.entries(fnMethods)) {
 
 export const fn: FnNamespace = fnBase as any;
 
+export function levenshteinDistance(s1: string, s2: string, maxDist: number = 64): number {
+  if (s1 === s2) return 0;
+  const l1 = s1.length;
+  const l2 = s2.length;
+  const diff = Math.abs(l1 - l2);
+  if (diff > maxDist) return maxDist + 1;
+  if (l1 === 0) return l2 <= maxDist ? l2 : maxDist + 1;
+  if (l2 === 0) return l1 <= maxDist ? l1 : maxDist + 1;
+
+  const boundedL1 = Math.min(l1, 64);
+  const boundedL2 = Math.min(l2, 64);
+
+  const prev = new Uint32Array(boundedL2 + 1);
+  const cur = new Uint32Array(boundedL2 + 1);
+  const prev2 = new Uint32Array(boundedL2 + 1);
+
+  for (let j = 0; j <= boundedL2; j++) {
+    prev[j] = j;
+    prev2[j] = j;
+  }
+
+  const s1Low = s1.toLowerCase();
+  const s2Low = s2.toLowerCase();
+
+  for (let i = 1; i <= boundedL1; i++) {
+    cur[0] = i;
+    const c1 = s1Low.charCodeAt(i - 1);
+
+    for (let j = 1; j <= boundedL2; j++) {
+      const c2 = s2Low.charCodeAt(j - 1);
+      const cost = c1 === c2 ? 0 : 1;
+
+      const del = prev[j] + 1;
+      const ins = cur[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      let minVal = Math.min(del, ins, sub);
+
+      if (i > 1 && j > 1) {
+        const c1Prev = s1Low.charCodeAt(i - 2);
+        const c2Prev = s2Low.charCodeAt(j - 2);
+        if (c1 === c2Prev && c1Prev === c2) {
+          const trans = prev2[j - 2] + 1;
+          if (trans < minVal) minVal = trans;
+        }
+      }
+      cur[j] = minVal;
+    }
+    prev2.set(prev);
+    prev.set(cur);
+  }
+  return prev[boundedL2];
+}
+
+export function fuzzyMatchString(str: string, pattern: string, maxDistance?: number): boolean {
+  if (!pattern) return true;
+  if (!str) return false;
+  const sLow = str.toLowerCase();
+  const pLow = pattern.toLowerCase();
+  if (sLow.includes(pLow)) return true;
+
+  const maxDist = maxDistance !== undefined ? maxDistance : (pLow.length <= 4 ? 1 : 2);
+  const wholeDist = levenshteinDistance(sLow, pLow, maxDist);
+  if (wholeDist <= maxDist) return true;
+
+  // Word-by-word matching
+  const words = sLow.split(/[\s,._\-]+/);
+  for (const w of words) {
+    if (w.length === 0) continue;
+    if (w.startsWith(pLow) || pLow.startsWith(w)) return true;
+    const wDist = levenshteinDistance(w, pLow, maxDist);
+    if (wDist <= maxDist) return true;
+  }
+  return false;
+}
+
+export function evalScalarFn(name: string, args: any[]): any {
+  switch (name) {
+    case 'upper':
+      return args[0] !== null && args[0] !== undefined
+        ? String(args[0]).toUpperCase()
+        : null;
+    case 'lower':
+      return args[0] !== null && args[0] !== undefined
+        ? String(args[0]).toLowerCase()
+        : null;
+    case 'length':
+      return args[0] !== null && args[0] !== undefined
+        ? String(args[0]).length
+        : null;
+    case 'trim':
+      return args[0] !== null && args[0] !== undefined
+        ? String(args[0]).trim()
+        : null;
+    case 'substr': {
+      if (args[0] === null || args[0] === undefined) return null;
+      const str = String(args[0]);
+      const start = Math.max(0, (Number(args[1]) || 1) - 1);
+      const len =
+        args[2] !== null && args[2] !== undefined
+          ? Number(args[2])
+          : undefined;
+      return len !== undefined
+        ? str.substring(start, start + len)
+        : str.substring(start);
+    }
+    case 'abs':
+      return args[0] !== null && args[0] !== undefined
+        ? Math.abs(Number(args[0]))
+        : null;
+    case 'round':
+      return args[0] !== null && args[0] !== undefined
+        ? Math.round(Number(args[0]))
+        : null;
+    case 'floor':
+      return args[0] !== null && args[0] !== undefined
+        ? Math.floor(Number(args[0]))
+        : null;
+    case 'ceil':
+      return args[0] !== null && args[0] !== undefined
+        ? Math.ceil(Number(args[0]))
+        : null;
+    case 'concat': {
+      if (args.some((a) => a === null || a === undefined)) return null;
+      return args.map(String).join('');
+    }
+    case 'coalesce': {
+      for (const a of args) {
+        if (a !== null && a !== undefined) return a;
+      }
+      return null;
+    }
+    case 'starts_with':
+    case 'startswith':
+      return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+        ? String(args[0]).startsWith(String(args[1])) ? 1 : 0
+        : null;
+    case 'ends_with':
+    case 'endswith':
+      return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+        ? String(args[0]).endsWith(String(args[1])) ? 1 : 0
+        : null;
+    case 'contains':
+      return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+        ? String(args[0]).includes(String(args[1])) ? 1 : 0
+        : null;
+    case 'like':
+      return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
+        ? sql_like_match(String(args[0]), String(args[1])) ? 1 : 0
+        : null;
+    case 'levenshtein':
+    case 'edit_distance': {
+      if (args[0] === null || args[0] === undefined || args[1] === null || args[1] === undefined) return null;
+      return levenshteinDistance(String(args[0]), String(args[1]));
+    }
+    case 'fuzzy': {
+      if (args[0] === null || args[0] === undefined || args[1] === null || args[1] === undefined) return null;
+      const maxDist = args[2] !== null && args[2] !== undefined ? Number(args[2]) : undefined;
+      return fuzzyMatchString(String(args[0]), String(args[1]), maxDist) ? 1 : 0;
+    }
+    default:
+      return null;
+  }
+}
+
 /**
  * Evaluates an ExprNode AST against a database row.
  * Used for fallback projection and post-processing.
@@ -711,9 +896,9 @@ export function evalExprNode(
   expr: ExprNode,
   row: DbRow,
   udfs?:
-    | Map<string, { call: (...args: any[]) => any }>
-    | Record<string, (...args: any[]) => any>
-    | ((name: string) => ((...args: any[]) => any) | undefined),
+    | Map<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
+    | Record<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
+    | ((name: string) => { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any) | undefined),
 ): any {
   switch (expr.type) {
     case 'literal':
@@ -797,96 +982,180 @@ export function evalExprNode(
         return null;
       }
       const args = expr.args.map((a) => evalExprNode(a, row, udfs));
-      switch (name) {
-        case 'upper':
-          return args[0] !== null && args[0] !== undefined
-            ? String(args[0]).toUpperCase()
-            : null;
-        case 'lower':
-          return args[0] !== null && args[0] !== undefined
-            ? String(args[0]).toLowerCase()
-            : null;
-        case 'length':
-          return args[0] !== null && args[0] !== undefined
-            ? String(args[0]).length
-            : null;
-        case 'trim':
-          return args[0] !== null && args[0] !== undefined
-            ? String(args[0]).trim()
-            : null;
-        case 'substr': {
-          if (args[0] === null || args[0] === undefined) return null;
-          const str = String(args[0]);
-          const start = Math.max(0, (Number(args[1]) || 1) - 1);
-          const len =
-            args[2] !== null && args[2] !== undefined
-              ? Number(args[2])
-              : undefined;
-          return len !== undefined
-            ? str.substring(start, start + len)
-            : str.substring(start);
-        }
-        case 'abs':
-          return args[0] !== null && args[0] !== undefined
-            ? Math.abs(Number(args[0]))
-            : null;
-        case 'round':
-          return args[0] !== null && args[0] !== undefined
-            ? Math.round(Number(args[0]))
-            : null;
-        case 'floor':
-          return args[0] !== null && args[0] !== undefined
-            ? Math.floor(Number(args[0]))
-            : null;
-        case 'ceil':
-          return args[0] !== null && args[0] !== undefined
-            ? Math.ceil(Number(args[0]))
-            : null;
-        case 'concat': {
-          if (args.some((a) => a === null || a === undefined)) return null;
-          return args.map(String).join('');
-        }
-        case 'coalesce': {
-          for (const a of args) {
-            if (a !== null && a !== undefined) return a;
-          }
-          return null;
-        }
-        case 'starts_with':
-        case 'startswith':
-          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
-            ? String(args[0]).startsWith(String(args[1])) ? 1 : 0
-            : null;
-        case 'ends_with':
-        case 'endswith':
-          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
-            ? String(args[0]).endsWith(String(args[1])) ? 1 : 0
-            : null;
-        case 'contains':
-          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
-            ? String(args[0]).includes(String(args[1])) ? 1 : 0
-            : null;
-        case 'like':
-          return args[0] !== null && args[0] !== undefined && args[1] !== null && args[1] !== undefined
-            ? sql_like_match(String(args[0]), String(args[1])) ? 1 : 0
-            : null;
-        default: {
-          let fnCb: ((...a: any[]) => any) | undefined;
-          if (typeof udfs === 'function') {
-            fnCb = udfs(name);
-          } else if (udfs instanceof Map) {
-            const entry: any = udfs.get(name);
-            fnCb = typeof entry === 'function' ? entry : entry?.call;
-          } else if (udfs && typeof udfs === 'object') {
-            const entry: any = (udfs as any)[name];
-            fnCb = typeof entry === 'function' ? entry : entry?.call;
-          }
-          if (fnCb) {
-            return fnCb(...args);
-          }
-          throw new UnknownFunctionError(name);
+      if (BUILTIN_SCALARS.has(name)) {
+        return evalScalarFn(name, args);
+      }
+      let fnCb: ((...a: any[]) => any) | undefined;
+      if (typeof udfs === 'function') {
+        const entry: any = udfs(name);
+        fnCb = typeof entry === 'function' ? entry : entry?.call ?? (entry?.batchCall ? (...a: any[]) => entry.batchCall([a])[0] : undefined);
+      } else if (udfs instanceof Map) {
+        const entry: any = udfs.get(name);
+        fnCb = typeof entry === 'function' ? entry : entry?.call ?? (entry?.batchCall ? (...a: any[]) => entry.batchCall([a])[0] : undefined);
+      } else if (udfs && typeof udfs === 'object') {
+        const entry: any = (udfs as any)[name];
+        fnCb = typeof entry === 'function' ? entry : entry?.call ?? (entry?.batchCall ? (...a: any[]) => entry.batchCall([a])[0] : undefined);
+      }
+      if (fnCb) {
+        return fnCb(...args);
+      }
+      throw new UnknownFunctionError(name);
+    }
+  }
+}
+
+/**
+ * Evaluates an ExprNode AST in vector batches against a slice of database rows.
+ * If any UDF provides `batchCall`, calls are dispatched in power-of-two batches (e.g. 128 rows per call)
+ * instead of incurring per-row call overhead. Power-of-two sizing (128) aligns with CPU cache lines
+ * and V8 memory allocation buckets.
+ */
+export function evalExprNodeBatch(
+  expr: ExprNode,
+  rows: DbRow[],
+  udfs?:
+    | Map<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
+    | Record<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
+    | ((name: string) => { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any) | undefined),
+  batchSize: number = 128,
+): any[] {
+  const n = rows.length;
+  if (n === 0) return [];
+
+  switch (expr.type) {
+    case 'literal': {
+      const out = new Array(n);
+      for (let i = 0; i < n; i++) out[i] = expr.value;
+      return out;
+    }
+    case 'col': {
+      const out = new Array(n);
+      if (expr.name === '*') {
+        for (let i = 0; i < n; i++) out[i] = null;
+      } else {
+        const colName = expr.name;
+        for (let i = 0; i < n; i++) {
+          const val = rows[i][colName];
+          out[i] = val !== undefined ? val : null;
         }
       }
+      return out;
+    }
+    case 'binary': {
+      const leftVals = evalExprNodeBatch(expr.left, rows, udfs, batchSize);
+      const rightVals = evalExprNodeBatch(expr.right, rows, udfs, batchSize);
+      const out = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const left = leftVals[i];
+        const right = rightVals[i];
+        if (left === null || right === null || left === undefined || right === undefined) {
+          out[i] = null;
+          continue;
+        }
+        if (
+          expr.op === '=' ||
+          expr.op === '!=' ||
+          expr.op === '<' ||
+          expr.op === '<=' ||
+          expr.op === '>' ||
+          expr.op === '>='
+        ) {
+          const cmp =
+            typeof left === 'string' && typeof right === 'string'
+              ? left < right
+                ? -1
+                : left > right
+                  ? 1
+                  : 0
+              : Number(left) < Number(right)
+                ? -1
+                : Number(left) > Number(right)
+                  ? 1
+                  : 0;
+          switch (expr.op) {
+            case '=': out[i] = cmp === 0 ? 1 : 0; break;
+            case '!=': out[i] = cmp !== 0 ? 1 : 0; break;
+            case '<': out[i] = cmp < 0 ? 1 : 0; break;
+            case '<=': out[i] = cmp <= 0 ? 1 : 0; break;
+            case '>': out[i] = cmp > 0 ? 1 : 0; break;
+            case '>=': out[i] = cmp >= 0 ? 1 : 0; break;
+          }
+        } else {
+          const numL = Number(left);
+          const numR = Number(right);
+          switch (expr.op) {
+            case '+': out[i] = numL + numR; break;
+            case '-': out[i] = numL - numR; break;
+            case '*': out[i] = numL * numR; break;
+            case '/': out[i] = numR === 0 ? null : numL / numR; break;
+            case '%': out[i] = numR === 0 ? null : numL % numR; break;
+            default: out[i] = null; break;
+          }
+        }
+      }
+      return out;
+    }
+    case 'fn': {
+      const name = expr.name.toLowerCase();
+      if (isAggregateFunction(name)) {
+        return rows.map((r) => evalExprNode(expr, r, udfs as any));
+      }
+
+      const argsVals: any[][] = expr.args.map((a) =>
+        evalExprNodeBatch(a, rows, udfs, batchSize),
+      );
+
+      let udfEntry: any;
+      if (typeof udfs === 'function') {
+        udfEntry = udfs(name);
+      } else if (udfs instanceof Map) {
+        udfEntry = udfs.get(name);
+      } else if (udfs && typeof udfs === 'object') {
+        udfEntry = (udfs as any)[name];
+      }
+
+      if (udfEntry) {
+        const batchFn =
+          typeof udfEntry === 'object' && typeof udfEntry.batchCall === 'function'
+            ? udfEntry.batchCall
+            : undefined;
+        const callFn = typeof udfEntry === 'function' ? udfEntry : udfEntry.call;
+
+        if (batchFn) {
+          const out = new Array(n);
+          for (let start = 0; start < n; start += batchSize) {
+            const end = Math.min(start + batchSize, n);
+            const batchArgList: any[][] = [];
+            for (let i = start; i < end; i++) {
+              const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
+              batchArgList.push(rowArgs);
+            }
+            const resBatch = batchFn(batchArgList);
+            for (let i = start; i < end; i++) {
+              out[i] = resBatch[i - start];
+            }
+          }
+          return out;
+        } else if (callFn) {
+          const out = new Array(n);
+          for (let i = 0; i < n; i++) {
+            const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
+            out[i] = callFn(...rowArgs);
+          }
+          return out;
+        }
+      }
+
+      if (BUILTIN_SCALARS.has(name)) {
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
+          out[i] = evalScalarFn(name, rowArgs);
+        }
+        return out;
+      }
+
+      throw new UnknownFunctionError(name);
     }
   }
 }

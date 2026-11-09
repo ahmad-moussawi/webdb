@@ -779,6 +779,115 @@ int32_t vm_str_ends_with_view(uint32_t str_off, uint32_t str_len, uint32_t sfx_o
   return 1;
 }
 
+int32_t vm_str_levenshtein_view(uint32_t s1_off, uint32_t s1_len, uint32_t s2_off, uint32_t s2_len, uint32_t max_dist) {
+  if (s1_len == 0) 
+    return s2_len <= max_dist ? (s2_len) : ((max_dist + 1));
+  if (s2_len == 0) 
+    return s1_len <= max_dist ? (s1_len) : ((max_dist + 1));
+  int32_t diff = (s1_len) - (s2_len);
+  uint32_t abs_diff = (diff < 0 ? -diff : diff);
+  if (abs_diff > max_dist) 
+    return (max_dist + 1);
+  uint32_t l1 = s1_len > 64 ? 64 : s1_len;
+  uint32_t l2 = s2_len > 64 ? 64 : s2_len;
+  uint32_t prev[65];
+  uint32_t cur[65];
+  uint32_t prev2[65];
+  for (uint32_t j = 0; j <= l2; j++) {
+    prev[j] = j;
+    prev2[j] = j;
+  }
+  for (uint32_t i = 1; i <= l1; i++) {
+    cur[0] = i;
+    uint32_t row_min = i;
+    int32_t c1 = to_lower_char(load_u8((const void *)(uintptr_t)(s1_off + i - 1)));
+    for (uint32_t j = 1; j <= l2; j++) {
+      int32_t c2 = to_lower_char(load_u8((const void *)(uintptr_t)(s2_off + j - 1)));
+      uint32_t cost = c1 == c2 ? 0 : 1;
+      uint32_t del = prev[j] + 1;
+      uint32_t ins = cur[j - 1] + 1;
+      uint32_t sub = prev[j - 1] + cost;
+      uint32_t min_val = del < ins ? del : ins;
+      if (sub < min_val) 
+        min_val = sub;
+      if (i > 1 && j > 1) {
+        int32_t c1_prev = to_lower_char(load_u8((const void *)(uintptr_t)(s1_off + i - 2)));
+        int32_t c2_prev = to_lower_char(load_u8((const void *)(uintptr_t)(s2_off + j - 2)));
+        if (c1 == c2_prev && c1_prev == c2) {
+          uint32_t trans = prev2[j - 2] + 1;
+          if (trans < min_val) 
+            min_val = trans;
+        }
+      }
+      cur[j] = min_val;
+      if (min_val < row_min) 
+        row_min = min_val;
+    }
+    if (row_min > max_dist) {
+      return (max_dist + 1);
+    }
+    for (uint32_t k = 0; k <= l2; k++) {
+      prev2[k] = prev[k];
+      prev[k] = cur[k];
+    }
+  }
+  return cur[l2];
+}
+
+int32_t vm_str_fuzzy_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len, uint32_t max_dist, uint32_t allow_prefix) {
+  if (pat_len == 0) 
+    return 1;
+  if (str_len == 0) 
+    return 0;
+  if (vm_str_contains_view(str_off, str_len, pat_off, pat_len) != 0) {
+    return 1;
+  }
+  int32_t whole_dist = vm_str_levenshtein_view(str_off, str_len, pat_off, pat_len, max_dist);
+  if (whole_dist <= (max_dist)) {
+    return 1;
+  }
+  uint32_t word_start = 0;
+  while (word_start < str_len) {
+    while (word_start < str_len) {
+      int32_t b = load_u8((const void *)(uintptr_t)(str_off + word_start));
+      if (b <= 32 || b == 44 || b == 46 || b == 58 || b == 59 || b == 45 || b == 95 || b == 47 || b == 39 || b == 34 || b == 40 || b == 41 || b == 91 || b == 93) {
+        word_start++;
+      } else {
+        break;
+      }
+    }
+    if (word_start >= str_len) 
+      break;
+    uint32_t word_end = word_start;
+    while (word_end < str_len) {
+      int32_t b = load_u8((const void *)(uintptr_t)(str_off + word_end));
+      if (b <= 32 || b == 44 || b == 46 || b == 58 || b == 59 || b == 45 || b == 95 || b == 47 || b == 39 || b == 34 || b == 40 || b == 41 || b == 91 || b == 93) {
+        break;
+      }
+      word_end++;
+    }
+    uint32_t word_len = word_end - word_start;
+    uint32_t w_off = str_off + word_start;
+    if (allow_prefix != 0 && pat_len >= 2 && word_len >= pat_len) {
+      int32_t is_pfx = 1;
+      for (uint32_t p = 0; p < pat_len; p++) {
+        if (to_lower_char(load_u8((const void *)(uintptr_t)(w_off + p))) != to_lower_char(load_u8((const void *)(uintptr_t)(pat_off + p)))) {
+          is_pfx = 0;
+          break;
+        }
+      }
+      if (is_pfx != 0) 
+        return 1;
+    }
+    int32_t w_dist = vm_str_levenshtein_view(w_off, word_len, pat_off, pat_len, max_dist);
+    if (w_dist <= (max_dist)) {
+      return 1;
+    }
+    word_start = word_end;
+  }
+  return 0;
+}
+
 int32_t vm_utf8_char_count(uint32_t str_off, uint32_t byte_len) {
   int32_t count = 0;
   uint32_t i = 0;

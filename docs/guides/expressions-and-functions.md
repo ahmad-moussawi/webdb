@@ -148,6 +148,75 @@ const inactiveUsers = await db
 > fn("slugify", col("title")).as("slug");
 > ```
 
+### Vectorized UDF Batching (`db.registerBatchedFunction`)
+
+When evaluating queries over hundreds or thousands of rows, executing an individual JavaScript function call per row introduces noticeable function call overhead (call frame construction and V8 execution boundaries).
+
+To maximize throughput across row sets, WebDB supports **Vectorized UDF Batching**. Instead of calling your function one row at a time, WebDB dispatches arguments in chunks (default **128 rows**, power-of-two aligned for CPU cache lines and V8 memory allocation buckets):
+
+```typescript
+import { DataType } from "@ahmadmoussawi/webdb";
+
+// Register a batched function:
+db.registerBatchedFunction(
+  "fast_tax",
+  (argsBatch) => {
+    // argsBatch is an array of row argument tuples:
+    // e.g. [[amount1, rate1], [amount2, rate2], ...] (up to 128 rows per batch)
+    return argsBatch.map(([amount, rate]) => {
+      if (amount === null || rate === null) return null;
+      return Number(amount) * (1 + Number(rate));
+    });
+  },
+  { returnType: DataType.FLOAT64, deterministic: true }
+);
+
+// Use it seamlessly in .select() or .where()
+const orders = await db
+  .from("orders")
+  .select("id", "amount", "fast_tax(amount, 0.15) as total_with_tax")
+  .where("fast_tax(amount, 0.15) > 100")
+  .toArray();
+```
+
+#### How `db.registerBatchedFunction` Works
+
+1. **Automatic Scalar Fallback**: `registerBatchedFunction` automatically defines a scalar fallback `call: (...args) => batchFn([args])[0]`, so the function also works seamlessly for single-row evaluations or constant expressions.
+2. **Signature**:
+   ```typescript
+   db.registerBatchedFunction(
+     name: string,
+     batchFn: (argsBatch: any[][]) => any[],
+     options?: { deterministic?: boolean; returnType?: DataType }
+   ): this
+   ```
+   - `argsBatch`: An array of argument arrays for the current chunk (up to 128 rows).
+   - Return Value: An array containing the computed result for each row in the batch (`out.length === argsBatch.length`).
+
+#### Registering via `UdfDefinition.batchCall`
+
+You can also specify `batchCall` directly inside the standard `db.registerFunction`:
+
+```typescript
+db.registerFunction("slugify", {
+  deterministic: true,
+  returnType: DataType.TEXT,
+  // Scalar fallback for single-row evaluations
+  call: (text: string | null) =>
+    text ? text.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-") : null,
+  // Vectorized batch implementation for multi-row queries
+  batchCall: (argsBatch: any[][]) => {
+    return argsBatch.map(([text]) =>
+      text ? String(text).toLowerCase().trim().replace(/[^a-z0-9]+/g, "-") : null
+    );
+  },
+});
+```
+
+> [!TIP]
+> **Built-in Search UDFs Use Batching**:
+> All text and search functions registered via `registerFuzzySearch(db)` from `@ahmadmoussawi/webdb/search` (such as `fuzzy`, `fuzzy_score`, `highlight`, `snippet`, `ngram_similarity`, `bm25_score`) automatically provide `batchCall` implementations for vectorized query performance.
+
 ---
 
 ## 4. Embrace the Browser: Web APIs as Query Functions
