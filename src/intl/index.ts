@@ -861,16 +861,22 @@ export function lit(value: unknown): ExpressionBuilder {
   return new ExpressionBuilder({ type: 'literal', value } as any);
 }
 
+export type ColumnOrExpr = string | ExpressionBuilder;
+
+function toExpr(target: ColumnOrExpr): ExpressionBuilder {
+  return typeof target === 'string' ? col(target) : target;
+}
+
 /**
  * Returns an ExpressionBuilder calling `format_date(col, style, locale, tz)`.
  */
 export function formatDateExpr(
-  column: string,
+  target: ColumnOrExpr,
   style: string = 'medium',
   locale?: string,
   timeZone?: string
 ): ExpressionBuilder {
-  const args = [col(column), lit(style)];
+  const args = [toExpr(target), lit(style)];
   if (locale !== undefined) args.push(lit(locale));
   if (timeZone !== undefined) {
     if (locale === undefined) args.push(lit(''));
@@ -883,11 +889,11 @@ export function formatDateExpr(
  * Returns an ExpressionBuilder calling `time_ago(col, [baseTs], [locale])`.
  */
 export function timeAgoExpr(
-  column: string,
+  target: ColumnOrExpr,
   baseTs?: unknown,
   locale?: string
 ): ExpressionBuilder {
-  const args = [col(column)];
+  const args = [toExpr(target)];
   if (baseTs !== undefined) args.push(lit(baseTs));
   if (locale !== undefined) {
     if (baseTs === undefined) args.push(lit(null));
@@ -899,41 +905,41 @@ export function timeAgoExpr(
 /**
  * Returns an ExpressionBuilder calling `days_since(col, [baseTs])`.
  */
-export function daysSinceExpr(column: string, baseTs?: unknown): ExpressionBuilder {
+export function daysSinceExpr(target: ColumnOrExpr, baseTs?: unknown): ExpressionBuilder {
   return baseTs !== undefined
-    ? fn('days_since', col(column), lit(baseTs))
-    : fn('days_since', col(column));
+    ? fn('days_since', toExpr(target), lit(baseTs))
+    : fn('days_since', toExpr(target));
 }
 
 /**
  * Returns an ExpressionBuilder calling `date_part(part, col)`.
  */
-export function datePartExpr(part: string, column: string): ExpressionBuilder {
-  return fn('date_part', lit(part), col(column));
+export function datePartExpr(part: string, target: ColumnOrExpr): ExpressionBuilder {
+  return fn('date_part', lit(part), toExpr(target));
 }
 
 /**
  * Returns an ExpressionBuilder calling `format_currency(col, currency, [locale])`.
  */
 export function formatCurrencyExpr(
-  column: string,
+  target: ColumnOrExpr,
   currency: string = 'USD',
   locale?: string
 ): ExpressionBuilder {
   return locale !== undefined
-    ? fn('format_currency', col(column), lit(currency), lit(locale))
-    : fn('format_currency', col(column), lit(currency));
+    ? fn('format_currency', toExpr(target), lit(currency), lit(locale))
+    : fn('format_currency', toExpr(target), lit(currency));
 }
 
 /**
  * Returns an ExpressionBuilder calling `format_number(col, [decimals], [locale])`.
  */
 export function formatNumberExpr(
-  column: string,
+  target: ColumnOrExpr,
   decimals?: number,
   locale?: string
 ): ExpressionBuilder {
-  const args = [col(column)];
+  const args = [toExpr(target)];
   if (decimals !== undefined) args.push(lit(decimals));
   if (locale !== undefined) {
     if (decimals === undefined) args.push(lit(null));
@@ -945,55 +951,55 @@ export function formatNumberExpr(
 /**
  * Returns an ExpressionBuilder calling `format_compact(col, [locale])`.
  */
-export function formatCompactExpr(column: string, locale?: string): ExpressionBuilder {
+export function formatCompactExpr(target: ColumnOrExpr, locale?: string): ExpressionBuilder {
   return locale !== undefined
-    ? fn('format_compact', col(column), lit(locale))
-    : fn('format_compact', col(column));
+    ? fn('format_compact', toExpr(target), lit(locale))
+    : fn('format_compact', toExpr(target));
 }
 
 /**
  * Returns an ExpressionBuilder calling `format_percent(col, [decimals], [locale])`.
  */
 export function formatPercentExpr(
-  column: string,
+  target: ColumnOrExpr,
   decimals: number = 1,
   locale?: string
 ): ExpressionBuilder {
   return locale !== undefined
-    ? fn('format_percent', col(column), lit(decimals), lit(locale))
-    : fn('format_percent', col(column), lit(decimals));
+    ? fn('format_percent', toExpr(target), lit(decimals), lit(locale))
+    : fn('format_percent', toExpr(target), lit(decimals));
 }
 
 /**
  * Returns an ExpressionBuilder calling `format_bytes(col, [decimals])`.
  */
-export function formatBytesExpr(column: string, decimals: number = 1): ExpressionBuilder {
-  return fn('format_bytes', col(column), lit(decimals));
+export function formatBytesExpr(target: ColumnOrExpr, decimals: number = 1): ExpressionBuilder {
+  return fn('format_bytes', toExpr(target), lit(decimals));
 }
 
 /**
  * Returns an ExpressionBuilder calling `regexp_match(col, pattern, [flags])`.
  */
 export function regexpMatchExpr(
-  column: string,
+  target: ColumnOrExpr,
   pattern: string,
   flags?: string
 ): ExpressionBuilder {
   return flags !== undefined
-    ? fn('regexp_match', col(column), lit(pattern), lit(flags))
-    : fn('regexp_match', col(column), lit(pattern));
+    ? fn('regexp_match', toExpr(target), lit(pattern), lit(flags))
+    : fn('regexp_match', toExpr(target), lit(pattern));
 }
 
 /**
  * Returns an ExpressionBuilder calling `slugify(col)`.
  */
-export function slugifyExpr(column: string): ExpressionBuilder {
-  return fn('slugify', col(column));
+export function slugifyExpr(target: ColumnOrExpr): ExpressionBuilder {
+  return fn('slugify', toExpr(target));
 }
 
 /**
  * Returns an ExpressionBuilder calling `unaccent(col)`.
  */
-export function unaccentExpr(column: string): ExpressionBuilder {
-  return fn('unaccent', col(column));
+export function unaccentExpr(target: ColumnOrExpr): ExpressionBuilder {
+  return fn('unaccent', toExpr(target));
 }

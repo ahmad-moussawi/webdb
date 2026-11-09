@@ -45,10 +45,10 @@ const orders = await db
   .select([
     'id',
     'customer_name',
-    // Using type-safe expression helper:
-    formatCurrencyExpr(col('total_cents') / 100, 'USD', 'en-US').as('formatted_total'),
-    formatDateExpr(col('created_at'), 'en-US', { dateStyle: 'medium' }).as('formatted_date'),
-    timeAgoExpr(col('created_at')).as('relative_time'),
+    // Using type-safe expression helper with an expression (.div(100)) or column name:
+    formatCurrencyExpr(col('total_cents').div(100), 'USD', 'en-US').as('formatted_total'),
+    formatDateExpr('created_at', 'medium', 'en-US').as('formatted_date'),
+    timeAgoExpr('created_at').as('relative_time'),
     // Or via bare fn() call:
     fn('format_currency', col('discount_amount'), 'USD', 'en-US').as('discount_formatted'),
   ])
@@ -88,13 +88,13 @@ registerStringFunctions(db);
 
 | Function Signature | Description | Example Output |
 | :--- | :--- | :--- |
-| `format_date(val, [locale], [optionsJson])` | Formats ISO string or millisecond timestamp with `Intl.DateTimeFormat` | `'Oct 25, 2026'` |
-| `format_time(val, [locale], [optionsJson])` | Formats time component | `'2:30 PM'` |
+| `format_date(val, [style='medium'], [locale], [tz])` | Formats ISO string or millisecond timestamp (`'short'`, `'medium'`, `'long'`, `'full'`) | `'Oct 25, 2026'` |
+| `format_time(val, [style='short'], [locale], [tz])` | Formats time component (`'short'`, `'medium'`, `'long'`, `'full'`) | `'2:30 PM'` |
 | `time_ago(val, [baseTime], [locale])` | Relative human-readable duration | `'3 hours ago'`, `'in 2 days'` |
-| `date_part(val, part)` | Extracts component: `'year'`, `'month'`, `'day'`, `'hour'`, `'minute'`, `'second'`, `'weekday'` | `2026`, `10` |
+| `date_part(part, val)` | Extracts component: `'year'`, `'month'`, `'day'`, `'hour'`, `'minute'`, `'second'`, `'weekday'` | `2026`, `10` |
 | `days_since(val, [baseTime])` | Number of whole elapsed days | `4` |
-| `date_add(val, amount, unit)` | Adds interval (`'day'`, `'week'`, `'month'`, `'year'`, `'hour'`, `'minute'`) returning ISO timestamp | `'2026-11-01T00:00:00.000Z'` |
-| `date_diff(valA, valB, [unit])` | Difference `(A - B)` in units (`'day'`, `'hour'`, `'minute'`, `'second'`, `'millisecond'`) | `7` |
+| `date_add(val, amount, [unit='day'])` | Adds interval (`'day'`, `'week'`, `'month'`, `'year'`, `'hour'`, `'minute'`) returning epoch ms | `1793577600000` |
+| `date_diff(valA, valB, [unit='day'])` | Difference `(A - B)` in units (`'day'`, `'hour'`, `'minute'`, `'second'`, `'millisecond'`) | `7` |
 | `iso_date(val)` | Normalizes to `YYYY-MM-DD` | `'2026-10-25'` |
 | `to_timestamp(val)` | Converts to numeric Unix millisecond timestamp | `1792972800000` |
 
@@ -102,12 +102,12 @@ registerStringFunctions(db);
 
 | Function Signature | Description | Example Output |
 | :--- | :--- | :--- |
-| `format_currency(val, currency, [locale], [optionsJson])` | Formats currency amount | `'$1,234.56'`, `'1 234,56 €'` |
-| `format_number(val, [locale], [optionsJson])` | Formats decimal number with thousand separators | `'1,234,567.89'` |
+| `format_currency(val, [currency='USD'], [locale])` | Formats currency amount | `'$1,234.56'`, `'1 234,56 €'` |
+| `format_number(val, [decimals], [locale])` | Formats decimal number with thousand separators | `'1,234,567.89'` |
 | `format_compact(val, [locale])` | Compact notation for large metrics | `'1.2M'`, `'45K'` |
-| `format_percent(val, [locale], [decimals=0])` | Formats decimal ratio as percentage | `'85%'`, `'12.5%'` |
+| `format_percent(val, [decimals=1], [locale])` | Formats decimal ratio as percentage | `'85.0%'`, `'12.5%'` |
 | `format_bytes(bytes, [decimals=1])` | Formats byte sizes with binary units (KiB, MiB, GiB, etc.) | `'14.2 MB'`, `'1.5 GB'` |
-| `plural(val, zeroStr, oneStr, otherStr)` | Simple string pluralization | `'1 item'`, `'5 items'` |
+| `plural(val, singular, [pluralText], [zeroText])` | String pluralization helper | `'1 item'`, `'5 items'` |
 
 ### String & Regex Functions
 
