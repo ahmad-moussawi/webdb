@@ -22,6 +22,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@ahmadmoussawi/webdb/intl': resolve(__dirname, 'src/intl/index.ts'),
+      '@ahmadmoussawi/webdb/search': resolve(__dirname, 'src/search/index.ts'),
       '@ahmadmoussawi/webdb': resolve(__dirname, 'src/index.ts'),
     },
   },

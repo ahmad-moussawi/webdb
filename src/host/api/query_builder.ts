@@ -29,6 +29,8 @@ import {
   isAggregateFunction,
   ExpressionBuilder,
   deriveDefaultAlias,
+  extractReferencedColumns,
+  exprHasBatchedUdf,
 } from '../compiler/expr_parser.js';
 import {
   notifyLiveQueryTableRead,
@@ -2920,6 +2922,7 @@ export class QueryBuilder {
   private async evalFiltersOnRows(
     rows: DbRow[],
     filters: QueryFilter[],
+    exprCache?: WeakMap<DbRow, Map<string, any>>,
   ): Promise<DbRow[]> {
     if (filters.length === 0 || rows.length === 0) return rows;
     const resolved = await this.resolveUncorrelatedFilters(filters);
@@ -2931,7 +2934,7 @@ export class QueryBuilder {
         if (typeof (this.db as any).getUdf === 'function') {
           udfs = (name: string) => (this.db as any).getUdf(name)?.def;
         }
-        const batchResults = evalExprNodeBatch(f.expr, currentRows, udfs);
+        const batchResults = evalExprNodeBatch(f.expr, currentRows, udfs, 128, exprCache);
         currentRows = currentRows.filter(
           (_, idx) => Boolean(batchResults[idx] && batchResults[idx] !== 0),
         );
@@ -3127,8 +3130,10 @@ export class QueryBuilder {
       rows = joined;
     }
 
+    const exprCache = new WeakMap<DbRow, Map<string, any>>();
+
     // Apply WHERE filters
-    rows = await this.evalFiltersOnRows(rows, this.filters);
+    rows = await this.evalFiltersOnRows(rows, this.filters, exprCache);
 
     // Apply GROUP BY / Aggregates / HAVING
     const hasAggsOrGrouping =
@@ -3138,7 +3143,7 @@ export class QueryBuilder {
     if (hasAggsOrGrouping) {
       rows = this.performInMemoryAggregation(rows);
       if (this.havingFilters.length > 0) {
-        rows = await this.evalFiltersOnRows(rows, this.havingFilters);
+        rows = await this.evalFiltersOnRows(rows, this.havingFilters, exprCache);
       }
     }
 
@@ -3154,6 +3159,21 @@ export class QueryBuilder {
 
     if (orderByReferencesSelectSubquery) {
       await this.attachSelectSubqueries(rows);
+    }
+
+    if (this.selectFields.length > 0 && rows.length > 0) {
+      let udfs: any;
+      if (typeof (this.db as any).getUdf === 'function') {
+        udfs = (name: string) => (this.db as any).getUdf(name)?.def;
+      }
+      for (const f of this.selectFields) {
+        if (f.expr && !f.subquery) {
+          const batchVals = evalExprNodeBatch(f.expr, rows, udfs, 128, exprCache);
+          for (let i = 0; i < rows.length; i++) {
+            rows[i][f.alias] = batchVals[i];
+          }
+        }
+      }
     }
 
     // Apply ORDER BY
@@ -3174,7 +3194,7 @@ export class QueryBuilder {
     }
 
     if (this.selectFields.length > 0) {
-      rows = this.projectRows(rows);
+      rows = this.projectRows(rows, exprCache);
     }
 
     return rows;
@@ -3184,7 +3204,10 @@ export class QueryBuilder {
    * Post-processes raw VDBE result rows into projected output records in vector batches
    * according to select fields, expressions, aliases, and registered UDFs.
    */
-  private projectRows(rows: DbRow[]): DbRow[] {
+  private projectRows(
+    rows: DbRow[],
+    exprCache?: WeakMap<DbRow, Map<string, any>>,
+  ): DbRow[] {
     if (rows.length === 0) return rows;
 
     const explicitAggs = this.aggExprs.filter((a) => !a.fromHaving);
@@ -3237,7 +3260,7 @@ export class QueryBuilder {
           projectedRows[i][targetAlias] = rows[i][sourceCol!];
         }
       } else if (field.expr) {
-        const batchVals = evalExprNodeBatch(field.expr, rows, udfs);
+        const batchVals = evalExprNodeBatch(field.expr, rows, udfs, 128, exprCache);
         for (let i = 0; i < n; i++) {
           projectedRows[i][targetAlias] = batchVals[i];
         }
@@ -3528,6 +3551,21 @@ export class QueryBuilder {
         await this.attachSelectSubqueries(rows);
       }
 
+      if (this.selectFields.length > 0 && rows.length > 0) {
+        let udfs: any;
+        if (typeof (this.db as any).getUdf === 'function') {
+          udfs = (name: string) => (this.db as any).getUdf(name)?.def;
+        }
+        for (const f of this.selectFields) {
+          if (f.expr && !f.subquery) {
+            const batchVals = evalExprNodeBatch(f.expr, rows, udfs);
+            for (let i = 0; i < rows.length; i++) {
+              rows[i][f.alias] = batchVals[i];
+            }
+          }
+        }
+      }
+
       if (hasOrderBy) {
         rows = this.sortAggregatedRows(rows);
       }
@@ -3555,7 +3593,94 @@ export class QueryBuilder {
       alias: f.alias,
     }));
 
-    if (hasJoins && hasOrderBy && selectExprs.length > 0) {
+    const hasBatchedUdfsInSelect =
+      !hasAggsOrGrouping &&
+      nonSubSelectFields.some((f) => f.expr && exprHasBatchedUdf(f.expr, this.db));
+
+    const hasBatchedUdfsInWhere =
+      !hasAggsOrGrouping &&
+      uncorrelatedWhereFilters.some((f) => f.type === 'expr' && f.expr && exprHasBatchedUdf(f.expr, this.db));
+
+    const batchedWhereFilters = hasBatchedUdfsInWhere
+      ? uncorrelatedWhereFilters.filter((f) => f.type === 'expr' && f.expr && exprHasBatchedUdf(f.expr, this.db))
+      : [];
+    const vdbeWhereFilters = hasBatchedUdfsInWhere
+      ? uncorrelatedWhereFilters.filter((f) => !(f.type === 'expr' && f.expr && exprHasBatchedUdf(f.expr, this.db)))
+      : uncorrelatedWhereFilters;
+
+    const orderByReferencesBatchedUdf =
+      hasOrderBy &&
+      this.orderKeys.some((k) => {
+        const col =
+          k.colName ?? (k.expr ? deriveDefaultAlias(k.expr) : undefined);
+        if (!col) return false;
+        const matchingField = nonSubSelectFields.find(
+          (f) => f.alias === col || f.sourceCol === col,
+        );
+        if (
+          matchingField &&
+          matchingField.expr &&
+          exprHasBatchedUdf(matchingField.expr, this.db)
+        ) {
+          return true;
+        }
+        if (k.expr && exprHasBatchedUdf(k.expr, this.db)) {
+          return true;
+        }
+        return false;
+      });
+
+    let vdbeSelectExprs: ParsedSelectExpr[] = selectExprs;
+    let vdbeSelectFields: typeof nonSubSelectFields | undefined = nonSubSelectFields;
+
+    if (nonSubSelectFields.length > 0 && (hasBatchedUdfsInSelect || hasBatchedUdfsInWhere)) {
+      const vdbeExprMap = new Map<string, ParsedSelectExpr>();
+      const neededCols = new Set<string>();
+      const batchedAliases = new Set<string>();
+
+      for (const f of nonSubSelectFields) {
+        if (f.expr && exprHasBatchedUdf(f.expr, this.db)) {
+          batchedAliases.add(f.alias);
+          const cols = extractReferencedColumns(f.expr);
+          for (const c of cols) neededCols.add(c);
+        } else {
+          const expr = f.expr ?? { type: 'col', name: f.sourceCol ?? f.alias };
+          vdbeExprMap.set(f.alias, { expr, alias: f.alias });
+        }
+      }
+
+      for (const f of batchedWhereFilters) {
+        if (f.expr) {
+          const cols = extractReferencedColumns(f.expr);
+          for (const c of cols) neededCols.add(c);
+        }
+      }
+
+      if (hasOrderBy) {
+        for (const k of this.orderKeys) {
+          const col = k.colName;
+          if (col && !batchedAliases.has(col)) neededCols.add(col);
+          if (k.expr) {
+            const cols = extractReferencedColumns(k.expr);
+            for (const c of cols) neededCols.add(c);
+          }
+        }
+      }
+
+      for (const colName of neededCols) {
+        if (!batchedAliases.has(colName) && !vdbeExprMap.has(colName)) {
+          vdbeExprMap.set(colName, {
+            expr: { type: 'col', name: colName },
+            alias: colName,
+          });
+        }
+      }
+
+      vdbeSelectExprs = Array.from(vdbeExprMap.values());
+      vdbeSelectFields = undefined;
+    }
+
+    if (hasJoins && hasOrderBy && vdbeSelectExprs.length > 0) {
       for (const k of this.orderKeys) {
         const col = k.colName;
         if (col) {
@@ -3569,8 +3694,8 @@ export class QueryBuilder {
               f.sourceCol === col ||
               f.sourceCol === short,
           );
-          if (!found) {
-            selectExprs.push({
+          if (!found && !vdbeSelectExprs.some((s) => s.alias === `__sort_${col}`)) {
+            vdbeSelectExprs.push({
               expr: { type: 'col', name: col },
               alias: `__sort_${col}`,
             });
@@ -3586,20 +3711,26 @@ export class QueryBuilder {
 
     const rawRows = await this.db.executeQuery(
       this.tableName,
-      uncorrelatedWhereFilters,
+      vdbeWhereFilters,
       {
         limit:
-          (hasJoins && hasOrderBy && hasAggsOrGrouping) || hasCorrelatedHaving
+          (hasJoins && hasOrderBy && hasAggsOrGrouping) ||
+          hasCorrelatedHaving ||
+          batchedWhereFilters.length > 0 ||
+          orderByReferencesBatchedUdf
             ? null
             : this.limitCount,
         offset:
-          (hasJoins && hasOrderBy && hasAggsOrGrouping) || hasCorrelatedHaving
+          (hasJoins && hasOrderBy && hasAggsOrGrouping) ||
+          hasCorrelatedHaving ||
+          batchedWhereFilters.length > 0 ||
+          orderByReferencesBatchedUdf
             ? null
             : this.offsetCount,
-        sortCol: hasJoins ? null : this.sortCol,
+        sortCol: hasJoins || orderByReferencesBatchedUdf ? null : this.sortCol,
         sortDir: this.sortDir,
         orderBy:
-          hasJoins && hasAggsOrGrouping
+          (hasJoins && hasAggsOrGrouping) || orderByReferencesBatchedUdf
             ? undefined
             : hasOrderBy
               ? this.orderKeys
@@ -3615,35 +3746,77 @@ export class QueryBuilder {
         having:
           resolvedHavingFilters.length > 0 ? resolvedHavingFilters : undefined,
         select:
-          passSelectToVdbe && nonSubSelectFields.length > 0
-            ? nonSubSelectFields
+          passSelectToVdbe && vdbeSelectFields && vdbeSelectFields.length > 0
+            ? vdbeSelectFields
             : undefined,
         selectExprs:
-          passSelectToVdbe && selectExprs.length > 0 ? selectExprs : undefined,
+          passSelectToVdbe && vdbeSelectExprs.length > 0 ? vdbeSelectExprs : undefined,
         planner: this.planner,
       },
     );
 
+    const exprCache = new WeakMap<DbRow, Map<string, any>>();
+
     let rows = rawRows;
+    if (batchedWhereFilters.length > 0) {
+      rows = await this.evalFiltersOnRows(rows, batchedWhereFilters, exprCache);
+      if (this.offsetCount !== null && this.offsetCount > 0 && !hasOrderBy) {
+        rows = rows.slice(this.offsetCount);
+      }
+      if (this.limitCount !== null && this.limitCount >= 0 && !hasOrderBy) {
+        rows = rows.slice(0, this.limitCount);
+      }
+    }
     if (hasCorrelatedHaving) {
       const corrHaving = this.havingFilters.filter((f) =>
         this.filterContainsCorrelatedSubquery(f),
       );
-      rows = await this.evalFiltersOnRows(rows, corrHaving);
+      rows = await this.evalFiltersOnRows(rows, corrHaving, exprCache);
+    }
+
+    if (rows.length > 0) {
+      let udfs: any;
+      if (typeof (this.db as any).getUdf === 'function') {
+        udfs = (name: string) => (this.db as any).getUdf(name)?.def;
+      }
+      if (hasBatchedUdfsInSelect) {
+        for (const f of nonSubSelectFields) {
+          if (f.expr && exprHasBatchedUdf(f.expr, this.db)) {
+            const batchVals = evalExprNodeBatch(f.expr, rows, udfs, 128, exprCache);
+            for (let i = 0; i < rows.length; i++) {
+              rows[i][f.alias] = batchVals[i];
+            }
+          }
+        }
+      }
+      if (orderByReferencesBatchedUdf) {
+        for (const k of this.orderKeys) {
+          if (k.expr && exprHasBatchedUdf(k.expr, this.db)) {
+            const rawKey = k.colName ?? deriveDefaultAlias(k.expr);
+            if (rawKey && rows[0][rawKey] === undefined) {
+              const batchVals = evalExprNodeBatch(k.expr, rows, udfs, 128, exprCache);
+              for (let i = 0; i < rows.length; i++) {
+                rows[i][rawKey] = batchVals[i];
+              }
+            }
+          }
+        }
+      }
     }
 
     const isOrderSatisfied = (rawRows as any).isOrderSatisfied === true;
-    if ((hasAggsOrGrouping || hasJoins) && hasOrderBy && !isOrderSatisfied) {
+    if (
+      (orderByReferencesBatchedUdf || ((hasAggsOrGrouping || hasJoins) && !isOrderSatisfied)) &&
+      hasOrderBy
+    ) {
       rows = this.sortAggregatedRows(rows);
-      if (hasJoins || hasCorrelatedHaving) {
-        if (this.offsetCount !== null && this.offsetCount > 0) {
-          rows = rows.slice(this.offsetCount);
-        }
-        if (this.limitCount !== null && this.limitCount >= 0) {
-          rows = rows.slice(0, this.limitCount);
-        }
+      if (this.offsetCount !== null && this.offsetCount > 0) {
+        rows = rows.slice(this.offsetCount);
       }
-    } else if (hasCorrelatedHaving) {
+      if (this.limitCount !== null && this.limitCount >= 0) {
+        rows = rows.slice(0, this.limitCount);
+      }
+    } else if (hasCorrelatedHaving || (batchedWhereFilters.length > 0 && hasOrderBy)) {
       if (this.offsetCount !== null && this.offsetCount > 0) {
         rows = rows.slice(this.offsetCount);
       }
@@ -3657,7 +3830,7 @@ export class QueryBuilder {
     }
 
     if (this.selectFields.length > 0) {
-      rows = this.projectRows(rows);
+      rows = this.projectRows(rows, exprCache);
     }
 
     return rows;

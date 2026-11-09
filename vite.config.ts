@@ -15,6 +15,7 @@ export default defineConfig({
     alias: {
       '@ahmadmoussawi/webdb/migrations': resolve(__dirname, 'src/migrations/index.ts'),
       '@ahmadmoussawi/webdb/search': resolve(__dirname, 'src/search/index.ts'),
+      '@ahmadmoussawi/webdb/intl': resolve(__dirname, 'src/intl/index.ts'),
       '@ahmadmoussawi/webdb/react': resolve(__dirname, 'src/react/index.ts'),
       '@ahmadmoussawi/webdb/angular': resolve(__dirname, 'src/angular/index.ts'),
       '@ahmadmoussawi/webdb/vue': resolve(__dirname, 'src/vue/index.ts'),

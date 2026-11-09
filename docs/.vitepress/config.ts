@@ -113,7 +113,13 @@ export default defineConfig({
       { text: "Live Demos", link: "/demos/" },
       { text: "API", link: "/reference/api-reference" },
       { text: "Studio IDE", link: "/playground/", target: "_self" },
-      { text: "Benchmarks", link: "/benchmark/", target: "_self" },
+      {
+        text: "Benchmarks",
+        items: [
+          { text: "Cross-Engine Comparison", link: "/benchmark/", target: "_self" },
+          { text: "WebDB Vector UDFs Benchmark", link: "/benchmark/#/webdb", target: "_self" },
+        ],
+      },
     ],
 
     sidebar: [
@@ -215,6 +221,11 @@ export default defineConfig({
           {
             text: "Query Performance & .explain()",
             link: "/query-planner",
+          },
+          {
+            text: "Vectorized UDFs Benchmark ↗",
+            link: "/benchmark/#/webdb",
+            target: "_self",
           },
           {
             text: "Common Use Cases & Recipes",

@@ -1,7 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Header } from './components/Header.js';
 import { BenchmarkControls } from './components/BenchmarkControls.js';
 import { ResultsView } from './components/ResultsView.js';
+import { WebdbUdfBenchmark } from './components/WebdbUdfBenchmark.js';
 import { EngineId, ScenarioId, ScenarioResult } from './adapters/index.js';
 import { ProgressUpdate, runBenchmarkSuite } from './engine/runner.js';
 
@@ -11,6 +12,18 @@ const STORAGE_KEYS = {
   DATASET_SIZE: 'webdb_benchmark_dataset_size_v2',
   ITERATIONS: 'webdb_benchmark_iterations_v2',
 };
+
+type BenchmarkPage = 'engines' | 'webdb';
+
+function getInitialPage(): BenchmarkPage {
+  if (typeof window !== 'undefined') {
+    const hash = window.location.hash.toLowerCase();
+    if (hash.includes('webdb') || hash.includes('udf')) {
+      return 'webdb';
+    }
+  }
+  return 'engines';
+}
 
 const DEFAULT_ENGINES: EngineId[] = ['webdb_wasm_mem', 'webdb_mem', 'webdb_idb', 'indexeddb'];
 const DEFAULT_SCENARIOS: ScenarioId[] = [
@@ -42,6 +55,23 @@ function getStoredValue<T>(key: string, fallback: T): T {
 }
 
 export const App: React.FC = () => {
+  const [activePage, setActivePage] = useState<BenchmarkPage>(getInitialPage);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      setActivePage(getInitialPage());
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const handlePageChange = (page: BenchmarkPage) => {
+    setActivePage(page);
+    if (typeof window !== 'undefined') {
+      window.location.hash = page === 'webdb' ? '#/webdb' : '#/engines';
+    }
+  };
+
   const [datasetSize, setDatasetSize] = useState<number>(() =>
     getStoredValue(STORAGE_KEYS.DATASET_SIZE, 5000),
   );
@@ -133,28 +163,34 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-shell">
-      <Header />
+      <Header activePage={activePage} onPageChange={handlePageChange} />
 
-      <div className="workspace-layout">
-        <BenchmarkControls
-          datasetSize={datasetSize}
-          setDatasetSize={setDatasetSize}
-          selectedEngines={selectedEngines}
-          setSelectedEngines={setSelectedEngines}
-          selectedScenarios={selectedScenarios}
-          setSelectedScenarios={setSelectedScenarios}
-          iterations={iterations}
-          setIterations={setIterations}
-          isRunning={isRunning}
-          progress={progress}
-          onRun={handleRun}
-          onStop={handleStop}
-        />
-
-        <main className="workspace-main">
-          <ResultsView results={results} datasetSize={datasetSize} />
+      {activePage === 'webdb' ? (
+        <main className="workspace-main workspace-main-full">
+          <WebdbUdfBenchmark />
         </main>
-      </div>
+      ) : (
+        <div className="workspace-layout">
+          <BenchmarkControls
+            datasetSize={datasetSize}
+            setDatasetSize={setDatasetSize}
+            selectedEngines={selectedEngines}
+            setSelectedEngines={setSelectedEngines}
+            selectedScenarios={selectedScenarios}
+            setSelectedScenarios={setSelectedScenarios}
+            iterations={iterations}
+            setIterations={setIterations}
+            isRunning={isRunning}
+            progress={progress}
+            onRun={handleRun}
+            onStop={handleStop}
+          />
+
+          <main className="workspace-main">
+            <ResultsView results={results} datasetSize={datasetSize} />
+          </main>
+        </div>
+      )}
     </div>
   );
 };

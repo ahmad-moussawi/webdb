@@ -492,6 +492,70 @@ export function parseSelectExpr(raw: string): ParsedSelectExpr {
   return { expr, alias };
 }
 
+/**
+ * Extracts all column names referenced in an expression tree.
+ */
+export function extractReferencedColumns(expr: ExprNode): string[] {
+  const cols = new Set<string>();
+  function walk(node: ExprNode) {
+    if (!node) return;
+    if (node.type === 'col' && node.name !== '*') {
+      cols.add(node.name);
+    } else if (node.type === 'binary') {
+      walk(node.left);
+      walk(node.right);
+    } else if (node.type === 'fn') {
+      for (const a of node.args) walk(a);
+    }
+  }
+  walk(expr);
+  return Array.from(cols);
+}
+
+/**
+ * Checks whether an expression tree contains any user-defined function with a `batchCall` implementation.
+ */
+export function exprHasBatchedUdf(expr: ExprNode, db: any): boolean {
+  if (!expr || !db || typeof db.getUdf !== 'function') return false;
+  let found = false;
+  function walk(node: ExprNode) {
+    if (!node || found) return;
+    if (node.type === 'fn') {
+      const entry = db.getUdf(node.name);
+      if (entry?.def && typeof entry.def.batchCall === 'function') {
+        found = true;
+        return;
+      }
+      for (const a of node.args) walk(a);
+    } else if (node.type === 'binary') {
+      walk(node.left);
+      walk(node.right);
+    }
+  }
+  walk(expr);
+  return found;
+}
+
+/**
+ * Produces a normalized, canonical string representation of an expression AST
+ * suitable for common subexpression elimination (CSE) and query caching.
+ */
+export function canonicalExpr(node: ExprNode): string {
+  if (!node) return '';
+  switch (node.type) {
+    case 'literal':
+      return typeof node.value === 'string'
+        ? `"${node.value}"`
+        : String(node.value);
+    case 'col':
+      return node.name.toLowerCase();
+    case 'fn':
+      return `${node.name.toLowerCase()}(${node.args.map(canonicalExpr).join(',')})`;
+    case 'binary':
+      return `(${canonicalExpr(node.left)}${node.op}${canonicalExpr(node.right)})`;
+  }
+}
+
 // -------------------------------------------------------------
 // Drizzle-style Standalone Expression Helpers (col, fn)
 // -------------------------------------------------------------
@@ -1014,10 +1078,11 @@ export function evalExprNodeBatch(
   expr: ExprNode,
   rows: DbRow[],
   udfs?:
-    | Map<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
-    | Record<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any)>
-    | ((name: string) => { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[] } | ((...args: any[]) => any) | undefined),
+    | Map<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any)>
+    | Record<string, { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any)>
+    | ((name: string) => { call?: (...args: any[]) => any; batchCall?: (argsBatch: any[][]) => any[]; deterministic?: boolean } | ((...args: any[]) => any) | undefined),
   batchSize: number = 128,
+  exprCache?: WeakMap<DbRow, Map<string, any>>,
 ): any[] {
   const n = rows.length;
   if (n === 0) return [];
@@ -1042,8 +1107,8 @@ export function evalExprNodeBatch(
       return out;
     }
     case 'binary': {
-      const leftVals = evalExprNodeBatch(expr.left, rows, udfs, batchSize);
-      const rightVals = evalExprNodeBatch(expr.right, rows, udfs, batchSize);
+      const leftVals = evalExprNodeBatch(expr.left, rows, udfs, batchSize, exprCache);
+      const rightVals = evalExprNodeBatch(expr.right, rows, udfs, batchSize, exprCache);
       const out = new Array(n);
       for (let i = 0; i < n; i++) {
         const left = leftVals[i];
@@ -1101,10 +1166,6 @@ export function evalExprNodeBatch(
         return rows.map((r) => evalExprNode(expr, r, udfs as any));
       }
 
-      const argsVals: any[][] = expr.args.map((a) =>
-        evalExprNodeBatch(a, rows, udfs, batchSize),
-      );
-
       let udfEntry: any;
       if (typeof udfs === 'function') {
         udfEntry = udfs(name);
@@ -1114,6 +1175,36 @@ export function evalExprNodeBatch(
         udfEntry = (udfs as any)[name];
       }
 
+      const isDeterministic =
+        typeof udfEntry === 'object' && udfEntry !== null && udfEntry.deterministic !== undefined
+          ? Boolean(udfEntry.deterministic)
+          : name !== 'random';
+
+      const cacheKey = exprCache && isDeterministic ? canonicalExpr(expr) : null;
+      if (cacheKey) {
+        let allCached = true;
+        for (let i = 0; i < n; i++) {
+          const rowMap = exprCache!.get(rows[i]);
+          if (!rowMap || !rowMap.has(cacheKey)) {
+            allCached = false;
+            break;
+          }
+        }
+        if (allCached) {
+          const out = new Array(n);
+          for (let i = 0; i < n; i++) {
+            out[i] = exprCache!.get(rows[i])!.get(cacheKey);
+          }
+          return out;
+        }
+      }
+
+      const argsVals: any[][] = expr.args.map((a) =>
+        evalExprNodeBatch(a, rows, udfs, batchSize, exprCache),
+      );
+
+      let out: any[];
+
       if (udfEntry) {
         const batchFn =
           typeof udfEntry === 'object' && typeof udfEntry.batchCall === 'function'
@@ -1121,41 +1212,92 @@ export function evalExprNodeBatch(
             : undefined;
         const callFn = typeof udfEntry === 'function' ? udfEntry : udfEntry.call;
 
+        const numArgs = expr.args.length;
         if (batchFn) {
-          const out = new Array(n);
+          out = new Array(n);
           for (let start = 0; start < n; start += batchSize) {
             const end = Math.min(start + batchSize, n);
-            const batchArgList: any[][] = [];
-            for (let i = start; i < end; i++) {
-              const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
-              batchArgList.push(rowArgs);
+            const batchLen = end - start;
+            const batchArgList: any[][] = new Array(batchLen);
+            if (numArgs === 1) {
+              const a0 = argsVals[0];
+              for (let i = start; i < end; i++) {
+                batchArgList[i - start] = [a0[i]];
+              }
+            } else if (numArgs === 2) {
+              const a0 = argsVals[0];
+              const a1 = argsVals[1];
+              for (let i = start; i < end; i++) {
+                batchArgList[i - start] = [a0[i], a1[i]];
+              }
+            } else if (numArgs === 3) {
+              const a0 = argsVals[0];
+              const a1 = argsVals[1];
+              const a2 = argsVals[2];
+              for (let i = start; i < end; i++) {
+                batchArgList[i - start] = [a0[i], a1[i], a2[i]];
+              }
+            } else {
+              for (let i = start; i < end; i++) {
+                const rowArgs = new Array(numArgs);
+                for (let aIdx = 0; aIdx < numArgs; aIdx++) {
+                  rowArgs[aIdx] = argsVals[aIdx][i];
+                }
+                batchArgList[i - start] = rowArgs;
+              }
             }
             const resBatch = batchFn(batchArgList);
             for (let i = start; i < end; i++) {
               out[i] = resBatch[i - start];
             }
           }
-          return out;
         } else if (callFn) {
-          const out = new Array(n);
-          for (let i = 0; i < n; i++) {
-            const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
-            out[i] = callFn(...rowArgs);
+          out = new Array(n);
+          if (numArgs === 1) {
+            const a0 = argsVals[0];
+            for (let i = 0; i < n; i++) out[i] = callFn(a0[i]);
+          } else if (numArgs === 2) {
+            const a0 = argsVals[0];
+            const a1 = argsVals[1];
+            for (let i = 0; i < n; i++) out[i] = callFn(a0[i], a1[i]);
+          } else if (numArgs === 3) {
+            const a0 = argsVals[0];
+            const a1 = argsVals[1];
+            const a2 = argsVals[2];
+            for (let i = 0; i < n; i++) out[i] = callFn(a0[i], a1[i], a2[i]);
+          } else {
+            for (let i = 0; i < n; i++) {
+              const rowArgs = new Array(numArgs);
+              for (let aIdx = 0; aIdx < numArgs; aIdx++) {
+                rowArgs[aIdx] = argsVals[aIdx][i];
+              }
+              out[i] = callFn(...rowArgs);
+            }
           }
-          return out;
+        } else {
+          throw new UnknownFunctionError(name);
         }
-      }
-
-      if (BUILTIN_SCALARS.has(name)) {
-        const out = new Array(n);
+      } else if (BUILTIN_SCALARS.has(name)) {
+        out = new Array(n);
         for (let i = 0; i < n; i++) {
           const rowArgs = expr.args.map((_, aIdx) => argsVals[aIdx][i]);
           out[i] = evalScalarFn(name, rowArgs);
         }
-        return out;
+      } else {
+        throw new UnknownFunctionError(name);
       }
 
-      throw new UnknownFunctionError(name);
+      if (cacheKey) {
+        for (let i = 0; i < n; i++) {
+          let rowMap = exprCache!.get(rows[i]);
+          if (!rowMap) {
+            rowMap = new Map<string, any>();
+            exprCache!.set(rows[i], rowMap);
+          }
+          rowMap.set(cacheKey, out[i]);
+        }
+      }
+      return out;
     }
   }
 }

@@ -1,8 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { Database, ShieldCheck, AlertTriangle, Cpu, Layers, ExternalLink } from 'lucide-react';
+import { Database, ShieldCheck, AlertTriangle, Cpu, Layers, ExternalLink, Zap } from 'lucide-react';
 import { SqliteWasmAdapter } from '../adapters/sqlite_adapter.js';
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  activePage?: 'engines' | 'webdb';
+  onPageChange?: (page: 'engines' | 'webdb') => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({
+  activePage = 'engines',
+  onPageChange,
+}) => {
   const [isIsolated, setIsIsolated] = useState(false);
   const [hasOpfs, setHasOpfs] = useState(false);
   const [heapSize, setHeapSize] = useState<string>('N/A');
@@ -36,7 +44,26 @@ export const Header: React.FC = () => {
           <span className="logo-badge">v0.1</span>
         </div>
         <span className="header-divider" />
-        <span className="header-subtitle">Performance & Memory Comparison</span>
+        
+        {/* Navigation Tabs */}
+        <nav className="header-tabs">
+          <button
+            className={`header-tab-btn ${activePage === 'engines' ? 'active' : ''}`}
+            onClick={() => onPageChange?.('engines')}
+            title="Compare WebDB against SQLite WASM, IndexedDB, and Raw JS Array"
+          >
+            <Layers size={13} />
+            <span>Cross-Engine</span>
+          </button>
+          <button
+            className={`header-tab-btn ${activePage === 'webdb' ? 'active' : ''}`}
+            onClick={() => onPageChange?.('webdb')}
+            title="Benchmark WebDB Vectorized UDFs (Batching vs Scalar Execution)"
+          >
+            <Zap size={13} />
+            <span>WebDB Vector UDFs</span>
+          </button>
+        </nav>
       </div>
 
       <div className="header-center">
