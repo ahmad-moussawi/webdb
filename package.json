@@ -31,6 +31,11 @@
       "import": "./dist/webdb.js",
       "require": "./dist/webdb.umd.cjs"
     },
+    "./migrations": {
+      "types": "./dist/migrations.d.ts",
+      "import": "./dist/migrations.js",
+      "require": "./dist/migrations.cjs"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",

@@ -6,18 +6,17 @@ WebDB makes browser-side schema and data migrations safe and deterministic becau
 
 ---
 
-## 1. Designing a Versioned Migration Runner
+## 1. Using the Built-in Migration Runner (`@ahmadmoussawi/webdb/migrations`)
 
-A clean, zero-dependency pattern is to store applied migrations in a dedicated `_migrations` table and run pending migrations sequentially inside `db.transaction()` during app initialization:
+WebDB provides an official, zero-overhead migration package exported via the subpath **`@ahmadmoussawi/webdb/migrations`**. Because it is a separate subpath export, it adds **0 bytes** to your core bundle unless explicitly imported.
+
+### Defining Migrations
+
+A migration defines a `version` (integer or string timestamp/semver), a descriptive `name`, an `up` forward migration handler, and an optional `down` rollback handler:
 
 ```typescript
 import { WebDB } from "@ahmadmoussawi/webdb";
-
-export interface Migration {
-  version: number;
-  name: string;
-  up: (tx: WebDB) => Promise<void>;
-}
+import { Migrator, type Migration } from "@ahmadmoussawi/webdb/migrations";
 
 export const MIGRATIONS: Migration[] = [
   {
@@ -45,6 +44,10 @@ export const MIGRATIONS: Migration[] = [
         unique: true,
       });
     },
+    async down(tx) {
+      await tx.dropTable("items");
+      await tx.dropTable("categories");
+    },
   },
   {
     version: 2,
@@ -60,6 +63,10 @@ export const MIGRATIONS: Migration[] = [
       await tx.createIndex("items", ["barcode"], {
         name: "idx_items_barcode",
       });
+    },
+    async down(tx) {
+      await tx.dropColumn("items", "barcode");
+      await tx.dropColumn("items", "is_active");
     },
   },
   {
@@ -77,52 +84,52 @@ export const MIGRATIONS: Migration[] = [
         name: "idx_orders_status_created",
       });
     },
+    async down(tx) {
+      await tx.dropTable("orders");
+    },
   },
 ];
 ```
 
 ### Running Pending Migrations on Startup
 
+Use the `Migrator` class or the convenient `runMigrations()` helper function during your application's bootstrap phase:
+
 ```typescript
-export async function runMigrations(
-  db: WebDB,
-  migrations: Migration[] = MIGRATIONS,
-): Promise<void> {
-  // 1. Ensure the _migrations tracking table exists idempotently
-  await db.createTableIfNotExists("_migrations", [
-    { name: "version", type: "INT32", primaryKey: true },
-    { name: "name", type: "TEXT", notNull: true },
-    { name: "applied_at", type: "INT64", notNull: true },
-  ]);
+import { WebDB } from "@ahmadmoussawi/webdb";
+import { Migrator, runMigrations } from "@ahmadmoussawi/webdb/migrations";
 
-  // 2. Read already-applied versions
-  const appliedRows = await db
-    .from("_migrations")
-    .select("version")
-    .orderBy("version", "asc")
-    .toArray();
-  const appliedVersions = new Set(appliedRows.map((r) => Number(r.version)));
+const db = await WebDB.open({ name: "my_app_db", storage: "idb" });
 
-  const sorted = [...migrations].sort((a, b) => a.version - b.version);
-  const pending = sorted.filter((m) => !appliedVersions.has(m.version));
+// Option A: Quick one-liner
+const result = await runMigrations(db, MIGRATIONS);
+console.log(`Executed ${result.executed.length} migrations in batch ${result.batch}`);
 
-  if (pending.length === 0) {
-    return;
-  }
+// Option B: Using the Migrator instance
+const migrator = new Migrator(db, {
+  tableName: "_migrations", // default tracking table
+  migrations: MIGRATIONS,
+  mode: "atomic", // 'atomic' (default) or 'per-migration'
+  onMigrationStart: (m, dir) => console.log(`Starting migration ${m.name} (${dir})...`),
+  onMigrationSuccess: (m, dir, ms) => console.log(`Finished ${m.name} in ${ms}ms`),
+  onMigrationError: (m, dir, err) => console.error(`Migration ${m.name} failed!`, err),
+});
 
-  // 3. Execute each pending migration atomically inside its own transaction
-  //    (or wrap the entire loop in a single db.transaction for all-or-nothing upgrades)
-  for (const migration of pending) {
-    await db.transaction(async (tx) => {
-      await migration.up(tx);
-      await tx.insert("_migrations", {
-        version: migration.version,
-        name: migration.name,
-        applied_at: Date.now(),
-      });
-    });
-  }
-}
+// Run all pending migrations:
+await migrator.up();
+
+// Check status:
+const status = await migrator.status();
+console.log(`Applied: ${status.applied.length}, Pending: ${status.pending.length}`);
+
+// Roll back the latest batch:
+await migrator.down();
+
+// Roll back exactly 1 migration:
+await migrator.down({ step: 1 });
+
+// Reset entire database schema back to step 0:
+await migrator.reset();
 ```
 
 ---
