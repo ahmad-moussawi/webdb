@@ -2,7 +2,13 @@
 
 WebDB lets you write computed columns, arithmetic expressions, string transformations, and custom JavaScript functions across `.select()`, `.where()`, `.groupBy()`, `.having()`, and `.orderBy()`.
 
-**Built for the browser, not against it.** WebDB deliberately ships **no date library, no locale tables, no collation rules and no text tokenizer**. The browser already has excellent ones, so your queries call them directly: `Date`, `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.RelativeTimeFormat`, `Intl.PluralRules`, `Intl.Segmenter` (word and sentence tokenizing), `URL`, `RegExp`, `String.prototype.normalize` and more. That means **zero extra bytes in your bundle**, always-current Unicode, locale and time-zone data, and results that match what your users see everywhere else on the page. See [Embrace the Browser](#_4-embrace-the-browser-web-apis-as-query-functions) for date, number and text examples.
+**Built for the browser, not against it.** WebDB deliberately ships **no date library, no locale tables, no collation rules and no text tokenizer** in its core runtime. The browser already has excellent ones, so your queries call them directly: `Date`, `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.RelativeTimeFormat`, `Intl.PluralRules`, `Intl.Segmenter` (word and sentence tokenizing), `URL`, `RegExp`, `String.prototype.normalize` and more.
+
+::: tip 📦 Pre-Packaged UDF Extensions
+Looking for ready-to-use, optimized browser UDFs with vectorized batching and LRU caching?
+- **[Internationalization & Formatting UDFs (`@ahmadmoussawi/webdb/intl`)](/guides/intl-formatting)**: Ready-to-use `format_date`, `format_currency`, `time_ago`, `format_bytes`, `date_add`, and more.
+- **[Fuzzy & Typo-Tolerant Search (`@ahmadmoussawi/webdb/search`)](/guides/fuzzy-search)**: Typo tolerance, Damerau-Levenshtein, BM25 scoring, and snippet highlighting.
+:::
 
 ::: tip 🔎 See it running
 **[Typo-Tolerant Search with UDFs →](/demos/search)** is a live demo of custom functions in action: typo-tolerant, accent-insensitive search with relevance ranking and highlighted snippets. UDFs are used in `SELECT`, `WHERE` and `ORDER BY`, running on IndexedDB in your browser. [View the source on GitHub](https://github.com/ahmad-moussawi/webdb/tree/main/docs/.vitepress/theme/demos/search).

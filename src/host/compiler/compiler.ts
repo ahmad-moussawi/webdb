@@ -39,6 +39,9 @@ export type ComparisonOp =
   | "in"
   | "not in";
 
+const isInt32 = (v: number): boolean =>
+  Number.isInteger(v) && v >= -2147483648 && v <= 2147483647;
+
 export function getCmpOpcode(op: string | undefined): OpCode {
   if (!op) return OpCode.OP_EQ;
   const norm = String(op).trim().toLowerCase().replace(/\s+/g, " ");
@@ -1322,7 +1325,7 @@ function emitHavingLeafJumpOnFalse(
       emitter.emitUint8(OpCode.OP_LOAD_NULL);
       emitter.emitUint8(regConst);
     } else if (typeof val === "number") {
-      if (Number.isInteger(val)) {
+      if (isInt32(val)) {
         emitter.emitUint8(OpCode.OP_LOAD_INT);
         emitter.emitUint8(regConst);
         emitter.emitInt32(val);
@@ -1489,7 +1492,7 @@ function emitHavingLeafJumpOnTrue(
       emitter.emitUint8(OpCode.OP_LOAD_NULL);
       emitter.emitUint8(regConst);
     } else if (typeof val === "number") {
-      if (Number.isInteger(val)) {
+      if (isInt32(val)) {
         emitter.emitUint8(OpCode.OP_LOAD_INT);
         emitter.emitUint8(regConst);
         emitter.emitInt32(val);
@@ -1871,7 +1874,7 @@ export function inferExprType(
 ): DataType {
   if (expr.type === "literal") {
     if (typeof expr.value === "number") {
-      return Number.isInteger(expr.value) ? DataType.INT32 : DataType.FLOAT64;
+      return isInt32(expr.value) ? DataType.INT32 : DataType.FLOAT64;
     }
     if (typeof expr.value === "string") return DataType.TEXT;
     return DataType.TEXT;
@@ -1958,7 +1961,7 @@ export function emitExpression(
       emitter.emitUint8(OpCode.OP_LOAD_NULL);
       emitter.emitUint8(targetReg);
     } else if (typeof val === "number") {
-      if (Number.isInteger(val)) {
+      if (isInt32(val)) {
         emitter.emitUint8(OpCode.OP_LOAD_INT);
         emitter.emitUint8(targetReg);
         emitter.emitInt32(val);
@@ -2330,7 +2333,7 @@ function emitLoadConstant(
     emitter.emitUint8(OpCode.OP_LOAD_NULL);
     emitter.emitUint8(reg);
   } else if (typeof val === "number") {
-    if (colType === DataType.FLOAT64 || !Number.isInteger(val)) {
+    if (colType === DataType.FLOAT64 || !isInt32(val)) {
       emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
       emitter.emitUint8(reg);
       emitter.emitFloat64(val);
@@ -3071,7 +3074,7 @@ export function compileQuery(
           emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
           emitter.emitUint8(regConst);
           emitter.emitFloat64(val);
-        } else if (!Number.isInteger(val)) {
+        } else if (!isInt32(val)) {
           emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
           emitter.emitUint8(regConst);
           emitter.emitFloat64(val);

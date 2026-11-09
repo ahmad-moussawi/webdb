@@ -41,6 +41,11 @@
       "import": "./dist/search.js",
       "require": "./dist/search.cjs"
     },
+    "./intl": {
+      "types": "./dist/intl.d.ts",
+      "import": "./dist/intl.js",
+      "require": "./dist/intl.cjs"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",

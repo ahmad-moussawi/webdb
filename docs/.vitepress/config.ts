@@ -81,6 +81,7 @@ export default defineConfig({
       alias: [
         { find: "@ahmadmoussawi/webdb/vue", replacement: src("vue/index.ts") },
         { find: "@ahmadmoussawi/webdb/search", replacement: src("search/index.ts") },
+        { find: "@ahmadmoussawi/webdb/intl", replacement: src("intl/index.ts") },
         { find: /^@ahmadmoussawi\/webdb$/, replacement: src("index.ts") },
       ],
     },
@@ -169,6 +170,10 @@ export default defineConfig({
           {
             text: "Fuzzy & Typo-Tolerant Search",
             link: "/guides/fuzzy-search",
+          },
+          {
+            text: "Intl & Date/Number Formatting",
+            link: "/guides/intl-formatting",
           },
         ],
       },
