@@ -116,14 +116,76 @@ export interface TransactionOptions {
 Below is a complete, copy-pasteable pattern for syncing a local WebDB database with a remote API:
 
 
-```mermaid
-flowchart LR
-  UI["User Action"] --> TX["db.transaction()\n(origin: 'local')"]
-  TX --> OBC["onBeforeCommit\nWrites to _sync_outbox"]
-  OBC --> OC["onCommit\nTriggers pushOutbox()"]
-  OC --> API(("Backend API"))
-  API --> Pull["pullFromServer()\nupsertMany (origin: 'remote')"]
-```
+<div class="diagram-container" style="margin: 24px 0; overflow-x: auto;">
+<svg viewBox="0 0 860 220" width="100%" height="100%" style="max-width: 860px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; display: block; margin: 0 auto;" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="sync-arrow-brand" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--vp-c-brand-1, #3b82f6)"/>
+    </marker>
+    <marker id="sync-arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--vp-c-green-1, #10b981)"/>
+    </marker>
+  </defs>
+
+  <!-- PUSH FLOW (Local -> Remote) -->
+  <!-- 1. User Action -->
+  <rect x="20" y="25" width="125" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="1.5" />
+  <text x="82.5" y="56" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">User Action</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="145" y1="51" x2="180" y2="51" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" marker-end="url(#sync-arrow-brand)" />
+
+  <!-- 2. db.transaction() -->
+  <rect x="185" y="25" width="145" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="1.5" />
+  <text x="257.5" y="47" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">db.transaction()</text>
+  <text x="257.5" y="63" text-anchor="middle" font-size="10.5" fill="var(--vp-c-brand-1, #3b82f6)">origin: 'local'</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="330" y1="51" x2="365" y2="51" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" marker-end="url(#sync-arrow-brand)" />
+
+  <!-- 3. onBeforeCommit -->
+  <rect x="370" y="25" width="150" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="1.5" />
+  <text x="445" y="47" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">onBeforeCommit</text>
+  <text x="445" y="63" text-anchor="middle" font-size="10.5" fill="var(--vp-c-text-2, #64748b)">Writes _sync_outbox</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="520" y1="51" x2="555" y2="51" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" marker-end="url(#sync-arrow-brand)" />
+
+  <!-- 4. onCommit -->
+  <rect x="560" y="25" width="135" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="1.5" />
+  <text x="627.5" y="47" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">onCommit</text>
+  <text x="627.5" y="63" text-anchor="middle" font-size="10.5" fill="var(--vp-c-text-2, #64748b)">pushOutbox()</text>
+
+  <!-- Arrow 4 -> Backend -->
+  <path d="M 695 51 C 715 51 720 70 730 80" fill="none" stroke="var(--vp-c-brand-1, #3b82f6)" stroke-width="2" marker-end="url(#sync-arrow-brand)" />
+
+  <!-- 5. Backend API Card -->
+  <rect x="735" y="55" width="105" height="90" rx="12" fill="var(--vp-c-bg-soft, #f8fafc)" stroke="var(--vp-c-green-1, #10b981)" stroke-width="2" />
+  <text x="787.5" y="93" text-anchor="middle" font-size="13" font-weight="700" fill="var(--vp-c-green-1, #10b981)">Backend</text>
+  <text x="787.5" y="111" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-green-1, #10b981)">API</text>
+  <text x="787.5" y="128" text-anchor="middle" font-size="10" fill="var(--vp-c-text-2, #64748b)">Remote DB</text>
+
+  <!-- PULL FLOW (Remote -> Local) -->
+  <!-- Arrow Backend -> 6 -->
+  <path d="M 735 120 C 690 145 660 160 610 161" fill="none" stroke="var(--vp-c-green-1, #10b981)" stroke-width="2" marker-end="url(#sync-arrow-green)" />
+
+  <!-- 6. pullFromServer() -->
+  <rect x="440" y="135" width="165" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-green-1, #10b981)" stroke-width="1.5" />
+  <text x="522.5" y="157" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">pullFromServer()</text>
+  <text x="522.5" y="173" text-anchor="middle" font-size="10.5" fill="var(--vp-c-text-2, #64748b)">Fetch delta from server</text>
+
+  <!-- Arrow 6 -> 7 -->
+  <line x1="440" y1="161" x2="385" y2="161" stroke="var(--vp-c-green-1, #10b981)" stroke-width="2" marker-end="url(#sync-arrow-green)" />
+
+  <!-- 7. upsertMany() -->
+  <rect x="200" y="135" width="180" height="52" rx="8" fill="var(--vp-c-bg-elv, #ffffff)" stroke="var(--vp-c-green-1, #10b981)" stroke-width="1.5" />
+  <text x="290" y="157" text-anchor="middle" font-size="12" font-weight="600" fill="var(--vp-c-text-1, #0f172a)">upsertMany()</text>
+  <text x="290" y="173" text-anchor="middle" font-size="10.5" fill="var(--vp-c-green-1, #10b981)">origin: 'remote' (no echo)</text>
+
+  <!-- Arrow 7 -> Local cache / UI -->
+  <path d="M 200 161 C 120 161 82.5 130 82.5 82" fill="none" stroke="var(--vp-c-green-1, #10b981)" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#sync-arrow-green)" />
+</svg>
+</div>
 
 
 ### Step 1: Create Domain & Sync Outbox Tables

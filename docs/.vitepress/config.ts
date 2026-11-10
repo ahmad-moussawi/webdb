@@ -195,6 +195,10 @@ export default defineConfig({
             link: "/guides/transactions",
           },
           {
+            text: "Locking & Multi-Tab Concurrency",
+            link: "/guides/concurrency-and-locking",
+          },
+          {
             text: "Reactivity & Offline Sync",
             link: "/offline-sync",
           },
