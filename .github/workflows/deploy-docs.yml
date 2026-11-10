@@ -2,17 +2,8 @@ name: Deploy Documentation
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - "docs/**"
-      - "playground/**"
-      - "benchmark/**"
-      - "src/**"
-      - "scripts/**"
-      - ".github/workflows/deploy-docs.yml"
-      - "package.json"
-      - "package-lock.json"
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:

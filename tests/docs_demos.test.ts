@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import 'fake-indexeddb/auto';
 import { WebDB } from '../src/index.ts';
 import * as todo from '../docs/.vitepress/theme/demos/todo/db.ts';
 import * as kanban from '../docs/.vitepress/theme/demos/kanban/db.ts';
 import * as cal from '../docs/.vitepress/theme/demos/calendar/db.ts';
+import * as search from '../docs/.vitepress/theme/demos/search/db.ts';
 import * as dates from '../docs/.vitepress/theme/demos/calendar/dates.ts';
 
 // Unique names + closing: instances with the same name share a BroadcastChannel inside one process.
@@ -290,5 +292,39 @@ describe('docs demo: search UDFs', () => {
     await search.addArticle(db, { title: 'x', body: 'y', tags: '', category: 'Guides' });
     await search.resetSearchData(db);
     expect(await db.from('articles').toArray()).toHaveLength(search.SEED_ARTICLES.length);
+  });
+});
+
+describe('docs demos on indexeddb storage (page fault + sorter regression)', () => {
+  it('runs todo, calendar, kanban, and search demos smoothly with storage: idb', async () => {
+    const todoDb = await WebDB.open({ name: `idb_demo_todo_${seq++}`, storage: 'idb' });
+    opened.push(todoDb);
+    await todo.setupTodoDb(todoDb);
+    const todoRows = await todo.todosQuery(todoDb, 'all', '').toArray();
+    expect(todoRows).toHaveLength(4);
+    const todoStats = await todo.todoStatsQuery(todoDb).toArray();
+    expect(todoStats.length).toBeGreaterThan(0);
+
+    const calDb = await WebDB.open({ name: `idb_demo_cal_${seq++}`, storage: 'idb' });
+    opened.push(calDb);
+    await cal.setupCalendarDb(calDb);
+    const calUpcoming = await cal.upcomingQuery(calDb, new Date().toISOString()).toArray();
+    expect(calUpcoming.length).toBeGreaterThan(0);
+
+    const kanbanDb = await WebDB.open({ name: `idb_demo_kanban_${seq++}`, storage: 'idb' });
+    opened.push(kanbanDb);
+    await kanban.setupKanbanDb(kanbanDb);
+    const lists = await kanban.listsQuery(kanbanDb).toArray();
+    const cards = await kanban.cardsQuery(kanbanDb).toArray();
+    expect(lists).toHaveLength(3);
+    expect(cards).toHaveLength(6);
+
+    const searchDb = await WebDB.open({ name: `idb_demo_search_${seq++}`, storage: 'idb' });
+    opened.push(searchDb);
+    await search.setupSearchDb(searchDb);
+    const searchCount = await search.articleCountQuery(searchDb).toArray();
+    expect(searchCount[0].n).toBe(search.SEED_ARTICLES.length);
+    const searchResults = await search.searchQuery(searchDb, { q: 'WebDB', fuzzy: false }).toArray();
+    expect(searchResults.length).toBeGreaterThan(0);
   });
 });

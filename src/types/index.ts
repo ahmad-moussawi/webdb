@@ -350,8 +350,12 @@ export type DbRow = Record<string, DbValue>;
 
 // Error Taxonomy
 export class RowSizeLimitExceededError extends Error {
-  constructor(size: number, limit: number = 2048) {
-    super(`Row size (${size} bytes) exceeds maximum limit of ${limit} bytes`);
+  constructor(sizeOrMessage: number | string, limit: number = 2048) {
+    if (typeof sizeOrMessage === 'string') {
+      super(sizeOrMessage);
+    } else {
+      super(`Row size (${sizeOrMessage} bytes) exceeds maximum limit of ${limit} bytes`);
+    }
     this.name = 'RowSizeLimitExceededError';
   }
 }
@@ -589,6 +593,13 @@ export class InvalidBytecodeError extends Error {
   constructor(message: string = 'Malformed bytecode execution halted (INVALID_BYTECODE)') {
     super(message);
     this.name = 'InvalidBytecodeError';
+  }
+}
+
+export class QueryExecutionStalledError extends Error {
+  constructor(message: string = 'Bytecode VM execution stalled without forward progress') {
+    super(message);
+    this.name = 'QueryExecutionStalledError';
   }
 }
 

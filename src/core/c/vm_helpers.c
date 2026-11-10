@@ -1143,6 +1143,11 @@ int32_t vm_in_set_contains(uint32_t ctx_off, uint32_t set_idx, uint32_t reg_off)
 int32_t vm_emit_raw_row(uint32_t ctx_off, uint32_t row_src_off, uint32_t row_len, uint32_t instr_pc) {
   uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
   uint32_t needed = 2 + row_len;
+  if (needed > RESULT_BUFFER_SIZE) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+    return VM_STATUS_ERROR;
+  }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
     store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
     store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
@@ -1215,6 +1220,11 @@ int32_t vm_serialize_and_emit_result_row(uint32_t ctx_off, uint32_t start_reg, u
   uint32_t total_row_size = header_and_tables_size + total_var_payload_size;
   uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
   uint32_t needed = 2 + total_row_size;
+  if (needed > RESULT_BUFFER_SIZE) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+    return VM_STATUS_ERROR;
+  }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
     store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
     store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);

@@ -31,6 +31,8 @@ import {
   VmStatus,
   QueryTimeoutError,
   InvalidBytecodeError,
+  QueryExecutionStalledError,
+  RowSizeLimitExceededError,
   QueryArenaExhaustedError,
   TooManyCursorsError,
   TooManyColumnsError,
@@ -4305,8 +4307,39 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const rows: DbRow[] = [];
     const stepFn = this.wasmCore ? this.wasmCore.vm_step : vm_step;
+    let consecutiveStalls = 0;
+    let lastPc = -1;
+    let lastStatus = -1;
+    let lastFaultPage = -1;
+
     while (true) {
       const status = stepFn(this.vmCtx, this.pool.view, bytecode);
+
+      // Progress Guard: detect and abort if VM execution stalls without forward progress
+      if (
+        status === lastStatus &&
+        this.vmCtx.pc === lastPc &&
+        this.vmCtx.resultCount === 0 &&
+        (status !== VmStatus.PAGE_FAULT || this.vmCtx.fault_page_id === lastFaultPage)
+      ) {
+        consecutiveStalls++;
+        if (consecutiveStalls > 3) {
+          throw new QueryExecutionStalledError(
+            `Bytecode VM execution stalled without forward progress: PC=${this.vmCtx.pc}, status=${status}`,
+          );
+        }
+      } else {
+        consecutiveStalls = 0;
+        lastPc = this.vmCtx.pc;
+        lastStatus = status;
+        lastFaultPage = status === VmStatus.PAGE_FAULT ? this.vmCtx.fault_page_id : -1;
+      }
+
+      if (status === VmStatus.BUFFER_FULL && this.vmCtx.resultCount === 0) {
+        throw new RowSizeLimitExceededError(
+          `Result buffer full with 0 rows emitted at PC=${this.vmCtx.pc} (row size exceeds buffer capacity).`,
+        );
+      }
 
       if (status === VmStatus.PAGE_FAULT) {
         // Temporarily pin any currently resident active cursor pages so acquiring fault_page_id
@@ -4445,16 +4478,6 @@ export class WebDB implements IDatabaseQueryExecutor {
         this.vmCtx.resultOffset = 0;
         this.vmCtx.resultCount = 0;
         this.vmCtx.status = VmStatus.RUNNING;
-        if (
-          (!this.vmCtx.sorters || this.vmCtx.sorters.length === 0) &&
-          (!this.vmCtx.aggregators || this.vmCtx.aggregators.length === 0)
-        ) {
-          this.pool.view.setUint32(
-            this.pool.offsets.vmContextOffset + VM_CTX_PHYS_ARENA_USED,
-            0,
-            true,
-          );
-        }
       } else if (status === VmStatus.ARENA_EXHAUSTED) {
         this.vmCtx.arenaOffset = 0;
         throw new QueryArenaExhaustedError();

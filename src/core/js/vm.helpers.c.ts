@@ -1476,6 +1476,11 @@ export function vm_emit_raw_row(
 ): i32 {
   const result_offset: u32 = read_u32(view, ctx_off + VM_CTX_RESULT_OFFSET);
   const needed: u32 = 2 + row_len;
+  if (needed > RESULT_BUFFER_SIZE) {
+    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+    return VmStatus.ERROR;
+  }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.BUFFER_FULL);
     write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
@@ -1589,6 +1594,11 @@ export function vm_serialize_and_emit_result_row(
 
   const result_offset: u32 = read_u32(view, ctx_off + VM_CTX_RESULT_OFFSET);
   const needed: u32 = 2 + total_row_size;
+  if (needed > RESULT_BUFFER_SIZE) {
+    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+    return VmStatus.ERROR;
+  }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.BUFFER_FULL);
     write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
@@ -2956,6 +2966,11 @@ export function emit_to_result_buffer(
   instr_pc: number,
 ): VmStatus {
   const needed = 2 + row_bytes.byteLength;
+  if (needed > RESULT_BUFFER_SIZE) {
+    ctx.status = VmStatus.ERROR;
+    ctx.pc = instr_pc;
+    return VmStatus.ERROR;
+  }
   if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
     ctx.status = VmStatus.BUFFER_FULL;
     ctx.pc = instr_pc;
