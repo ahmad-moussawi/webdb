@@ -15,6 +15,8 @@ import {
   TOTAL_MEMORY_BYTES,
   PAGE_TYPE_LEAF_DATA,
   MAX_ROW_SIZE,
+  OVERFLOW_LEN_FLAG,
+  OVERFLOW_DESCRIPTOR_SIZE,
 } from "../../constants.ts";
 import { OpCode, VmStatus, DataType } from "../../types/index.ts";
 import { u8, u16, u32, i32, i64, f64 } from "../types.ts";
@@ -154,6 +156,7 @@ import {
   vm_agg_step_raw,
   vm_agg_next_raw,
   vm_agg_final_raw,
+  vm_load_overflow_column,
 } from "./vm.helpers.c.ts";
 
 // Re-export helpers, context functions, and types for public/core consumers
@@ -707,6 +710,30 @@ export function vm_step_raw(
         }
         const rel_offset: u16 = read_u16(view, entry_offset);
         const len: u16 = read_u16(view, entry_offset + 2);
+        if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+          if (
+            rel_offset + OVERFLOW_DESCRIPTOR_SIZE > row_len ||
+            row_offset + rel_offset < entry_offset + 4
+          ) {
+            vm_reg_set_null(view, reg_off);
+            break;
+          }
+          const first_pid: u32 = read_u32(view, row_offset + rel_offset);
+          const total_len: u32 = read_u32(view, row_offset + rel_offset + 4);
+          const ov_status: i32 = vm_load_overflow_column(
+            view,
+            ctx_off,
+            reg_off,
+            DataType.TEXT,
+            first_pid,
+            total_len,
+            instr_pc,
+          );
+          if (ov_status !== VmStatus.RUNNING) {
+            return ov_status;
+          }
+          break;
+        }
         if (
           rel_offset + len > row_len ||
           (len > 0 && row_offset + rel_offset < entry_offset + 4)
@@ -767,6 +794,30 @@ export function vm_step_raw(
         }
         const rel_offset: u16 = read_u16(view, entry_offset);
         const len: u16 = read_u16(view, entry_offset + 2);
+        if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+          if (
+            rel_offset + OVERFLOW_DESCRIPTOR_SIZE > row_len ||
+            row_offset + rel_offset < entry_offset + 4
+          ) {
+            vm_reg_set_null(view, reg_off);
+            break;
+          }
+          const first_pid: u32 = read_u32(view, row_offset + rel_offset);
+          const total_len: u32 = read_u32(view, row_offset + rel_offset + 4);
+          const ov_status: i32 = vm_load_overflow_column(
+            view,
+            ctx_off,
+            reg_off,
+            DataType.BLOB,
+            first_pid,
+            total_len,
+            instr_pc,
+          );
+          if (ov_status !== VmStatus.RUNNING) {
+            return ov_status;
+          }
+          break;
+        }
         if (
           rel_offset + len > row_len ||
           (len > 0 && row_offset + rel_offset < entry_offset + 4)

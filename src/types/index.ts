@@ -350,13 +350,26 @@ export type DbRow = Record<string, DbValue>;
 
 // Error Taxonomy
 export class RowSizeLimitExceededError extends Error {
-  constructor(sizeOrMessage: number | string, limit: number = 2048) {
+  constructor(sizeOrMessage: number | string, limit: number = 3800) {
     if (typeof sizeOrMessage === 'string') {
       super(sizeOrMessage);
     } else {
       super(`Row size (${sizeOrMessage} bytes) exceeds maximum limit of ${limit} bytes`);
     }
     this.name = 'RowSizeLimitExceededError';
+  }
+}
+
+export class IndexKeySizeExceededError extends Error {
+  constructor(
+    public readonly indexName: string,
+    public readonly actualBytes: number,
+    public readonly maxBytes: number = 1024,
+  ) {
+    super(
+      `Index key for '${indexName}' (${actualBytes} bytes) exceeds maximum index key limit of ${maxBytes} bytes.`,
+    );
+    this.name = 'IndexKeySizeExceededError';
   }
 }
 

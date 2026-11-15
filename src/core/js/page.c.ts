@@ -1,11 +1,17 @@
 import {
   PAGE_SIZE,
   MAX_ROW_SIZE,
+  MAX_INLINE_ROW_SIZE,
   PAGE_HEADER_SIZE,
   PAGE_TYPE_FREE,
   PAGE_TYPE_TABLE_INTERIOR,
   PAGE_TYPE_INDEX_LEAF,
   PAGE_TYPE_LEAF_DATA,
+  PAGE_TYPE_OVERFLOW,
+  OVERFLOW_DESCRIPTOR_SIZE,
+  OVERFLOW_LEN_FLAG,
+  ROW_FLAG_ACTIVE,
+  ROW_FLAG_HAS_OVERFLOW,
   TABLE_INTERIOR_CELL_SIZE,
   MAX_TABLE_INTERIOR_CELLS,
   TABLE_INTERIOR_SPLIT_INDEX,
@@ -693,21 +699,178 @@ export function page_get_table_layout(
   return { null_bitmap_bytes, fixed_slice_size, var_col_count };
 }
 
+export interface OverflowRef {
+  firstPageId: number;
+  totalLen: number;
+}
+
+export interface OverflowDescriptorInfo {
+  colName: string;
+  isText: boolean;
+  firstPageId: number;
+  totalLen: number;
+}
+
+export interface PreparedOverflowSpill {
+  colName: string;
+  bytes: Uint8Array;
+}
+
+export function page_init_overflow(
+  view: DataView,
+  page_offset: number,
+  chunk_size: number,
+  next_page_id: number,
+): void {
+  view.setUint8(page_offset + 0, PAGE_TYPE_OVERFLOW);
+  view.setUint8(page_offset + 1, 0);
+  view.setUint16(page_offset + 2, chunk_size, true);
+  view.setUint16(page_offset + 4, 0, true);
+  view.setUint32(page_offset + 6, next_page_id, true);
+  view.setUint16(page_offset + 10, 0, true);
+  view.setUint32(page_offset + 12, 0, true);
+}
+
+export function page_get_overflow_chunk_size(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint16(page_offset + 2, true);
+}
+
+export function page_get_overflow_next_page_id(
+  view: DataView,
+  page_offset: number,
+): number {
+  return view.getUint32(page_offset + 6, true);
+}
+
+export function page_set_overflow_next_page_id(
+  view: DataView,
+  page_offset: number,
+  next_page_id: number,
+): void {
+  view.setUint32(page_offset + 6, next_page_id, true);
+}
+
 /**
- * Serializes a user row into WebDB Phase 1 binary format:
+ * Inspects a row before serialization and returns any variable-length columns
+ * that must be spilled to overflow pages so the inline record fits within
+ * MAX_INLINE_ROW_SIZE (2048B) and MAX_ROW_SIZE (3800B).
+ * Returns null if the entire row fits within MAX_INLINE_ROW_SIZE inline.
+ */
+export function page_prepare_row_overflow(
+  table_or_columns: TableMeta | ColumnMeta[],
+  values: Record<string, DbValue>,
+): PreparedOverflowSpill[] | null {
+  const columns = Array.isArray(table_or_columns)
+    ? table_or_columns
+    : (table_or_columns as TableMeta).columns;
+  const col_count = columns.length;
+  if (col_count > MAX_COLUMNS_PER_TABLE) {
+    throw new TooManyColumnsError(col_count, MAX_COLUMNS_PER_TABLE);
+  }
+
+  const null_bitmap_bytes = (col_count + 7) >> 3;
+  let fixed_slice_size = 0;
+  let var_col_count = 0;
+  const varCandidates: Array<{ colName: string; bytes: Uint8Array }> = [];
+  let total_var_bytes = 0;
+
+  for (let i = 0; i < col_count; i++) {
+    const col = columns[i];
+    const val = values[col.name];
+    const is_null = val === null || val === undefined;
+    const c_type = col.type;
+
+    if (is_null) {
+      if ((col.flags & ColumnFlag.NOT_NULL) !== 0) {
+        throw new NotNullConstraintError(col.name);
+      }
+      if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+        var_col_count++;
+      }
+    } else {
+      switch (c_type) {
+        case DataType.INT32:
+          fixed_slice_size += 4;
+          break;
+        case DataType.INT64:
+        case DataType.FLOAT64:
+          fixed_slice_size += 8;
+          break;
+        case DataType.UUID:
+        case DataType.ULID:
+          fixed_slice_size += 16;
+          break;
+        case DataType.TEXT: {
+          var_col_count++;
+          const str = String(val ?? "");
+          const bytes = str.length > 0 ? text_encoder.encode(str) : new Uint8Array(0);
+          total_var_bytes += bytes.byteLength;
+          if (bytes.byteLength > OVERFLOW_DESCRIPTOR_SIZE) {
+            varCandidates.push({ colName: col.name, bytes });
+          }
+          break;
+        }
+        case DataType.BLOB: {
+          var_col_count++;
+          const bytes = val instanceof Uint8Array ? val : new Uint8Array(val as any);
+          total_var_bytes += bytes.byteLength;
+          if (bytes.byteLength > OVERFLOW_DESCRIPTOR_SIZE) {
+            varCandidates.push({ colName: col.name, bytes });
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  const var_offset_table_size = var_col_count << 2;
+  const header_and_tables_size =
+    3 + null_bitmap_bytes + fixed_slice_size + var_offset_table_size;
+  if (header_and_tables_size > MAX_ROW_SIZE) {
+    throw new RowSizeLimitExceededError(header_and_tables_size, MAX_ROW_SIZE);
+  }
+
+  let inlineSize = header_and_tables_size + total_var_bytes;
+  if (inlineSize <= MAX_INLINE_ROW_SIZE) {
+    return null;
+  }
+
+  // Sort candidates largest-first and greedily spill until inlineSize <= MAX_INLINE_ROW_SIZE
+  varCandidates.sort((a, b) => b.bytes.byteLength - a.bytes.byteLength);
+  const spills: PreparedOverflowSpill[] = [];
+  for (let i = 0; i < varCandidates.length; i++) {
+    if (inlineSize <= MAX_INLINE_ROW_SIZE) break;
+    const cand = varCandidates[i];
+    spills.push(cand);
+    inlineSize -= cand.bytes.byteLength - OVERFLOW_DESCRIPTOR_SIZE;
+  }
+
+  if (inlineSize > MAX_ROW_SIZE) {
+    throw new RowSizeLimitExceededError(inlineSize, MAX_ROW_SIZE);
+  }
+
+  return spills.length > 0 ? spills : null;
+}
+
+/**
+ * Serializes a user row into WebDB binary format:
  *
- * [0]: Flags (1B: 0x01 = Active)
+ * [0]: Flags (1B: 0x01 = Active, 0x02 = Has Overflow)
  * [1..2]: Row _length (2B uint16 LE)
  * [3..(3 + null_bitmap_bytes - 1)]: _null-_bitmap (ceil(N/8) bytes)
  * Followed by: Fixed Slice (INT32 4B, INT64 8B, FLOAT64 8B, UUID 16B, ULID 16B)
- * Followed by: Var-_offset Table (4B per TEXT/BLOB column: 2B rel_offset, 2B length)
- * Followed by: Var Payloads (raw UTF-8 string or binary bytes)
+ * Followed by: Var-_offset Table (4B per TEXT/BLOB column: 2B rel_offset, 2B length | 0x8000 if overflow)
+ * Followed by: Var Payloads (raw UTF-8 string, binary bytes, or 8B OverflowDescriptor)
  *
- * Strict 2048-Byte boundary enforced.
+ * Inline record size bounded by MAX_ROW_SIZE (3800B).
  */
 export function page_serialize_row(
   table_or_columns: TableMeta | ColumnMeta[],
   values: Record<string, DbValue>,
+  overflowMap?: Map<string, OverflowRef>,
 ): Uint8Array {
   const columns = Array.isArray(table_or_columns)
     ? table_or_columns
@@ -813,6 +976,34 @@ export function page_serialize_row(
         current_fixed_offset += 16;
         break;
       case DataType.TEXT: {
+        const overflowRef = overflowMap?.get(col.name);
+        if (overflowRef) {
+          if (current_payload_offset + OVERFLOW_DESCRIPTOR_SIZE <= MAX_ROW_SIZE) {
+            _rowScratchView.setUint16(
+              current_var_table_offset,
+              current_payload_offset,
+              true,
+            );
+            _rowScratchView.setUint16(
+              current_var_table_offset + 2,
+              OVERFLOW_LEN_FLAG | OVERFLOW_DESCRIPTOR_SIZE,
+              true,
+            );
+            _rowScratchView.setUint32(
+              current_payload_offset,
+              overflowRef.firstPageId,
+              true,
+            );
+            _rowScratchView.setUint32(
+              current_payload_offset + 4,
+              overflowRef.totalLen,
+              true,
+            );
+          }
+          current_payload_offset += OVERFLOW_DESCRIPTOR_SIZE;
+          current_var_table_offset += 4;
+          break;
+        }
         const str = String(val ?? "");
         let byte_len = 0;
         if (str.length > 0) {
@@ -847,6 +1038,34 @@ export function page_serialize_row(
         break;
       }
       case DataType.BLOB: {
+        const overflowRef = overflowMap?.get(col.name);
+        if (overflowRef) {
+          if (current_payload_offset + OVERFLOW_DESCRIPTOR_SIZE <= MAX_ROW_SIZE) {
+            _rowScratchView.setUint16(
+              current_var_table_offset,
+              current_payload_offset,
+              true,
+            );
+            _rowScratchView.setUint16(
+              current_var_table_offset + 2,
+              OVERFLOW_LEN_FLAG | OVERFLOW_DESCRIPTOR_SIZE,
+              true,
+            );
+            _rowScratchView.setUint32(
+              current_payload_offset,
+              overflowRef.firstPageId,
+              true,
+            );
+            _rowScratchView.setUint32(
+              current_payload_offset + 4,
+              overflowRef.totalLen,
+              true,
+            );
+          }
+          current_payload_offset += OVERFLOW_DESCRIPTOR_SIZE;
+          current_var_table_offset += 4;
+          break;
+        }
         const bytes =
           val instanceof Uint8Array ? val : new Uint8Array(val as any);
         const byte_len = bytes.byteLength;
@@ -875,8 +1094,11 @@ export function page_serialize_row(
     throw new RowSizeLimitExceededError(total_row_size, MAX_ROW_SIZE);
   }
 
-  // [0]: Flags (0x01 = Active)
-  _rowScratchBuf[0] = 0x01;
+  // [0]: Flags (0x01 = Active, 0x02 = Has Overflow)
+  _rowScratchBuf[0] =
+    overflowMap && overflowMap.size > 0
+      ? ROW_FLAG_ACTIVE | ROW_FLAG_HAS_OVERFLOW
+      : ROW_FLAG_ACTIVE;
   // [1..2]: Stored Row length
   _rowScratchView.setUint16(1, total_row_size, true);
 
@@ -891,6 +1113,7 @@ export function page_deserialize_row(
   arg2: DataView | number,
   arg3?: number | TableMeta | ColumnMeta[],
   selectedCols?: Set<string>,
+  overflowDescriptorsOut?: OverflowDescriptorInfo[],
 ): DbRow {
   let columns: ColumnMeta[];
   let view: DataView;
@@ -1036,7 +1259,26 @@ export function page_deserialize_row(
           const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
           const rel_offset = view.getUint16(table_entry_offset, true);
           const len = view.getUint16(table_entry_offset + 2, true);
-          if (len === 0) {
+          if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+            if (
+              rel_offset < min_payload_rel_offset ||
+              rel_offset + OVERFLOW_DESCRIPTOR_SIZE > record_length ||
+              record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE > view.byteLength
+            ) {
+              return null as any;
+            }
+            const firstPageId = view.getUint32(record_offset + rel_offset, true);
+            const totalLen = view.getUint32(record_offset + rel_offset + 4, true);
+            if (overflowDescriptorsOut) {
+              overflowDescriptorsOut.push({
+                colName: col.name,
+                isText: true,
+                firstPageId,
+                totalLen,
+              });
+            }
+            row[col.name] = null;
+          } else if (len === 0) {
             row[col.name] = "";
           } else {
             if (
@@ -1059,20 +1301,41 @@ export function page_deserialize_row(
           const table_entry_offset = var_offset_table_start + (var_col_idx << 2);
           const rel_offset = view.getUint16(table_entry_offset, true);
           const len = view.getUint16(table_entry_offset + 2, true);
-          if (
-            len > 0 &&
-            (rel_offset < min_payload_rel_offset ||
-              rel_offset + len > record_length ||
-              record_offset + rel_offset + len > view.byteLength)
-          ) {
-            return null as any;
+          if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+            if (
+              rel_offset < min_payload_rel_offset ||
+              rel_offset + OVERFLOW_DESCRIPTOR_SIZE > record_length ||
+              record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE > view.byteLength
+            ) {
+              return null as any;
+            }
+            const firstPageId = view.getUint32(record_offset + rel_offset, true);
+            const totalLen = view.getUint32(record_offset + rel_offset + 4, true);
+            if (overflowDescriptorsOut) {
+              overflowDescriptorsOut.push({
+                colName: col.name,
+                isText: false,
+                firstPageId,
+                totalLen,
+              });
+            }
+            row[col.name] = null;
+          } else {
+            if (
+              len > 0 &&
+              (rel_offset < min_payload_rel_offset ||
+                rel_offset + len > record_length ||
+                record_offset + rel_offset + len > view.byteLength)
+            ) {
+              return null as any;
+            }
+            const payload_offset = view.byteOffset + record_offset + rel_offset;
+            const blob_bytes = new Uint8Array(len);
+            if (len > 0) {
+              blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
+            }
+            row[col.name] = blob_bytes;
           }
-          const payload_offset = view.byteOffset + record_offset + rel_offset;
-          const blob_bytes = new Uint8Array(len);
-          if (len > 0) {
-            blob_bytes.set(new Uint8Array(view.buffer, payload_offset, len));
-          }
-          row[col.name] = blob_bytes;
         }
         var_col_idx++;
         break;
@@ -1081,6 +1344,87 @@ export function page_deserialize_row(
   }
 
   return row;
+}
+
+/**
+ * Extracts all `first_overflow_page_id` pointers referenced by a serialized record
+ * so that overflow page chains can be freed upon row deletion, update, or table drop.
+ */
+export function page_extract_overflow_descriptors(
+  table_or_columns: TableMeta | ColumnMeta[],
+  view: DataView,
+  record_offset: number,
+): number[] {
+  if (record_offset < 0 || record_offset + 3 > view.byteLength) {
+    return [];
+  }
+  const record_flags = view.getUint8(record_offset);
+  if ((record_flags & ROW_FLAG_ACTIVE) === 0 || (record_flags & ROW_FLAG_HAS_OVERFLOW) === 0) {
+    return [];
+  }
+
+  const columns = Array.isArray(table_or_columns)
+    ? table_or_columns
+    : (table_or_columns as TableMeta).columns;
+  const col_count = columns.length;
+  const null_bitmap_bytes = (col_count + 7) >> 3;
+  const bitmap_start = record_offset + 3;
+  const fixed_start = bitmap_start + null_bitmap_bytes;
+  if (fixed_start > view.byteLength) {
+    return [];
+  }
+
+  const record_length = view.getUint16(record_offset + 1, true);
+  const record_end = record_offset + record_length;
+  if (record_length < 3 + null_bitmap_bytes || record_end > view.byteLength) {
+    return [];
+  }
+
+  let current_fixed_offset = fixed_start;
+  let total_var_cols = 0;
+  let cur_bitmap_byte = col_count > 0 ? view.getUint8(bitmap_start) : 0;
+  for (let i = 0; i < col_count; i++) {
+    if ((i & 7) === 0 && i > 0) {
+      cur_bitmap_byte = view.getUint8(bitmap_start + (i >> 3));
+    }
+    const c_type = columns[i].type;
+    if (c_type === DataType.TEXT || c_type === DataType.BLOB) {
+      total_var_cols++;
+    }
+    if ((cur_bitmap_byte & (1 << (i & 7))) === 0) {
+      if (c_type === DataType.INT32) current_fixed_offset += 4;
+      else if (c_type === DataType.INT64 || c_type === DataType.FLOAT64)
+        current_fixed_offset += 8;
+      else if (c_type === DataType.UUID || c_type === DataType.ULID)
+        current_fixed_offset += 16;
+    }
+  }
+
+  const var_offset_table_start = current_fixed_offset;
+  const var_offset_table_end = var_offset_table_start + (total_var_cols << 2);
+  if (var_offset_table_end > record_end) {
+    return [];
+  }
+  const min_payload_rel_offset = var_offset_table_end - record_offset;
+
+  const pageIds: number[] = [];
+  for (let v = 0; v < total_var_cols; v++) {
+    const entry_off = var_offset_table_start + (v << 2);
+    const rel_offset = view.getUint16(entry_off, true);
+    const len = view.getUint16(entry_off + 2, true);
+    if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+      if (
+        rel_offset >= min_payload_rel_offset &&
+        rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= record_length
+      ) {
+        const firstPageId = view.getUint32(record_offset + rel_offset, true);
+        if (firstPageId > 1) {
+          pageIds.push(firstPageId);
+        }
+      }
+    }
+  }
+  return pageIds;
 }
 
 // ============================================================================

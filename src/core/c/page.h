@@ -3,6 +3,21 @@
 
 #include "webdb_types.h"
 
+typedef struct {
+  uint32_t firstPageId;
+  uint32_t totalLen;
+} OverflowRef;
+typedef struct {
+  const char * colName;
+  bool isText;
+  uint32_t firstPageId;
+  uint32_t totalLen;
+} OverflowDescriptorInfo;
+typedef struct {
+  const char * colName;
+  uint8_t * bytes;
+} PreparedOverflowSpill;
+
 WEBDB_EXPORT void page_init(uint32_t page_offset, uint8_t page_type, uint32_t next_page_id);
 WEBDB_EXPORT void page_init_free(uint32_t page_offset, uint32_t next_free_page_id);
 WEBDB_EXPORT uint8_t page_get_type(uint32_t page_offset);

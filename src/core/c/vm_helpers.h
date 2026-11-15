@@ -19,6 +19,7 @@ WEBDB_EXPORT void vm_reg_set_i32(uint32_t reg_off, int32_t val);
 WEBDB_EXPORT void vm_reg_set_i64(uint32_t reg_off, int64_t val);
 WEBDB_EXPORT void vm_reg_set_f64(uint32_t reg_off, double val);
 WEBDB_EXPORT void vm_reg_set_slice(uint32_t reg_off, uint8_t col_type, uint32_t data_off, uint32_t data_len);
+WEBDB_EXPORT int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_type, uint32_t first_page_id, uint32_t total_len, uint32_t instr_pc);
 WEBDB_EXPORT void vm_reg_copy(uint32_t dst_reg_off, uint32_t src_reg_off);
 WEBDB_EXPORT int32_t vm_reg_clone_to_arena(uint32_t ctx_off, uint32_t arena_base, uint32_t dst_slot_off, uint32_t src_reg_off);
 WEBDB_EXPORT uint8_t vm_hex_char(uint32_t nibble);

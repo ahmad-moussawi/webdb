@@ -20,8 +20,53 @@
     },
     {
       "name": "MAX_ROW_SIZE",
+      "value": 3800,
+      "description": "Maximum inline size in bytes allowed for a single serialized row record on a\nslotted data page (3,800 B), leaving room for the 16-byte page header, slot\ndirectory, and defragmentation margin within a 4,096-byte page."
+    },
+    {
+      "name": "MAX_INLINE_ROW_SIZE",
       "value": 2048,
-      "description": "Strict maximum size in bytes allowed for a single serialized row record (2 KB).\nEnforces the B-tree invariant that at least two rows fit on a leaf data page\nwithout requiring overflow chaining in the v1 engine."
+      "description": "Target inline row budget (2 KB) before spilling large variable-length columns\nto overflow pages, preserving high B-tree leaf density."
+    },
+    {
+      "name": "MAX_INDEX_KEY_SIZE",
+      "value": 1024,
+      "description": "Maximum serialized key length in bytes allowed in a secondary B-tree index."
+    },
+    {
+      "name": "PAGE_TYPE_OVERFLOW",
+      "value": 14,
+      "description": "0x0E: Dedicated overflow page holding out-of-line variable-length payload chunks."
+    },
+    {
+      "name": "OVERFLOW_HEADER_SIZE",
+      "value": 16,
+      "description": "Header size in bytes of an overflow page (matches standard 16-byte page header)."
+    },
+    {
+      "name": "OVERFLOW_PAYLOAD_SIZE",
+      "value": 4080,
+      "description": "Usable contiguous payload bytes per overflow page (PAGE_SIZE - OVERFLOW_HEADER_SIZE)."
+    },
+    {
+      "name": "OVERFLOW_DESCRIPTOR_SIZE",
+      "value": 8,
+      "description": "Size in bytes of an inline OverflowDescriptor (uint32 first_page_id + uint32 total_len)."
+    },
+    {
+      "name": "OVERFLOW_LEN_FLAG",
+      "value": 32768,
+      "description": "0x8000: High bit in var-offset table length field indicating an OverflowDescriptor."
+    },
+    {
+      "name": "ROW_FLAG_ACTIVE",
+      "value": 1,
+      "description": "0x01: Record header flag indicating an active (non-deleted) row."
+    },
+    {
+      "name": "ROW_FLAG_HAS_OVERFLOW",
+      "value": 2,
+      "description": "0x02: Record header flag indicating at least one column is stored in overflow pages."
     }
   ],
   "layouts": [

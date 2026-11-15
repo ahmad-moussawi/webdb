@@ -302,6 +302,19 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint16_t rel_offset = load_u16((const void *)(uintptr_t)(entry_offset));
           uint16_t len = load_u16((const void *)(uintptr_t)(entry_offset + 2));
+          if ((len & OVERFLOW_LEN_FLAG) != 0) {
+            if (rel_offset + OVERFLOW_DESCRIPTOR_SIZE > row_len || row_offset + rel_offset < entry_offset + 4) {
+              vm_reg_set_null(reg_off);
+              break;
+            }
+            uint32_t first_pid = load_u32((const void *)(uintptr_t)(row_offset + rel_offset));
+            uint32_t total_len = load_u32((const void *)(uintptr_t)(row_offset + rel_offset + 4));
+            int32_t ov_status = vm_load_overflow_column(ctx_off, reg_off, TYPE_TEXT, first_pid, total_len, instr_pc);
+            if (ov_status != VM_STATUS_RUNNING) {
+              return ov_status;
+            }
+            break;
+          }
           if (rel_offset + len > row_len || (len > 0 && row_offset + rel_offset < entry_offset + 4)) {
             vm_reg_set_null(reg_off);
             break;
@@ -336,6 +349,19 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint16_t rel_offset = load_u16((const void *)(uintptr_t)(entry_offset));
           uint16_t len = load_u16((const void *)(uintptr_t)(entry_offset + 2));
+          if ((len & OVERFLOW_LEN_FLAG) != 0) {
+            if (rel_offset + OVERFLOW_DESCRIPTOR_SIZE > row_len || row_offset + rel_offset < entry_offset + 4) {
+              vm_reg_set_null(reg_off);
+              break;
+            }
+            uint32_t first_pid = load_u32((const void *)(uintptr_t)(row_offset + rel_offset));
+            uint32_t total_len = load_u32((const void *)(uintptr_t)(row_offset + rel_offset + 4));
+            int32_t ov_status = vm_load_overflow_column(ctx_off, reg_off, TYPE_BLOB, first_pid, total_len, instr_pc);
+            if (ov_status != VM_STATUS_RUNNING) {
+              return ov_status;
+            }
+            break;
+          }
           if (rel_offset + len > row_len || (len > 0 && row_offset + rel_offset < entry_offset + 4)) {
             vm_reg_set_null(reg_off);
             break;

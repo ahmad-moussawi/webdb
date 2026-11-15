@@ -15,6 +15,13 @@ import {
   PAGE_TYPE_INDEX_LEAF,
   PAGE_TYPE_LEAF_DATA,
   PAGE_TYPE_CATALOG_PAGE,
+  PAGE_TYPE_OVERFLOW,
+  MAX_INDEX_KEY_SIZE,
+  OVERFLOW_HEADER_SIZE,
+  OVERFLOW_PAYLOAD_SIZE,
+  OVERFLOW_LEN_FLAG,
+  OVERFLOW_DESCRIPTOR_SIZE,
+  ROW_FLAG_HAS_OVERFLOW,
   HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
   HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
 } from "../../constants.ts";
@@ -33,6 +40,7 @@ import {
   InvalidBytecodeError,
   QueryExecutionStalledError,
   RowSizeLimitExceededError,
+  IndexKeySizeExceededError,
   QueryArenaExhaustedError,
   TooManyCursorsError,
   TooManyColumnsError,
@@ -111,6 +119,14 @@ import {
   page_set_next_page_id,
   page_serialize_row,
   page_deserialize_row,
+  page_init_overflow,
+  page_get_overflow_chunk_size,
+  page_get_overflow_next_page_id,
+  page_set_overflow_next_page_id,
+  page_prepare_row_overflow,
+  page_extract_overflow_descriptors,
+  type OverflowDescriptorInfo,
+  type OverflowRef,
   page_init_index_leaf,
   page_insert_index_leaf_cell,
   page_delete_index_leaf_cell,
@@ -732,7 +748,188 @@ export class WebDB implements IDatabaseQueryExecutor {
     return trackLiveQueryPromise(promise, callerTracker);
   }
 
-  private async freeTableTreePages(rootPageId: number): Promise<void> {
+  private static readonly _ovTextEncoder = new TextEncoder();
+  private static readonly _ovTextDecoder = new TextDecoder();
+
+  private _validateIndexKeySize(
+    indexName: string,
+    keyType: DataType,
+    keyVal: any,
+  ): void {
+    if (keyVal === null || keyVal === undefined) return;
+    let byteLen = 0;
+    if (keyType === DataType.TEXT) {
+      const str = String(keyVal);
+      if (str.length * 3 <= MAX_INDEX_KEY_SIZE) return;
+      byteLen = WebDB._ovTextEncoder.encode(str).byteLength;
+    } else if (keyType === DataType.BLOB) {
+      byteLen =
+        keyVal instanceof Uint8Array
+          ? keyVal.byteLength
+          : new Uint8Array(keyVal as any).byteLength;
+    } else {
+      return;
+    }
+    if (byteLen > MAX_INDEX_KEY_SIZE) {
+      throw new IndexKeySizeExceededError(indexName, byteLen, MAX_INDEX_KEY_SIZE);
+    }
+  }
+
+  private async _writeOverflowChain(data: Uint8Array): Promise<number> {
+    let remaining = data.byteLength;
+    let offset = 0;
+    let firstPageId = 0;
+    let prevPageId = 0;
+
+    while (remaining > 0) {
+      const chunkLen = Math.min(remaining, OVERFLOW_PAYLOAD_SIZE);
+      const newPageId = await this.driver.allocateAndPinPage();
+      const slot = this.pool.getResidentSlot(newPageId);
+      try {
+        const view = this.pool.getSlotDataView(slot);
+        page_init_overflow(view, 0, chunkLen, 0);
+        new Uint8Array(
+          view.buffer,
+          view.byteOffset + OVERFLOW_HEADER_SIZE,
+          chunkLen,
+        ).set(data.subarray(offset, offset + chunkLen));
+        this.pool.markDirty(slot);
+      } finally {
+        this.pool.unpinSlot(slot);
+      }
+
+      if (prevPageId !== 0) {
+        const prevSlot = await this.driver.acquirePage(prevPageId);
+        const prevView = this.pool.getSlotDataView(prevSlot);
+        page_set_overflow_next_page_id(prevView, 0, newPageId);
+        this.pool.markDirty(prevSlot);
+      } else {
+        firstPageId = newPageId;
+      }
+
+      prevPageId = newPageId;
+      offset += chunkLen;
+      remaining -= chunkLen;
+    }
+
+    return firstPageId;
+  }
+
+  private async _readOverflowChain(
+    firstPageId: number,
+    totalLen: number,
+  ): Promise<Uint8Array> {
+    if (totalLen === 0 || firstPageId <= 1) {
+      return new Uint8Array(0);
+    }
+    const result = new Uint8Array(totalLen);
+    let copied = 0;
+    let currPageId = firstPageId;
+    const visited = new Set<number>();
+
+    while (currPageId > 1 && copied < totalLen && !visited.has(currPageId)) {
+      visited.add(currPageId);
+      const slot = await this.driver.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      if (page_get_type(view, 0) !== PAGE_TYPE_OVERFLOW) {
+        break;
+      }
+      const chunkLen = Math.min(
+        page_get_overflow_chunk_size(view, 0),
+        OVERFLOW_PAYLOAD_SIZE,
+        totalLen - copied,
+      );
+      const nextPageId = page_get_overflow_next_page_id(view, 0);
+      if (chunkLen > 0) {
+        result.set(
+          new Uint8Array(
+            view.buffer,
+            view.byteOffset + OVERFLOW_HEADER_SIZE,
+            chunkLen,
+          ),
+          copied,
+        );
+        copied += chunkLen;
+      }
+      currPageId = nextPageId;
+    }
+
+    return copied === totalLen ? result : result.subarray(0, copied);
+  }
+
+  private async _freeOverflowChain(firstPageId: number): Promise<void> {
+    let currPageId = firstPageId;
+    const visited = new Set<number>();
+    while (currPageId > 1 && !visited.has(currPageId)) {
+      visited.add(currPageId);
+      const slot = await this.driver.acquirePage(currPageId);
+      const view = this.pool.getSlotDataView(slot);
+      if (page_get_type(view, 0) !== PAGE_TYPE_OVERFLOW) {
+        break;
+      }
+      const nextPageId = page_get_overflow_next_page_id(view, 0);
+      this.driver.forceUnpinPage(currPageId);
+      await this.driver.freePage(currPageId, true);
+      currPageId = nextPageId;
+    }
+  }
+
+  private async _serializeRowWithOverflow(
+    columns: ColumnMeta[],
+    values: DbRow,
+  ): Promise<Uint8Array> {
+    const spills = page_prepare_row_overflow(columns, values);
+    if (!spills) {
+      return page_serialize_row(columns, values);
+    }
+    const overflowMap = new Map<string, OverflowRef>();
+    for (let i = 0; i < spills.length; i++) {
+      const s = spills[i];
+      const firstPageId = await this._writeOverflowChain(s.bytes);
+      overflowMap.set(s.colName, {
+        firstPageId,
+        totalLen: s.bytes.byteLength,
+      });
+    }
+    return page_serialize_row(columns, values, overflowMap);
+  }
+
+  private async _deserializeRowWithOverflow(
+    columns: ColumnMeta[],
+    view: DataView,
+    recordOffset: number,
+    selectedCols?: Set<string>,
+  ): Promise<DbRow> {
+    if (
+      recordOffset < 0 ||
+      recordOffset >= view.byteLength ||
+      (view.getUint8(recordOffset) & ROW_FLAG_HAS_OVERFLOW) === 0
+    ) {
+      return page_deserialize_row(columns, view, recordOffset, selectedCols);
+    }
+    const descriptors: OverflowDescriptorInfo[] = [];
+    const row = page_deserialize_row(
+      columns,
+      view,
+      recordOffset,
+      selectedCols,
+      descriptors,
+    );
+    if (!row || descriptors.length === 0) {
+      return row;
+    }
+    for (let i = 0; i < descriptors.length; i++) {
+      const d = descriptors[i];
+      const bytes = await this._readOverflowChain(d.firstPageId, d.totalLen);
+      row[d.colName] = d.isText ? WebDB._ovTextDecoder.decode(bytes) : bytes;
+    }
+    return row;
+  }
+
+  private async freeTableTreePages(
+    rootPageId: number,
+    columns?: ColumnMeta[],
+  ): Promise<void> {
     if (rootPageId <= 1) return;
 
     const toFree: number[] = [];
@@ -754,19 +951,25 @@ export class WebDB implements IDatabaseQueryExecutor {
         continue;
       }
 
-      // Only free and traverse actual table/index tree pages; never free catalog pages or unknown page types
+      // Only free and traverse actual table/index/overflow pages; never free catalog pages or unknown page types
       if (
         pType !== PAGE_TYPE_TABLE_INTERIOR &&
         pType !== PAGE_TYPE_INDEX_INTERIOR &&
         pType !== PAGE_TYPE_LEAF_DATA &&
-        pType !== PAGE_TYPE_INDEX_LEAF
+        pType !== PAGE_TYPE_INDEX_LEAF &&
+        pType !== PAGE_TYPE_OVERFLOW
       ) {
         continue;
       }
 
       toFree.push(pId);
 
-      if (
+      if (pType === PAGE_TYPE_OVERFLOW) {
+        const nextOvId = page_get_overflow_next_page_id(view, 0);
+        if (nextOvId > 1 && !visited.has(nextOvId)) {
+          queue.push(nextOvId);
+        }
+      } else if (
         pType === PAGE_TYPE_TABLE_INTERIOR ||
         pType === PAGE_TYPE_INDEX_INTERIOR
       ) {
@@ -788,6 +991,18 @@ export class WebDB implements IDatabaseQueryExecutor {
         pType === PAGE_TYPE_LEAF_DATA ||
         pType === PAGE_TYPE_INDEX_LEAF
       ) {
+        if (pType === PAGE_TYPE_LEAF_DATA && columns) {
+          const cellCount = page_get_cell_count(view, 0);
+          for (let i = 0; i < cellCount; i++) {
+            const off = page_get_cell_offset(view, 0, i);
+            const ovIds = page_extract_overflow_descriptors(columns, view, off);
+            for (let j = 0; j < ovIds.length; j++) {
+              if (!visited.has(ovIds[j])) {
+                queue.push(ovIds[j]);
+              }
+            }
+          }
+        }
         const nextId = page_get_next_page_id(view, 0);
         if (nextId > 1 && !visited.has(nextId)) {
           queue.push(nextId);
@@ -835,6 +1050,14 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
+    let tableColumns: ColumnMeta[] | undefined;
+    try {
+      const meta = await this._getTableInternal(tableName);
+      tableColumns = meta.columns;
+      this.tableMetaCache.delete(tableName.toLowerCase());
+    } catch {
+      // Ignore if catalog is partially corrupt during forced cleanup
+    }
 
     // 1a. Free embedded primary key index tree if present
     if (desc.pkRootPageId && desc.pkRootPageId > 1) {
@@ -864,7 +1087,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // 2. Free all data pages belonging to this table
     if (desc.rootPageId > 1) {
-      await this.freeTableTreePages(desc.rootPageId);
+      await this.freeTableTreePages(desc.rootPageId, tableColumns);
     }
 
     // 3. Free all column catalog pages belonging to this table
@@ -1303,7 +1526,11 @@ export class WebDB implements IDatabaseQueryExecutor {
         pageSlot = await this.driver.acquirePage(currentPageId);
         pageView = this.pool.getSlotDataView(pageSlot);
         const cellOffset = page_get_cell_offset(pageView, 0, i);
-        const row = page_deserialize_row(table.columns, pageView, cellOffset);
+        const row = await this._deserializeRowWithOverflow(
+          table.columns,
+          pageView,
+          cellOffset,
+        );
         if (row) {
           pageRows.push(transformRow(row));
         }
@@ -1514,7 +1741,11 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
         pageView = this.pool.getSlotDataView(pageSlot);
         const cellOffset = page_get_cell_offset(pageView, 0, i);
-        const row = page_deserialize_row(table.columns, pageView, cellOffset);
+        const row = await this._deserializeRowWithOverflow(
+          table.columns,
+          pageView,
+          cellOffset,
+        );
         if (row) {
           const rowid = (BigInt(currentPageId) << 16n) | BigInt(i);
           const { keyVal, keyType } = this.extractIndexKey(
@@ -1524,6 +1755,13 @@ export class WebDB implements IDatabaseQueryExecutor {
           );
 
           if (keyVal !== undefined && keyVal !== null) {
+            try {
+              this._validateIndexKeySize(indexName, keyType, keyVal);
+            } catch (e) {
+              await this.freeTableTreePages(indexRootPageId);
+              this.indexTailPages.delete(indexRootPageId);
+              throw e;
+            }
             if (seenUniqueKeys !== null) {
               const setKey =
                 keyVal instanceof Uint8Array
@@ -2319,6 +2557,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     pageId: number,
     deletedCellIndicesAsc: number[],
     allCellsOnPage: Array<{ cellIdx: number; row: DbRow }>,
+    freeOverflow: boolean = true,
   ): Promise<void> {
     if (deletedCellIndicesAsc.length === 0) return;
     const deletedSet = new Set(deletedCellIndicesAsc);
@@ -2384,13 +2623,27 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    // 3. Delete target cells from the data page in descending order of slot index
+    // 3. Collect overflow page IDs (if freeing) & delete target cells in descending order of slot index
     const slot = await this.driver.acquirePage(pageId);
     const view = this.pool.getSlotDataView(slot);
+    const overflowPageIdsToFree: number[] = [];
+    if (freeOverflow) {
+      for (let k = 0; k < deletedCellIndicesAsc.length; k++) {
+        const cellOff = page_get_cell_offset(view, 0, deletedCellIndicesAsc[k]);
+        const ovIds = page_extract_overflow_descriptors(table.columns, view, cellOff);
+        for (let j = 0; j < ovIds.length; j++) {
+          overflowPageIdsToFree.push(ovIds[j]);
+        }
+      }
+    }
     for (let k = deletedCellIndicesAsc.length - 1; k >= 0; k--) {
       page_delete_row(view, 0, deletedCellIndicesAsc[k]);
     }
     this.pool.markDirty(slot);
+
+    for (let k = 0; k < overflowPageIdsToFree.length; k++) {
+      await this._freeOverflowChain(overflowPageIdsToFree[k]);
+    }
   }
 
   private normalizeWhereOrPkFilters(
@@ -2623,8 +2876,22 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
-      // 4. Pre-serialize row (validates row size <= 2048 bytes before any page mutation)
-      const rowBytes = page_serialize_row(table.columns, effectiveRow);
+      // 3b. Validate all index key sizes <= MAX_INDEX_KEY_SIZE (1024B) before spilling overflow
+      for (let iIdx = 0; iIdx < indexes.length; iIdx++) {
+        const idx = indexes[iIdx];
+        const { keyVal, keyType } = this.extractIndexKey(
+          table.columns,
+          idx,
+          effectiveRow,
+        );
+        this._validateIndexKeySize(idx.name, keyType, keyVal);
+      }
+
+      // 4. Pre-serialize row (spills large TEXT/BLOB columns to overflow pages if > 2048B)
+      const rowBytes = await this._serializeRowWithOverflow(
+        table.columns,
+        effectiveRow,
+      );
       preparedRows[rIdx] = {
         row: origRow,
         effectiveRow,
@@ -2899,7 +3166,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         oldRow: DbRow;
         newRow: DbRow;
         changedColumns: string[];
-        newRowBytes: Uint8Array;
+        oldOverflowPageIds: number[];
+        newRowBytes?: Uint8Array;
       }>;
     }
 
@@ -2912,8 +3180,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     const visitedPages = new Set<number>();
     while (currPageId > 1 && !visitedPages.has(currPageId)) {
       visitedPages.add(currPageId);
-      const slot = await this.driver.acquirePage(currPageId);
-      const view = this.pool.getSlotDataView(slot);
+      let slot = await this.driver.acquirePage(currPageId);
+      let view = this.pool.getSlotDataView(slot);
       if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
         break;
       }
@@ -2924,8 +3192,19 @@ export class WebDB implements IDatabaseQueryExecutor {
       const matches: PageCellsSnapshot["matches"] = [];
 
       for (let i = 0; i < cellCount; i++) {
+        slot = await this.driver.acquirePage(currPageId);
+        view = this.pool.getSlotDataView(slot);
         const off = page_get_cell_offset(view, 0, i);
-        const row = page_deserialize_row(table.columns, view, off);
+        const oldOverflowPageIds = page_extract_overflow_descriptors(
+          table.columns,
+          view,
+          off,
+        );
+        const row = await this._deserializeRowWithOverflow(
+          table.columns,
+          view,
+          off,
+        );
         allCells.push({ cellIdx: i, row });
 
         if (row && this.matchesFilters(table, row, filters)) {
@@ -2945,17 +3224,29 @@ export class WebDB implements IDatabaseQueryExecutor {
             }
           }
 
+          // Index key size check
+          for (const idx of indexes) {
+            const { keyVal, keyType } = this.extractIndexKey(
+              table.columns,
+              idx,
+              newRow,
+            );
+            this._validateIndexKeySize(idx.name, keyType, keyVal);
+          }
+
+          // Validate row size & NOT NULL constraints without allocating overflow pages yet
+          page_prepare_row_overflow(table.columns, newRow);
+
           const changedColumns = table.columns
             .map((c) => c.name)
             .filter((col) => !this.valuesEqual(row[col], newRow[col]));
-          const newRowBytes = page_serialize_row(table.columns, newRow);
 
           matches.push({
             cellIdx: i,
             oldRow: row,
             newRow,
             changedColumns,
-            newRowBytes,
+            oldOverflowPageIds,
           });
           updatingRowids.add((BigInt(currPageId) << 16n) | BigInt(i));
           totalMatched++;
@@ -3023,13 +3314,22 @@ export class WebDB implements IDatabaseQueryExecutor {
       const overflowIndicesOnPage: number[] = [];
 
       for (const m of ps.matches) {
+        for (let ovIdx = 0; ovIdx < m.oldOverflowPageIds.length; ovIdx++) {
+          await this._freeOverflowChain(m.oldOverflowPageIds[ovIdx]);
+        }
+        const newRowBytes = await this._serializeRowWithOverflow(
+          table.columns,
+          m.newRow,
+        );
+        m.newRowBytes = newRowBytes;
+
         const slot = await this.driver.acquirePage(ps.pageId);
         const view = this.pool.getSlotDataView(slot);
         const res = page_update_row(
           view,
           0,
           m.cellIdx,
-          m.newRowBytes,
+          newRowBytes,
           this.pool.pageScratchpadOffset,
         );
 
@@ -3075,7 +3375,12 @@ export class WebDB implements IDatabaseQueryExecutor {
           }
         } else {
           overflowIndicesOnPage.push(m.cellIdx);
-          overflowUpdates.push(m);
+          overflowUpdates.push({
+            oldRow: m.oldRow,
+            newRow: m.newRow,
+            changedColumns: m.changedColumns,
+            newRowBytes,
+          });
         }
       }
 
@@ -3086,6 +3391,7 @@ export class WebDB implements IDatabaseQueryExecutor {
           ps.pageId,
           overflowIndicesOnPage,
           ps.allCells,
+          false,
         );
       }
     }
@@ -3301,8 +3607,14 @@ export class WebDB implements IDatabaseQueryExecutor {
         const deletedIndices: number[] = [];
 
         for (let i = 0; i < cellCount; i++) {
-          const off = page_get_cell_offset(view, 0, i);
-          const row = page_deserialize_row(table.columns, view, off);
+          const curSlot = await this.driver.acquirePage(currPageId);
+          const curView = this.pool.getSlotDataView(curSlot);
+          const off = page_get_cell_offset(curView, 0, i);
+          const row = await this._deserializeRowWithOverflow(
+            table.columns,
+            curView,
+            off,
+          );
           allCells.push({ cellIdx: i, row });
 
           if (row && this.matchesFilters(table, row, filters)) {
@@ -3922,12 +4234,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     return trackLiveQueryPromise(promise, callerTracker);
   }
 
-  private _extractColumnarBatch(
+  private async _extractColumnarBatch(
     outputColumns: ColumnMeta[],
     view: DataView,
     offsets: Int32Array,
     neededCols: Set<string>,
-  ): Record<string, any[]> {
+  ): Promise<Record<string, any[]>> {
     const count = offsets.length;
     const col_count = outputColumns.length;
     const null_bitmap_bytes = (col_count + 7) >> 3;
@@ -3971,6 +4283,14 @@ export class WebDB implements IDatabaseQueryExecutor {
         lastNeededColIdx = i;
       }
     }
+
+    const pendingOverflow: Array<{
+      colArr: any[];
+      rowIdx: number;
+      firstPageId: number;
+      totalLen: number;
+      isText: boolean;
+    }> = [];
 
     for (let rowIdx = 0; rowIdx < count; rowIdx++) {
       const record_offset = offsets[rowIdx];
@@ -4095,7 +4415,23 @@ export class WebDB implements IDatabaseQueryExecutor {
                 var_offset_table_start + (var_col_idx << 2);
               const rel_offset = view.getUint16(table_entry_offset, true);
               const len = view.getUint16(table_entry_offset + 2, true);
-              if (len === 0) {
+              if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+                if (
+                  rel_offset >= min_payload_rel_offset &&
+                  rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= record_length &&
+                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= view.byteLength
+                ) {
+                  pendingOverflow.push({
+                    colArr,
+                    rowIdx,
+                    firstPageId: view.getUint32(record_offset + rel_offset, true),
+                    totalLen: view.getUint32(record_offset + rel_offset + 4, true),
+                    isText: true,
+                  });
+                } else {
+                  colArr[rowIdx] = null;
+                }
+              } else if (len === 0) {
                 colArr[rowIdx] = "";
               } else if (
                 rel_offset >= min_payload_rel_offset &&
@@ -4123,7 +4459,23 @@ export class WebDB implements IDatabaseQueryExecutor {
                 var_offset_table_start + (var_col_idx << 2);
               const rel_offset = view.getUint16(table_entry_offset, true);
               const len = view.getUint16(table_entry_offset + 2, true);
-              if (len === 0) {
+              if ((len & OVERFLOW_LEN_FLAG) !== 0) {
+                if (
+                  rel_offset >= min_payload_rel_offset &&
+                  rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= record_length &&
+                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= view.byteLength
+                ) {
+                  pendingOverflow.push({
+                    colArr,
+                    rowIdx,
+                    firstPageId: view.getUint32(record_offset + rel_offset, true),
+                    totalLen: view.getUint32(record_offset + rel_offset + 4, true),
+                    isText: false,
+                  });
+                } else {
+                  colArr[rowIdx] = null;
+                }
+              } else if (len === 0) {
                 colArr[rowIdx] = new Uint8Array(0);
               } else if (
                 rel_offset >= min_payload_rel_offset &&
@@ -4144,6 +4496,12 @@ export class WebDB implements IDatabaseQueryExecutor {
           }
         }
       }
+    }
+
+    for (let p = 0; p < pendingOverflow.length; p++) {
+      const item = pendingOverflow[p];
+      const bytes = await this._readOverflowChain(item.firstPageId, item.totalLen);
+      item.colArr[item.rowIdx] = item.isText ? textDecoder.decode(bytes) : bytes;
     }
 
     return result;
@@ -4384,7 +4742,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             curOff += 2 + rowLen;
           }
 
-          const colData = this._extractColumnarBatch(
+          const colData = await this._extractColumnarBatch(
             outputColumns,
             this.pool.view,
             offsets,
@@ -4422,11 +4780,15 @@ export class WebDB implements IDatabaseQueryExecutor {
 
           for (let i = 0; i < survivingCount; i++) {
             const idx = surviving[i];
-            const record = page_deserialize_row(
-              outputColumns,
-              this.pool.view,
-              offsets[idx],
-            );
+            const rowOff = offsets[idx];
+            const record =
+              (this.pool.view.getUint8(rowOff) & ROW_FLAG_HAS_OVERFLOW) !== 0
+                ? await this._deserializeRowWithOverflow(
+                    outputColumns,
+                    this.pool.view,
+                    rowOff,
+                  )
+                : page_deserialize_row(outputColumns, this.pool.view, rowOff);
             if (record) {
               if (options.exprCache && rowCache && rowCache[idx]) {
                 options.exprCache.set(record, rowCache[idx]);
@@ -4444,11 +4806,18 @@ export class WebDB implements IDatabaseQueryExecutor {
           );
           const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
-          const record = page_deserialize_row(
-            outputColumns,
-            this.pool.view,
-            rowRecordOffset,
-          );
+          const record =
+            (this.pool.view.getUint8(rowRecordOffset) & ROW_FLAG_HAS_OVERFLOW) !== 0
+              ? await this._deserializeRowWithOverflow(
+                  outputColumns,
+                  this.pool.view,
+                  rowRecordOffset,
+                )
+              : page_deserialize_row(
+                  outputColumns,
+                  this.pool.view,
+                  rowRecordOffset,
+                );
           if (record) {
             rows.push(record);
           }

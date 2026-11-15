@@ -23,11 +23,57 @@
 export const PAGE_SIZE = 4096;
 
 /**
- * Strict maximum size in bytes allowed for a single serialized row record (2 KB).
- * Enforces the B-tree invariant that at least two rows fit on a leaf data page
- * without requiring overflow chaining in the v1 engine.
+ * Maximum inline size in bytes allowed for a single serialized row record on a
+ * slotted data page (3,800 B), leaving room for the 16-byte page header, slot
+ * directory, and defragmentation margin within a 4,096-byte page.
  */
-export const MAX_ROW_SIZE = 2048;
+export const MAX_ROW_SIZE = 3800;
+
+/**
+ * Target inline row budget (2 KB) before spilling large variable-length columns
+ * to overflow pages, preserving high B-tree leaf density.
+ */
+export const MAX_INLINE_ROW_SIZE = 2048;
+
+/**
+ * Maximum serialized key length in bytes allowed in a secondary B-tree index.
+ */
+export const MAX_INDEX_KEY_SIZE = 1024;
+
+/**
+ * 0x0E: Dedicated overflow page holding out-of-line variable-length payload chunks.
+ */
+export const PAGE_TYPE_OVERFLOW = 14;
+
+/**
+ * Header size in bytes of an overflow page (matches standard 16-byte page header).
+ */
+export const OVERFLOW_HEADER_SIZE = 16;
+
+/**
+ * Usable contiguous payload bytes per overflow page (PAGE_SIZE - OVERFLOW_HEADER_SIZE).
+ */
+export const OVERFLOW_PAYLOAD_SIZE = 4080;
+
+/**
+ * Size in bytes of an inline OverflowDescriptor (uint32 first_page_id + uint32 total_len).
+ */
+export const OVERFLOW_DESCRIPTOR_SIZE = 8;
+
+/**
+ * 0x8000: High bit in var-offset table length field indicating an OverflowDescriptor.
+ */
+export const OVERFLOW_LEN_FLAG = 32768;
+
+/**
+ * 0x01: Record header flag indicating an active (non-deleted) row.
+ */
+export const ROW_FLAG_ACTIVE = 1;
+
+/**
+ * 0x02: Record header flag indicating at least one column is stored in overflow pages.
+ */
+export const ROW_FLAG_HAS_OVERFLOW = 2;
 
 // ============================================================================
 // 1. SLOTTED PAGE HEADER Layout

@@ -10,9 +10,12 @@ import {
   RESULT_BUFFER_SIZE,
   PAGE_TO_SLOT_OFFSET,
   PAGE_TO_SLOT_SIZE,
+  TRANSIENT_ARENA_OFFSET,
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_TOPK_HEAP_LIMIT,
+  OVERFLOW_HEADER_SIZE,
+  OVERFLOW_PAYLOAD_SIZE,
 } from "../../constants.ts";
 import {
   VmStatus,
@@ -316,6 +319,105 @@ export function vm_reg_set_slice(
   write_f64(view, reg_off + VM_REG_F64, 0.0);
   write_u32(view, reg_off + VM_REG_DATA_OFF, data_off);   // JS: reg.dataOff = data_off
   write_u32(view, reg_off + VM_REG_DATA_LEN, data_len);   // JS: reg.dataLen = data_len
+}
+
+/**
+ * @export_c
+ * Reassembles an out-of-line overflow column chain into the transient query arena
+ * and stores the resulting slice in `reg_off`.
+ * Returns `VmStatus.RUNNING` on success, `VmStatus.PAGE_FAULT` if an overflow page
+ * is not resident in the buffer pool, or `VmStatus.ARENA_EXHAUSTED` on OOM.
+ */
+export function vm_load_overflow_column(
+  view: DataView,
+  ctx_off: u32,
+  reg_off: u32,
+  col_type: u8,
+  first_page_id: u32,
+  total_len: u32,
+  instr_pc: u32,
+): i32 {
+  if (total_len === 0 || first_page_id <= 1) {
+    vm_reg_set_slice(view, reg_off, col_type, 0, 0);
+    return VmStatus.RUNNING;
+  }
+
+  // Pass 1: Verify all overflow pages in the chain are resident before allocating arena memory
+  let curr_pid: u32 = first_page_id;
+  let remaining: u32 = total_len;
+  while (curr_pid > 1 && remaining > 0) {
+    const slot: i32 = buf_pool_get_resident_slot(
+      view,
+      PAGE_TO_SLOT_OFFSET,
+      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      curr_pid,
+    );
+    if (slot < 0) {
+      write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, curr_pid);
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.PAGE_FAULT;
+    }
+    const page_off: u32 = (slot as u32) * PAGE_SIZE;
+    const chunk_len: u32 = read_u16(view, page_off + 2);
+    const next_pid: u32 = read_u32(view, page_off + 6);
+    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+      break;
+    }
+    if (chunk_len >= remaining) {
+      remaining = 0;
+    } else {
+      remaining -= chunk_len;
+    }
+    curr_pid = next_pid;
+  }
+
+  const dest_off: u32 = vm_phys_alloc(
+    view,
+    ctx_off,
+    TRANSIENT_ARENA_OFFSET,
+    total_len,
+  );
+  if (dest_off === 0) {
+    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
+    return VmStatus.ARENA_EXHAUSTED;
+  }
+
+  // Pass 2: Copy chunks into contiguous arena slice
+  curr_pid = first_page_id;
+  let copied: u32 = 0;
+  while (curr_pid > 1 && copied < total_len) {
+    const slot: i32 = buf_pool_get_resident_slot(
+      view,
+      PAGE_TO_SLOT_OFFSET,
+      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      curr_pid,
+    );
+    if (slot < 0) {
+      break;
+    }
+    const page_off: u32 = (slot as u32) * PAGE_SIZE;
+    let chunk_len: u32 = read_u16(view, page_off + 2);
+    const next_pid: u32 = read_u32(view, page_off + 6);
+    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+      break;
+    }
+    if (copied + chunk_len > total_len) {
+      chunk_len = total_len - copied;
+    }
+    memcpy(
+      view,
+      dest_off + copied,
+      view,
+      page_off + OVERFLOW_HEADER_SIZE,
+      chunk_len,
+    );
+    copied += chunk_len;
+    curr_pid = next_pid;
+  }
+
+  vm_reg_set_slice(view, reg_off, col_type, dest_off, copied);
+  return VmStatus.RUNNING;
 }
 
 /**

@@ -533,7 +533,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
     await dbRecovered.close();
   });
 
-  it('8. RowSizeLimitExceededError (> 2048B) mid-migration during addColumn rolls back atomically', async () => {
+  it('8. addColumn succeeds when rows exceed 2048B by spilling to overflow pages', async () => {
     const db = await WebDB.open({ name: 'test_alter_row_overflow', storage: 'memory' });
 
     await db.createTable('documents', [
@@ -549,26 +549,24 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
     }));
     docs.push({
       id: 20,
-      body: 'X'.repeat(2000), // 2000 bytes <= 2048 limit
+      body: 'X'.repeat(2000), // 2000 bytes <= 2048 inline limit
     });
     await db.insertMany('documents', docs);
 
-    // Adding a column with a 100-byte default value pushes row #20 over 2048 bytes -> RowSizeLimitExceededError
-    await expect(
-      db.addColumn(
-        'documents',
-        { name: 'footer', type: 'TEXT' },
-        { defaultValue: 'F'.repeat(100) },
-      ),
-    ).rejects.toThrow(RowSizeLimitExceededError);
+    // Adding a column with a 100-byte default value pushes row #20 over 2048 bytes -> spills to overflow page
+    await db.addColumn(
+      'documents',
+      { name: 'footer', type: 'TEXT' },
+      { defaultValue: 'F'.repeat(100) },
+    );
 
-    // Verify atomic rollback: schema still has only ['id', 'body'] and all 20 rows are intact
     const meta = await db.getTable('documents');
-    expect(meta.columns.map((c) => c.name)).toEqual(['id', 'body']);
+    expect(meta.columns.map((c) => c.name)).toEqual(['id', 'body', 'footer']);
 
     const survivingDocs = await db.from('documents').orderBy('id', 'asc').toArray();
     expect(survivingDocs).toHaveLength(20);
     expect((survivingDocs[19].body as string).length).toBe(2000);
+    expect(survivingDocs[19].footer).toBe('F'.repeat(100));
 
     await db.close();
   });

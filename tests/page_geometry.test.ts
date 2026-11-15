@@ -280,20 +280,20 @@ describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
     expect(d0.payload).toBe("much_longer_payload_expanding_row");
   });
 
-  it("7. Boundary Limit (2048 Bytes)", () => {
-    // Exactly 2048 bytes must pass
+  it("7. Boundary Limit (3800 Bytes Inline)", () => {
+    // Exactly 3800 bytes must pass
     // Row header: 1B flag + 2B len + 1B nullmap + 4B fixed (id) + 4B fixed (extra) + 4B varTable = 16B
-    // 2048 - 16 = 2032 payload bytes
-    const exact2048 = page_serialize_row(table, {
+    // 3800 - 16 = 3784 payload bytes
+    const exact3800 = page_serialize_row(table, {
       id: 1,
-      payload: "A".repeat(2032),
+      payload: "A".repeat(3784),
       extra: 5,
     });
-    expect(exact2048.byteLength).toBe(2048);
+    expect(exact3800.byteLength).toBe(3800);
 
-    // 2049 bytes must throw RowSizeLimitExceededError
+    // 3801 bytes must throw RowSizeLimitExceededError
     expect(() => {
-      page_serialize_row(table, { id: 1, payload: "A".repeat(2033), extra: 5 });
+      page_serialize_row(table, { id: 1, payload: "A".repeat(3785), extra: 5 });
     }).toThrow(RowSizeLimitExceededError);
   });
 

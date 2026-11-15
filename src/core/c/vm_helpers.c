@@ -381,6 +381,63 @@ void vm_reg_set_slice(uint32_t reg_off, uint8_t col_type, uint32_t data_off, uin
   store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), data_len);
 }
 
+int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_type, uint32_t first_page_id, uint32_t total_len, uint32_t instr_pc) {
+  if (total_len == 0 || first_page_id <= 1) {
+    vm_reg_set_slice(reg_off, col_type, 0, 0);
+    return VM_STATUS_RUNNING;
+  }
+  uint32_t curr_pid = first_page_id;
+  uint32_t remaining = total_len;
+  while (curr_pid > 1 && remaining > 0) {
+    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_pid);
+    if (slot < 0) {
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_pid);
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_PAGE_FAULT;
+    }
+    uint32_t page_off = (slot) * PAGE_SIZE;
+    uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
+    uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
+    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+      break;
+    }
+    if (chunk_len >= remaining) {
+      remaining = 0;
+    } else {
+      remaining -= chunk_len;
+    }
+    curr_pid = next_pid;
+  }
+  uint32_t dest_off = vm_phys_alloc(ctx_off, TRANSIENT_ARENA_OFFSET, total_len);
+  if (dest_off == 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
+    return VM_STATUS_ARENA_EXHAUSTED;
+  }
+  curr_pid = first_page_id;
+  uint32_t copied = 0;
+  while (curr_pid > 1 && copied < total_len) {
+    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_pid);
+    if (slot < 0) {
+      break;
+    }
+    uint32_t page_off = (slot) * PAGE_SIZE;
+    uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
+    uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
+    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+      break;
+    }
+    if (copied + chunk_len > total_len) {
+      chunk_len = total_len - copied;
+    }
+    webdb_memcpy((void *)(uintptr_t)(dest_off + copied), (const void *)(uintptr_t)(page_off + OVERFLOW_HEADER_SIZE), chunk_len);
+    copied += chunk_len;
+    curr_pid = next_pid;
+  }
+  vm_reg_set_slice(reg_off, col_type, dest_off, copied);
+  return VM_STATUS_RUNNING;
+}
+
 void vm_reg_copy(uint32_t dst_reg_off, uint32_t src_reg_off) {
   if (dst_reg_off == src_reg_off) 
     return;

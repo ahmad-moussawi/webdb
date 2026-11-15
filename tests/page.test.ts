@@ -80,9 +80,9 @@ describe('Slotted Page & Row Format', () => {
     expect(() => page_serialize_row(table, invalidRow as any)).toThrow(NotNullConstraintError);
   });
 
-  it('enforces strict 2048-byte max row limit with RowSizeLimitExceededError', () => {
-    // Construct a large row exceeding 2048 bytes
-    const largeName = 'X'.repeat(2100);
+  it('enforces strict MAX_ROW_SIZE (3800-byte) inline limit with RowSizeLimitExceededError', () => {
+    // Construct a large row exceeding 3800 bytes inline limit
+    const largeName = 'X'.repeat(3900);
     const largeRow = { id: 99, name: largeName, age: 20, score: 50.0 };
 
     expect(() => page_serialize_row(table, largeRow)).toThrow(RowSizeLimitExceededError);
