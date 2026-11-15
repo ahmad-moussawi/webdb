@@ -21,13 +21,13 @@ Install `@ahmadmoussawi/webdb` using your preferred package manager:
 
 ```bash
 # npm
-npm install @ahmadmoussawi/webdb@alpha
+npm install @ahmadmoussawi/webdb
 
 # pnpm
-pnpm add @ahmadmoussawi/webdb@alpha
+pnpm add @ahmadmoussawi/webdb
 
 # yarn
-yarn add @ahmadmoussawi/webdb@alpha
+yarn add @ahmadmoussawi/webdb
 ```
 
 > [!TIP]
@@ -40,46 +40,56 @@ yarn add @ahmadmoussawi/webdb@alpha
 Here is a complete, runnable example showing how to open a database, define a schema, insert data, run queries, and use transactions:
 
 ```typescript
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB } from "@ahmadmoussawi/webdb";
 
 async function main() {
   // 1. Open a persistent database (uses IndexedDB in the browser, or memory in Node/tests)
   const db = await WebDB.open({
-    name: 'my_task_app',
-    storage: typeof indexedDB !== 'undefined' ? 'idb' : 'memory',
+    name: "my_task_app",
+    storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
   });
 
   // 2. Create a table with typed columns
-  await db.createTable('tasks', [
-    { name: 'id', type: 'UUID', primaryKey: true },
-    { name: 'title', type: 'TEXT', notNull: true },
-    { name: 'priority', type: 'INT32' },
-    { name: 'done', type: 'INT32' }, // 0 = false, 1 = true
+  await db.createTable("tasks", [
+    { name: "id", type: "UUID", primaryKey: true },
+    { name: "title", type: "TEXT", notNull: true },
+    { name: "priority", type: "INT32" },
+    { name: "done", type: "INT32" }, // 0 = false, 1 = true
   ]);
 
   // Create an index to speed up filtering and sorting by priority
-  await db.createIndex('tasks', 'priority');
+  await db.createIndex("tasks", "priority");
 
   // 3. Insert single or multiple rows
-  await db.insert('tasks', {
+  await db.insert("tasks", {
     id: crypto.randomUUID(),
-    title: 'Design database schema',
+    title: "Design database schema",
     priority: 1,
     done: 1,
   });
 
-  await db.insertMany('tasks', [
-    { id: crypto.randomUUID(), title: 'Write API documentation', priority: 3, done: 0 },
-    { id: crypto.randomUUID(), title: 'Add offline sync worker', priority: 2, done: 0 },
+  await db.insertMany("tasks", [
+    {
+      id: crypto.randomUUID(),
+      title: "Write API documentation",
+      priority: 3,
+      done: 0,
+    },
+    {
+      id: crypto.randomUUID(),
+      title: "Add offline sync worker",
+      priority: 2,
+      done: 0,
+    },
   ]);
 
   // 4. Query records using the fluent Query Builder
   const pendingHighPriority = await db
-    .from('tasks')
-    .select('id', 'title', 'priority')
-    .where('done', '=', 0)
-    .where('priority', '>=', 2)
-    .orderBy('priority', 'desc')
+    .from("tasks")
+    .select("id", "title", "priority")
+    .where("done", "=", 0)
+    .where("priority", ">=", 2)
+    .orderBy("priority", "desc")
     .limit(10)
     .toArray();
 
@@ -87,19 +97,19 @@ async function main() {
 
   // 5. Update and delete records
   await db
-    .from('tasks')
-    .where('title', '=', 'Write API documentation')
+    .from("tasks")
+    .where("title", "=", "Write API documentation")
     .update({ done: 1 });
 
   // 6. Wrap multi-step operations in an ACID transaction
   await db.transaction(async (tx) => {
-    await tx.insert('tasks', {
+    await tx.insert("tasks", {
       id: crypto.randomUUID(),
-      title: 'Ship release v1.0',
+      title: "Ship release v1.0",
       priority: 3,
       done: 0,
     });
-    await tx.delete('tasks', { done: 1 });
+    await tx.delete("tasks", { done: 1 });
   });
 
   // 7. Close the database connection when finished

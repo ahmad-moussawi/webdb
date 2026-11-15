@@ -42,10 +42,10 @@
 
 Experience WebDB directly on your device with zero installation or setup:
 
-| Tool | Highlights | Link |
-| :--- | :--- | :--- |
-| **WebDB Studio Playground** | Full in-browser database IDE with Monaco editor, live table explorer, low-level binary 4KB slotted page inspector, buffer pool visualizer, and real-time bytecode disassembler. | [**Launch Studio IDE →**](https://ahmad-moussawi.github.io/webdb/playground/) |
-| **In-Browser Benchmark Suite** | Live comparative benchmarking engine measuring throughput (ops/sec), latency, and memory allocations against Raw JS Arrays, Native IndexedDB, and official SQLite WASM on your hardware. | [**Run Benchmarks →**](https://ahmad-moussawi.github.io/webdb/benchmark/) |
+| Tool                           | Highlights                                                                                                                                                                               | Link                                                                          |
+| :----------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------- |
+| **WebDB Studio Playground**    | Full in-browser database IDE with Monaco editor, live table explorer, low-level binary 4KB slotted page inspector, buffer pool visualizer, and real-time bytecode disassembler.          | [**Launch Studio IDE →**](https://ahmad-moussawi.github.io/webdb/playground/) |
+| **In-Browser Benchmark Suite** | Live comparative benchmarking engine measuring throughput (ops/sec), latency, and memory allocations against Raw JS Arrays, Native IndexedDB, and official SQLite WASM on your hardware. | [**Run Benchmarks →**](https://ahmad-moussawi.github.io/webdb/benchmark/)     |
 
 ---
 
@@ -98,17 +98,17 @@ Read our complete specifications:
 
 ## 📦 Installation
 
-Install the alpha release of `@ahmadmoussawi/webdb` via npm, pnpm, or yarn:
+Install `@ahmadmoussawi/webdb` via npm, pnpm, or yarn:
 
 ```bash
 # npm
-npm install @ahmadmoussawi/webdb@alpha
+npm install @ahmadmoussawi/webdb
 
 # pnpm
-pnpm add @ahmadmoussawi/webdb@alpha
+pnpm add @ahmadmoussawi/webdb
 
 # yarn
-yarn add @ahmadmoussawi/webdb@alpha
+yarn add @ahmadmoussawi/webdb
 ```
 
 ---
@@ -236,22 +236,27 @@ import { useLiveQuery } from "@ahmadmoussawi/webdb/react";
 const { data: users, isLoading } = useLiveQuery(
   () => db.from("users").where("age", ">=", minAge).orderBy("score", "desc"),
   [minAge],
-  { initialData: [] }
+  { initialData: [] },
 );
 
 // 3. Vue 3 (@ahmadmoussawi/webdb/vue)
 import { useLiveQuery } from "@ahmadmoussawi/webdb/vue";
 const { data: users, isLoading } = useLiveQuery(
-  () => db.from("users").where("age", ">=", minAgeRef.value).orderBy("score", "desc"),
+  () =>
+    db
+      .from("users")
+      .where("age", ">=", minAgeRef.value)
+      .orderBy("score", "desc"),
   [minAgeRef],
-  { initialData: [] }
+  { initialData: [] },
 );
 
 // 4. Angular Signals & RxJS (@ahmadmoussawi/webdb/angular)
 import { liveQuerySignal, liveQuery$ } from "@ahmadmoussawi/webdb/angular";
 users = liveQuerySignal(
-  () => db.from("users").where("age", ">=", this.minAge()).orderBy("score", "desc"),
-  { initialData: [] }
+  () =>
+    db.from("users").where("age", ">=", this.minAge()).orderBy("score", "desc"),
+  { initialData: [] },
 );
 ```
 
@@ -259,7 +264,7 @@ users = liveQuerySignal(
 
 ## ⚙️ Core Architecture: TypeScript ➔ C Transpiler
 
-WebDB uses an automated **TypeScript-to-C Transpiler** (`scripts/transpiler/`) to maintain a single canonical source of truth for its core storage and execution engine (`src/core/js/*.c.ts`). 
+WebDB uses an automated **TypeScript-to-C Transpiler** (`scripts/transpiler/`) to maintain a single canonical source of truth for its core storage and execution engine (`src/core/js/*.c.ts`).
 
 TypeScript code is written in a strict, zero-allocation, C-compatible style. The transpiler translates this code into freestanding C99 (`src/core/c/`), which is then compiled via Clang (`wasm32-unknown-unknown -nostdlib -O3`) and optimized with `wasm-opt` into an **ultra-lean ~19 KB gzipped (~51 KB raw) WASM binary**.
 
@@ -306,24 +311,26 @@ npm test
 
 Primitive type aliases in TypeScript map directly to C native fixed-width types:
 
-| TypeScript Alias | C Native Type | Description |
-| :--- | :--- | :--- |
-| `u8`, `u16`, `u32` | `uint8_t`, `uint16_t`, `uint32_t` | Unsigned 8, 16, 32-bit integers |
-| `i8`, `i16`, `i32` | `int8_t`, `int16_t`, `int32_t` | Signed 8, 16, 32-bit integers |
-| `u64`, `i64` | `uint64_t`, `int64_t` | 64-bit integers (`bigint` in JS) |
-| `f64` | `double` | 64-bit IEEE 754 floating point |
-| `byte_ptr` | `uint32_t` | Linear memory byte offset |
-| `const_u8_ptr` | `const uint8_t *` | Immutable byte buffer pointer |
-| `u8_ptr` | `uint8_t *` | Mutable byte buffer pointer |
-| `const_char_ptr` | `const char *` | Null-terminated C string pointer |
-| `char_ptr` | `char *` | Mutable character buffer pointer |
+| TypeScript Alias   | C Native Type                     | Description                      |
+| :----------------- | :-------------------------------- | :------------------------------- |
+| `u8`, `u16`, `u32` | `uint8_t`, `uint16_t`, `uint32_t` | Unsigned 8, 16, 32-bit integers  |
+| `i8`, `i16`, `i32` | `int8_t`, `int16_t`, `int32_t`    | Signed 8, 16, 32-bit integers    |
+| `u64`, `i64`       | `uint64_t`, `int64_t`             | 64-bit integers (`bigint` in JS) |
+| `f64`              | `double`                          | 64-bit IEEE 754 floating point   |
+| `byte_ptr`         | `uint32_t`                        | Linear memory byte offset        |
+| `const_u8_ptr`     | `const uint8_t *`                 | Immutable byte buffer pointer    |
+| `u8_ptr`           | `uint8_t *`                       | Mutable byte buffer pointer      |
+| `const_char_ptr`   | `const char *`                    | Null-terminated C string pointer |
+| `char_ptr`         | `char *`                          | Mutable character buffer pointer |
 
 ### Transpiler Annotations Reference
 
 The transpiler supports annotations to customize code generation and enable dual implementations:
 
 #### 1. `@export_c` (Exported Function)
+
 Exports the function in both the C source and the `.h` header with `WEBDB_EXPORT`.
+
 ```typescript
 /**
  * @export_c
@@ -334,7 +341,9 @@ export function page_get_cell_count(page_offset: u32): u16 {
 ```
 
 #### 2. `@internal_c` (Module-Private Static Helper)
+
 Generates a `static` C function internal to the translation unit, omitted from the `.h` header.
+
 ```typescript
 /**
  * @internal_c
@@ -345,7 +354,9 @@ function init_crc_table(): void {
 ```
 
 #### 3. `@manual_c` / `@native_c` (Dual Implementation Shortcut)
+
 Instructs the transpiler that a function is manually implemented in C:
+
 - **In TypeScript / Vitest**: Executes the TypeScript body normally.
 - **In C Header (`.h`)**: Still registers `WEBDB_EXPORT` so callers have the prototype.
 - **In C Source (`.c`)**: **Skips** generating the body in `.c`. The implementation is resolved from existing C files, companion files, or headers.
@@ -362,9 +373,10 @@ export function btree_split_leaf(page_offset: u32, new_key: u32): i32 {
 ```
 
 #### 4. Inline C Blocks (` ```c ... ``` `)
+
 Embed hand-crafted C code directly inside the TypeScript JSDoc comment. The transpiler emits the C code block verbatim:
 
-```typescript
+````typescript
 /**
  * @export_c
  * @manual_c
@@ -378,9 +390,10 @@ Embed hand-crafted C code directly inside the TypeScript JSDoc comment. The tran
 export function fast_crc32(crc: u32, buf: Uint8Array, len: u32): u32 {
   return (crc ^ len) >>> 0;
 }
-```
+````
 
 #### 5. `@use_c: target_c_name` (Symbol & Call Rewriting)
+
 Maps the TypeScript function to a differently named existing C function. The transpiler automatically rewrites all call sites across transpiled code to call `target_c_name(...)`:
 
 ```typescript
@@ -394,12 +407,15 @@ export function checksum(ptr: u32): u32 {
 ```
 
 #### 6. Companion Files (`<module>.manual.c`)
+
 For large or performance-critical manual C functions:
+
 - Create `src/core/c/<module>.manual.c` (e.g. `src/core/c/catalog.manual.c`).
 - The transpiler automatically detects it and appends `#include "<module>.manual.c"` at the end of the generated `.c` file.
 - The companion file is completely safe from transpiler overwrites.
 
 #### 7. `c_inline(cCode, jsFallback)` (Compile-Time Intrinsic)
+
 Embeds C-specific intrinsics without breaking TypeScript execution:
 
 ```typescript
@@ -413,6 +429,7 @@ export function compute_leading_zeros(val: u32): u32 {
 ```
 
 #### 8. `@c_include` & `@c_raw` Directives
+
 - `/** @c_include "custom_header.h" */`: Adds `#include "custom_header.h"` at the top of the generated C file.
 - `/** @c_raw ```c ... ``` */`: Injects top-level C macros or typedefs directly into the generated C file.
 

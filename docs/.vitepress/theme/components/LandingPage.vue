@@ -401,7 +401,7 @@ const copyUdfCode = () => {
 
 const installCopied = ref(false);
 const copyInstallCmd = () => {
-  navigator.clipboard.writeText("npm install @ahmadmoussawi/webdb@alpha");
+  navigator.clipboard.writeText("npm install @ahmadmoussawi/webdb");
   installCopied.value = true;
   setTimeout(() => (installCopied.value = false), 2000);
 };
@@ -761,7 +761,7 @@ onBeforeUnmount(() => {
           @click="copyInstallCmd"
         >
           <span class="install-prompt">$</span>
-          <code>npm install @ahmadmoussawi/webdb@alpha</code>
+          <code>npm install @ahmadmoussawi/webdb</code>
           <span class="install-copy-badge">
             {{ installCopied ? "Copied ✓" : "Copy" }}
           </span>
@@ -785,7 +785,8 @@ onBeforeUnmount(() => {
           <div class="metric-val">Reactive</div>
           <div class="metric-label">Live Queries, UI Updates Automatically</div>
           <div class="metric-desc">
-            Auto-tracked live queries across React, Vue 3, Angular &amp; Plain JS
+            Auto-tracked live queries across React, Vue 3, Angular &amp; Plain
+            JS
           </div>
         </div>
 
@@ -803,7 +804,8 @@ onBeforeUnmount(() => {
           <div class="metric-val">Search</div>
           <div class="metric-label">Fuzzy &amp; BM25 Ranking</div>
           <div class="metric-desc">
-            Zero-dependency typo tolerance, BM25 scoring, highlights &amp; snippets
+            Zero-dependency typo tolerance, BM25 scoring, highlights &amp;
+            snippets
           </div>
         </div>
 
@@ -1478,17 +1480,11 @@ onBeforeUnmount(() => {
 
         <!-- SEARCH CTAS -->
         <div class="fw-guide-row">
-          <a
-            :href="withBase('/guides/fuzzy-search')"
-            class="btn btn-primary"
-          >
+          <a :href="withBase('/guides/fuzzy-search')" class="btn btn-primary">
             <span>Explore Fuzzy &amp; BM25 Search Guide</span>
             <span class="btn-arrow">→</span>
           </a>
-          <a
-            :href="withBase('/demos/search')"
-            class="btn btn-secondary"
-          >
+          <a :href="withBase('/demos/search')" class="btn btn-secondary">
             <span>Try Interactive Live Search Demo</span>
             <span class="btn-arrow">→</span>
           </a>
@@ -1607,10 +1603,7 @@ onBeforeUnmount(() => {
             <span>Read Expressions &amp; UDFs Guide</span>
             <span class="btn-arrow">→</span>
           </a>
-          <a
-            :href="withBase('/demos/search')"
-            class="btn btn-secondary"
-          >
+          <a :href="withBase('/demos/search')" class="btn btn-secondary">
             <span>Explore Live Demo with UDFs</span>
             <span class="btn-arrow">→</span>
           </a>
