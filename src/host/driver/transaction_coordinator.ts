@@ -613,16 +613,19 @@ export class TransactionCoordinator {
   /**
    * Restores buffer pool slots, pin counts, spilled pages, and truncates WAL back to a savepoint.
    */
-  async restoreSavepoint(savepoint: {
-    frameCount: number;
-    slotSnapshots: Map<
-      number,
-      { pageId: number; dirty: boolean; data: Uint8Array }
-    >;
-    pinCounts: Uint32Array;
-    spilledPages: Map<number, Uint8Array>;
-    walFrameSeq: number;
-  }): Promise<void> {
+  async restoreSavepoint(
+    savepoint: {
+      frameCount: number;
+      slotSnapshots: Map<
+        number,
+        { pageId: number; dirty: boolean; data: Uint8Array }
+      >;
+      pinCounts: Uint32Array;
+      spilledPages: Map<number, Uint8Array>;
+      walFrameSeq: number;
+    },
+    preserveWalHeader: boolean = false,
+  ): Promise<void> {
     // Pass 1: Unassign all non-zero slots first to avoid page-to-slot collision if a page moved slots
     for (let slot = 1; slot < this.pool.slotCount; slot++) {
       this.pool.unassignSlot(slot);
@@ -653,6 +656,14 @@ export class TransactionCoordinator {
     }
     this.walFrameSeq = savepoint.walFrameSeq;
     await this.vfs.truncateWal(savepoint.frameCount);
+    if (preserveWalHeader && savepoint.frameCount === 0) {
+      await this.vfs.writeWalHeader(
+        encodeWalFileHeader({
+          checkpointSeq: this.checkpointSeq,
+          salt1: this.instanceSalt,
+        }),
+      );
+    }
     this.expectedWalFrameCount = savepoint.frameCount;
   }
 

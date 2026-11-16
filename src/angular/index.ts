@@ -144,20 +144,27 @@ export function liveQuerySignal<T = DbRow[]>(
     autoStart: false,
   });
 
+  let runningEffectSync = false;
   const unsubscribe = controller.subscribe((nextState) => {
-    stateSignal.set(nextState);
+    if (runningEffectSync) {
+      queueMicrotask(() => stateSignal.set(nextState));
+    } else {
+      stateSignal.set(nextState);
+    }
   });
 
   let effectRef: { destroy(): void } | null = null;
   try {
     effectRef = effect(
       () => {
-        void controller.refresh();
+        runningEffectSync = true;
+        try {
+          void controller.refresh();
+        } finally {
+          runningEffectSync = false;
+        }
       },
-      {
-        injector: options.injector,
-        allowSignalWrites: true,
-      },
+      options.injector ? { injector: options.injector } : undefined,
     );
   } catch {
     // Outside an Angular injection context without an injector: start immediately

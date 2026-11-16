@@ -1481,7 +1481,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         this.tableMetaCache.clear();
         this.tableTailPages.clear();
         this.indexTailPages.clear();
-        await this.coordinator.restoreSavepoint(savepoint);
+        await this.coordinator.restoreSavepoint(savepoint, true);
         throw err;
       }
     }, this.currentLeaseId ?? undefined);
@@ -3899,7 +3899,7 @@ export class WebDB implements IDatabaseQueryExecutor {
               this.tableMetaCache.clear();
               this.tableTailPages.clear();
               this.indexTailPages.clear();
-              await this.coordinator.restoreSavepoint(savepoint);
+              await this.coordinator.restoreSavepoint(savepoint, true);
               throw err;
             }
           };
