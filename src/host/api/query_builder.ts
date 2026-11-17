@@ -3,7 +3,7 @@ import {
   AggregateNotAllowedInWhereError,
   SubqueryNestingTooDeepError,
   JoinType,
-  TransactionOptions,
+  DmlOptions,
 } from '../../types/index.js';
 import { MAX_IN_LIST_SIZE } from '../../constants.js';
 import {
@@ -418,12 +418,12 @@ export interface IDatabaseQueryExecutor {
     tableName: string,
     filters: QueryFilter[],
     patch: Partial<DbRow>,
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number>;
   executeDelete?(
     tableName: string,
     filters: QueryFilter[],
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number>;
 }
 
@@ -3901,9 +3901,16 @@ export class QueryBuilder {
     );
   }
 
+  private resolveDmlOptions(options?: DmlOptions): DmlOptions | undefined {
+    const effectiveLimit =
+      options?.limit ?? (this.limitCount !== null ? this.limitCount : undefined);
+    if (effectiveLimit === undefined) return options;
+    return { ...options, limit: effectiveLimit };
+  }
+
   async update(
     patch: Partial<DbRow>,
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number> {
     if (!this.db.executeUpdate) {
       throw new Error('Database executor does not support executeUpdate');
@@ -3914,16 +3921,20 @@ export class QueryBuilder {
       this.tableName,
       resolvedFilters,
       patch,
-      options,
+      this.resolveDmlOptions(options),
     );
   }
 
-  async delete(options?: TransactionOptions): Promise<number> {
+  async delete(options?: DmlOptions): Promise<number> {
     if (!this.db.executeDelete) {
       throw new Error('Database executor does not support executeDelete');
     }
     this.assertSubqueryDepth();
     const resolvedFilters = await this.resolveUncorrelatedFilters(this.filters);
-    return this.db.executeDelete(this.tableName, resolvedFilters, options);
+    return this.db.executeDelete(
+      this.tableName,
+      resolvedFilters,
+      this.resolveDmlOptions(options),
+    );
   }
 }

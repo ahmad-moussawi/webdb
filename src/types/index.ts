@@ -390,6 +390,10 @@ export interface TransactionOptions {
   meta?: Record<string, any>;
 }
 
+export interface DmlOptions extends TransactionOptions {
+  limit?: number;
+}
+
 export interface UpsertOptions extends TransactionOptions {
   conflictTarget?: string | string[];
   mode?: 'merge' | 'replace' | 'ignore';

@@ -61,6 +61,7 @@ import {
   InvalidDatabaseError,
   CorruptPageError,
   TransactionOptions,
+  DmlOptions,
   UpsertOptions,
   MutationRecord,
   Changeset,
@@ -3063,11 +3064,18 @@ export class WebDB implements IDatabaseQueryExecutor {
     return recordedChanges;
   }
 
+  private normalizeDmlLimit(limit?: number): number | undefined {
+    if (limit === undefined) return undefined;
+    if (Number.isNaN(limit) || limit <= 0) return 0;
+    if (!Number.isFinite(limit)) return undefined;
+    return Math.floor(limit);
+  }
+
   async update(
     tableName: string,
     whereOrPk: DbValue | Partial<DbRow>,
     patch: Partial<DbRow>,
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number> {
     if (
       !this.coordinator.isInTransaction() &&
@@ -3087,6 +3095,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         tableName,
         filters,
         patch,
+        options?.limit,
       );
       if (!inTx && changes.length > 0) {
         const changeset = this.buildChangeset(
@@ -3105,7 +3114,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     tableName: string,
     filters: QueryFilter[],
     patch: Partial<DbRow>,
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number> {
     if (
       !this.coordinator.isInTransaction() &&
@@ -3123,6 +3132,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         tableName,
         filters,
         patch,
+        options?.limit,
       );
       if (!inTx && changes.length > 0) {
         const changeset = this.buildChangeset(
@@ -3141,6 +3151,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     tableName: string,
     filters: QueryFilter[],
     patch: Partial<DbRow>,
+    limit?: number,
   ): Promise<{ count: number; changes: MutationRecord[] }> {
     const table = await this._getTableInternal(tableName);
     this.validateFilterColumns(table, filters);
@@ -3150,6 +3161,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       if (!validColMap.has(k)) {
         throw new ColumnNotFoundError(k, tableName);
       }
+    }
+
+    const effectiveLimit = this.normalizeDmlLimit(limit);
+    if (effectiveLimit === 0) {
+      return { count: 0, changes: [] };
     }
 
     const page1View = this.pool.getSlotDataView(0);
@@ -3207,7 +3223,11 @@ export class WebDB implements IDatabaseQueryExecutor {
         );
         allCells.push({ cellIdx: i, row });
 
-        if (row && this.matchesFilters(table, row, filters)) {
+        if (
+          (effectiveLimit === undefined || totalMatched < effectiveLimit) &&
+          row &&
+          this.matchesFilters(table, row, filters)
+        ) {
           const newRow: DbRow = { ...row };
           for (const [k, v] of Object.entries(patch)) {
             if (v !== undefined) {
@@ -3255,6 +3275,9 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       if (matches.length > 0) {
         pageSnapshots.push({ pageId: currPageId, allCells, matches });
+      }
+      if (effectiveLimit !== undefined && totalMatched >= effectiveLimit) {
+        break;
       }
       currPageId = nextPageId;
     }
@@ -3510,7 +3533,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   async delete(
     tableName: string,
     whereOrPk: DbValue | Partial<DbRow>,
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number> {
     if (
       !this.coordinator.isInTransaction() &&
@@ -3529,6 +3552,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       const { count, changes } = await this._executeDeleteInternal(
         tableName,
         filters,
+        options?.limit,
       );
       if (!inTx && changes.length > 0) {
         const changeset = this.buildChangeset(
@@ -3546,7 +3570,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   async executeDelete(
     tableName: string,
     filters: QueryFilter[],
-    options?: TransactionOptions,
+    options?: DmlOptions,
   ): Promise<number> {
     if (
       !this.coordinator.isInTransaction() &&
@@ -3563,6 +3587,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       const { count, changes } = await this._executeDeleteInternal(
         tableName,
         filters,
+        options?.limit,
       );
       if (!inTx && changes.length > 0) {
         const changeset = this.buildChangeset(
@@ -3580,9 +3605,15 @@ export class WebDB implements IDatabaseQueryExecutor {
   private async _executeDeleteInternal(
     tableName: string,
     filters: QueryFilter[],
+    limit?: number,
   ): Promise<{ count: number; changes: MutationRecord[] }> {
     const table = await this._getTableInternal(tableName);
     this.validateFilterColumns(table, filters);
+
+    const effectiveLimit = this.normalizeDmlLimit(limit);
+    if (effectiveLimit === 0) {
+      return { count: 0, changes: [] };
+    }
 
     const page1View = this.pool.getSlotDataView(0);
     const indexes = catalog_list_table_indexes(page1View, table.tableId);
@@ -3617,7 +3648,12 @@ export class WebDB implements IDatabaseQueryExecutor {
           );
           allCells.push({ cellIdx: i, row });
 
-          if (row && this.matchesFilters(table, row, filters)) {
+          if (
+            (effectiveLimit === undefined ||
+              totalDeleted + deletedIndices.length < effectiveLimit) &&
+            row &&
+            this.matchesFilters(table, row, filters)
+          ) {
             deletedIndices.push(i);
             const rec: MutationRecord = {
               table: table.name,
@@ -3644,6 +3680,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
+      if (effectiveLimit !== undefined && totalDeleted >= effectiveLimit) {
+        break;
+      }
       currPageId = nextPageId;
     }
 
