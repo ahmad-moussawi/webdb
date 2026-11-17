@@ -85,7 +85,7 @@ export const Header: React.FC<HeaderProps> = ({
 
       <div className="header-right">
         <a href="../" className="nav-btn" title="Documentation">Docs</a>
-        <a href="../playground/" className="nav-btn" title="WebDB Studio IDE">Studio IDE</a>
+        <a href="https://studio.webdb.dev/" className="nav-btn" title="WebDB Studio IDE">Studio IDE</a>
         <a
           href="https://github.com/ahmad-moussawi/webdb"
           target="_blank"

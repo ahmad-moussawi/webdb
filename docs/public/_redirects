@@ -1,0 +1,2 @@
+/playground https://studio.webdb.dev/ 301
+/playground/* https://studio.webdb.dev/:splat 301

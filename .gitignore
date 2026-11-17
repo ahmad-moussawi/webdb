@@ -1,5 +1,6 @@
 node_modules/
 /dist/
+dist-studio/
 docs/.vitepress/dist
 docs/.vitepress/cache
 docs/public/playground/

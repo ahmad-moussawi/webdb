@@ -5,9 +5,11 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   root: resolve(__dirname, 'playground'),
-  base: './',
+  base: process.env.PLAYGROUND_BASE || './',
   build: {
-    outDir: resolve(__dirname, 'docs/public/playground'),
+    outDir: process.env.PLAYGROUND_OUT_DIR
+      ? resolve(__dirname, process.env.PLAYGROUND_OUT_DIR)
+      : resolve(__dirname, 'docs/public/playground'),
     emptyOutDir: true,
   },
   server: {

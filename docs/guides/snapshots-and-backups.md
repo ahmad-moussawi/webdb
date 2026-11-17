@@ -85,12 +85,12 @@ async function restoreFromFileInput(db: WebDB, file: File) {
 
 ## 4. Opening Remote & Compressed (`.webdb.gz`) Snapshots in WebDB Studio
 
-The [**WebDB Studio Playground**](/playground/) natively supports exporting and importing both raw `.webdb` images and gzip-compressed `.webdb.gz` snapshots (which typically compress 4 KB slotted pages by **70–90%** using the browser's native `CompressionStream` / `DecompressionStream`).
+The [**WebDB Studio Playground**](https://studio.webdb.dev/) natively supports exporting and importing both raw `.webdb` images and gzip-compressed `.webdb.gz` snapshots (which typically compress 4 KB slotted pages by **70–90%** using the browser's native `CompressionStream` / `DecompressionStream`).
 
 You can also create **shareable external links** that directly open a remote `.webdb` or `.webdb.gz` file inside the Studio IDE via URL query parameters:
 
 ```
-https://webdb.dev/playground/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory
+https://studio.webdb.dev/?core=wasm&db=https://example.com/files/db.webdb.gz&storage=memory
 ```
 
 | URL Parameter | Values | Description |

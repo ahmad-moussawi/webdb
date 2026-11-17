@@ -105,6 +105,7 @@
     "playground": "vite --config vite.playground.config.ts",
     "playground:serve": "node scripts/serve.js",
     "build:playground": "vite build --config vite.playground.config.ts",
+    "build:studio": "PLAYGROUND_BASE=/ PLAYGROUND_OUT_DIR=dist-studio vite build --config vite.playground.config.ts && cp playground/logo.svg dist-studio/logo.svg",
     "benchmark": "vite --config vite.benchmark.config.ts",
     "build:benchmark": "vite build --config vite.benchmark.config.ts",
     "docs:prepare": "npm run build && npm run build:playground && npm run build:benchmark && node scripts/prepare_docs_playground.js",

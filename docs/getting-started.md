@@ -125,7 +125,7 @@ main();
 
 Want to experiment with queries and inspect how WebDB stores data before writing any code?
 
-- [**Launch Studio IDE Playground →**](/playground/) — Interactive in-browser IDE with live table explorer, query editor, and query plan inspector.
+- [**Launch Studio IDE Playground →**](https://studio.webdb.dev/) — Interactive in-browser IDE with live table explorer, query editor, and query plan inspector.
 - [**Run In-Browser Benchmarks →**](/benchmark/) — Compare WebDB throughput and latency against Raw JS Arrays, Native IndexedDB, and SQLite WASM on your own hardware.
 
 ---

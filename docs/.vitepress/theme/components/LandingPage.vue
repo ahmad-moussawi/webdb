@@ -717,8 +717,7 @@ onBeforeUnmount(() => {
       <!-- ONLY 2 HERO CTA BUTTONS: PLAYGROUND & DOCS -->
       <div class="hero-actions">
         <a
-          :href="withBase('/playground/')"
-          target="_self"
+          href="https://studio.webdb.dev/"
           class="btn btn-primary"
         >
           <svg
@@ -1937,8 +1936,7 @@ onBeforeUnmount(() => {
           </p>
           <div class="tool-actions">
             <a
-              :href="withBase('/playground/')"
-              target="_self"
+              href="https://studio.webdb.dev/"
               class="btn btn-primary"
             >
               <span>Launch Studio IDE</span>

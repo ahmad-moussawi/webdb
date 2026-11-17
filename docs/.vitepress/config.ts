@@ -112,7 +112,7 @@ export default defineConfig({
       { text: "Docs", link: "/getting-started" },
       { text: "Live Demos", link: "/demos/" },
       { text: "API", link: "/reference/api-reference" },
-      { text: "Studio IDE", link: "/playground/", target: "_self" },
+      { text: "Studio IDE", link: "https://studio.webdb.dev/" },
       {
         text: "Benchmarks",
         items: [
