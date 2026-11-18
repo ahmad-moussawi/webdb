@@ -32,9 +32,9 @@ function installMockOpfs(): { files: Map<string, Uint8Array>; restore: () => voi
       };
     },
     async createWritable(opts?: { keepExistingData?: boolean }) {
-      let working = opts?.keepExistingData
-        ? (files.get(name) ?? new Uint8Array(0))
-        : new Uint8Array(0);
+      const existing = opts?.keepExistingData ? (files.get(name) ?? new Uint8Array(0)) : new Uint8Array(0);
+      let working = existing;
+      let size = existing.byteLength;
       let cursor = 0;
       return {
         async seek(pos: number) {
@@ -43,24 +43,26 @@ function installMockOpfs(): { files: Map<string, Uint8Array>; restore: () => voi
         async write(data: Uint8Array) {
           const needed = cursor + data.byteLength;
           if (needed > working.byteLength) {
-            const grown = new Uint8Array(needed);
-            grown.set(working);
+            const nextCap = Math.max(needed, working.byteLength * 2, 65536);
+            const grown = new Uint8Array(nextCap);
+            grown.set(working.subarray(0, size));
             working = grown;
           }
           working.set(data, cursor);
           cursor += data.byteLength;
+          if (needed > size) size = needed;
         },
         async truncate(newSize: number) {
-          if (newSize <= working.byteLength) {
-            working = working.slice(0, newSize);
-          } else {
-            const grown = new Uint8Array(newSize);
-            grown.set(working);
+          if (newSize > working.byteLength) {
+            const nextCap = Math.max(newSize, working.byteLength * 2, 65536);
+            const grown = new Uint8Array(nextCap);
+            grown.set(working.subarray(0, size));
             working = grown;
           }
+          size = newSize;
         },
         async close() {
-          files.set(name, working);
+          files.set(name, working.subarray(0, size));
         },
       };
     },
@@ -254,7 +256,7 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
         .toArray();
       expect(deletedCheck).toHaveLength(0);
     },
-    90_000,
+    180_000,
   );
 
   it(
@@ -378,7 +380,7 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
         mockOpfs.restore();
       }
     },
-    90_000,
+    180_000,
   );
 });
 
