@@ -90,6 +90,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: pages deploy docs/.vitepress/dist --project-name=${{ vars.CLOUDFLARE_PROJECT_NAME || 'webdb' }} --branch=main
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
@@ -103,6 +104,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: deploy
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
