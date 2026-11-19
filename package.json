@@ -1,6 +1,7 @@
 {
   "name": "@ahmadmoussawi/webdb",
   "version": "0.7.1",
+  "homepage": "https://webdb.dev",
   "type": "module",
   "description": "Ultra-lean browser-native relational database engine",
   "license": "MIT",
