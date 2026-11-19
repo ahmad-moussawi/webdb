@@ -258,6 +258,63 @@ export class Io {
   }
 
   /**
+   * Batches multiple dirty slots into a single `vfs.writePages()` call.
+   * Preserves checksum stamping, in-flight flush serialization, and coordinator notification.
+   */
+  async writeSlots(
+    slots: Array<{ slotIdx: number; pageId: number }>,
+  ): Promise<void> {
+    if (slots.length === 0) return;
+    if (slots.length === 1) {
+      await this.writeSlot(slots[0].slotIdx, slots[0].pageId);
+      return;
+    }
+
+    for (const { pageId } of slots) {
+      if (pageId <= 0) {
+        throw new Error(
+          `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
+        );
+      }
+      const existing_flush = this.in_flight_flushes.get(pageId);
+      if (existing_flush) {
+        await existing_flush;
+      }
+    }
+
+    const pages: Array<{ pageId: number; data: Uint8Array }> = [];
+    for (const { slotIdx, pageId } of slots) {
+      const slot_offset = slotIdx * PAGE_SIZE;
+      const page_bytes = this.uint8.subarray(
+        slot_offset,
+        slot_offset + PAGE_SIZE,
+      );
+      this.stampSlotChecksum(slotIdx, pageId);
+      const write_snapshot = page_bytes.slice();
+      if (this.coordinator) {
+        this.coordinator.onDirectPageWrite(pageId, write_snapshot);
+      }
+      pages.push({ pageId, data: write_snapshot });
+    }
+
+    pages.sort((a, b) => a.pageId - b.pageId);
+
+    const write_promise = this.vfs.writePages(pages);
+    for (const { pageId } of pages) {
+      this.in_flight_flushes.set(pageId, write_promise);
+    }
+    try {
+      await write_promise;
+    } finally {
+      for (const { pageId } of pages) {
+        if (this.in_flight_flushes.get(pageId) === write_promise) {
+          this.in_flight_flushes.delete(pageId);
+        }
+      }
+    }
+  }
+
+  /**
    * Spills a slot to the WAL if an active transaction is open, otherwise writes it to VFS.
    */
   async spillOrWriteSlot(slotIdx: number, pageId: number): Promise<void> {

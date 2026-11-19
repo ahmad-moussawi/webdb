@@ -37,6 +37,34 @@ export interface IVfsAdapter {
   /** Returns the current number of frames in the WAL */
   getWalFrameCount(): Promise<number>;
 
+  /**
+   * Optional fast-path: atomically writes checkpointed pages, resets the WAL to 0,
+   * and optionally writes a fresh WAL header in a single storage transaction.
+   */
+  checkpointAtomic?(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+    walHeader?: Uint8Array,
+  ): Promise<void>;
+
+  /**
+   * Optional fast-path: reads cross-tab synchronization state (WAL frame count,
+   * WAL header, and Page 1) in a single storage transaction.
+   */
+  readSyncSnapshot?(): Promise<{
+    walFrameCount: number;
+    walHeader: Uint8Array | null;
+    page1: Uint8Array | null;
+  }>;
+
+  /**
+   * Optional fast-path: appends WAL frames (and optionally writes the WAL header)
+   * in a single storage transaction, returning the new total WAL frame count.
+   */
+  appendWalFramesWithHeader?(
+    frames: Uint8Array[],
+    walHeader?: Uint8Array,
+  ): Promise<number>;
+
   /** Closes and cleans up storage handles (optional) */
   close?(): Promise<void>;
 }

@@ -268,6 +268,7 @@ export class TransactionCoordinator {
   // Cross-tab state tracking
   private instanceSalt = Math.floor(Math.random() * 0xffffffff) >>> 0 || 1;
   private expectedWalFrameCount = 0;
+  private walHeaderReady = false;
   private lastDiskChangeCounter = 0;
   private lastDiskSchemaVersion = 0;
   private onCrossTabInvalidated?: () => Promise<void>;
@@ -331,11 +332,24 @@ export class TransactionCoordinator {
   async syncCrossTabState(force: boolean = false): Promise<void> {
     if (!force && !this.queue.hasWebLocks()) return;
 
-    const walFrameCount = await this.vfs.getWalFrameCount();
+    let walFrameCount: number;
+    let headerBytes: Uint8Array | null;
+    let diskPage1: Uint8Array | null;
+
+    if (this.vfs.readSyncSnapshot) {
+      const snap = await this.vfs.readSyncSnapshot();
+      walFrameCount = snap.walFrameCount;
+      headerBytes = snap.walHeader;
+      diskPage1 = snap.page1;
+    } else {
+      walFrameCount = await this.vfs.getWalFrameCount();
+      headerBytes = walFrameCount > 0 ? await this.vfs.readWalHeader() : null;
+      [diskPage1] = await this.vfs.readPages([1]);
+    }
+
     let walTouchedByOtherTab = false;
 
     if (walFrameCount > 0) {
-      const headerBytes = await this.vfs.readWalHeader();
       let headerSalt = 0;
       if (headerBytes) {
         try {
@@ -354,6 +368,8 @@ export class TransactionCoordinator {
         this.walFrameSeq = 0;
         this.txCommitCount = 0;
         this.expectedWalFrameCount = 0;
+        this.walHeaderReady = false;
+        [diskPage1] = await this.vfs.readPages([1]);
       }
     } else if (this.expectedWalFrameCount > 0) {
       walTouchedByOtherTab = true;
@@ -361,9 +377,9 @@ export class TransactionCoordinator {
       this.walFrameSeq = 0;
       this.txCommitCount = 0;
       this.expectedWalFrameCount = 0;
+      this.walHeaderReady = false;
     }
 
-    const [diskPage1] = await this.vfs.readPages([1]);
     const latestPage1 =
       (!walTouchedByOtherTab && this.committedWalPages.get(1)) || diskPage1;
     if (latestPage1) {
@@ -439,8 +455,6 @@ export class TransactionCoordinator {
       .getSlotDataView(0)
       .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
-    await this.ensureWalHeader();
-
     const frames: Uint8Array[] = [];
     for (const { pageId, data } of pages) {
       const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
@@ -471,10 +485,7 @@ export class TransactionCoordinator {
       }),
     );
 
-    await this.vfs.appendWalFrames(frames);
-    await this.vfs.flushWal?.();
-    const currentFrames = await this.vfs.getWalFrameCount();
-    this.expectedWalFrameCount = currentFrames;
+    const currentFrames = await this.appendFramesToWal(frames, true);
     this.txCommitCount++;
     this.scheduleIdleTimer();
 
@@ -483,27 +494,45 @@ export class TransactionCoordinator {
     }
   }
 
-  /** Makes sure the WAL header carries this instance's salt before frames are appended. */
-  private async ensureWalHeader(): Promise<void> {
-    const currentFrames = await this.vfs.getWalFrameCount();
-    const existingHeader = await this.vfs.readWalHeader();
-    let headerValid = false;
-    if (existingHeader && currentFrames > 0) {
-      try {
-        const decoded = decodeWalFileHeader(existingHeader, true);
-        headerValid = decoded.salt1 === this.instanceSalt;
-      } catch {
-        headerValid = false;
-      }
-    }
-    if (!headerValid) {
-      await this.vfs.writeWalHeader(
-        encodeWalFileHeader({
+  /**
+   * Appends WAL frames (combining WAL header initialization into the same VFS transaction
+   * when supported) and returns the new total WAL frame count.
+   */
+  private async appendFramesToWal(
+    frames: Uint8Array[],
+    flush: boolean = true,
+  ): Promise<number> {
+    const headerToWrite = !this.walHeaderReady
+      ? encodeWalFileHeader({
           checkpointSeq: this.checkpointSeq,
           salt1: this.instanceSalt,
-        }),
+        })
+      : undefined;
+
+    let currentFrames: number;
+    if (this.vfs.appendWalFramesWithHeader) {
+      currentFrames = await this.vfs.appendWalFramesWithHeader(
+        frames,
+        headerToWrite,
       );
+      this.walHeaderReady = true;
+      if (flush) {
+        await this.vfs.flushWal?.();
+      }
+    } else {
+      if (headerToWrite) {
+        await this.vfs.writeWalHeader(headerToWrite);
+        this.walHeaderReady = true;
+      }
+      await this.vfs.appendWalFrames(frames);
+      if (flush) {
+        await this.vfs.flushWal?.();
+      }
+      currentFrames = await this.vfs.getWalFrameCount();
     }
+
+    this.expectedWalFrameCount = currentFrames;
+    return currentFrames;
   }
 
   getSpilledPage(pageId: number): Uint8Array | null {
@@ -565,15 +594,14 @@ export class TransactionCoordinator {
       pageCopy,
     );
 
-    await this.vfs.appendWalFrames([frame]);
-    this.expectedWalFrameCount = await this.vfs.getWalFrameCount();
+    await this.appendFramesToWal([frame], false);
   }
 
   /**
    * Captures a point-in-time snapshot of the buffer pool, spilled pages, and WAL frame count.
    * Used both at transaction BEGIN and for nested savepoints.
    */
-  async captureSavepoint(): Promise<{
+  async captureSavepoint(knownFrameCount?: number): Promise<{
     frameCount: number;
     slotSnapshots: Map<
       number,
@@ -583,7 +611,10 @@ export class TransactionCoordinator {
     spilledPages: Map<number, Uint8Array>;
     walFrameSeq: number;
   }> {
-    const frameCount = await this.vfs.getWalFrameCount();
+    const frameCount =
+      knownFrameCount !== undefined
+        ? knownFrameCount
+        : await this.vfs.getWalFrameCount();
     const slotSnapshots = new Map<
       number,
       { pageId: number; dirty: boolean; data: Uint8Array }
@@ -656,13 +687,17 @@ export class TransactionCoordinator {
     }
     this.walFrameSeq = savepoint.walFrameSeq;
     await this.vfs.truncateWal(savepoint.frameCount);
-    if (preserveWalHeader && savepoint.frameCount === 0) {
-      await this.vfs.writeWalHeader(
-        encodeWalFileHeader({
-          checkpointSeq: this.checkpointSeq,
-          salt1: this.instanceSalt,
-        }),
-      );
+    if (savepoint.frameCount === 0) {
+      this.walHeaderReady = false;
+      if (preserveWalHeader && !this.vfs.appendWalFramesWithHeader) {
+        await this.vfs.writeWalHeader(
+          encodeWalFileHeader({
+            checkpointSeq: this.checkpointSeq,
+            salt1: this.instanceSalt,
+          }),
+        );
+        this.walHeaderReady = true;
+      }
     }
     this.expectedWalFrameCount = savepoint.frameCount;
   }
@@ -682,29 +717,11 @@ export class TransactionCoordinator {
     try {
       await this.syncCrossTabState();
 
-      // Ensure WAL header is initialized with this instance's salt
-      const currentFrames = await this.vfs.getWalFrameCount();
-      const existingHeader = await this.vfs.readWalHeader();
-      let headerValid = false;
-      if (existingHeader && currentFrames > 0) {
-        try {
-          const decoded = decodeWalFileHeader(existingHeader, true);
-          headerValid = decoded.salt1 === this.instanceSalt;
-        } catch {
-          headerValid = false;
-        }
-      }
-      if (!headerValid) {
-        await this.vfs.writeWalHeader(
-          encodeWalFileHeader({
-            checkpointSeq: this.checkpointSeq,
-            salt1: this.instanceSalt,
-          }),
-        );
-      }
-
       this.spilledPages.clear();
-      const snap = await this.captureSavepoint();
+      const knownFrameCount = this.queue.hasWebLocks()
+        ? this.expectedWalFrameCount
+        : undefined;
+      const snap = await this.captureSavepoint(knownFrameCount);
       this.snapshotFrameCount = snap.frameCount;
       this.snapshotWalFrameSeq = snap.walFrameSeq;
       this.slotSnapshots = snap.slotSnapshots;
@@ -784,11 +801,8 @@ export class TransactionCoordinator {
       }),
     );
 
-    // Durably write WAL frames
-    await this.vfs.appendWalFrames(framesToAppend);
-    await this.vfs.flushWal?.();
-    const currentFrames = await this.vfs.getWalFrameCount();
-    this.expectedWalFrameCount = currentFrames;
+    // Durably write WAL frames (combining WAL header write when supported)
+    const currentFrames = await this.appendFramesToWal(framesToAppend, true);
 
     // Cleanup active transaction state
     this.activeLease = null;
@@ -943,28 +957,37 @@ export class TransactionCoordinator {
 
     if (pagesToWrite.length > 0) {
       pagesToWrite.sort((a, b) => a.pageId - b.pageId);
-      await this.vfs.writePages(pagesToWrite);
     }
 
-    // 4. Durably flush main storage
-    await this.vfs.flush?.();
+    const nextCheckpointSeq = this.checkpointSeq + 1;
+    const nextWalHeader = encodeWalFileHeader({
+      checkpointSeq: nextCheckpointSeq,
+      salt1: this.instanceSalt,
+    });
 
-    // 5. Strictly AFTER flush succeeds, reset WAL to 0 and clear in-memory WAL page cache
-    await this.vfs.truncateWal(0);
+    if (this.vfs.checkpointAtomic) {
+      // Single atomic multi-store transaction: write pages + reset WAL + write fresh WAL header
+      await this.vfs.checkpointAtomic(pagesToWrite, nextWalHeader);
+    } else {
+      if (pagesToWrite.length > 0) {
+        await this.vfs.writePages(pagesToWrite);
+      }
+
+      // 4. Durably flush main storage
+      await this.vfs.flush?.();
+
+      // 5. Strictly AFTER flush succeeds, reset WAL to 0
+      await this.vfs.truncateWal(0);
+      await this.vfs.writeWalHeader(nextWalHeader);
+    }
+
     this.committedWalPages.clear();
-
-    // Increment checkpoint counter and re-write clean WAL file header
-    this.checkpointSeq++;
+    this.checkpointSeq = nextCheckpointSeq;
     this.walFrameSeq = 0;
     this.txCommitCount = 0;
     this.expectedWalFrameCount = 0;
+    this.walHeaderReady = true;
     this.recordDiskPage1State();
-    await this.vfs.writeWalHeader(
-      encodeWalFileHeader({
-        checkpointSeq: this.checkpointSeq,
-        salt1: this.instanceSalt,
-      }),
-    );
 
     return { pagesWritten: pagesToWrite.length };
   }
@@ -972,18 +995,25 @@ export class TransactionCoordinator {
   async resetWalAfterImport(): Promise<void> {
     this.spilledPages.clear();
     this.committedWalPages.clear();
-    await this.vfs.truncateWal(0);
-    this.checkpointSeq++;
+    const nextCheckpointSeq = this.checkpointSeq + 1;
+    const nextWalHeader = encodeWalFileHeader({
+      checkpointSeq: nextCheckpointSeq,
+      salt1: this.instanceSalt,
+    });
+
+    if (this.vfs.checkpointAtomic) {
+      await this.vfs.checkpointAtomic([], nextWalHeader);
+    } else {
+      await this.vfs.truncateWal(0);
+      await this.vfs.writeWalHeader(nextWalHeader);
+    }
+
+    this.checkpointSeq = nextCheckpointSeq;
     this.walFrameSeq = 0;
     this.txCommitCount = 0;
     this.expectedWalFrameCount = 0;
+    this.walHeaderReady = true;
     this.recordDiskPage1State();
-    await this.vfs.writeWalHeader(
-      encodeWalFileHeader({
-        checkpointSeq: this.checkpointSeq,
-        salt1: this.instanceSalt,
-      }),
-    );
   }
 
   private scheduleIdleTimer(): void {

@@ -139,20 +139,23 @@ export async function recoverFromWal(vfs: IVfsAdapter): Promise<RecoveryResult> 
     }
   }
 
-  // Step 4: Apply committed pages to main storage
-  if (latestPages.size > 0) {
-    const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
-    for (const [pageId, data] of latestPages.entries()) {
-      pagesToWrite.push({ pageId, data });
-    }
-    // Sort pages in ascending pageId order for sequential write locality
-    pagesToWrite.sort((a, b) => a.pageId - b.pageId);
-    await vfs.writePages(pagesToWrite);
+  // Step 4 & 5: Apply committed pages to main storage, flush, and truncate WAL
+  const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
+  for (const [pageId, data] of latestPages.entries()) {
+    pagesToWrite.push({ pageId, data });
   }
+  // Sort pages in ascending pageId order for sequential write locality
+  pagesToWrite.sort((a, b) => a.pageId - b.pageId);
 
-  // Step 5: Flush main storage and truncate WAL
-  await vfs.flush?.();
-  await vfs.truncateWal(0);
+  if (vfs.checkpointAtomic) {
+    await vfs.checkpointAtomic(pagesToWrite);
+  } else {
+    if (pagesToWrite.length > 0) {
+      await vfs.writePages(pagesToWrite);
+    }
+    await vfs.flush?.();
+    await vfs.truncateWal(0);
+  }
 
   return {
     frameCount: validFramesProcessed,

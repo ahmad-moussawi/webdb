@@ -73,7 +73,7 @@ import {
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
 import { MemoryVfsAdapter } from "../storage/memory.ts";
-import { IndexedDbVfsAdapter } from "../storage/idb.ts";
+import { IndexedDbVfsAdapter, type IdbDurability } from "../storage/idb.ts";
 import { OpfsVfsAdapter } from "../storage/opfs.ts";
 import { Io } from "../storage/io.ts";
 import { computePageChecksum } from "../storage/crc32.ts";
@@ -207,6 +207,17 @@ export interface WebDbOptions {
   wasmBinary?: ArrayBuffer | Uint8Array;
   planner?: QueryPlanner;
   initialData?: Uint8Array | ArrayBuffer;
+  /**
+   * IndexedDB transaction durability mode when `storage === 'idb'`.
+   * Defaults to `'relaxed'` for lower write latency on Windows/Chromium.
+   */
+  idbDurability?: IdbDurability;
+  /**
+   * Enable cross-tab synchronization via Web Locks and BroadcastChannel.
+   * Defaults to `true`. Set to `false` for single-tab apps (e.g. POS kiosks)
+   * to avoid per-operation cross-tab sync reads.
+   */
+  crossTabSync?: boolean;
 }
 
 export class WebDB implements IDatabaseQueryExecutor {
@@ -259,6 +270,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     wasmCore?: WasmCoreExports,
     planner?: QueryPlanner,
     dbName?: string,
+    crossTabSync: boolean = true,
   ) {
     this.vfs = vfs;
     this.io = io;
@@ -278,7 +290,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       await WebDB.pinAllCatalogPages(this.driver);
     });
 
-    if (typeof BroadcastChannel !== "undefined" && dbName) {
+    if (crossTabSync && typeof BroadcastChannel !== "undefined" && dbName) {
       const channelName = `webdb_sync_${vfs.name}_${dbName}`;
       this.broadcastChannel = new BroadcastChannel(channelName);
       this.broadcastChannel.onmessage = (ev: MessageEvent) => {
@@ -314,7 +326,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (options.vfs) {
       vfs = options.vfs;
     } else if (storageType === "idb") {
-      vfs = new IndexedDbVfsAdapter(options.name);
+      vfs = new IndexedDbVfsAdapter(options.name, {
+        durability: options.idbDurability,
+      });
     } else if (storageType === "opfs") {
       vfs = new OpfsVfsAdapter(options.name);
     } else {
@@ -350,8 +364,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       useDefaultLayoutOffsets: true,
     });
 
+    const crossTabSync = options.crossTabSync ?? true;
     const crossTabLockName =
-      options.name && vfs.name !== "memory"
+      crossTabSync && options.name && vfs.name !== "memory"
         ? `webdb_lock_${vfs.name}_${options.name}`
         : undefined;
 
@@ -397,6 +412,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       wasmCore,
       options.planner,
       options.name,
+      crossTabSync,
     );
 
     if (options.initialData) {

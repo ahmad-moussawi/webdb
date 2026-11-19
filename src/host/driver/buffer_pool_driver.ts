@@ -540,9 +540,18 @@ export class BufferPoolDriver {
       if (this.isDirty(i)) {
         const pageId = this.getAssignedPage(i);
         if (pageId > 0) {
+          if (i === 0 && pageId !== 1) {
+            throw new Error(
+              `Corruption detected: slot 0 is assigned to page ${pageId} instead of page 1`,
+            );
+          }
           dirty.push({ slotIdx: i, pageId, generation: this.slot_dirty_generations[i] });
         }
       }
+    }
+
+    if (dirty.length === 0) {
+      return;
     }
 
     // If any dirty page still has an older image in the WAL, commit the whole batch through the
@@ -558,9 +567,10 @@ export class BufferPoolDriver {
       return;
     }
 
-    for (let i = 0; i < this.slotCount; i++) {
-      if (this.isDirty(i)) {
-        await this.flushSlot(i);
+    await this.io.writeSlots(dirty);
+    for (const d of dirty) {
+      if (this.slot_dirty_generations[d.slotIdx] === d.generation) {
+        this.clearDirty(d.slotIdx);
       }
     }
     await this.io.flush();

@@ -1,14 +1,55 @@
 import { IVfsAdapter } from './vfs.js';
 
+export type IdbDurability = 'default' | 'strict' | 'relaxed';
+
+export interface IndexedDbVfsOptions {
+  durability?: IdbDurability;
+}
+
 export class IndexedDbVfsAdapter implements IVfsAdapter {
   readonly name = 'idb' as const;
   readonly isSynchronous = false;
+  readonly durability: IdbDurability;
 
   private dbName: string;
   private dbPromise: Promise<IDBDatabase> | null = null;
+  private cachedWalFrameCount: number | null = null;
 
-  constructor(dbName: string) {
+  constructor(dbName: string, options?: IndexedDbVfsOptions) {
     this.dbName = `webdb_${dbName}`;
+    this.durability = options?.durability ?? 'relaxed';
+  }
+
+  private openWriteTx(
+    db: IDBDatabase,
+    stores: string | string[],
+  ): IDBTransaction {
+    if (this.durability === 'default') {
+      return db.transaction(stores, 'readwrite');
+    }
+    try {
+      return db.transaction(stores, 'readwrite', {
+        durability: this.durability,
+      });
+    } catch {
+      return db.transaction(stores, 'readwrite');
+    }
+  }
+
+  private toStorableBytes(data: Uint8Array): Uint8Array {
+    const isShared =
+      typeof SharedArrayBuffer !== 'undefined' &&
+      data.buffer instanceof SharedArrayBuffer;
+    if (
+      !isShared &&
+      data.byteOffset === 0 &&
+      data.byteLength === data.buffer.byteLength
+    ) {
+      return data;
+    }
+    const copy = new Uint8Array(data.byteLength);
+    copy.set(data);
+    return copy;
   }
 
   private getDb(): Promise<IDBDatabase> {
@@ -69,13 +110,11 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
     if (pages.length === 0) return;
     const db = await this.getDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction('pages', 'readwrite');
+      const tx = this.openWriteTx(db, 'pages');
       const store = tx.objectStore('pages');
 
       for (const { pageId, data } of pages) {
-        const copy = new Uint8Array(data.byteLength);
-        copy.set(data);
-        store.put(copy, pageId);
+        store.put(this.toStorableBytes(data), pageId);
       }
 
       tx.oncomplete = () => resolve();
@@ -91,13 +130,14 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
   async truncate(pageCount: number): Promise<void> {
     const db = await this.getDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction('pages', 'readwrite');
+      const tx = this.openWriteTx(db, 'pages');
       const store = tx.objectStore('pages');
       const range = IDBKeyRange.lowerBound(pageCount, true);
-      const request = store.delete(range);
+      store.delete(range);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
   }
 
@@ -125,11 +165,9 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
   async writeWalHeader(header: Uint8Array): Promise<void> {
     const db = await this.getDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction('wal_meta', 'readwrite');
+      const tx = this.openWriteTx(db, 'wal_meta');
       const store = tx.objectStore('wal_meta');
-      const copy = new Uint8Array(header.byteLength);
-      copy.set(header);
-      store.put(copy, 'header');
+      store.put(this.toStorableBytes(header), 'header');
 
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
@@ -164,24 +202,56 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
 
   async appendWalFrames(frames: Uint8Array[]): Promise<void> {
     if (frames.length === 0) return;
-    const db = await this.getDb();
-    return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction('wal_frames', 'readwrite');
-      const store = tx.objectStore('wal_frames');
-      const countReq = store.count();
+    await this.appendWalFramesWithHeader(frames);
+  }
 
-      countReq.onsuccess = () => {
-        let nextIdx = countReq.result;
+  async appendWalFramesWithHeader(
+    frames: Uint8Array[],
+    walHeader?: Uint8Array,
+  ): Promise<number> {
+    if (frames.length === 0 && !walHeader) {
+      return this.cachedWalFrameCount ?? (await this.getWalFrameCount());
+    }
+    const db = await this.getDb();
+    const stores = walHeader ? ['wal_frames', 'wal_meta'] : ['wal_frames'];
+    return new Promise<number>((resolve, reject) => {
+      const tx = this.openWriteTx(db, stores);
+      const framesStore = tx.objectStore('wal_frames');
+      if (walHeader) {
+        tx.objectStore('wal_meta').put(this.toStorableBytes(walHeader), 'header');
+      }
+
+      let finalCount = 0;
+
+      const writeFramesFrom = (startIdx: number) => {
+        let nextIdx = startIdx;
         for (const frame of frames) {
-          const copy = new Uint8Array(frame.byteLength);
-          copy.set(frame);
-          store.put(copy, nextIdx++);
+          framesStore.put(this.toStorableBytes(frame), nextIdx++);
         }
+        finalCount = nextIdx;
       };
 
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
+      if (this.cachedWalFrameCount !== null) {
+        writeFramesFrom(this.cachedWalFrameCount);
+      } else {
+        const countReq = framesStore.count();
+        countReq.onsuccess = () => {
+          writeFramesFrom(countReq.result);
+        };
+      }
+
+      tx.oncomplete = () => {
+        this.cachedWalFrameCount = finalCount;
+        resolve(finalCount);
+      };
+      tx.onerror = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
+      tx.onabort = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
     });
   }
 
@@ -192,7 +262,7 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
   async truncateWal(frameIndex: number): Promise<void> {
     const db = await this.getDb();
     return new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(['wal_frames', 'wal_meta'], 'readwrite');
+      const tx = this.openWriteTx(db, ['wal_frames', 'wal_meta']);
       const framesStore = tx.objectStore('wal_frames');
       const metaStore = tx.objectStore('wal_meta');
 
@@ -204,9 +274,23 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
         framesStore.delete(range);
       }
 
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
+      tx.oncomplete = () => {
+        this.cachedWalFrameCount =
+          frameIndex === 0
+            ? 0
+            : this.cachedWalFrameCount !== null
+              ? Math.min(this.cachedWalFrameCount, frameIndex)
+              : null;
+        resolve();
+      };
+      tx.onerror = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
+      tx.onabort = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
     });
   }
 
@@ -217,12 +301,99 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
       const store = tx.objectStore('wal_frames');
       const request = store.count();
 
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        this.cachedWalFrameCount = request.result;
+        resolve(request.result);
+      };
       request.onerror = () => reject(request.error);
     });
   }
 
+  async checkpointAtomic(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+    walHeader?: Uint8Array,
+  ): Promise<void> {
+    const db = await this.getDb();
+    return new Promise<void>((resolve, reject) => {
+      const tx = this.openWriteTx(db, ['pages', 'wal_frames', 'wal_meta']);
+      const pagesStore = tx.objectStore('pages');
+      const framesStore = tx.objectStore('wal_frames');
+      const metaStore = tx.objectStore('wal_meta');
+
+      for (const { pageId, data } of pages) {
+        pagesStore.put(this.toStorableBytes(data), pageId);
+      }
+
+      framesStore.clear();
+      if (walHeader) {
+        metaStore.put(this.toStorableBytes(walHeader), 'header');
+      } else {
+        metaStore.delete('header');
+      }
+
+      tx.oncomplete = () => {
+        this.cachedWalFrameCount = 0;
+        resolve();
+      };
+      tx.onerror = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
+      tx.onabort = () => {
+        this.cachedWalFrameCount = null;
+        reject(tx.error);
+      };
+    });
+  }
+
+  async readSyncSnapshot(): Promise<{
+    walFrameCount: number;
+    walHeader: Uint8Array | null;
+    page1: Uint8Array | null;
+  }> {
+    const db = await this.getDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(['pages', 'wal_frames', 'wal_meta'], 'readonly');
+      const pagesStore = tx.objectStore('pages');
+      const framesStore = tx.objectStore('wal_frames');
+      const metaStore = tx.objectStore('wal_meta');
+
+      let walFrameCount = 0;
+      let walHeader: Uint8Array | null = null;
+      let page1: Uint8Array | null = null;
+
+      const countReq = framesStore.count();
+      countReq.onsuccess = () => {
+        walFrameCount = countReq.result;
+      };
+
+      const headerReq = metaStore.get('header');
+      headerReq.onsuccess = () => {
+        const res = headerReq.result;
+        if (res) {
+          walHeader = res instanceof Uint8Array ? res : new Uint8Array(res);
+        }
+      };
+
+      const page1Req = pagesStore.get(1);
+      page1Req.onsuccess = () => {
+        const res = page1Req.result;
+        if (res) {
+          page1 = res instanceof Uint8Array ? res : new Uint8Array(res);
+        }
+      };
+
+      tx.oncomplete = () => {
+        this.cachedWalFrameCount = walFrameCount;
+        resolve({ walFrameCount, walHeader, page1 });
+      };
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
   async close(): Promise<void> {
+    this.cachedWalFrameCount = null;
     if (this.dbPromise) {
       const db = await this.dbPromise;
       db.close();
