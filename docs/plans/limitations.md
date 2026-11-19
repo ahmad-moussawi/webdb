@@ -11,7 +11,7 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 | Category        | Parameter                              |                             V1 Limit                             | Error Thrown / Behavior on Breach                                    |
 | :-------------- | :------------------------------------- | :--------------------------------------------------------------: | :------------------------------------------------------------------- |
 | **Storage**     | Page Size                              |                       `4,096 bytes` (4 KB)                       | Rigid physical constant.                                             |
-| **Storage**     | Maximum Row Size                       |                          `2,048 bytes`                           | `RowSizeLimitExceededError` (compile/insert time)                    |
+| **Storage**     | Maximum Inline Row Size                |     `3,800 bytes` (`2,048 B` spill threshold; overflow pages)    | Large `TEXT`/`BLOB` auto-spill; `RowSizeLimitExceededError` if inline > `3,800 B` |
 | **Storage**     | Maximum Database Size                  |                        `16 TB` (physical)                        | Browser Storage Quota Exceeded (OS/device limit)                     |
 | **Storage**     | Maximum Tables per DB                  |            `16 tables` (Page 1) / $\infty$ (chained)             | `CatalogFullError` (forward-compatible to $\infty$)                  |
 | **Storage**     | Maximum Columns per Table              |                          `256 columns`                           | `TooManyColumnsError` (DDL time)                                     |
@@ -40,11 +40,12 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 - **Invariant:** Every database page, internal node, leaf node, and WAL frame is sized to exactly **4,096 bytes** ($2^{12}$).
 - **Rationale:** Aligns with standard operating system virtual memory page sizes and browser block I/O (IndexedDB block clustering and OPFS sync blocks). Eliminates variable-length page header decoding.
 
-### 2.2 Maximum Row Size (2,048 Bytes) & No Overflow Pages
+### 2.2 Inline Row Ceiling (3,800 Bytes) & Automatic Overflow Pages
 
-- **Invariant:** Serialized row records (header + null-bitmap + fixed-size columns + var-length strings/blobs) must never exceed **2,048 bytes** ($4096 / 2$).
-- **Mathematical Proof:** A B+Tree leaf page requires at least 2 records to maintain B-Tree balance invariants during node splits without cascading page collapses. Capping row size at $\frac{\text{Page Size}}{2} = 2048\text{ bytes}$ guarantees every leaf page can hold at least 2 cells plus the page header and slot directory.
-- **Failure Mode:** Attempting to insert or update a row whose serialized length $> 2048$ bytes immediately halts and throws `RowSizeLimitExceededError`. Overflow page chains are omitted in V1 to preserve zero-fragmentation slotted page math.
+- **Inline Spill Threshold (`2,048 bytes`):** When a serialized row fits within `MAX_INLINE_ROW_SIZE` (`2,048 bytes`), the entire row is stored inline on the 4 KB B+Tree leaf page—guaranteeing at least 2 records per leaf page for balanced splits.
+- **Automatic Overflow Spilling (`TEXT` / `BLOB`):** When a row exceeds `2,048 bytes`, WebDB greedily spills the largest `TEXT` and `BLOB` columns (> 8 bytes) into chained 4 KB **Overflow Pages** (`PAGE_TYPE_OVERFLOW = 14`, `4,080 bytes` usable payload per page) and replaces each spilled column inline with an 8-byte `OVERFLOW_DESCRIPTOR_SIZE` pointer (`ROW_FLAG_HAS_OVERFLOW`).
+- **Hard Inline Ceiling (`3,800 bytes`):** After spilling eligible variable-length columns, the remaining inline record (3-byte header + null-bitmap + fixed-width columns + var-length offset table + 8-byte overflow descriptors) must fit within `MAX_ROW_SIZE` (`3,800 bytes`).
+- **Failure Mode:** Attempting to insert or update a row whose non-spillable inline structure still exceeds `3,800 bytes` immediately halts and throws `RowSizeLimitExceededError`.
 
 ### 2.3 Maximum Database File Size (16 TB Physical / Browser Quota)
 
@@ -107,10 +108,10 @@ WebDB is engineered for **ultra-lean, deterministic execution** inside browser r
 - **Dynamic Row Null-Bitmap Scaling:**
   - The row's binary **Null-Bitmap** is sized dynamically as $\lceil\text{column\_count} / 8\rceil$ bytes.
   - For a 256-column table, the Null-Bitmap is exactly **32 bytes** (`(256 + 7) >> 3 = 32`).
-- **Interaction with Single Row Boundary (2,048 Bytes):**
-  - All serialized row records must satisfy the rigid physical constraint $\le 2048\text{ bytes}$ (`RowSizeLimitExceededError`).
-  - For 256 columns of 4-byte integers (`INT32`), row size is $1 + 32 + (256 \times 4) = 1,057\text{ bytes} \ll 2,048\text{ bytes}$.
-  - Tables utilizing wide 8-byte columns (`INT64`, `FLOAT64`, `UUID`) or strings across all 256 columns must ensure non-null populated fields do not exceed 2,048 bytes per row.
+- **Interaction with Inline Row Boundary (3,800 Bytes):**
+  - After automatic overflow spilling of large `TEXT`/`BLOB` columns, the remaining inline record (header + null-bitmap + fixed-width columns + var-length offset table / 8-byte overflow descriptors) must stay $\le 3,800\text{ bytes}$ (`RowSizeLimitExceededError`).
+  - For 256 columns of 4-byte integers (`INT32`), inline row size is $3 + 32 + (256 \times 4) = 1,059\text{ bytes} \ll 3,800\text{ bytes}$.
+  - Tables with up to 256 fixed-width 8-byte columns (`INT64`, `FLOAT64`) easily fit inline ($3 + 32 + 2{,}048 = 2{,}083\text{ bytes}$), whereas 256 populated 16-byte `UUID`/`ULID` columns ($4{,}131\text{ bytes}$) would exceed the `3,800`-byte inline ceiling.
 - **Failure Mode:** Calling `db.createTable()` with $> 256$ column definitions immediately throws `TooManyColumnsError`.
 
 ### 2.6 Maximum Identifier Length (64 Characters)
@@ -342,8 +343,8 @@ WebDB provides low-level primitives for building offline-first synchronization e
 | **`INT32`**   | 32-bit signed integer |       4 bytes       | Little-endian. Clamped range: $-2^{31} \dots 2^{31}-1$.                     |
 | **`INT64`**   | 64-bit signed integer |       8 bytes       | Represented in JS as `bigint`. Used for row IDs and millisecond timestamps. |
 | **`FLOAT64`** | 64-bit IEEE 754 float |       8 bytes       | Standard JavaScript `number` representation.                                |
-| **`TEXT`**    | UTF-8 byte stream     | Var (2B len + data) | Max length bounded by 2048-byte row ceiling.                                |
-| **`BLOB`**    | Raw binary bytes      | Var (2B len + data) | Max length bounded by 2048-byte row ceiling.                                |
+| **`TEXT`**    | UTF-8 byte stream     | Var (2B len + data) | Stored inline up to 2,048B row threshold; automatically spills to chained 4 KB overflow pages. |
+| **`BLOB`**    | Raw binary bytes      | Var (2B len + data) | Stored inline up to 2,048B row threshold; automatically spills to chained 4 KB overflow pages. |
 
 ### Unsupported Types & Recommended Emulations
 
@@ -360,7 +361,7 @@ WebDB provides low-level primitives for building offline-first synchronization e
 | :-------------------------------- | :----------------------------------------: | :--------------------------: | :----------------------------------------------------------- |
 | **Engine Footprint**              |                 `< 100 KB`                 |      `~800 KB - 1.5 MB`      | Zero SQL parser in engine, ultra-lean VDBE.                  |
 | **Page Size**                     |                 Rigid 4 KB                 |  Configurable (512B - 64KB)  | Deterministic memory layout for browser cache.               |
-| **Max Row Size**                  |               `2,048 bytes`                |    `1,000,000,000 bytes`     | Eliminates overflow page complexity in V1.                   |
+| **Max Row Size**                  | `3,800 B` inline + chained overflow pages  |    `1,000,000,000 bytes`     | `TEXT`/`BLOB` auto-spill past 2,048B into 4 KB overflow pages. |
 | **Tables per Database**           |      `16 tables` (Page 1) / $\infty$       |    Unlimited ($2^{31}-1$)    | $O(1)$ 128B descriptors; forward-compatible link.            |
 | **Columns per Table**             |               `256 columns`                |       `2,000 columns`        | Dedicated catalog pages; dynamic 32-byte Null-Bitmap.        |
 | **Max Identifier Length**         |              `64 characters`               |  Unlimited (no fixed limit)  | Standard SQL length (`char name[64]`); zero string parsing.  |

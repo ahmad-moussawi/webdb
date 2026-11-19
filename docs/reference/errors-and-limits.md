@@ -8,7 +8,7 @@ To guarantee fast startup, predictable memory usage on mobile browsers, and a co
 
 | Area                         | Limit                | Notes & How to Handle                                                                                                                                                |
 | :--------------------------- | :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Maximum Row Size**         | `2,048 bytes` (2 KB) | Serialized size of a single row (columns + strings/blobs) cannot exceed 2 KB. Store large files/images in OPFS/Blob storage and save their URL or file key in WebDB. |
+| **Maximum Inline Row Size**  | `3,800 bytes` _(2,048 B spill threshold)_ | Rows exceeding `2,048 bytes` automatically spill large `TEXT`/`BLOB` columns into chained 4 KB overflow pages (`4,080 B` payload/page). The remaining inline header, fixed-width columns, and 8-byte overflow pointers must stay $\le 3,800$ bytes. |
 | **Identifier Length**        | `64 characters`      | Maximum length for table names, column names, and index names (matches PostgreSQL & MySQL).                                                                          |
 | **Tables per Database**      | `Unlimited` _(16 on Page 1 + 31/overflow page)_ | Page 1 stores 16 tables; additional tables chain automatically via `NEXT_CATALOG_PAGE_ID` overflow catalog pages.                                                    |
 | **Columns per Table**        | `256 columns`        | Supports 1 to 256 columns per table.                                                                                                                                 |
@@ -46,7 +46,7 @@ try {
   } else if (err instanceof NotNullConstraintError) {
     alert("Please fill in all required fields.");
   } else if (err instanceof RowSizeLimitExceededError) {
-    alert("Profile text is too long (maximum 2 KB per record).");
+    alert("Row inline structure exceeds the 3,800-byte maximum limit.");
   } else {
     throw err;
   }
@@ -59,7 +59,7 @@ try {
 | :--------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`UniqueConstraintViolationError`**                 | Inserting or updating a duplicate value on a `primaryKey: true` column or `{ unique: true }` index.                                                    |
 | **`NotNullConstraintError`**                         | Inserting `null`/`undefined` into a `notNull: true` column, or calling `addColumn` with `notNull: true` on a populated table without a `defaultValue`. |
-| **`RowSizeLimitExceededError`**                      | Inserting or updating a row whose serialized binary size exceeds `2,048 bytes`.                                                                        |
+| **`RowSizeLimitExceededError`**                      | Inserting or updating a row whose inline binary record still exceeds `3,800 bytes` after spilling eligible `TEXT`/`BLOB` columns to overflow pages.    |
 | **`TableNotFoundError`**                             | Querying, mutating, or inspecting a table name that does not exist.                                                                                    |
 | **`TableAlreadyExistsError`**                        | Calling `createTable()` or `renameTable()` with a name that already exists.                                                                            |
 | **`ColumnNotFoundError`**                            | Referencing a non-existent column in `renameColumn`, `dropColumn`, `createIndex`, or queries.                                                          |
