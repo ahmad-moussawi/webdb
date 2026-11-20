@@ -257,7 +257,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
 
       // Page 2: items root page with 2 rows, linked to Page 3
       const slot2 = await driver.acquirePage(2);
-      const page2Offset = slot2 * PAGE_SIZE;
+      const page2Offset = driver.getSlotOffset(slot2);
       page_init(view, page2Offset);
       page_insert_row(
         view,
@@ -275,7 +275,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
 
       // Page 3: second page with 2 rows, linked to 0 (EOF)
       const slot3 = await driver.acquirePage(3);
-      const page3Offset = slot3 * PAGE_SIZE;
+      const page3Offset = driver.getSlotOffset(slot3);
       page_init(view, page3Offset);
       page_insert_row(
         view,

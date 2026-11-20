@@ -172,6 +172,10 @@ export const VM_AGG_BUCKETS_OFF = 16;    // u32: Arena byte offset of `u32 bucke
 export const VM_AGG_CURR_BUCKET_OFF = 20;// u32: Arena byte offset of active `VmAggBucket`
 
 export const VM_CTX_IN_SETS_OFF = 7440;  // 16 * 8B (`count: u32, items_off: u32`) -> JS `ctx.inSets[set_idx]`
+export const VM_CTX_SLOTS_BASE_OFF = 7568;       // u32: Base byte offset of buffer pool slot 0 (SLOTS_BASE_OFFSET or 0)
+export const VM_CTX_PAGE_TO_SLOT_OFF = 7572;     // u32: Byte offset of PAGE_TO_SLOT hash table
+export const VM_CTX_PAGE_TO_SLOT_BUCKETS = 7576; // u32: Number of buckets in PAGE_TO_SLOT hash table
+export const VM_CTX_ARENA_BASE_OFF = 7580;       // u32: Byte offset of transient query arena base
 export const VM_CTX_SCRATCH_OFF = 7680;  // Scratch buffer inside `VM_CONTEXT_OFFSET`
 export const VM_STATUS_HOST_UDF = 99;    // Yield code asking host wrapper to invoke `ctx.udfs[udf_id]`
 
@@ -342,14 +346,19 @@ export function vm_load_overflow_column(
     return VmStatus.RUNNING;
   }
 
+  const slots_base: u32 = read_u32(view, ctx_off + VM_CTX_SLOTS_BASE_OFF);
+  const page_to_slot_off: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF);
+  const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
+  const arena_base: u32 = read_u32(view, ctx_off + VM_CTX_ARENA_BASE_OFF);
+
   // Pass 1: Verify all overflow pages in the chain are resident before allocating arena memory
   let curr_pid: u32 = first_page_id;
   let remaining: u32 = total_len;
   while (curr_pid > 1 && remaining > 0) {
     const slot: i32 = buf_pool_get_resident_slot(
       view,
-      PAGE_TO_SLOT_OFFSET,
-      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      page_to_slot_off,
+      page_to_slot_buckets,
       curr_pid,
     );
     if (slot < 0) {
@@ -358,7 +367,7 @@ export function vm_load_overflow_column(
       write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
       return VmStatus.PAGE_FAULT;
     }
-    const page_off: u32 = (slot as u32) * PAGE_SIZE;
+    const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
     const chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
     if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
@@ -375,7 +384,7 @@ export function vm_load_overflow_column(
   const dest_off: u32 = vm_phys_alloc(
     view,
     ctx_off,
-    TRANSIENT_ARENA_OFFSET,
+    arena_base,
     total_len,
   );
   if (dest_off === 0) {
@@ -389,14 +398,14 @@ export function vm_load_overflow_column(
   while (curr_pid > 1 && copied < total_len) {
     const slot: i32 = buf_pool_get_resident_slot(
       view,
-      PAGE_TO_SLOT_OFFSET,
-      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      page_to_slot_off,
+      page_to_slot_buckets,
       curr_pid,
     );
     if (slot < 0) {
       break;
     }
-    const page_off: u32 = (slot as u32) * PAGE_SIZE;
+    const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
     let chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
     if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
@@ -645,22 +654,26 @@ export function vm_ulid_encode_view(
  */
 export function vm_resolve_page_offset(
   view: DataView,
+  ctx_off: u32,
   has_buffer_pool: u32,
   page_id: u32,
 ): u32 {
   if (page_id === 0) return 0;
+  const slots_base: u32 = read_u32(view, ctx_off + VM_CTX_SLOTS_BASE_OFF);
   if (has_buffer_pool !== 0) {
+    const page_to_slot_off: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF);
+    const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
     const slot: i32 = buf_pool_get_resident_slot(
       view,
-      PAGE_TO_SLOT_OFFSET,
-      DEFAULT_PAGE_TO_SLOT_BUCKETS,
+      page_to_slot_off,
+      page_to_slot_buckets,
       page_id,
     );
     if (slot >= 0) {
-      return (slot as u32) * PAGE_SIZE;
+      return slots_base + (slot as u32) * PAGE_SIZE;
     }
   }
-  return (page_id - 1) * PAGE_SIZE;
+  return slots_base + (page_id - 1) * PAGE_SIZE;
 }
 
 /**
@@ -2883,8 +2896,19 @@ export function get_cursor(ctx: VmContext, cursor_idx: number): VmCursor {
 
 export function resolve_page_offset(view: DataView, page_id: number): number {
   if (page_id <= 0) return 0;
-  const has_pool = view.byteLength >= PAGE_TO_SLOT_OFFSET + PAGE_TO_SLOT_SIZE ? 1 : 0;
-  return vm_resolve_page_offset(view, has_pool, page_id);
+  const pool = (view.buffer as any).__webdbPool;
+  if (pool) {
+    const slot = buf_pool_get_resident_slot(
+      view,
+      pool.pageToSlotOffset,
+      pool.pageToSlotBuckets,
+      page_id,
+    );
+    if (slot >= 0) {
+      return pool.slotsBaseOffset + slot * PAGE_SIZE;
+    }
+  }
+  return (page_id - 1) * PAGE_SIZE;
 }
 
 export function compare_3vl(

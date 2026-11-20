@@ -12,6 +12,8 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
   uint32_t MAX_CYCLES = 10000000;
   uint32_t cycles = 0;
   uint32_t has_buffer_pool = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_HAS_BUFFER_POOL));
+  uint32_t page_to_slot_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_OFF));
+  uint32_t page_to_slot_buckets = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS));
   uint32_t pc = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PC));
   while (pc < code_len) {
     cycles++;
@@ -41,7 +43,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
           store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), 0);
           if (has_buffer_pool != 0 && root_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, root_page_id);
+            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, root_page_id);
             if (slot < 0) {
               store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), root_page_id);
               store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -65,7 +67,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
           if (has_buffer_pool != 0 && page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, page_id);
+            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, page_id);
             if (slot < 0) {
               store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), page_id);
               store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -74,7 +76,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             }
             store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
           }
-          uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, page_id);
           if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
             pc = jump_target;
             break;
@@ -107,7 +109,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
-          uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, page_id);
           if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
             pc = jump_target;
             break;
@@ -122,7 +124,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             uint32_t next_page_id = page_get_next_page_id(page_offset);
             if (next_page_id != 0 && next_page_id != page_id) {
               if (has_buffer_pool != 0) {
-                int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, next_page_id);
+                int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, next_page_id);
                 if (slot < 0) {
                   store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), next_page_id);
                   store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -131,7 +133,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
                 }
                 store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
               }
-              uint32_t next_offset = vm_resolve_page_offset(has_buffer_pool, next_page_id);
+              uint32_t next_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, next_page_id);
               if (page_get_type(next_offset) != PAGE_TYPE_LEAF_DATA) {
                 pc = jump_target;
                 break;
@@ -164,7 +166,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
-          uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, page_id);
           if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
             pc = jump_target;
             break;
@@ -192,7 +194,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
-          uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, page_id);
+          uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, page_id);
           int32_t cell_idx = load_i32((const void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX));
           if (cell_idx > 0) {
             int32_t prev_idx = cell_idx - 1;
@@ -380,7 +382,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
           store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), 0);
           if (has_buffer_pool != 0 && root_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, root_page_id);
+            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, root_page_id);
             if (slot < 0) {
               store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), root_page_id);
               store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -416,7 +418,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           int64_t matched_rowid = 0LL;
           while (curr_page_id != 0) {
             if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_page_id);
+              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
               if (slot < 0) {
                 store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
                 store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -425,7 +427,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               }
               store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
             }
-            uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, curr_page_id);
+            uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
             int32_t matched_slot = vm_index_seek_leaf_eq(ctx_off, page_offset, key_type, key_reg_off);
             if (matched_slot >= 0) {
               found = 1;
@@ -444,7 +446,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
             int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
             if (has_buffer_pool != 0 && data_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, data_page_id);
+              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
               if (slot < 0) {
                 store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
                 store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -455,7 +457,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
             store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
             store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-            uint32_t data_page_offset = vm_resolve_page_offset(has_buffer_pool, data_page_id);
+            uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
             uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
             store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
           }
@@ -486,7 +488,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           int64_t matched_rowid = 0LL;
           while (curr_page_id != 0) {
             if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_page_id);
+              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
               if (slot < 0) {
                 store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
                 store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -495,7 +497,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               }
               store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
             }
-            uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, curr_page_id);
+            uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
             int32_t candidate_slot = vm_index_seek_leaf_ge(ctx_off, page_offset, key_type, key_reg_off);
             if (candidate_slot >= 0) {
               found = 1;
@@ -514,7 +516,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
             int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
             if (has_buffer_pool != 0 && data_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, data_page_id);
+              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
               if (slot < 0) {
                 store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
                 store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -525,7 +527,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
             store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
             store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-            uint32_t data_page_offset = vm_resolve_page_offset(has_buffer_pool, data_page_id);
+            uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
             uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
             store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
           }
@@ -544,7 +546,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           }
           uint32_t idx_cur_off = vm_cursor_off(ctx_off, index_cursor_idx);
           uint32_t curr_page_id = load_u32((const void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID));
-          uint32_t page_offset = vm_resolve_page_offset(has_buffer_pool, curr_page_id);
+          uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
           int32_t cell_count = page_get_cell_count(page_offset);
           int32_t next_cell_idx = load_i32((const void *)(uintptr_t)(idx_cur_off + VM_CUR_CELL_IDX)) + 1;
           if (next_cell_idx >= cell_count) {
@@ -554,7 +556,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               break;
             }
             if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_page_id);
+              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
               if (slot < 0) {
                 store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
                 store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -563,7 +565,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               }
               store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
             }
-            page_offset = vm_resolve_page_offset(has_buffer_pool, curr_page_id);
+            page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
             next_cell_idx = 0;
             store_u32((void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID), curr_page_id);
             store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_CELL_IDX), -1);
@@ -574,7 +576,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
           int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
           if (has_buffer_pool != 0 && data_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, data_page_id);
+            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
             if (slot < 0) {
               store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
               store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
@@ -587,7 +589,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
           store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
           store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-          uint32_t data_page_offset = vm_resolve_page_offset(has_buffer_pool, data_page_id);
+          uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
           uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
           store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
           break;

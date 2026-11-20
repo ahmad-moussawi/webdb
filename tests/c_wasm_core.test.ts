@@ -17,6 +17,9 @@ import {
   BYTECODE_SIZE,
   PAGE_SCRATCHPAD_OFFSET,
   PAGE_SCRATCHPAD_SIZE,
+  WASM_STACK_TOP,
+  WASM_REGION_SIZE,
+  SLOTS_BASE_OFFSET,
   ALIGNMENT_PADDING_OFFSET,
   TRANSIENT_ARENA_OFFSET,
   createWasmMemory,
@@ -269,32 +272,32 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       await db2.close();
     });
 
-    it("places Wasm stack and .rodata/.bss strictly inside ALIGNMENT_PADDING (0x421080..0x42FFFF)", () => {
+    it("places Wasm stack and .rodata/.bss strictly inside WASM_REGION (0x000000..0x00FFFF)", () => {
       const cleanMem = createWasmMemory();
       const core = createWasmCore(cleanMem);
       const u8 = new Uint8Array(cleanMem.buffer);
 
-      // Verify zero bytes were modified across all 1024 page slots (0..0x3FFFFF) and pool/VM buffers (0x400000..0x42107F)
-      let nonZeroBeforePadding = 0;
-      for (let i = 0; i < ALIGNMENT_PADDING_OFFSET; i++) {
+      // Verify zero bytes were modified in fixed engine regions (0x010000..0x02FFFF) or any page slots / metadata (0x030000+)
+      let nonZeroAfterWasmRegion = 0;
+      for (let i = WASM_REGION_SIZE; i < TRANSIENT_ARENA_OFFSET; i++) {
         if (u8[i] !== 0) {
-          nonZeroBeforePadding++;
+          nonZeroAfterWasmRegion++;
           break;
         }
       }
-      expect(nonZeroBeforePadding).toBe(0);
+      expect(nonZeroAfterWasmRegion).toBe(0);
 
-      // Verify .rodata is present inside ALIGNMENT_PADDING..TRANSIENT_ARENA_OFFSET
-      let nonZeroInPadding = 0;
-      for (let i = ALIGNMENT_PADDING_OFFSET; i < TRANSIENT_ARENA_OFFSET; i++) {
+      // Verify .rodata is present inside WASM_STACK_TOP..WASM_REGION_SIZE (0x00C000..0x00FFFF)
+      let nonZeroInRodata = 0;
+      for (let i = WASM_STACK_TOP; i < WASM_REGION_SIZE; i++) {
         if (u8[i] !== 0) {
-          nonZeroInPadding++;
+          nonZeroInRodata++;
         }
       }
-      expect(nonZeroInPadding).toBeGreaterThan(0);
+      expect(nonZeroInRodata).toBeGreaterThan(0);
 
-      // Verify __stack_pointer is placed at 0x42D000 inside ALIGNMENT_PADDING
-      expect(core.exports.__stack_pointer.value).toBe(0x42d000);
+      // Verify __stack_pointer is placed at WASM_STACK_TOP (0x00C000)
+      expect(core.exports.__stack_pointer.value).toBe(WASM_STACK_TOP);
     });
   });
 
@@ -475,13 +478,15 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
         }
       }
 
-      // Also verify global region boundaries
-      expect(DIRTY_MASK_OFFSET + 128).toBe(VM_CONTEXT_OFFSET);
+      // Also verify global region boundaries (fixed low engine block + dynamic pool metadata)
+      expect(WASM_REGION_SIZE).toBe(VM_CONTEXT_OFFSET);
       expect(VM_CONTEXT_OFFSET + VM_CONTEXT_SIZE).toBe(RESULT_BUFFER_OFFSET);
       expect(RESULT_BUFFER_OFFSET + RESULT_BUFFER_SIZE).toBe(BYTECODE_OFFSET);
       expect(BYTECODE_OFFSET + BYTECODE_SIZE).toBe(PAGE_SCRATCHPAD_OFFSET);
       expect(PAGE_SCRATCHPAD_OFFSET + PAGE_SCRATCHPAD_SIZE).toBe(ALIGNMENT_PADDING_OFFSET);
-      expect(ALIGNMENT_PADDING_OFFSET).toBeLessThan(TRANSIENT_ARENA_OFFSET);
+      expect(ALIGNMENT_PADDING_OFFSET).toBeLessThan(SLOTS_BASE_OFFSET);
+      expect(SLOT_TO_PAGE_OFFSET + 4096).toBe(PAGE_TO_SLOT_OFFSET);
+      expect(DIRTY_MASK_OFFSET + 128).toBeLessThanOrEqual(TRANSIENT_ARENA_OFFSET);
     });
 
     it("preserves canary sentinel bytes in neighbouring regions across 100-column + IN + GROUP BY + ORDER BY queries on both JS and WASM", async () => {

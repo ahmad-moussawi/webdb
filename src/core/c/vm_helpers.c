@@ -284,6 +284,22 @@
 #define VM_CTX_IN_SETS_OFF 7440
 #endif
 
+#ifndef VM_CTX_SLOTS_BASE_OFF
+#define VM_CTX_SLOTS_BASE_OFF 7568
+#endif
+
+#ifndef VM_CTX_PAGE_TO_SLOT_OFF
+#define VM_CTX_PAGE_TO_SLOT_OFF 7572
+#endif
+
+#ifndef VM_CTX_PAGE_TO_SLOT_BUCKETS
+#define VM_CTX_PAGE_TO_SLOT_BUCKETS 7576
+#endif
+
+#ifndef VM_CTX_ARENA_BASE_OFF
+#define VM_CTX_ARENA_BASE_OFF 7580
+#endif
+
 #ifndef VM_CTX_SCRATCH_OFF
 #define VM_CTX_SCRATCH_OFF 7680
 #endif
@@ -386,17 +402,21 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
     vm_reg_set_slice(reg_off, col_type, 0, 0);
     return VM_STATUS_RUNNING;
   }
+  uint32_t slots_base = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_SLOTS_BASE_OFF));
+  uint32_t page_to_slot_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_OFF));
+  uint32_t page_to_slot_buckets = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS));
+  uint32_t arena_base = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_BASE_OFF));
   uint32_t curr_pid = first_page_id;
   uint32_t remaining = total_len;
   while (curr_pid > 1 && remaining > 0) {
-    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_pid);
+    int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
       store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_pid);
       store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
       store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
       return VM_STATUS_PAGE_FAULT;
     }
-    uint32_t page_off = (slot) * PAGE_SIZE;
+    uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
     if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
@@ -409,7 +429,7 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
     }
     curr_pid = next_pid;
   }
-  uint32_t dest_off = vm_phys_alloc(ctx_off, TRANSIENT_ARENA_OFFSET, total_len);
+  uint32_t dest_off = vm_phys_alloc(ctx_off, arena_base, total_len);
   if (dest_off == 0) {
     store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
     return VM_STATUS_ARENA_EXHAUSTED;
@@ -417,11 +437,11 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
   curr_pid = first_page_id;
   uint32_t copied = 0;
   while (curr_pid > 1 && copied < total_len) {
-    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, curr_pid);
+    int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
       break;
     }
-    uint32_t page_off = (slot) * PAGE_SIZE;
+    uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
     if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
@@ -596,16 +616,19 @@ int32_t vm_ulid_encode_view(uint32_t src_off, uint32_t src_len, uint32_t dst_off
   return 0;
 }
 
-uint32_t vm_resolve_page_offset(uint32_t has_buffer_pool, uint32_t page_id) {
+uint32_t vm_resolve_page_offset(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_id) {
   if (page_id == 0) 
     return 0;
+  uint32_t slots_base = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_SLOTS_BASE_OFF));
   if (has_buffer_pool != 0) {
-    int32_t slot = buf_pool_get_resident_slot(PAGE_TO_SLOT_OFFSET, DEFAULT_PAGE_TO_SLOT_BUCKETS, page_id);
+    uint32_t page_to_slot_off = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_OFF));
+    uint32_t page_to_slot_buckets = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS));
+    int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, page_id);
     if (slot >= 0) {
-      return (slot) * PAGE_SIZE;
+      return slots_base + (slot) * PAGE_SIZE;
     }
   }
-  return (page_id - 1) * PAGE_SIZE;
+  return slots_base + (page_id - 1) * PAGE_SIZE;
 }
 
 int32_t vm_row_is_null(uint32_t null_bitmap_offset, uint32_t col_idx) {

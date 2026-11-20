@@ -35,6 +35,9 @@ import {
   CATALOG_PAGE_HEADER_SIZE,
   COLUMN_META_SIZE,
   DEFAULT_SLOT_COUNT,
+  WASM_STACK_TOP,
+  WASM_REGION_SIZE,
+  SLOTS_BASE_OFFSET,
   SLOT_TO_PAGE_OFFSET,
   PAGE_TO_SLOT_OFFSET,
   DIRTY_MASK_OFFSET,
@@ -98,25 +101,43 @@ describe("Layout Architecture Tests (tests/layouts.test.ts)", () => {
     expect(COLUMN_META_SIZE).toBe(72);
   });
 
-  it("6. Buffer Pool memory layout aligns with default 1024-slot (4MB) specification", () => {
+  it("6. Buffer Pool memory layout aligns with fixed low engine block + default 1024-slot (4MB) specification", () => {
     expect(DEFAULT_SLOT_COUNT).toBe(1024);
-    expect(SLOT_TO_PAGE_OFFSET).toBe(0x400000);
-    expect(PAGE_TO_SLOT_OFFSET).toBe(0x401000);
-    expect(DIRTY_MASK_OFFSET).toBe(0x405000);
-    expect(VM_CONTEXT_OFFSET).toBe(0x405080);
-    expect(RESULT_BUFFER_OFFSET).toBe(0x408080);
-    expect(BYTECODE_OFFSET).toBe(0x418080);
-    expect(PAGE_SCRATCHPAD_OFFSET).toBe(0x420080);
-    expect(TRANSIENT_ARENA_OFFSET).toBe(0x430000);
+    expect(WASM_STACK_TOP).toBe(0x00c000);
+    expect(WASM_REGION_SIZE).toBe(0x010000);
+    expect(VM_CONTEXT_OFFSET).toBe(0x010000);
+    expect(RESULT_BUFFER_OFFSET).toBe(0x013000);
+    expect(BYTECODE_OFFSET).toBe(0x023000);
+    expect(PAGE_SCRATCHPAD_OFFSET).toBe(0x02b000);
+    expect(SLOTS_BASE_OFFSET).toBe(0x030000);
+    expect(SLOT_TO_PAGE_OFFSET).toBe(0x430000);
+    expect(PAGE_TO_SLOT_OFFSET).toBe(0x431000);
+    expect(DIRTY_MASK_OFFSET).toBe(0x435000);
+    expect(TRANSIENT_ARENA_OFFSET).toBe(0x440000);
   });
 
   it("7. Dynamic buffer pool offset computation correctly offsets non-default slot counts", () => {
     const custom = computeBufferPoolOffsets(64);
-    expect(custom.slotsEndOffset).toBe(64 * PAGE_SIZE);
-    expect(custom.slotToPageOffset).toBe(64 * PAGE_SIZE);
+    expect(custom.slotsBaseOffset).toBe(SLOTS_BASE_OFFSET);
+    expect(custom.slotsEndOffset).toBe(SLOTS_BASE_OFFSET + 64 * PAGE_SIZE);
+    expect(custom.slotToPageOffset).toBe(custom.slotsEndOffset);
     // 64 slots * 4 bytes = 256 bytes (8-byte aligned)
     expect(custom.pageToSlotOffset).toBe(custom.slotToPageOffset + 256);
     // 64 slots -> 128 buckets * 8 bytes = 1024 bytes
     expect(custom.dirtyMaskOffset).toBe(custom.pageToSlotOffset + 1024);
+    expect(custom.transientArenaOffset % 65536).toBe(0);
+
+    // Large slotCount (e.g. 8192 = 32 MB) scales cleanly without overlapping fixed engine block
+    const large = computeBufferPoolOffsets(8192);
+    expect(large.slotsBaseOffset).toBe(SLOTS_BASE_OFFSET);
+    expect(large.slotsEndOffset).toBe(SLOTS_BASE_OFFSET + 8192 * PAGE_SIZE);
+    expect(large.slotToPageOffset).toBe(large.slotsEndOffset);
+    expect(large.pageToSlotBuckets).toBe(16384);
+    expect(large.pageToSlotOffset).toBe(large.slotToPageOffset + 8192 * 4);
+    expect(large.dirtyMaskOffset).toBe(large.pageToSlotOffset + 16384 * 8);
+    expect(large.transientArenaOffset % 65536).toBe(0);
+    expect(large.transientArenaOffset).toBeGreaterThanOrEqual(
+      large.dirtyMaskOffset + 1024,
+    );
   });
 });

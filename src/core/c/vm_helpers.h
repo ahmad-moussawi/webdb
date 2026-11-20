@@ -28,7 +28,7 @@ WEBDB_EXPORT void vm_uuid_decode_view(uint32_t src_off, uint32_t dst_off);
 WEBDB_EXPORT int32_t vm_uuid_encode_view(uint32_t src_off, uint32_t src_len, uint32_t dst_off);
 WEBDB_EXPORT void vm_ulid_decode_view(uint32_t src_off, uint32_t dst_off);
 WEBDB_EXPORT int32_t vm_ulid_encode_view(uint32_t src_off, uint32_t src_len, uint32_t dst_off);
-WEBDB_EXPORT uint32_t vm_resolve_page_offset(uint32_t has_buffer_pool, uint32_t page_id);
+WEBDB_EXPORT uint32_t vm_resolve_page_offset(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_id);
 WEBDB_EXPORT int32_t vm_row_is_null(uint32_t null_bitmap_offset, uint32_t col_idx);
 WEBDB_EXPORT uint32_t vm_compute_fixed_col_offset(uint32_t null_bitmap_offset, uint32_t null_bitmap_bytes, uint32_t tbl_off, uint32_t target_col_idx);
 WEBDB_EXPORT uint32_t vm_compute_var_col_idx(uint32_t tbl_off, uint32_t target_col_idx);

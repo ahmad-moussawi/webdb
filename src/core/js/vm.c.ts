@@ -5,6 +5,7 @@
  */
 
 import {
+  SLOTS_BASE_OFFSET,
   PAGE_TO_SLOT_OFFSET,
   DEFAULT_PAGE_TO_SLOT_BUCKETS,
   SLOT_TO_PAGE_OFFSET,
@@ -109,6 +110,10 @@ import {
   VM_AGG_OCCUPIED,
   VM_AGG_READ_IDX,
   VM_CTX_IN_SETS_OFF,
+  VM_CTX_SLOTS_BASE_OFF,
+  VM_CTX_PAGE_TO_SLOT_OFF,
+  VM_CTX_PAGE_TO_SLOT_BUCKETS,
+  VM_CTX_ARENA_BASE_OFF,
   VM_STATUS_HOST_UDF,
   vm_reg_off,
   vm_cursor_off,
@@ -228,6 +233,8 @@ export function vm_step_raw(
   // JS: const hasBufferPool = ctx.hasBufferPool;
   // JS: let pc = ctx.pc;
   const has_buffer_pool: u32 = read_u32(view, ctx_off + VM_CTX_HAS_BUFFER_POOL);
+  const page_to_slot_off: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF);
+  const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
   let pc: u32 = read_u32(view, ctx_off + VM_CTX_PC);
 
   while (pc < code_len) {
@@ -276,8 +283,8 @@ export function vm_step_raw(
         if (has_buffer_pool !== 0 && root_page_id > 0) {
           const slot: i32 = buf_pool_get_resident_slot(
             view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            page_to_slot_off,
+            page_to_slot_buckets,
             root_page_id,
           );
           if (slot < 0) {
@@ -317,8 +324,8 @@ export function vm_step_raw(
         if (has_buffer_pool !== 0 && page_id > 0) {
           const slot: i32 = buf_pool_get_resident_slot(
             view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            page_to_slot_off,
+            page_to_slot_buckets,
             page_id,
           );
           if (slot < 0) {
@@ -334,6 +341,7 @@ export function vm_step_raw(
 
         const page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           page_id,
         );
@@ -386,6 +394,7 @@ export function vm_step_raw(
         const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
         const page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           page_id,
         );
@@ -419,8 +428,8 @@ export function vm_step_raw(
             if (has_buffer_pool !== 0) {
               const slot: i32 = buf_pool_get_resident_slot(
                 view,
-                PAGE_TO_SLOT_OFFSET,
-                DEFAULT_PAGE_TO_SLOT_BUCKETS,
+                page_to_slot_off,
+                page_to_slot_buckets,
                 next_page_id,
               );
               if (slot < 0) {
@@ -436,6 +445,7 @@ export function vm_step_raw(
 
             const next_offset: u32 = vm_resolve_page_offset(
               view,
+              ctx_off,
               has_buffer_pool,
               next_page_id,
             );
@@ -492,6 +502,7 @@ export function vm_step_raw(
         const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
         const page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           page_id,
         );
@@ -539,6 +550,7 @@ export function vm_step_raw(
         const page_id: u32 = read_u32(view, cur_off + VM_CUR_PAGE_ID);
         const page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           page_id,
         );
@@ -856,8 +868,8 @@ export function vm_step_raw(
         if (has_buffer_pool !== 0 && root_page_id > 0) {
           const slot: i32 = buf_pool_get_resident_slot(
             view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            page_to_slot_off,
+            page_to_slot_buckets,
             root_page_id,
           );
           if (slot < 0) {
@@ -904,8 +916,8 @@ export function vm_step_raw(
           if (has_buffer_pool !== 0 && curr_page_id > 0) {
             const slot: i32 = buf_pool_get_resident_slot(
               view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              page_to_slot_off,
+              page_to_slot_buckets,
               curr_page_id,
             );
             if (slot < 0) {
@@ -919,6 +931,7 @@ export function vm_step_raw(
 
           const page_offset: u32 = vm_resolve_page_offset(
             view,
+            ctx_off,
             has_buffer_pool,
             curr_page_id,
           );
@@ -959,8 +972,8 @@ export function vm_step_raw(
           if (has_buffer_pool !== 0 && data_page_id > 0) {
             const slot: i32 = buf_pool_get_resident_slot(
               view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              page_to_slot_off,
+              page_to_slot_buckets,
               data_page_id,
             );
             if (slot < 0) {
@@ -976,6 +989,7 @@ export function vm_step_raw(
           write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
           const data_page_offset: u32 = vm_resolve_page_offset(
             view,
+            ctx_off,
             has_buffer_pool,
             data_page_id,
           );
@@ -1026,8 +1040,8 @@ export function vm_step_raw(
           if (has_buffer_pool !== 0 && curr_page_id > 0) {
             const slot: i32 = buf_pool_get_resident_slot(
               view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              page_to_slot_off,
+              page_to_slot_buckets,
               curr_page_id,
             );
             if (slot < 0) {
@@ -1041,6 +1055,7 @@ export function vm_step_raw(
 
           const page_offset: u32 = vm_resolve_page_offset(
             view,
+            ctx_off,
             has_buffer_pool,
             curr_page_id,
           );
@@ -1081,8 +1096,8 @@ export function vm_step_raw(
           if (has_buffer_pool !== 0 && data_page_id > 0) {
             const slot: i32 = buf_pool_get_resident_slot(
               view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              page_to_slot_off,
+              page_to_slot_buckets,
               data_page_id,
             );
             if (slot < 0) {
@@ -1098,6 +1113,7 @@ export function vm_step_raw(
           write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
           const data_page_offset: u32 = vm_resolve_page_offset(
             view,
+            ctx_off,
             has_buffer_pool,
             data_page_id,
           );
@@ -1131,6 +1147,7 @@ export function vm_step_raw(
         let curr_page_id: u32 = read_u32(view, idx_cur_off + VM_CUR_PAGE_ID);
         let page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           curr_page_id,
         );
@@ -1147,8 +1164,8 @@ export function vm_step_raw(
           if (has_buffer_pool !== 0 && curr_page_id > 0) {
             const slot: i32 = buf_pool_get_resident_slot(
               view,
-              PAGE_TO_SLOT_OFFSET,
-              DEFAULT_PAGE_TO_SLOT_BUCKETS,
+              page_to_slot_off,
+              page_to_slot_buckets,
               curr_page_id,
             );
             if (slot < 0) {
@@ -1161,6 +1178,7 @@ export function vm_step_raw(
           }
           page_offset = vm_resolve_page_offset(
             view,
+            ctx_off,
             has_buffer_pool,
             curr_page_id,
           );
@@ -1186,8 +1204,8 @@ export function vm_step_raw(
         if (has_buffer_pool !== 0 && data_page_id > 0) {
           const slot: i32 = buf_pool_get_resident_slot(
             view,
-            PAGE_TO_SLOT_OFFSET,
-            DEFAULT_PAGE_TO_SLOT_BUCKETS,
+            page_to_slot_off,
+            page_to_slot_buckets,
             data_page_id,
           );
           if (slot < 0) {
@@ -1206,6 +1224,7 @@ export function vm_step_raw(
         write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
         const data_page_offset: u32 = vm_resolve_page_offset(
           view,
+          ctx_off,
           has_buffer_pool,
           data_page_id,
         );
@@ -2490,32 +2509,38 @@ export function executeVmStepWithRunner(
 ): VmStatus {
   let activeView = view;
   let needsCopyBack = false;
+  const pool = (view.buffer as any).__webdbPool;
+  const minArenaEnd =
+    (pool ? pool.transientArenaOffset : TRANSIENT_ARENA_OFFSET) + 65536;
 
   if (targetBuffer) {
     if (view.buffer === targetBuffer && view.byteOffset === 0) {
       activeView =
-        view.byteLength >= TRANSIENT_ARENA_OFFSET + 65536
+        view.byteLength >= minArenaEnd
           ? view
           : new DataView(targetBuffer);
     } else {
       activeView = new DataView(targetBuffer);
-      const copyLen = Math.min(view.byteLength, VM_CONTEXT_OFFSET);
-      new Uint8Array(targetBuffer, 0, copyLen).set(
+      const copyLen = Math.min(
+        view.byteLength,
+        SLOT_TO_PAGE_OFFSET - SLOTS_BASE_OFFSET,
+      );
+      new Uint8Array(targetBuffer, SLOTS_BASE_OFFSET, copyLen).set(
         new Uint8Array(view.buffer, view.byteOffset, copyLen),
       );
       needsCopyBack = true;
     }
-  } else if (
-    view.byteLength < TRANSIENT_ARENA_OFFSET + 65536 ||
-    view.byteOffset !== 0
-  ) {
+  } else if (view.byteLength < minArenaEnd || view.byteOffset !== 0) {
     const holder = executeVmStepWithRunner as any;
     if (!holder._fallbackBuffer || !holder._fallbackView) {
       holder._fallbackBuffer = new ArrayBuffer(TOTAL_MEMORY_BYTES);
       holder._fallbackView = new DataView(holder._fallbackBuffer);
     }
-    const copyLen = Math.min(view.byteLength, VM_CONTEXT_OFFSET);
-    new Uint8Array(holder._fallbackBuffer, 0, copyLen).set(
+    const copyLen = Math.min(
+      view.byteLength,
+      SLOT_TO_PAGE_OFFSET - SLOTS_BASE_OFFSET,
+    );
+    new Uint8Array(holder._fallbackBuffer, SLOTS_BASE_OFFSET, copyLen).set(
       new Uint8Array(view.buffer, view.byteOffset, copyLen),
     );
     activeView = holder._fallbackView;
@@ -2524,7 +2549,7 @@ export function executeVmStepWithRunner(
 
   const ctx_off = VM_CONTEXT_OFFSET;
   const code_off = BYTECODE_OFFSET;
-  const arena_base = TRANSIENT_ARENA_OFFSET;
+  const arena_base = pool ? pool.transientArenaOffset : TRANSIENT_ARENA_OFFSET;
   const meta = ctx as any;
   const fastHost = ctx._fastHostMode === true;
 
@@ -2684,12 +2709,26 @@ export function executeVmStepWithRunner(
     }
   }
 
-  // Sync scalar header fields
-  const has_buffer_pool =
+  // Sync scalar header fields & dynamic buffer pool layout offsets
+  let has_buffer_pool = 0;
+  let slots_base = needsCopyBack ? SLOTS_BASE_OFFSET : 0;
+  let page_to_slot_off = PAGE_TO_SLOT_OFFSET;
+  let page_to_slot_buckets = DEFAULT_PAGE_TO_SLOT_BUCKETS;
+
+  if (pool && !needsCopyBack) {
+    has_buffer_pool = 1;
+    slots_base = pool.slotsBaseOffset ?? SLOTS_BASE_OFFSET;
+    page_to_slot_off = pool.pageToSlotOffset;
+    page_to_slot_buckets = pool.pageToSlotBuckets;
+  } else if (
+    !needsCopyBack &&
     view.byteLength >= SLOT_TO_PAGE_OFFSET + 4 &&
     view.getUint32(SLOT_TO_PAGE_OFFSET, true) > 0
-      ? 1
-      : 0;
+  ) {
+    has_buffer_pool = 1;
+    slots_base = SLOTS_BASE_OFFSET;
+  }
+
   write_u32(activeView, ctx_off + VM_CTX_PC, ctx.pc);
   write_i32(activeView, ctx_off + VM_CTX_STATUS, ctx.status);
   write_u32(activeView, ctx_off + VM_CTX_FAULT_PAGE_ID, ctx.fault_page_id);
@@ -2698,6 +2737,10 @@ export function executeVmStepWithRunner(
   write_u32(activeView, ctx_off + VM_CTX_ARENA_OFFSET, ctx.arenaOffset);
   write_u32(activeView, ctx_off + VM_CTX_MAX_QUERY_MEMORY, ctx.maxQueryMemory);
   write_u32(activeView, ctx_off + VM_CTX_HAS_BUFFER_POOL, has_buffer_pool);
+  write_u32(activeView, ctx_off + VM_CTX_SLOTS_BASE_OFF, slots_base);
+  write_u32(activeView, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF, page_to_slot_off);
+  write_u32(activeView, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS, page_to_slot_buckets);
+  write_u32(activeView, ctx_off + VM_CTX_ARENA_BASE_OFF, arena_base);
 
   // Copy bytecode into BYTECODE_OFFSET
   new Uint8Array(

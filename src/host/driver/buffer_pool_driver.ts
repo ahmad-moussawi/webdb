@@ -1,6 +1,7 @@
 import {
   PAGE_SIZE,
   DEFAULT_SLOT_COUNT,
+  MAX_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   PAGE_TO_SLOT_BUCKET_SIZE,
   PAGE_TYPE_FREE,
@@ -95,6 +96,7 @@ export class BufferPoolDriver {
   readonly offsets: BufferPoolOffsets;
 
   // Offsets shortcuts
+  readonly slotsBaseOffset: number;
   readonly slotsEndOffset: number;
   readonly slotToPageOffset: number;
   readonly pageToSlotOffset: number;
@@ -120,6 +122,16 @@ export class BufferPoolDriver {
     this.slotCount =
       options.slotCount ?? options.pool?.slotCount ?? DEFAULT_SLOT_COUNT;
 
+    if (
+      !Number.isInteger(this.slotCount) ||
+      this.slotCount < 2 ||
+      this.slotCount > MAX_SLOT_COUNT
+    ) {
+      throw new RangeError(
+        `Invalid slotCount: ${this.slotCount}. Must be an integer between 2 and ${MAX_SLOT_COUNT}`,
+      );
+    }
+
     this.maxQueryMemory =
       options.maxQueryMemory ??
       options.pool?.maxQueryMemory ??
@@ -140,10 +152,11 @@ export class BufferPoolDriver {
     this.uint8 = new Uint8Array(this.buffer);
 
     this.offsets = computeBufferPoolOffsets(
-      options.useDefaultLayoutOffsets ? DEFAULT_SLOT_COUNT : this.slotCount,
+      this.slotCount,
       this.maxQueryMemory,
     );
 
+    this.slotsBaseOffset = this.offsets.slotsBaseOffset;
     this.slotsEndOffset = this.offsets.slotsEndOffset;
     this.slotToPageOffset = this.offsets.slotToPageOffset;
     this.pageToSlotOffset = this.offsets.pageToSlotOffset;
@@ -162,7 +175,7 @@ export class BufferPoolDriver {
     for (let i = 0; i < this.slotCount; i++) {
       this.slot_views[i] = new DataView(
         this.buffer,
-        i * PAGE_SIZE,
+        this.slotsBaseOffset + i * PAGE_SIZE,
         PAGE_SIZE,
       );
     }
@@ -170,7 +183,11 @@ export class BufferPoolDriver {
     if (options.io) {
       this.io = options.io;
     } else if (options.vfs) {
-      this.io = new Io({ vfs: options.vfs, memory: this.wasmMemory });
+      this.io = new Io({
+        vfs: options.vfs,
+        memory: this.wasmMemory,
+        slotsBaseOffset: this.slotsBaseOffset,
+      });
     } else {
       throw new Error(
         "BufferPoolDriver requires either an Io instance or IVfsAdapter",
@@ -236,12 +253,13 @@ export class BufferPoolDriver {
 
   getSlotOffset(slotIdx: number): number {
     this.validate_slot_idx(slotIdx);
-    return slotIdx * PAGE_SIZE;
+    return this.slotsBaseOffset + slotIdx * PAGE_SIZE;
   }
 
   getPageBytesInSlot(slotIdx: number): Uint8Array {
     this.validate_slot_idx(slotIdx);
-    return this.uint8.subarray(slotIdx * PAGE_SIZE, (slotIdx + 1) * PAGE_SIZE);
+    const start = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
+    return this.uint8.subarray(start, start + PAGE_SIZE);
   }
 
   getSlotDataView(slotIdx: number): DataView {
@@ -252,7 +270,7 @@ export class BufferPoolDriver {
     }
     const fresh = new DataView(
       this.wasmMemory.buffer,
-      slotIdx * PAGE_SIZE,
+      this.slotsBaseOffset + slotIdx * PAGE_SIZE,
       PAGE_SIZE,
     );
     this.slot_views[slotIdx] = fresh;
@@ -692,7 +710,7 @@ export class BufferPoolDriver {
 
         memset(
           this.uint8,
-          slot * PAGE_SIZE + PAGE_HEADER_SIZE,
+          this.slotsBaseOffset + slot * PAGE_SIZE + PAGE_HEADER_SIZE,
           0,
           PAGE_SIZE - PAGE_HEADER_SIZE,
         );

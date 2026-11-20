@@ -6,7 +6,7 @@
 #include "buffer_pool.h"
 
 uint32_t buf_pool_get_slot_offset(uint32_t slot_idx) {
-  return slot_idx * PAGE_SIZE;
+  return SLOTS_BASE_OFFSET + slot_idx * PAGE_SIZE;
 }
 
 uint32_t buf_pool_read_slot_to_page(uint32_t slot_to_page_offset, uint32_t slot_idx) {

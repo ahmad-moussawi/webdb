@@ -419,12 +419,15 @@ import { PAGE_SIZE } from "./page_format.js";
   // Dynamic computation function
   out += `/**
  * Computes memory layout offsets for arbitrary slot counts.
+ * Fixed engine & WASM regions sit at 0x000000..0x02FFFF; page slots, pool metadata,
+ * and the transient query arena scale dynamically starting at SLOTS_BASE_OFFSET (0x030000).
  */
 export function computeBufferPoolOffsets(
   slotCount: number,
   _maxQueryMemory: number = DEFAULT_MAX_QUERY_MEMORY,
 ) {
-  const slotsEndOffset = slotCount * PAGE_SIZE;
+  const slotsBaseOffset = SLOTS_BASE_OFFSET;
+  const slotsEndOffset = slotsBaseOffset + slotCount * PAGE_SIZE;
   const slotToPageBytes = (slotCount * 4 + 7) & ~7;
   let pageToSlotBuckets = 16;
   while (pageToSlotBuckets < slotCount * 2) {
@@ -433,41 +436,23 @@ export function computeBufferPoolOffsets(
   const pageToSlotBytes = pageToSlotBuckets * 8;
   const dirtyMaskBytes = (Math.ceil(slotCount / 8) + 7) & ~7;
 
-  if (slotCount === DEFAULT_SLOT_COUNT) {
-    return {
-      slotsEndOffset,
-      slotToPageOffset: SLOT_TO_PAGE_OFFSET,
-      pageToSlotOffset: PAGE_TO_SLOT_OFFSET,
-      pageToSlotBuckets: DEFAULT_PAGE_TO_SLOT_BUCKETS,
-      dirtyMaskOffset: DIRTY_MASK_OFFSET,
-      vmContextOffset: VM_CONTEXT_OFFSET,
-      resultBufferOffset: RESULT_BUFFER_OFFSET,
-      bytecodeOffset: BYTECODE_OFFSET,
-      pageScratchpadOffset: PAGE_SCRATCHPAD_OFFSET,
-      transientArenaOffset: TRANSIENT_ARENA_OFFSET,
-    };
-  }
-
   const slotToPageOffset = slotsEndOffset;
   const pageToSlotOffset = slotToPageOffset + slotToPageBytes;
   const dirtyMaskOffset = pageToSlotOffset + pageToSlotBytes;
-  const vmContextOffset = dirtyMaskOffset + dirtyMaskBytes;
-  const resultBufferOffset = vmContextOffset + VM_CONTEXT_SIZE;
-  const bytecodeOffset = resultBufferOffset + RESULT_BUFFER_SIZE;
-  const pageScratchpadOffset = bytecodeOffset + BYTECODE_SIZE;
-  const transientArenaOffset =
-    pageScratchpadOffset + PAGE_SCRATCHPAD_SIZE + ALIGNMENT_PADDING_SIZE;
+  const rawArenaStart = dirtyMaskOffset + dirtyMaskBytes;
+  const transientArenaOffset = (rawArenaStart + 65535) & ~65535;
 
   return {
+    slotsBaseOffset,
     slotsEndOffset,
     slotToPageOffset,
     pageToSlotOffset,
     pageToSlotBuckets,
     dirtyMaskOffset,
-    vmContextOffset,
-    resultBufferOffset,
-    bytecodeOffset,
-    pageScratchpadOffset,
+    vmContextOffset: VM_CONTEXT_OFFSET,
+    resultBufferOffset: RESULT_BUFFER_OFFSET,
+    bytecodeOffset: BYTECODE_OFFSET,
+    pageScratchpadOffset: PAGE_SCRATCHPAD_OFFSET,
     transientArenaOffset,
   };
 }

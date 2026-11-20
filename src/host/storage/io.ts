@@ -1,5 +1,6 @@
 import {
   PAGE_SIZE,
+  SLOTS_BASE_OFFSET,
   PAGE_HEADER_OFFSET_CHECKSUM,
   HEADER_OFFSET_PAGE_CHECKSUM,
 } from "../../constants.ts";
@@ -11,6 +12,7 @@ import { read_u32, write_u32 } from "../../shared/c_runtime.ts";
 export interface IoOptions {
   vfs: IVfsAdapter;
   memory: WebAssembly.Memory | ArrayBuffer;
+  slotsBaseOffset?: number;
 }
 
 /**
@@ -32,6 +34,7 @@ export class Io {
   readonly buffer: ArrayBuffer;
   readonly uint8: Uint8Array;
   readonly view: DataView;
+  readonly slotsBaseOffset: number;
 
   private in_flight_flushes = new Map<number, Promise<void>>();
   private in_flight_reads = new Map<number, Promise<void>>();
@@ -64,7 +67,7 @@ export class Io {
   async writeSlotsViaWal(slots: Array<{ slotIdx: number; pageId: number }>): Promise<void> {
     const pages = slots.map(({ slotIdx, pageId }) => {
       this.stampSlotChecksum(slotIdx, pageId);
-      const offset = slotIdx * PAGE_SIZE;
+      const offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
       return { pageId, data: this.uint8.slice(offset, offset + PAGE_SIZE) };
     });
     await this.coordinator!.commitDirectPagesViaWal(pages);
@@ -78,7 +81,7 @@ export class Io {
    * Computes and writes the page-level CRC32 checksum into the slot header in linear memory.
    */
   stampSlotChecksum(slotIdx: number, pageId: number): void {
-    const slot_offset = slotIdx * PAGE_SIZE;
+    const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
     const page_bytes = this.uint8.subarray(
       slot_offset,
       slot_offset + PAGE_SIZE,
@@ -113,6 +116,7 @@ export class Io {
 
     this.uint8 = new Uint8Array(this.buffer);
     this.view = new DataView(this.buffer);
+    this.slotsBaseOffset = options.slotsBaseOffset ?? SLOTS_BASE_OFFSET;
   }
 
   /**
@@ -127,7 +131,7 @@ export class Io {
     }
 
     if (this.coordinator && this.coordinator.hasSpilledPage(pageId)) {
-      const slot_offset = slotIdx * PAGE_SIZE;
+      const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
       const spilled = this.coordinator.getSpilledPage(pageId)!;
       this.uint8.set(spilled, slot_offset);
       return;
@@ -150,7 +154,7 @@ export class Io {
 
     const read_promise = (async () => {
       const [disk_page] = await this.vfs.readPages([pageId]);
-      const slot_offset = slotIdx * PAGE_SIZE;
+      const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
 
       if (disk_page) {
         if (disk_page.byteLength !== PAGE_SIZE) {
@@ -214,7 +218,7 @@ export class Io {
       return;
     }
 
-    const slot_offset = slotIdx * PAGE_SIZE;
+    const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
     const page_bytes = this.uint8.subarray(
       slot_offset,
       slot_offset + PAGE_SIZE,
@@ -284,7 +288,7 @@ export class Io {
 
     const pages: Array<{ pageId: number; data: Uint8Array }> = [];
     for (const { slotIdx, pageId } of slots) {
-      const slot_offset = slotIdx * PAGE_SIZE;
+      const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
       const page_bytes = this.uint8.subarray(
         slot_offset,
         slot_offset + PAGE_SIZE,
@@ -344,7 +348,7 @@ export class Io {
     }
 
     if (this.coordinator && this.coordinator.hasSpilledPage(faultPageId)) {
-      const slot_offset = targetSlot * PAGE_SIZE;
+      const slot_offset = this.slotsBaseOffset + targetSlot * PAGE_SIZE;
       const spilled = this.coordinator.getSpilledPage(faultPageId)!;
       this.uint8.set(spilled, slot_offset);
     } else {

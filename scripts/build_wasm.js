@@ -80,9 +80,9 @@ const outWasm = path.join(distDir, "webdb_core.wasm");
 const coreWasm = path.join(wasmDir, "webdb_core.wasm");
 
 // 2. Compile with clang targeting wasm32
-// Place Wasm C stack (49,024B: 0x421080..0x42D000) and .rodata/.data/.bss (0x42D000..0x42FFFF)
-// inside the reserved ALIGNMENT_PADDING region (0x421080..0x42FFFF) so Wasm never collides
-// with Buffer Pool page slots (0x000000..0x3FFFFF) or metadata regions (0x400000..0x42107F).
+// Place Wasm C stack (48 KB: 0x000000..0x00BFFF) and .rodata/.data/.bss (16 KB: 0x00C000..0x00FFFF)
+// inside the fixed low WASM_REGION (0x000000..0x00FFFF) so Wasm never collides
+// with fixed engine regions (0x010000..0x02FFFF) or dynamic Buffer Pool page slots (0x030000+).
 console.log("Compiling C core to WebAssembly (wasm32-nostdlib)...");
 const compileCmd = [
   `"${clang}"`,
@@ -94,7 +94,7 @@ const compileCmd = [
   "-Wl,--import-memory",
   "-Wl,--export-dynamic",
   "-Wl,--lto-O3",
-  "-Wl,-z,stack-size=4378624",
+  "-Wl,-z,stack-size=49152",
   `-I "${path.join(rootDir, "src", "core", "c")}"`,
   `-o "${rawWasm}"`,
   `"${cSource}"`,

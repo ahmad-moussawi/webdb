@@ -4,7 +4,7 @@
  */
 
 import { getWebDbCoreWasmBytes } from "./embedded_wasm.ts";
-import { PAGE_TYPE_LEAF_DATA, BYTECODE_OFFSET } from "../../constants.ts";
+import { PAGE_TYPE_LEAF_DATA, BYTECODE_OFFSET, WASM_STACK_TOP } from "../../constants.ts";
 import { DataType } from "../../types/index.ts";
 import { UuidCodec, UlidCodec } from "../js/codecs.c.ts";
 import * as jsCore from "../js/index.ts";
@@ -98,7 +98,7 @@ export function createWasmCore(
 
   const exp = instance.exports as Record<string, any>;
   if (exp.__stack_pointer && typeof exp.__stack_pointer === "object" && "value" in exp.__stack_pointer) {
-    exp.__stack_pointer.value = 0x42D000;
+    exp.__stack_pointer.value = WASM_STACK_TOP;
   }
 
   const getAbsOffset = (view: DataView | Uint8Array, offset: number = 0) => {

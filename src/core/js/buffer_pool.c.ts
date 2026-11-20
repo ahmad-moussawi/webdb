@@ -1,6 +1,8 @@
 import {
   PAGE_SIZE,
+  SLOTS_BASE_OFFSET,
   DEFAULT_SLOT_COUNT,
+  MAX_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   PAGE_TO_SLOT_BUCKET_SIZE,
   PAGE_TYPE_FREE,
@@ -43,7 +45,7 @@ import {
  * Returns the byte offset for a given slot in linear memory.
  */
 export function buf_pool_get_slot_offset(slot_idx: u32): u32 {
-  return slot_idx * PAGE_SIZE;
+  return SLOTS_BASE_OFFSET + slot_idx * PAGE_SIZE;
 }
 
 /**
@@ -262,7 +264,13 @@ export function buf_pool_find_victim(
     }
 
     // Defense-in-depth: Never evict system/catalog pages (0x0C)
-    const slot_view = new DataView(buffer, hand * PAGE_SIZE, PAGE_SIZE);
+    const slots_base =
+      (buffer as any).__webdbPool?.slotsBaseOffset ?? SLOTS_BASE_OFFSET;
+    const slot_view = new DataView(
+      buffer,
+      slots_base + hand * PAGE_SIZE,
+      PAGE_SIZE,
+    );
     if (page_get_type(slot_view, 0) === PAGE_TYPE_CATALOG_PAGE) {
       continue;
     }
@@ -326,7 +334,13 @@ export function buf_pool_select_eviction_victim(
     dirty_mask_offset,
     candidate_slot,
   );
-  const slot_view = new DataView(buffer, candidate_slot * PAGE_SIZE, PAGE_SIZE);
+  const slots_base =
+    (buffer as any).__webdbPool?.slotsBaseOffset ?? SLOTS_BASE_OFFSET;
+  const slot_view = new DataView(
+    buffer,
+    slots_base + candidate_slot * PAGE_SIZE,
+    PAGE_SIZE,
+  );
   const is_free_page =
     old_page_id > 0 && page_get_type(slot_view, 0) === PAGE_TYPE_FREE;
   const flush_page_id =
@@ -355,6 +369,7 @@ export class BufferPool {
   uint8: Uint8Array;
 
   // Offsets
+  readonly slots_base_offset: number;
   readonly slots_end_offset: number;
   readonly slot_to_page_offset: number;
   readonly page_to_slot_offset: number;
@@ -376,9 +391,13 @@ export class BufferPool {
   constructor(options?: BufferPoolOptions) {
     this.slot_count = options?.slotCount ?? DEFAULT_SLOT_COUNT;
 
-    if (!Number.isInteger(this.slot_count) || this.slot_count < 2) {
-      throw new Error(
-        `Invalid slotCount: ${this.slot_count}. Must be an integer >= 2`,
+    if (
+      !Number.isInteger(this.slot_count) ||
+      this.slot_count < 2 ||
+      this.slot_count > MAX_SLOT_COUNT
+    ) {
+      throw new RangeError(
+        `Invalid slotCount: ${this.slot_count}. Must be an integer between 2 and ${MAX_SLOT_COUNT}`,
       );
     }
 
@@ -402,6 +421,7 @@ export class BufferPool {
       this.max_query_memory,
     );
 
+    this.slots_base_offset = offsets.slotsBaseOffset;
     this.slots_end_offset = offsets.slotsEndOffset;
     this.slot_to_page_offset = offsets.slotToPageOffset;
     this.page_to_slot_offset = offsets.pageToSlotOffset;
@@ -426,6 +446,13 @@ export class BufferPool {
     });
 
     this.buffer = this.wasm_memory.buffer;
+    (this.buffer as any).__webdbPool = {
+      slotsBaseOffset: this.slots_base_offset,
+      slotToPageOffset: this.slot_to_page_offset,
+      pageToSlotOffset: this.page_to_slot_offset,
+      pageToSlotBuckets: this.page_to_slot_buckets,
+      transientArenaOffset: this.transient_arena_offset,
+    };
     this.view = new DataView(this.buffer);
     this.uint8 = new Uint8Array(this.buffer);
 
@@ -668,17 +695,21 @@ export class BufferPool {
 
   get_slot_offset(slot_idx: number): number {
     this.validate_slot_idx(slot_idx);
-    return buf_pool_get_slot_offset(slot_idx);
+    return this.slots_base_offset + slot_idx * PAGE_SIZE;
   }
 
   get_page_bytes_in_slot(slot_idx: number): Uint8Array {
     this.validate_slot_idx(slot_idx);
-    return this.get_bytes(slot_idx * PAGE_SIZE, PAGE_SIZE);
+    return this.get_bytes(this.slots_base_offset + slot_idx * PAGE_SIZE, PAGE_SIZE);
   }
 
   get_slot_data_view(slot_idx: number): DataView {
     this.validate_slot_idx(slot_idx);
-    return new DataView(this.buffer, slot_idx * PAGE_SIZE, PAGE_SIZE);
+    return new DataView(
+      this.buffer,
+      this.slots_base_offset + slot_idx * PAGE_SIZE,
+      PAGE_SIZE,
+    );
   }
 
   get_resident_slot(page_id: number): number {

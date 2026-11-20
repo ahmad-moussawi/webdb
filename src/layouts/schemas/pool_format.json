@@ -3,8 +3,11 @@
   "name": "pool_format",
   "description": "Buffer Pool and Shared Wasm Memory layout definitions for WebDB",
   "constants": [
+    { "name": "WASM_STACK_TOP", "value": 49152, "description": "Top of the WASM C stack inside WASM_REGION (0x00C000 = 48 KB)." },
+    { "name": "WASM_REGION_SIZE", "value": 65536, "description": "Reserved low region for WASM C stack (48 KB) and .rodata/.data/.bss (16 KB) at 0x000000..0x00FFFF." },
     { "name": "DEFAULT_CACHE_SIZE_BYTES", "value": 4194304, "description": "Default cache buffer pool size in bytes (4 MB = 1024 * 4096)." },
     { "name": "DEFAULT_SLOT_COUNT", "value": 1024, "description": "Default number of page cache slots in the buffer pool (1024)." },
+    { "name": "MAX_SLOT_COUNT", "value": 65536, "description": "Maximum supported number of page cache slots in the buffer pool (65536 = 256 MB)." },
     { "name": "DEFAULT_PAGE_SLOTS", "value": 1024, "description": "Alias for DEFAULT_SLOT_COUNT (1024)." },
     { "name": "DEFAULT_PAGE_TO_SLOT_BUCKETS", "value": 2048, "description": "Default number of hash table buckets for page-to-slot mapping (2048, load factor <= 50%)." },
     { "name": "PAGE_TO_SLOT_BUCKET_SIZE", "value": 8, "description": "Size in bytes of each hash table bucket (uint32 page_id + uint32 slot_idx = 8 bytes)." },
@@ -13,31 +16,34 @@
     { "name": "RESULT_BUFFER_SIZE", "value": 65536, "description": "Size in bytes allocated for SQL result row serialization buffer (64 KB)." },
     { "name": "BYTECODE_SIZE", "value": 32768, "description": "Size in bytes allocated for compiled query bytecode instructions (32 KB)." },
     { "name": "PAGE_SCRATCHPAD_SIZE", "value": 4096, "description": "Size in bytes allocated for temporary single-page staging / decompression (4 KB)." },
-    { "name": "ALIGNMENT_PADDING_SIZE", "value": 61312, "description": "Padding bytes to align transient execution arena at boundary 0x430000 (61,312 bytes)." },
+    { "name": "ALIGNMENT_PADDING_SIZE", "value": 16384, "description": "Padding bytes aligning the start of dynamic page slots to 0x030000 (16 KB)." },
     { "name": "DEFAULT_MAX_QUERY_MEMORY", "value": 16777216, "description": "Maximum memory limit in bytes for transient query execution arena (16 MB)." }
   ],
   "bufferPool": {
-    "baseOffset": 4194304,
+    "baseOffset": 0,
     "regionsName": "DEFAULT_BUFFER_POOL_REGIONS",
     "layoutName": "DEFAULT_BUFFER_POOL_LAYOUT",
     "regions": [
-      { "name": "SLOT_TO_PAGE", "size": 4096, "offsetName": "SLOT_TO_PAGE_OFFSET", "description": "Byte offset 0x400000: Array of 1024 uint32 pageIds mapping slot -> pageId." },
-      { "name": "PAGE_TO_SLOT", "size": 16384, "offsetName": "PAGE_TO_SLOT_OFFSET", "description": "Byte offset 0x401000: Open-addressing hash table (2048 buckets x 8B) mapping pageId -> slot." },
-      { "name": "DIRTY_MASK", "size": 128, "offsetName": "DIRTY_MASK_OFFSET", "description": "Byte offset 0x405000: Bitmask (128 bytes = 1024 bits) tracking dirty slots." },
-      { "name": "VM_CONTEXT", "size": 12288, "offsetName": "VM_CONTEXT_OFFSET", "description": "Byte offset 0x405080: Execution context frames for the SQL VM." },
-      { "name": "RESULT_BUFFER", "size": 65536, "offsetName": "RESULT_BUFFER_OFFSET", "description": "Byte offset 0x408080: Output buffer for query result rows." },
-      { "name": "BYTECODE", "size": 32768, "offsetName": "BYTECODE_OFFSET", "description": "Byte offset 0x418080: Instruction buffer for compiled bytecode routines." },
-      { "name": "PAGE_SCRATCHPAD", "size": 4096, "offsetName": "PAGE_SCRATCHPAD_OFFSET", "description": "Byte offset 0x420080: Staging buffer for page compression or I/O reassembly." },
-      { "name": "ALIGNMENT_PADDING", "size": 61312, "offsetName": "ALIGNMENT_PADDING_OFFSET", "description": "Byte offset 0x421080: Padding aligning transient arena to 0x430000." }
+      { "name": "WASM_REGION", "size": 65536, "offsetName": "WASM_REGION_OFFSET", "description": "Byte offset 0x000000: WASM C stack (0x000000..0x00BFFF) and .rodata/.data/.bss (0x00C000..0x00FFFF)." },
+      { "name": "VM_CONTEXT", "size": 12288, "offsetName": "VM_CONTEXT_OFFSET", "description": "Byte offset 0x010000: Execution context frames for the SQL VM." },
+      { "name": "RESULT_BUFFER", "size": 65536, "offsetName": "RESULT_BUFFER_OFFSET", "description": "Byte offset 0x013000: Output buffer for query result rows." },
+      { "name": "BYTECODE", "size": 32768, "offsetName": "BYTECODE_OFFSET", "description": "Byte offset 0x023000: Instruction buffer for compiled bytecode routines." },
+      { "name": "PAGE_SCRATCHPAD", "size": 4096, "offsetName": "PAGE_SCRATCHPAD_OFFSET", "description": "Byte offset 0x02B000: Staging buffer for page compression or I/O reassembly." },
+      { "name": "ALIGNMENT_PADDING", "size": 16384, "offsetName": "ALIGNMENT_PADDING_OFFSET", "description": "Byte offset 0x02C000: Padding aligning page slots to 64 KB boundary 0x030000." },
+      { "name": "PAGE_SLOTS", "size": 4194304, "offsetName": "SLOTS_BASE_OFFSET", "description": "Byte offset 0x030000: Contiguous 4 KB buffer pool page slots (default 1024 slots = 4 MB)." },
+      { "name": "SLOT_TO_PAGE", "size": 4096, "offsetName": "SLOT_TO_PAGE_OFFSET", "description": "Byte offset 0x430000 (default 1024 slots): Array of uint32 pageIds mapping slot -> pageId." },
+      { "name": "PAGE_TO_SLOT", "size": 16384, "offsetName": "PAGE_TO_SLOT_OFFSET", "description": "Byte offset 0x431000 (default 1024 slots): Open-addressing hash table mapping pageId -> slot." },
+      { "name": "DIRTY_MASK", "size": 128, "offsetName": "DIRTY_MASK_OFFSET", "description": "Byte offset 0x435000 (default 1024 slots): Bitmask tracking dirty slots." },
+      { "name": "ARENA_ALIGNMENT_PADDING", "size": 44928, "offsetName": "ARENA_ALIGNMENT_PADDING_OFFSET", "description": "Byte offset 0x435080 (default 1024 slots): Padding aligning transient arena to 64 KB boundary 0x440000." }
     ],
     "endOffsetName": "TRANSIENT_ARENA_OFFSET",
-    "endOffsetDescription": "Byte offset 0x430000: Start of dynamic transient query execution arena."
+    "endOffsetDescription": "Byte offset 0x440000 (default 1024 slots): Start of dynamic transient query execution arena."
   },
   "postConstants": [
     {
       "name": "TOTAL_MEMORY_BYTES",
-      "value": 21168128,
-      "description": "Total buffer pool and shared Wasm memory allocation in bytes (20.1875 MB)."
+      "value": 21233664,
+      "description": "Total buffer pool and shared Wasm memory allocation in bytes for default 1024 slots (20.25 MB)."
     }
   ]
 }

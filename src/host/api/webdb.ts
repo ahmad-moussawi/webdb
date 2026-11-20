@@ -3,6 +3,7 @@ import {
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
   DEFAULT_SLOT_COUNT,
+  MAX_SLOT_COUNT,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_INDEXES_PAGE1,
   MAX_TABLES_PAGE1,
@@ -336,11 +337,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
+    if (
+      !Number.isInteger(slotCount) ||
+      slotCount < 2 ||
+      slotCount > MAX_SLOT_COUNT
+    ) {
+      throw new RangeError(
+        `Invalid slotCount: ${slotCount}. Must be an integer between 2 and ${MAX_SLOT_COUNT}`,
+      );
+    }
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
-    const memory = createWasmMemory(
-      Math.max(slotCount, DEFAULT_SLOT_COUNT),
-      maxQueryMemory,
-    );
+    const memory = createWasmMemory(slotCount, maxQueryMemory);
     const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
     const envCore: "js" | "wasm" | undefined =
       procEnv === "wasm" || procEnv === "js"
@@ -361,7 +368,6 @@ export class WebDB implements IDatabaseQueryExecutor {
       memory,
       slotCount,
       maxQueryMemory,
-      useDefaultLayoutOffsets: true,
     });
 
     const crossTabSync = options.crossTabSync ?? true;
