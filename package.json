@@ -1,6 +1,6 @@
 {
   "name": "@ahmadmoussawi/webdb",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "homepage": "https://webdb.dev",
   "type": "module",
   "description": "Ultra-lean browser-native relational database engine",
