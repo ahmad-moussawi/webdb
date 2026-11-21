@@ -457,8 +457,15 @@ export class WebDB implements IDatabaseQueryExecutor {
       idxCatPageId = header.nextColCatalogPageId;
     }
 
-    // 3. Pin column catalog pages for all active tables
-    const tableDescriptors = catalog_list_table_descriptors(page1View);
+    // 3. Pin column catalog pages for all active tables (including tables in overflow catalog pages)
+    const pager = {
+      getPageBytes: (pageId: number) => {
+        const slot = driver.getResidentSlot(pageId);
+        if (slot !== -1) return driver.getPageBytesInSlot(slot);
+        return new Uint8Array(PAGE_SIZE);
+      },
+    };
+    const tableDescriptors = catalog_list_table_descriptors(page1View, pager);
     for (const desc of tableDescriptors) {
       let catPageId = desc.colCatalogPageId;
       while (catPageId !== 0) {
@@ -1095,10 +1102,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       if (
         idx &&
         (idx.tableId === desc.tableId ||
-          idx.name
-            .toLowerCase()
-            .startsWith(`idx_${tableName.toLowerCase()}_`) ||
-          idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)
+          (idx.tableId === 0 &&
+            (idx.name
+              .toLowerCase()
+              .startsWith(`idx_${tableName.toLowerCase()}_`) ||
+              idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)))
       ) {
         if (idx.rootPageId > 1 && idx.rootPageId !== desc.pkRootPageId) {
           await this.freeTableTreePages(idx.rootPageId);
@@ -2482,6 +2490,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         return f.isNull ? isNull : !isNull;
       }
       case "in": {
+        // Handle constant boolean sentinel emitted by uncorrelated EXISTS/NOT EXISTS resolution
+        if (!f.colName && !f.expr && (!f.values || f.values.length === 0)) {
+          return Boolean(f.notIn);
+        }
         const val = f.expr
           ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
           : row[f.colName!];
@@ -2554,7 +2566,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
       default:
-        return true;
+        throw new Error(
+          `Unsupported filter type in DML: "${String((f as any).type)}"`,
+        );
     }
   }
 
@@ -4760,33 +4774,38 @@ export class WebDB implements IDatabaseQueryExecutor {
         );
       }
 
-      if (status === VmStatus.PAGE_FAULT) {
-        // Temporarily pin any currently resident active cursor pages so acquiring fault_page_id
-        // does not evict the page a cursor is actively transitioning from.
-        const pinnedCursorSlots: number[] = [];
-        const cursors = this.vmCtx.cursors ?? [this.vmCtx.cursor];
-        for (const c of cursors) {
-          if (c && c.pageId > 1) {
-            const s = this.pool.getResidentSlot(c.pageId);
-            if (s > 0) {
-              this.pool.pinSlot(s);
-              pinnedCursorSlots.push(s);
+      // Temporarily pin active cursor pages (and fault_page_id) across acquirePage + chunk hydration
+      // so loading overflow pages during deserialization cannot evict pages the VM is actively scanning.
+      const pinnedCursorSlots: number[] = [];
+      const pinActiveCursorPage = (pageId: number) => {
+        if (pageId > 1) {
+          const s = this.pool.getResidentSlot(pageId);
+          if (s > 0 && !pinnedCursorSlots.includes(s)) {
+            this.pool.pinSlot(s);
+            pinnedCursorSlots.push(s);
+          }
+        }
+      };
+
+      try {
+        if (status === VmStatus.PAGE_FAULT || status === VmStatus.BUFFER_FULL) {
+          const cursors = this.vmCtx.cursors ?? [this.vmCtx.cursor];
+          for (const c of cursors) {
+            if (c && c.pageId > 1) {
+              pinActiveCursorPage(c.pageId);
             }
           }
         }
-        try {
+
+        if (status === VmStatus.PAGE_FAULT) {
           await this.driver.acquirePage(this.vmCtx.fault_page_id);
-        } finally {
-          for (const s of pinnedCursorSlots) {
-            this.pool.unpinSlot(s);
+          pinActiveCursorPage(this.vmCtx.fault_page_id);
+          this.vmCtx.status = VmStatus.RUNNING;
+
+          if (hasBatchedWhere && this.vmCtx.resultOffset + 4096 < RESULT_BUFFER_SIZE) {
+            continue;
           }
         }
-        this.vmCtx.status = VmStatus.RUNNING;
-
-        if (hasBatchedWhere && this.vmCtx.resultOffset + 4096 < RESULT_BUFFER_SIZE) {
-          continue;
-        }
-      }
 
       // Hydrate rows from Output Result Buffer for current chunk
       if (hasBatchedWhere) {
@@ -4884,6 +4903,11 @@ export class WebDB implements IDatabaseQueryExecutor {
           }
 
           currentOffset += 2 + rowLen;
+        }
+      }
+      } finally {
+        for (const s of pinnedCursorSlots) {
+          this.pool.unpinSlot(s);
         }
       }
 
@@ -5077,11 +5101,20 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
+      const residentPager = {
+        getPageBytes: (pageId: number) => {
+          const slot = this.pool.getResidentSlot(pageId);
+          if (slot !== -1) return this.pool.getPageBytesInSlot(slot);
+          return new Uint8Array(PAGE_SIZE);
+        },
+      };
+
       // Capture pre-import table names for change notifications
       const oldPage1View = this.pool.getSlotDataView(0);
-      const oldTables = catalog_list_table_descriptors(oldPage1View).map(
-        (d) => d.name,
-      );
+      const oldTables = catalog_list_table_descriptors(
+        oldPage1View,
+        residentPager,
+      ).map((d) => d.name);
 
       // Pass 2: Atomically replace storage, reset buffer pool & WAL, and pin imported catalog pages
       const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
@@ -5093,6 +5126,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         });
       }
 
+      // Persist replacement to storage BEFORE resetting live buffer pool state,
+      // so a failed atomic replacement leaves the existing live pool & WAL intact.
+      await this.coordinator.resetWalAfterImport(pagesToWrite);
+
       for (let slot = 1; slot < this.pool.slotCount; slot++) {
         this.pool.forceUnpinSlot(slot);
         this.pool.unassignSlot(slot);
@@ -5102,10 +5139,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       this.pool.getPageBytesInSlot(0).set(pagesToWrite[0].data);
       this.pool.clearDirty(0);
-
-      await this.vfs.writePages(pagesToWrite);
-      await this.vfs.flush?.();
-      await this.coordinator.resetWalAfterImport();
+      this.coordinator.recordDiskPage1State();
 
       this.tableMetaCache.clear();
       this.tableTailPages.clear();
@@ -5115,9 +5149,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       await WebDB.pinAllCatalogPages(this.driver);
 
       const newPage1View = this.pool.getSlotDataView(0);
-      const newTables = catalog_list_table_descriptors(newPage1View).map(
-        (d) => d.name,
-      );
+      const newTables = catalog_list_table_descriptors(
+        newPage1View,
+        residentPager,
+      ).map((d) => d.name);
       const affectedTables = Array.from(new Set([...oldTables, ...newTables]));
 
       this.notifySubscriptions({

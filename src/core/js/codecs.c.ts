@@ -70,14 +70,14 @@ export function uuid_encode(
   target: Uint8Array,
   offset: u32,
 ): i32 {
-  let clean_idx = 0;
-  let hi = -1;
+  let clean_idx: i32 = 0;
+  let hi: i32 = -1;
 
-  for (let i = 0; i < strlen(uuid_str); i++) {
-    const c = uuid_str.charCodeAt(i);
+  for (let i: u32 = 0; i < strlen(uuid_str); i++) {
+    const c: i32 = uuid_str.charCodeAt(i);
     if (c !== 45) {
       if (clean_idx >= 32) return -1;
-      const val = hex_val(c);
+      const val: i32 = hex_val(c);
       if (val < 0) return -1;
       if (clean_idx % 2 === 0) {
         hi = val;
@@ -150,8 +150,8 @@ export function ulid_encode(
   if (strlen(ulid_str) !== 26) return -1;
 
   let time: u64 = 0n;
-  for (let i = 0; i < 10; i++) {
-    const v = crockford_decode(ulid_str.charCodeAt(i));
+  for (let i: u32 = 0; i < 10; i++) {
+    const v: i32 = crockford_decode(ulid_str.charCodeAt(i));
     if (v < 0) return -1;
     time = (time << 5n) | BigInt(v);
   }
@@ -164,15 +164,15 @@ export function ulid_encode(
   target[offset + 5] = Number(time & 0xffn);
 
   let rand_hi: u64 = 0n;
-  for (let i = 10; i < 18; i++) {
-    const v = crockford_decode(ulid_str.charCodeAt(i));
+  for (let i: u32 = 10; i < 18; i++) {
+    const v: i32 = crockford_decode(ulid_str.charCodeAt(i));
     if (v < 0) return -1;
     rand_hi = (rand_hi << 5n) | BigInt(v);
   }
 
   let rand_lo: u64 = 0n;
-  for (let i = 18; i < 26; i++) {
-    const v = crockford_decode(ulid_str.charCodeAt(i));
+  for (let i: u32 = 18; i < 26; i++) {
+    const v: i32 = crockford_decode(ulid_str.charCodeAt(i));
     if (v < 0) return -1;
     rand_lo = (rand_lo << 5n) | BigInt(v);
   }
@@ -198,27 +198,27 @@ export function ulid_decode(
     time = (time << 8n) | BigInt(source[offset + i]);
   }
 
-  for (let i = 9; i >= 0; i--) {
+  for (let i: i32 = 9; i >= 0; i--) {
     out_str[i] = CROCKFORD_ALPHABET.charCodeAt(Number(time % 32n));
     time /= 32n;
   }
 
   let rand_hi: u64 = 0n;
-  for (let i = 0; i < 5; i++) {
+  for (let i: u32 = 0; i < 5; i++) {
     rand_hi = (rand_hi << 8n) | BigInt(source[offset + 6 + i]);
   }
 
   let rand_lo: u64 = 0n;
-  for (let i = 0; i < 5; i++) {
+  for (let i: u32 = 0; i < 5; i++) {
     rand_lo = (rand_lo << 8n) | BigInt(source[offset + 11 + i]);
   }
 
-  for (let i = 25; i >= 18; i--) {
+  for (let i: i32 = 25; i >= 18; i--) {
     out_str[i] = CROCKFORD_ALPHABET.charCodeAt(Number(rand_lo & 31n));
     rand_lo >>= 5n;
   }
 
-  for (let i = 17; i >= 10; i--) {
+  for (let i: i32 = 17; i >= 10; i--) {
     out_str[i] = CROCKFORD_ALPHABET.charCodeAt(Number(rand_hi & 31n));
     rand_hi >>= 5n;
   }

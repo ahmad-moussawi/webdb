@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach } from 'vitest';
-import { WebDB, DataType, col, fn } from '../src/index.js';
+import { WebDB, DataType, col, fn, isIndexAlignedWithOrderBy } from '../src/index.js';
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
@@ -342,5 +342,282 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
       { id: 1, stage: 'from-4096' },
       { id: 2, stage: 'from-64' },
     ]);
+  });
+
+  it('pins overflow-catalog table colCatalogPageId chains and truncates leftover IDB pages on importBinary()', async () => {
+    // 1. Create a large source DB (20 tables -> tables 17..20 in overflow catalog, > 100 pages)
+    const largeSrc = await WebDB.open({
+      name: uniqueName('large_for_truncate'),
+      storage: 'idb',
+      slotCount: 128,
+      crossTabSync: false,
+    });
+    openedDbs.push(largeSrc);
+
+    await seedRichDatabase(largeSrc, {
+      tableCount: 20,
+      rowsPerExtraTable: 10,
+      bigRows: 120,
+    });
+    const largeTotalPages = largeSrc.driver.getSlotDataView(0).getUint32(12, true);
+    expect(largeTotalPages).toBeGreaterThan(100);
+    const largeBinary = await largeSrc.exportBinary();
+
+    // 2. Create a tiny DB (just 1 table, ~5 pages)
+    const tinySrc = await WebDB.open({
+      name: uniqueName('tiny_for_truncate'),
+      storage: 'idb',
+      slotCount: 32,
+      crossTabSync: false,
+    });
+    openedDbs.push(tinySrc);
+    await tinySrc.createTable('small_tbl', [
+      { name: 'id', type: DataType.INT32, primaryKey: true },
+      { name: 'label', type: DataType.TEXT, notNull: true },
+    ]);
+    await tinySrc.insert('small_tbl', { id: 1, label: 'tiny' });
+    const tinyTotalPages = tinySrc.driver.getSlotDataView(0).getUint32(12, true);
+    expect(tinyTotalPages).toBeLessThan(10);
+    const tinyBinary = await tinySrc.exportBinary();
+
+    // 3. Import large 20-table DB into a target IDB instance
+    const target = await WebDB.open({
+      name: uniqueName('target_truncate_and_pin'),
+      storage: 'idb',
+      slotCount: 128,
+      crossTabSync: false,
+    });
+    openedDbs.push(target);
+
+    await target.importBinary(largeBinary);
+
+    // Verify overflow-catalog table (entity_19, table #20) has its colCatalogPageId pinned
+    const meta19 = await target.getTable('entity_19');
+    const colCatSlot = target.driver.getResidentSlot(meta19.colCatalogPageId);
+    expect(colCatSlot).toBeGreaterThan(0);
+    expect(target.driver.isSlotPinned(colCatSlot)).toBe(true);
+
+    // ORDER BY on an overflow-catalog table with secondary index must succeed cleanly
+    const ordered19 = await target
+      .from('entity_19')
+      .orderBy('id', 'asc')
+      .toArray();
+    expect(ordered19).toHaveLength(10);
+
+    // 4. Now import the much smaller DB into the SAME target IDB instance
+    await target.importBinary(tinyBinary);
+
+    // Leftover pages > tinyTotalPages must be truncated from IndexedDB!
+    const leftover = await target.vfs.readPages([
+      tinyTotalPages + 1,
+      Math.floor(largeTotalPages / 2),
+      largeTotalPages,
+    ]);
+    expect(leftover).toEqual([null, null, null]);
+
+    const tinyRows = await target.from('small_tbl').orderBy('id', 'asc').toArray();
+    expect(tinyRows).toEqual([{ id: 1, label: 'tiny' }]);
+  });
+
+  it('isIndexAlignedWithOrderBy slices columnIndices to columnCount and guards against out-of-bounds indices', () => {
+    const mockTable: any = {
+      name: 'orders',
+      columns: [
+        { name: 'id', type: DataType.INT32 },
+        { name: 'code', type: DataType.TEXT },
+      ],
+    };
+
+    // On-disk single-column index descriptor has 8 padded slots: [1, 0, 0, 0, 0, 0, 0, 0]
+    const singleColIndex: any = {
+      columnCount: 1,
+      columnIndices: [1, 0, 0, 0, 0, 0, 0, 0],
+    };
+
+    // Aligned with ORDER BY code ASC
+    expect(
+      isIndexAlignedWithOrderBy(singleColIndex, mockTable, [
+        { colName: 'code', direction: 'asc' },
+      ]),
+    ).toBe(true);
+
+    // Must NOT treat padded 0 slots as a composite (code, id) index!
+    expect(
+      isIndexAlignedWithOrderBy(singleColIndex, mockTable, [
+        { colName: 'code', direction: 'asc' },
+        { colName: 'id', direction: 'asc' },
+      ]),
+    ).toBe(false);
+
+    // Out-of-bounds column index must safely return false instead of throwing TypeError
+    const corruptIndex: any = {
+      columnCount: 1,
+      columnIndices: [99, 0, 0, 0, 0, 0, 0, 0],
+    };
+    expect(
+      isIndexAlignedWithOrderBy(corruptIndex, mockTable, [
+        { colName: 'code', direction: 'asc' },
+      ]),
+    ).toBe(false);
+  });
+
+  it('does not skip sorting on tie-breaker columns due to padded columnIndices after importBinary()', async () => {
+    const src = await WebDB.open({
+      name: uniqueName('tie_sort_src'),
+      storage: 'memory',
+    });
+    openedDbs.push(src);
+
+    await src.createTable('events', [
+      { name: 'id', type: DataType.INT32, primaryKey: true },
+      { name: 'grp', type: DataType.TEXT, notNull: true },
+    ]);
+    // Single-column index on col 1 ("grp"); on disk columnIndices is padded to [1, 0, 0, 0, 0, 0, 0, 0]
+    await src.createIndex('events', ['grp'], { name: 'idx_events_grp' });
+
+    // Insert ties on "grp" with out-of-order "id" (col 0)
+    await src.insert('events', { id: 30, grp: 'a' });
+    await src.insert('events', { id: 10, grp: 'a' });
+    await src.insert('events', { id: 20, grp: 'a' });
+    await src.insert('events', { id: 5, grp: 'b' });
+    await src.insert('events', { id: 1, grp: 'b' });
+
+    const snap = await src.exportBinary();
+
+    const dst = await WebDB.open({
+      name: uniqueName('tie_sort_dst'),
+      storage: 'idb',
+      crossTabSync: false,
+      initialData: snap,
+    });
+    openedDbs.push(dst);
+
+    // ORDER BY grp ASC, id ASC must sort tie-breakers by id (not treat padded 0 slot as composite index)
+    const rows = await dst
+      .from('events')
+      .orderBy('grp', 'asc')
+      .orderBy('id', 'asc')
+      .toArray();
+    expect(rows).toEqual([
+      { id: 10, grp: 'a' },
+      { id: 20, grp: 'a' },
+      { id: 30, grp: 'a' },
+      { id: 1, grp: 'b' },
+      { id: 5, grp: 'b' },
+    ]);
+  });
+
+  it('keeps overflow-catalog table & index metadata pinned under tight eviction pressure and notifies subscribers on importBinary()', async () => {
+    const src = await WebDB.open({
+      name: uniqueName('evict_overflow_src'),
+      storage: 'idb',
+      slotCount: 128,
+      crossTabSync: false,
+    });
+    openedDbs.push(src);
+
+    // 20 tables (> 16) + secondary index on table #20 (entity_19) so both table and index live in overflow catalogs
+    await seedRichDatabase(src, {
+      tableCount: 20,
+      rowsPerExtraTable: 15,
+      bigRows: 80,
+    });
+    await src.createIndex('entity_19', ['tag'], { name: 'idx_entity_19_tag' });
+    const binary = await src.exportBinary();
+
+    // Open target with tight pool (48 slots: ~24 permanently pinned catalog pages + ~24 evictable slots)
+    const dst = await WebDB.open({
+      name: uniqueName('evict_overflow_dst'),
+      storage: 'idb',
+      slotCount: 48,
+      crossTabSync: false,
+    });
+    openedDbs.push(dst);
+
+    // Subscribe specifically to overflow-catalog table entity_19 before importBinary()
+    const notifiedTables: string[][] = [];
+    const unsubscribe = dst.subscribe(['entity_19'], (ev) => {
+      notifiedTables.push(ev.tables);
+    });
+
+    await dst.importBinary(binary);
+    unsubscribe();
+
+    // Subscriber must have been notified for overflow-catalog table entity_19
+    expect(notifiedTables.length).toBeGreaterThan(0);
+    expect(notifiedTables[0]).toContain('entity_19');
+
+    // Thrash the 24 evictable slots by scanning all 80 overflow-backed rows of big_orders
+    const bigRows = await dst.from('big_orders').toArray();
+    expect(bigRows).toHaveLength(80);
+
+    // Now query entity_19 using ORDER BY on its overflow-catalog secondary index
+    const ordered = await dst
+      .from('entity_19')
+      .orderBy('tag', 'asc')
+      .toArray();
+    expect(ordered).toHaveLength(15);
+    expect(ordered[0].tag).toBe('t19-tag-1');
+  });
+
+  it('cleanly allocates and persists new pages after importBinary() shrinks a larger IDB database', async () => {
+    const dbName = uniqueName('shrink_reuse_pages');
+
+    // 1. Seed a large DB (> 100 pages) on IDB
+    const db = await WebDB.open({
+      name: dbName,
+      storage: 'idb',
+      slotCount: 128,
+      crossTabSync: false,
+    });
+    openedDbs.push(db);
+
+    await seedRichDatabase(db, {
+      tableCount: 18,
+      rowsPerExtraTable: 5,
+      bigRows: 110,
+    });
+    const oldTotalPages = db.driver.getSlotDataView(0).getUint32(12, true);
+    expect(oldTotalPages).toBeGreaterThan(100);
+
+    // 2. Build a tiny 1-table DB (~4 pages) and import it over the large IDB DB
+    const tinySrc = await WebDB.open({
+      name: uniqueName('tiny_shrink_src'),
+      storage: 'memory',
+    });
+    openedDbs.push(tinySrc);
+    await tinySrc.createTable('fresh', [
+      { name: 'id', type: DataType.INT32, primaryKey: true },
+      { name: 'data', type: DataType.TEXT, notNull: true },
+    ]);
+    await tinySrc.insert('fresh', { id: 1, data: 'seed' });
+    const tinyBinary = await tinySrc.exportBinary();
+
+    await db.importBinary(tinyBinary);
+
+    // 3. Allocate fresh pages beyond tinyTotalPages (reusing page IDs that existed in the old large DB)
+    const pad = 'R'.repeat(2500);
+    await db.transaction(async (tx) => {
+      for (let i = 2; i <= 30; i++) {
+        await tx.insert('fresh', { id: i, data: `fresh-${i}-${pad}` });
+      }
+    });
+    await db.checkpoint();
+    await db.close();
+    openedDbs = openedDbs.filter((d) => d !== db);
+
+    // 4. Reopen and verify zero checksum errors or stale data from the old DB
+    const reopened = await WebDB.open({
+      name: dbName,
+      storage: 'idb',
+      slotCount: 128,
+      crossTabSync: false,
+    });
+    openedDbs.push(reopened);
+
+    const rows = await reopened.from('fresh').orderBy('id', 'asc').toArray();
+    expect(rows).toHaveLength(30);
+    expect(rows[0]).toEqual({ id: 1, data: 'seed' });
+    expect((rows[29].data as string).startsWith('fresh-30-')).toBe(true);
   });
 });

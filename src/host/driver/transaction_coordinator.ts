@@ -276,6 +276,21 @@ export class TransactionCoordinator {
   // Inactivity idle checkpoint timer (5 seconds)
   private idleTimer: any = null;
   private isClosed = false;
+  private walWriteLock: Promise<void> = Promise.resolve();
+
+  private async withWalWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.walWriteLock;
+    let release!: () => void;
+    this.walWriteLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   constructor(
     vfs: IVfsAdapter,
@@ -450,48 +465,73 @@ export class TransactionCoordinator {
     pages: Array<{ pageId: number; data: Uint8Array }>,
   ): Promise<void> {
     if (pages.length === 0) return;
-    const txId = this.queue.allocateTxId();
-    const dbSizePages = this.pool
-      .getSlotDataView(0)
-      .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+    return this.withWalWriteLock(async () => {
+      const txId = this.queue.allocateTxId();
+      const dbSizePages = this.pool
+        .getSlotDataView(0)
+        .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
-    const frames: Uint8Array[] = [];
-    for (const { pageId, data } of pages) {
-      const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
-      pageCopy.set(data);
-      this.committedWalPages.set(pageId, pageCopy);
+      const frames: Uint8Array[] = [];
+      const stagedPages: Array<{ pageId: number; data: Uint8Array }> = [];
+      let nextFrameSeq = this.walFrameSeq;
+      for (const { pageId, data } of pages) {
+        const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
+        pageCopy.set(data);
+        stagedPages.push({ pageId, data: pageCopy });
+        frames.push(
+          encodeWalFrame(
+            {
+              frameType: WAL_FRAME_TYPE_PAGE_DATA,
+              flags: 0,
+              txId,
+              pageId,
+              dbSizePages,
+              frameSeq: ++nextFrameSeq,
+            },
+            pageCopy,
+          ),
+        );
+      }
       frames.push(
-        encodeWalFrame(
-          {
-            frameType: WAL_FRAME_TYPE_PAGE_DATA,
-            flags: 0,
-            txId,
-            pageId,
-            dbSizePages,
-            frameSeq: ++this.walFrameSeq,
-          },
-          pageCopy,
-        ),
+        encodeWalFrame({
+          frameType: WAL_FRAME_TYPE_TX_COMMIT,
+          flags: 0,
+          txId,
+          pageId: 0,
+          dbSizePages,
+          frameSeq: ++nextFrameSeq,
+        }),
       );
-    }
-    frames.push(
-      encodeWalFrame({
-        frameType: WAL_FRAME_TYPE_TX_COMMIT,
-        flags: 0,
-        txId,
-        pageId: 0,
-        dbSizePages,
-        frameSeq: ++this.walFrameSeq,
-      }),
-    );
 
-    const currentFrames = await this.appendFramesToWal(frames, true);
-    this.txCommitCount++;
-    this.scheduleIdleTimer();
+      const currentFrames = await this.appendFramesToWal(frames, true);
 
-    if (currentFrames >= 256 || this.txCommitCount >= 100) {
-      this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
-    }
+      // Commit in-memory WAL index & sequence only AFTER durable WAL append succeeds
+      this.walFrameSeq = nextFrameSeq;
+      for (const { pageId, data } of stagedPages) {
+        this.committedWalPages.set(pageId, data);
+        if (pageId === 1) {
+          const view = new DataView(
+            data.buffer,
+            data.byteOffset,
+            data.byteLength,
+          );
+          this.lastDiskChangeCounter = view.getUint32(
+            HEADER_OFFSET_CHANGE_COUNTER,
+            true,
+          );
+          this.lastDiskSchemaVersion = view.getUint32(
+            HEADER_OFFSET_SCHEMA_VERSION,
+            true,
+          );
+        }
+      }
+      this.txCommitCount++;
+      this.scheduleIdleTimer();
+
+      if (currentFrames >= 256 || this.txCommitCount >= 100) {
+        this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
+      }
+    });
   }
 
   /**
@@ -749,16 +789,18 @@ export class TransactionCoordinator {
 
     const txId = this.activeLease.txId;
     const framesToAppend: Uint8Array[] = [];
+    const stagedDirtySlots: Array<{
+      slot: number;
+      pageId: number;
+      data: Uint8Array;
+    }> = [];
+    let nextFrameSeq = this.walFrameSeq;
     const dbSizePages = this.pool
       .getSlotDataView(0)
       .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
-    // Promote any spilled pages from this transaction into committedWalPages first
-    for (const [pageId, data] of this.spilledPages.entries()) {
-      this.committedWalPages.set(pageId, data);
-    }
-
-    // Append all resident dirty pages to WAL as FRAME_PAGE_DATA frames
+    // Stage all resident dirty pages as FRAME_PAGE_DATA frames (do NOT clear dirty or
+    // mutate committedWalPages until durable WAL write succeeds)
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
       if (this.pool.isDirty(slot)) {
         const pageId = this.pool.getAssignedPage(slot);
@@ -769,8 +811,7 @@ export class TransactionCoordinator {
           const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
           pageCopy.set(pageBytes);
 
-          this.committedWalPages.set(pageId, pageCopy);
-          this.pool.clearDirty(slot);
+          stagedDirtySlots.push({ slot, pageId, data: pageCopy });
 
           framesToAppend.push(
             encodeWalFrame(
@@ -780,7 +821,7 @@ export class TransactionCoordinator {
                 txId,
                 pageId,
                 dbSizePages,
-                frameSeq: ++this.walFrameSeq,
+                frameSeq: ++nextFrameSeq,
               },
               pageCopy,
             ),
@@ -797,12 +838,23 @@ export class TransactionCoordinator {
         txId,
         pageId: 0,
         dbSizePages,
-        frameSeq: ++this.walFrameSeq,
+        frameSeq: ++nextFrameSeq,
       }),
     );
 
     // Durably write WAL frames (combining WAL header write when supported)
     const currentFrames = await this.appendFramesToWal(framesToAppend, true);
+
+    // Commit point reached: apply in-memory WAL state & clear dirty bits
+    this.walFrameSeq = nextFrameSeq;
+    for (const [pageId, data] of this.spilledPages.entries()) {
+      this.committedWalPages.set(pageId, data);
+    }
+    for (const { slot, pageId, data } of stagedDirtySlots) {
+      this.committedWalPages.set(pageId, data);
+      this.pool.clearDirty(slot);
+    }
+    this.recordDiskPage1State();
 
     // Cleanup active transaction state
     this.activeLease = null;
@@ -818,7 +870,7 @@ export class TransactionCoordinator {
     // Check passive checkpoint size trigger (> 256 frames or 100 txs)
     if (currentFrames >= 256 || this.txCommitCount >= 100) {
       // Trigger checkpoint asynchronously in queue without blocking caller
-      this.queue.enqueue(() => this.executeCheckpoint());
+      this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
     }
   }
 
@@ -867,57 +919,70 @@ export class TransactionCoordinator {
   }
 
   async executeCheckpoint(): Promise<{ pagesWritten: number }> {
-    const frameCount = await this.vfs.getWalFrameCount();
-
-    // 1. Scan WAL frames chronologically
+    // 1. Collect committed WAL pages.
+    // Fast-path: when this coordinator owns the active WAL (walHeaderReady && txCommitCount > 0),
+    // `committedWalPages` already holds the exact latest committed image for every WAL page in RAM,
+    // so we can skip reading and re-validating WAL frames from storage.
     const walIndex = new Map<number, Uint8Array>();
-    if (frameCount > 0) {
-      const rawFrames = await this.vfs.readWalFrames(0, frameCount);
-      const txGroups = new Map<
-        number,
-        Array<{ pageId: number; data: Uint8Array }>
-      >();
-      const committedTxs = new Set<number>();
-
-      for (const frameBytes of rawFrames) {
-        const validation = validateWalFrame(frameBytes);
-        if (!validation.valid || !validation.header) {
-          break;
-        }
-        const { frameType, txId, pageId } = validation.header;
-
-        if (!txGroups.has(txId)) txGroups.set(txId, []);
-
-        if (frameType === WAL_FRAME_TYPE_TX_COMMIT) {
-          committedTxs.add(txId);
-        } else if (
-          frameType === WAL_FRAME_TYPE_PAGE_DATA ||
-          frameType === WAL_FRAME_TYPE_TX_UNCOMMITTED
-        ) {
-          const pageData = new Uint8Array(
-            frameBytes.buffer,
-            frameBytes.byteOffset + WAL_FRAME_HEADER_SIZE,
-            WAL_PAGE_SIZE,
-          );
-          const copy = new Uint8Array(WAL_PAGE_SIZE);
-          copy.set(pageData);
-          txGroups.get(txId)!.push({ pageId, data: copy });
-        }
+    if (this.walHeaderReady && this.txCommitCount > 0) {
+      for (const [pageId, data] of this.committedWalPages.entries()) {
+        walIndex.set(pageId, data);
       }
+    } else {
+      const frameCount = await this.vfs.getWalFrameCount();
+      if (frameCount > 0) {
+        const rawFrames = await this.vfs.readWalFrames(0, frameCount);
+        const txGroups = new Map<
+          number,
+          Array<{ pageId: number; data: Uint8Array }>
+        >();
+        const committedTxs = new Set<number>();
 
-      for (const [txId, frames] of txGroups.entries()) {
-        if (committedTxs.has(txId)) {
-          for (const f of frames) {
-            if (f.pageId > 0) {
-              walIndex.set(f.pageId, f.data);
+        let validFramesProcessed = 0;
+        for (const frameBytes of rawFrames) {
+          const validation = validateWalFrame(frameBytes);
+          if (!validation.valid || !validation.header) {
+            break;
+          }
+          if (validation.header.frameSeq !== validFramesProcessed + 1) {
+            break;
+          }
+          validFramesProcessed++;
+          const { frameType, txId, pageId } = validation.header;
+
+          if (!txGroups.has(txId)) txGroups.set(txId, []);
+
+          if (frameType === WAL_FRAME_TYPE_TX_COMMIT) {
+            committedTxs.add(txId);
+          } else if (
+            frameType === WAL_FRAME_TYPE_PAGE_DATA ||
+            frameType === WAL_FRAME_TYPE_TX_UNCOMMITTED
+          ) {
+            const pageData = new Uint8Array(
+              frameBytes.buffer,
+              frameBytes.byteOffset + WAL_FRAME_HEADER_SIZE,
+              WAL_PAGE_SIZE,
+            );
+            const copy = new Uint8Array(WAL_PAGE_SIZE);
+            copy.set(pageData);
+            txGroups.get(txId)!.push({ pageId, data: copy });
+          }
+        }
+
+        for (const [txId, frames] of txGroups.entries()) {
+          if (committedTxs.has(txId)) {
+            for (const f of frames) {
+              if (f.pageId > 0) {
+                walIndex.set(f.pageId, f.data);
+              }
             }
           }
         }
       }
-    }
 
-    for (const [pageId, data] of this.committedWalPages.entries()) {
-      walIndex.set(pageId, data);
+      for (const [pageId, data] of this.committedWalPages.entries()) {
+        walIndex.set(pageId, data);
+      }
     }
 
     // 2. Inspect resident dirty slots in memory (memory_override)
@@ -945,11 +1010,12 @@ export class TransactionCoordinator {
     ]);
 
     const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
+    const dirtySlotsToClear: number[] = [];
     for (const pageId of allPageIds) {
       if (memoryOverride.has(pageId)) {
         const { slotIdx, data } = memoryOverride.get(pageId)!;
         pagesToWrite.push({ pageId, data });
-        this.pool.clearDirty(slotIdx);
+        dirtySlotsToClear.push(slotIdx);
       } else {
         pagesToWrite.push({ pageId, data: walIndex.get(pageId)! });
       }
@@ -981,6 +1047,11 @@ export class TransactionCoordinator {
       await this.vfs.writeWalHeader(nextWalHeader);
     }
 
+    // Clear dirty bits only AFTER durable persistence succeeds
+    for (const slotIdx of dirtySlotsToClear) {
+      this.pool.clearDirty(slotIdx);
+    }
+
     this.committedWalPages.clear();
     this.checkpointSeq = nextCheckpointSeq;
     this.walFrameSeq = 0;
@@ -992,28 +1063,58 @@ export class TransactionCoordinator {
     return { pagesWritten: pagesToWrite.length };
   }
 
-  async resetWalAfterImport(): Promise<void> {
-    this.spilledPages.clear();
-    this.committedWalPages.clear();
+  async resetWalAfterImport(
+    pagesToReplace?: Array<{ pageId: number; data: Uint8Array }>,
+  ): Promise<void> {
     const nextCheckpointSeq = this.checkpointSeq + 1;
     const nextWalHeader = encodeWalFileHeader({
       checkpointSeq: nextCheckpointSeq,
       salt1: this.instanceSalt,
     });
 
-    if (this.vfs.checkpointAtomic) {
-      await this.vfs.checkpointAtomic([], nextWalHeader);
+    if (pagesToReplace && this.vfs.replaceDatabaseAtomic) {
+      await this.vfs.replaceDatabaseAtomic(pagesToReplace, nextWalHeader);
     } else {
-      await this.vfs.truncateWal(0);
-      await this.vfs.writeWalHeader(nextWalHeader);
+      if (pagesToReplace) {
+        await this.vfs.writePages(pagesToReplace);
+        await this.vfs.truncate(pagesToReplace.length);
+        await this.vfs.flush?.();
+      }
+      if (this.vfs.checkpointAtomic) {
+        await this.vfs.checkpointAtomic([], nextWalHeader);
+      } else {
+        await this.vfs.truncateWal(0);
+        await this.vfs.writeWalHeader(nextWalHeader);
+      }
     }
 
+    // Mutate in-memory coordinator state only AFTER durable storage replacement succeeds
+    this.spilledPages.clear();
+    this.committedWalPages.clear();
     this.checkpointSeq = nextCheckpointSeq;
     this.walFrameSeq = 0;
     this.txCommitCount = 0;
     this.expectedWalFrameCount = 0;
     this.walHeaderReady = true;
-    this.recordDiskPage1State();
+
+    const importedPage1 = pagesToReplace?.find((p) => p.pageId === 1)?.data;
+    if (importedPage1) {
+      const view = new DataView(
+        importedPage1.buffer,
+        importedPage1.byteOffset,
+        importedPage1.byteLength,
+      );
+      this.lastDiskChangeCounter = view.getUint32(
+        HEADER_OFFSET_CHANGE_COUNTER,
+        true,
+      );
+      this.lastDiskSchemaVersion = view.getUint32(
+        HEADER_OFFSET_SCHEMA_VERSION,
+        true,
+      );
+    } else {
+      this.recordDiskPage1State();
+    }
   }
 
   private scheduleIdleTimer(): void {

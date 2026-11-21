@@ -174,7 +174,7 @@ void page_delete_row(uint32_t page_offset, uint16_t cell_idx) {
   uint32_t dst = slot_dir_start + cell_idx * 2;
   uint32_t shift_length = (cell_count - 1 - cell_idx) * 2;
   if (shift_length > 0) {
-    webdb_memcpy((void *)(uintptr_t)(dst), (const void *)(uintptr_t)(src), shift_length);
+    webdb_memmove((void *)(uintptr_t)(dst), (const void *)(uintptr_t)(src), shift_length);
   }
   page_set_cell_count(page_offset, cell_count - 1);
   page_set_free_bytes(page_offset, page_get_free_bytes(page_offset) + row_len);
@@ -198,11 +198,33 @@ int32_t page_insert_interior_cell(uint32_t page_offset, uint32_t child_page_id, 
     return -1;
   }
   uint32_t content_offset = page_get_cell_content_offset(page_offset);
+  uint32_t slot_dir_end = PAGE_HEADER_SIZE + ((cell_count + 1) * 2);
+  if (content_offset < slot_dir_end + TABLE_INTERIOR_CELL_SIZE) {
+    return -1;
+  }
   uint32_t new_content_offset = content_offset - TABLE_INTERIOR_CELL_SIZE;
+  int32_t lo = 0;
+  int32_t hi = cell_count - 1;
+  int32_t insert_slot = cell_count;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) >> 1;
+    uint32_t mid_off = page_get_cell_offset(page_offset, mid);
+    int64_t mid_rowid = load_i64((const void *)(uintptr_t)(page_offset + mid_off + 4));
+    if (rowid < mid_rowid) {
+      insert_slot = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
   uint32_t target_offset = page_offset + new_content_offset;
   store_u32((void *)(uintptr_t)(target_offset), child_page_id);
   store_i64((void *)(uintptr_t)(target_offset + 4), rowid);
-  page_set_cell_offset(page_offset, cell_count, new_content_offset);
+  for (int32_t s = cell_count - 1; s >= insert_slot; s--) {
+    uint16_t prev_off = page_get_cell_offset(page_offset, s);
+    page_set_cell_offset(page_offset, s + 1, prev_off);
+  }
+  page_set_cell_offset(page_offset, insert_slot, new_content_offset);
   page_set_cell_count(page_offset, cell_count + 1);
   page_set_cell_content_offset(page_offset, new_content_offset);
   return cell_count + 1;
@@ -213,21 +235,23 @@ uint32_t page_binary_search_interior(uint32_t page_offset, int64_t target_row_id
   if (cell_count == 0) {
     return page_get_right_child_page_id(page_offset);
   }
-  uint32_t lo = 0;
-  uint32_t hi = cell_count - 1;
-  uint32_t candidate_child = -1;
+  int32_t lo = 0;
+  int32_t hi = cell_count - 1;
+  int32_t has_candidate = 0;
+  uint32_t candidate_child = 0;
   while (lo <= hi) {
-    uint32_t mid = (lo + hi) >> 1;
+    int32_t mid = (lo + hi) >> 1;
     uint32_t cell_offset = page_get_cell_offset(page_offset, mid);
-    uint32_t cell_rowid = load_i64((const void *)(uintptr_t)(page_offset + cell_offset + 4));
+    int64_t cell_rowid = load_i64((const void *)(uintptr_t)(page_offset + cell_offset + 4));
     if (target_row_id <= cell_rowid) {
       candidate_child = load_u32((const void *)(uintptr_t)(page_offset + cell_offset));
+      has_candidate = 1;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
-  if (candidate_child != -1) {
+  if (has_candidate != 0) {
     return candidate_child;
   }
   return page_get_right_child_page_id(page_offset);
@@ -327,7 +351,7 @@ int32_t page_insert_index_cell_raw(uint32_t page_offset, uint8_t key_type, int64
   store_u16((void *)(uintptr_t)(target_offset), key_len);
   if (key_len > 0) {
     if (key_type == TYPE_INT32) {
-      store_i32((void *)(uintptr_t)(target_offset + 2), ((int32_t)(key_f64)));
+      store_i32((void *)(uintptr_t)(target_offset + 2), webdb_f64_to_i32((double)(key_f64)));
     } else     if (key_type == TYPE_INT64) {
       store_i64((void *)(uintptr_t)(target_offset + 2), key_i64);
     } else     if (key_type == TYPE_FLOAT64) {
@@ -412,7 +436,7 @@ void page_delete_index_leaf_cell(uint32_t page_offset, uint16_t slot_idx) {
   uint32_t dst = slot_dir_start + slot_idx * 2;
   uint32_t shift_len = (cell_count - 1 - slot_idx) * 2;
   if (shift_len > 0) {
-    webdb_memcpy((void *)(uintptr_t)(dst), (const void *)(uintptr_t)(src), shift_len);
+    webdb_memmove((void *)(uintptr_t)(dst), (const void *)(uintptr_t)(src), shift_len);
   }
   page_set_cell_count(page_offset, cell_count - 1);
   page_set_free_bytes(page_offset, page_get_free_bytes(page_offset) + cell_length);

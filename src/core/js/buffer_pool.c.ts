@@ -329,20 +329,13 @@ export function buf_pool_select_eviction_victim(
     slot_to_page_offset,
     candidate_slot,
   );
-  const is_dirty = buf_pool_is_dirty(
-    new Uint8Array(buffer),
-    dirty_mask_offset,
-    candidate_slot,
-  );
+  const u8 = new Uint8Array(buffer);
+  const is_dirty = buf_pool_is_dirty(u8, dirty_mask_offset, candidate_slot);
   const slots_base =
     (buffer as any).__webdbPool?.slotsBaseOffset ?? SLOTS_BASE_OFFSET;
-  const slot_view = new DataView(
-    buffer,
-    slots_base + candidate_slot * PAGE_SIZE,
-    PAGE_SIZE,
-  );
   const is_free_page =
-    old_page_id > 0 && page_get_type(slot_view, 0) === PAGE_TYPE_FREE;
+    old_page_id > 0 &&
+    u8[slots_base + candidate_slot * PAGE_SIZE] === PAGE_TYPE_FREE;
   const flush_page_id =
     is_dirty && !is_free_page && old_page_id > 0 ? old_page_id : 0;
 

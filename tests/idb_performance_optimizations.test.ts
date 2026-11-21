@@ -97,6 +97,9 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     const res = await db.checkpoint();
     expect(res.pagesWritten).toBeGreaterThan(0);
 
+    // Zero readonly txs (committedWalPages in RAM skips readWalFrames) + 1 atomic readwrite tx
+    const readTxs = spy.calls.filter((c) => c.mode === 'readonly');
+    expect(readTxs.length).toBe(0);
     const writeTxs = spy.calls.filter((c) => c.mode === 'readwrite');
     expect(writeTxs.length).toBe(1);
     expect(writeTxs[0].stores).toEqual(['pages', 'wal_frames', 'wal_meta']);
@@ -270,5 +273,51 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     });
     openedDbs.push(db);
     expect(db.coordinator.leaseQueue.hasWebLocks()).toBe(false);
+  });
+
+  it('executes importBinary() in a single atomic readwrite IDB transaction (replaceDatabaseAtomic) and supports sparse contiguous readPages()', async () => {
+    const src = await WebDB.open({
+      name: uniqueName('idb_atomic_imp_src'),
+      storage: 'memory',
+    });
+    openedDbs.push(src);
+    await src.createTable('t', [
+      { name: 'id', type: DataType.INT32, primaryKey: true },
+      { name: 'v', type: DataType.TEXT, notNull: true },
+    ]);
+    await src.insert('t', { id: 1, v: 'hello' });
+    const binary = await src.exportBinary();
+
+    const dst = await WebDB.open({
+      name: uniqueName('idb_atomic_imp_dst'),
+      storage: 'idb',
+      crossTabSync: false,
+    });
+    openedDbs.push(dst);
+
+    const spy = spyIdbTransactions();
+    await dst.importBinary(binary);
+
+    const writeTxs = spy.calls.filter((c) => c.mode === 'readwrite');
+    expect(writeTxs.length).toBe(1);
+    expect(writeTxs[0].stores).toEqual(['pages', 'wal_frames', 'wal_meta']);
+
+    // Verify contiguous readPages() fast-path handles sparse missing pages accurately
+    const vfs = new IndexedDbVfsAdapter(uniqueName('idb_sparse_contiguous'));
+    const p1 = new Uint8Array(4096).fill(1);
+    const p3 = new Uint8Array(4096).fill(3);
+    const p5 = new Uint8Array(4096).fill(5);
+    await vfs.writePages([
+      { pageId: 1, data: p1 },
+      { pageId: 3, data: p3 },
+      { pageId: 5, data: p5 },
+    ]);
+    const loaded = await vfs.readPages([1, 2, 3, 4, 5]);
+    expect(loaded[0]?.[0]).toBe(1);
+    expect(loaded[1]).toBeNull();
+    expect(loaded[2]?.[0]).toBe(3);
+    expect(loaded[3]).toBeNull();
+    expect(loaded[4]?.[0]).toBe(5);
+    await vfs.close();
   });
 });

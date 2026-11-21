@@ -34,6 +34,7 @@ import { UuidCodec, UlidCodec } from "./codecs.c.ts";
 import type { u8, u16, u32, i32, i64, f64 } from "../types.ts";
 import {
   memcpy,
+  memmove,
   read_u8,
   read_u16,
   write_u16,
@@ -586,7 +587,7 @@ export function page_delete_row(
   const shift_length = (cell_count - 1 - cell_idx) * 2;
 
   if (shift_length > 0) {
-    memcpy(view, dst, view, src, shift_length);
+    memmove(view, dst, view, src, shift_length);
   }
 
   // Update header
@@ -1477,21 +1478,48 @@ export function page_insert_interior_cell(
   child_page_id: u32,
   rowid: i64,
 ): i32 {
-  const cell_count = page_get_cell_count(view, page_offset);
+  const cell_count: i32 = page_get_cell_count(view, page_offset);
   if (cell_count >= MAX_TABLE_INTERIOR_CELLS) {
     return -1; // Interior page full
   }
 
-  const content_offset = page_get_cell_content_offset(view, page_offset);
-  const new_content_offset = content_offset - TABLE_INTERIOR_CELL_SIZE;
+  const content_offset: u32 = page_get_cell_content_offset(view, page_offset);
+  const slot_dir_end: u32 = PAGE_HEADER_SIZE + ((cell_count + 1) * 2);
+  if (content_offset < slot_dir_end + TABLE_INTERIOR_CELL_SIZE) {
+    return -1; // Insufficient contiguous free space
+  }
+
+  const new_content_offset: u32 = content_offset - TABLE_INTERIOR_CELL_SIZE;
+
+  // Binary search to maintain sorted rowid order in slot directory
+  let lo: i32 = 0;
+  let hi: i32 = cell_count - 1;
+  let insert_slot: i32 = cell_count;
+  while (lo <= hi) {
+    const mid: i32 = (lo + hi) >> 1;
+    const mid_off: u32 = page_get_cell_offset(view, page_offset, mid);
+    const mid_rowid: i64 = view.getBigInt64(page_offset + mid_off + 4, true);
+    if (rowid < mid_rowid) {
+      insert_slot = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
 
   // Write 12-byte cell payload
-  const target_offset = page_offset + new_content_offset;
+  const target_offset: u32 = page_offset + new_content_offset;
   view.setUint32(target_offset, child_page_id, true);
   view.setBigInt64(target_offset + 4, rowid, true);
 
+  // Shift subsequent slot directory entries right by 1 if inserting before end
+  for (let s: i32 = cell_count - 1; s >= insert_slot; s--) {
+    const prev_off: u16 = page_get_cell_offset(view, page_offset, s);
+    page_set_cell_offset(view, page_offset, s + 1, prev_off);
+  }
+
   // Write slot directory entry
-  page_set_cell_offset(view, page_offset, cell_count, new_content_offset);
+  page_set_cell_offset(view, page_offset, insert_slot, new_content_offset);
 
   page_set_cell_count(view, page_offset, cell_count + 1);
   page_set_cell_content_offset(view, page_offset, new_content_offset);
@@ -1509,29 +1537,31 @@ export function page_binary_search_interior(
   page_offset: u32,
   target_row_id: i64,
 ): u32 {
-  const cell_count = page_get_cell_count(view, page_offset);
+  const cell_count: i32 = page_get_cell_count(view, page_offset);
   if (cell_count === 0) {
     return page_get_right_child_page_id(view, page_offset);
   }
 
-  let lo = 0;
-  let hi = cell_count - 1;
-  let candidate_child = -1;
+  let lo: i32 = 0;
+  let hi: i32 = cell_count - 1;
+  let has_candidate: i32 = 0;
+  let candidate_child: u32 = 0;
 
   while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const cell_offset = page_get_cell_offset(view, page_offset, mid);
-    const cell_rowid = view.getBigInt64(page_offset + cell_offset + 4, true);
+    const mid: i32 = (lo + hi) >> 1;
+    const cell_offset: u32 = page_get_cell_offset(view, page_offset, mid);
+    const cell_rowid: i64 = view.getBigInt64(page_offset + cell_offset + 4, true);
 
     if (target_row_id <= cell_rowid) {
       candidate_child = view.getUint32(page_offset + cell_offset, true);
+      has_candidate = 1;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
   }
 
-  if (candidate_child !== -1) {
+  if (has_candidate !== 0) {
     return candidate_child;
   }
 
@@ -1558,7 +1588,16 @@ export function page_split_interior(
     throw new Error(`Cannot split interior page with only ${cell_count} cells`);
   }
 
-  // Read median cell
+  // Snapshot all entries before mutating either page (also safe if page_offset === new_page_offset)
+  const leftEntries: Array<{ childId: number; rowid: bigint }> = [];
+  for (let i = 0; i < median_idx; i++) {
+    const off = page_get_cell_offset(view, page_offset, i);
+    leftEntries.push({
+      childId: view.getUint32(page_offset + off, true),
+      rowid: view.getBigInt64(page_offset + off + 4, true),
+    });
+  }
+
   const median_cell_offset = page_get_cell_offset(
     view,
     page_offset,
@@ -1573,21 +1612,28 @@ export function page_split_interior(
     true,
   );
 
-  // Initialize right sibling interior page
-  const old_right_child = page_get_right_child_page_id(view, page_offset);
-  page_init_interior(view, new_page_offset, old_right_child);
-
-  // Copy entries 146..cell_count-1 to new sibling page
+  const rightEntries: Array<{ childId: number; rowid: bigint }> = [];
   for (let i = median_idx + 1; i < cell_count; i++) {
-    const offset = page_get_cell_offset(view, page_offset, i);
-    const child_id = view.getUint32(page_offset + offset, true);
-    const r_id = view.getBigInt64(page_offset + offset + 4, true);
-    page_insert_interior_cell(view, new_page_offset, child_id, r_id);
+    const off = page_get_cell_offset(view, page_offset, i);
+    rightEntries.push({
+      childId: view.getUint32(page_offset + off, true),
+      rowid: view.getBigInt64(page_offset + off + 4, true),
+    });
   }
 
-  // Left page keeps entries 0..144, and its right_child_page_id becomes median's child_page_id
-  page_set_right_child_page_id(view, page_offset, promoted_child_page_id);
-  page_set_cell_count(view, page_offset, median_idx);
+  const old_right_child = page_get_right_child_page_id(view, page_offset);
+
+  // Initialize and populate right sibling interior page
+  page_init_interior(view, new_page_offset, old_right_child);
+  for (const entry of rightEntries) {
+    page_insert_interior_cell(view, new_page_offset, entry.childId, entry.rowid);
+  }
+
+  // Re-initialize and repack left page so cell_content_offset reclaims space from moved cells
+  page_init_interior(view, page_offset, promoted_child_page_id);
+  for (const entry of leftEntries) {
+    page_insert_interior_cell(view, page_offset, entry.childId, entry.rowid);
+  }
 
   return {
     median_rowid,
@@ -2189,7 +2235,7 @@ export function page_delete_index_leaf_cell(
   const shift_len = (cell_count - 1 - slot_idx) * 2;
 
   if (shift_len > 0) {
-    memcpy(view, dst, view, src, shift_len);
+    memmove(view, dst, view, src, shift_len);
   }
 
   page_set_cell_count(view, page_offset, cell_count - 1);
