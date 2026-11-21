@@ -238,10 +238,27 @@ export class Migrator {
     return { applied, pending, all };
   }
 
+  private validateStepOption(
+    step: number | undefined,
+    kind: 'migration' | 'rollback',
+  ): 'zero' | 'valid' {
+    if (step === undefined) return 'valid';
+    if (!Number.isInteger(step) || step < 0) {
+      throw new RangeError(
+        `Invalid ${kind} step: ${step}. Must be a non-negative integer.`,
+      );
+    }
+    return step === 0 ? 'zero' : 'valid';
+  }
+
   /**
    * Executes pending migrations up to the latest registered version (or up to `step`).
    */
   async up(options?: MigrateUpOptions): Promise<MigrationResult> {
+    if (this.validateStepOption(options?.step, 'migration') === 'zero') {
+      return { executed: [] };
+    }
+
     if (this.mode === 'atomic') {
       return this.db.transaction(async (tx) => {
         return this.runUpInternal(tx, options);
@@ -265,14 +282,6 @@ export class Migrator {
     );
 
     if (options?.step !== undefined) {
-      if (!Number.isInteger(options.step) || options.step < 0) {
-        throw new RangeError(
-          `Invalid migration step: ${options.step}. Must be a non-negative integer.`,
-        );
-      }
-      if (options.step === 0) {
-        return { executed: [] };
-      }
       pending = pending.slice(0, options.step);
     }
 
@@ -300,22 +309,15 @@ export class Migrator {
    * Rolls back previously applied migrations. By default rolls back the most recent batch.
    */
   async down(options?: MigrateDownOptions): Promise<MigrationResult> {
+    if (this.validateStepOption(options?.step, 'rollback') === 'zero') {
+      return { executed: [] };
+    }
+
     return this.db.transaction(async (tx) => {
       await this.ensureTrackingTable(tx);
       const applied = await this.getAppliedRecords(tx);
       if (applied.length === 0) {
         return { executed: [] };
-      }
-
-      if (options?.step !== undefined) {
-        if (!Number.isInteger(options.step) || options.step < 0) {
-          throw new RangeError(
-            `Invalid rollback step: ${options.step}. Must be a non-negative integer.`,
-          );
-        }
-        if (options.step === 0) {
-          return { executed: [] };
-        }
       }
 
       // Group & order records to revert
@@ -455,14 +457,6 @@ export class Migrator {
     );
 
     if (options?.step !== undefined) {
-      if (!Number.isInteger(options.step) || options.step < 0) {
-        throw new RangeError(
-          `Invalid migration step: ${options.step}. Must be a non-negative integer.`,
-        );
-      }
-      if (options.step === 0) {
-        return { executed: [] };
-      }
       pending = pending.slice(0, options.step);
     }
 

@@ -276,6 +276,21 @@ export class TransactionCoordinator {
   // Inactivity idle checkpoint timer (5 seconds)
   private idleTimer: any = null;
   private isClosed = false;
+  private walWriteLock: Promise<void> = Promise.resolve();
+
+  private async withWalWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.walWriteLock;
+    let release!: () => void;
+    this.walWriteLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   constructor(
     vfs: IVfsAdapter,
@@ -450,67 +465,73 @@ export class TransactionCoordinator {
     pages: Array<{ pageId: number; data: Uint8Array }>,
   ): Promise<void> {
     if (pages.length === 0) return;
-    const txId = this.queue.allocateTxId();
-    const dbSizePages = this.pool
-      .getSlotDataView(0)
-      .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
+    return this.withWalWriteLock(async () => {
+      const txId = this.queue.allocateTxId();
+      const dbSizePages = this.pool
+        .getSlotDataView(0)
+        .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
-    const frames: Uint8Array[] = [];
-    const stagedPages: Array<{ pageId: number; data: Uint8Array }> = [];
-    let nextFrameSeq = this.walFrameSeq;
-    for (const { pageId, data } of pages) {
-      const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
-      pageCopy.set(data);
-      stagedPages.push({ pageId, data: pageCopy });
-      frames.push(
-        encodeWalFrame(
-          {
-            frameType: WAL_FRAME_TYPE_PAGE_DATA,
-            flags: 0,
-            txId,
-            pageId,
-            dbSizePages,
-            frameSeq: ++nextFrameSeq,
-          },
-          pageCopy,
-        ),
-      );
-    }
-    frames.push(
-      encodeWalFrame({
-        frameType: WAL_FRAME_TYPE_TX_COMMIT,
-        flags: 0,
-        txId,
-        pageId: 0,
-        dbSizePages,
-        frameSeq: ++nextFrameSeq,
-      }),
-    );
-
-    const currentFrames = await this.appendFramesToWal(frames, true);
-
-    // Commit in-memory WAL index & sequence only AFTER durable WAL append succeeds
-    this.walFrameSeq = nextFrameSeq;
-    for (const { pageId, data } of stagedPages) {
-      this.committedWalPages.set(pageId, data);
-      if (pageId === 1) {
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        this.lastDiskChangeCounter = view.getUint32(
-          HEADER_OFFSET_CHANGE_COUNTER,
-          true,
-        );
-        this.lastDiskSchemaVersion = view.getUint32(
-          HEADER_OFFSET_SCHEMA_VERSION,
-          true,
+      const frames: Uint8Array[] = [];
+      const stagedPages: Array<{ pageId: number; data: Uint8Array }> = [];
+      let nextFrameSeq = this.walFrameSeq;
+      for (const { pageId, data } of pages) {
+        const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
+        pageCopy.set(data);
+        stagedPages.push({ pageId, data: pageCopy });
+        frames.push(
+          encodeWalFrame(
+            {
+              frameType: WAL_FRAME_TYPE_PAGE_DATA,
+              flags: 0,
+              txId,
+              pageId,
+              dbSizePages,
+              frameSeq: ++nextFrameSeq,
+            },
+            pageCopy,
+          ),
         );
       }
-    }
-    this.txCommitCount++;
-    this.scheduleIdleTimer();
+      frames.push(
+        encodeWalFrame({
+          frameType: WAL_FRAME_TYPE_TX_COMMIT,
+          flags: 0,
+          txId,
+          pageId: 0,
+          dbSizePages,
+          frameSeq: ++nextFrameSeq,
+        }),
+      );
 
-    if (currentFrames >= 256 || this.txCommitCount >= 100) {
-      this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
-    }
+      const currentFrames = await this.appendFramesToWal(frames, true);
+
+      // Commit in-memory WAL index & sequence only AFTER durable WAL append succeeds
+      this.walFrameSeq = nextFrameSeq;
+      for (const { pageId, data } of stagedPages) {
+        this.committedWalPages.set(pageId, data);
+        if (pageId === 1) {
+          const view = new DataView(
+            data.buffer,
+            data.byteOffset,
+            data.byteLength,
+          );
+          this.lastDiskChangeCounter = view.getUint32(
+            HEADER_OFFSET_CHANGE_COUNTER,
+            true,
+          );
+          this.lastDiskSchemaVersion = view.getUint32(
+            HEADER_OFFSET_SCHEMA_VERSION,
+            true,
+          );
+        }
+      }
+      this.txCommitCount++;
+      this.scheduleIdleTimer();
+
+      if (currentFrames >= 256 || this.txCommitCount >= 100) {
+        this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
+      }
+    });
   }
 
   /**
@@ -1045,8 +1066,6 @@ export class TransactionCoordinator {
   async resetWalAfterImport(
     pagesToReplace?: Array<{ pageId: number; data: Uint8Array }>,
   ): Promise<void> {
-    this.spilledPages.clear();
-    this.committedWalPages.clear();
     const nextCheckpointSeq = this.checkpointSeq + 1;
     const nextWalHeader = encodeWalFileHeader({
       checkpointSeq: nextCheckpointSeq,
@@ -1069,12 +1088,33 @@ export class TransactionCoordinator {
       }
     }
 
+    // Mutate in-memory coordinator state only AFTER durable storage replacement succeeds
+    this.spilledPages.clear();
+    this.committedWalPages.clear();
     this.checkpointSeq = nextCheckpointSeq;
     this.walFrameSeq = 0;
     this.txCommitCount = 0;
     this.expectedWalFrameCount = 0;
     this.walHeaderReady = true;
-    this.recordDiskPage1State();
+
+    const importedPage1 = pagesToReplace?.find((p) => p.pageId === 1)?.data;
+    if (importedPage1) {
+      const view = new DataView(
+        importedPage1.buffer,
+        importedPage1.byteOffset,
+        importedPage1.byteLength,
+      );
+      this.lastDiskChangeCounter = view.getUint32(
+        HEADER_OFFSET_CHANGE_COUNTER,
+        true,
+      );
+      this.lastDiskSchemaVersion = view.getUint32(
+        HEADER_OFFSET_SCHEMA_VERSION,
+        true,
+      );
+    } else {
+      this.recordDiskPage1State();
+    }
   }
 
   private scheduleIdleTimer(): void {

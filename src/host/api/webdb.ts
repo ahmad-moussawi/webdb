@@ -5126,6 +5126,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         });
       }
 
+      // Persist replacement to storage BEFORE resetting live buffer pool state,
+      // so a failed atomic replacement leaves the existing live pool & WAL intact.
+      await this.coordinator.resetWalAfterImport(pagesToWrite);
+
       for (let slot = 1; slot < this.pool.slotCount; slot++) {
         this.pool.forceUnpinSlot(slot);
         this.pool.unassignSlot(slot);
@@ -5135,8 +5139,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       this.pool.getPageBytesInSlot(0).set(pagesToWrite[0].data);
       this.pool.clearDirty(0);
-
-      await this.coordinator.resetWalAfterImport(pagesToWrite);
+      this.coordinator.recordDiskPage1State();
 
       this.tableMetaCache.clear();
       this.tableTailPages.clear();

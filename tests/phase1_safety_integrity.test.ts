@@ -5,6 +5,8 @@ import {
   MemoryVfsAdapter,
   Io,
   BufferPoolDriver,
+  TransactionCoordinator,
+  decodeWalFrameHeader,
   createWasmMemory,
   createWasmCore,
   page_init_interior,
@@ -512,12 +514,23 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
           ],
         });
 
-        // step: 0 must run ZERO migrations
+        // step: 0 must run ZERO migrations AND not create the tracking table
         const res0 = await migrator.up({ step: 0 });
         expect(res0.executed).toEqual([]);
         expect(await db.hasTable("t1")).toBe(false);
+        expect(await db.hasTable("_webdb_migrations")).toBe(false);
 
         await expect(migrator.up({ step: -1 })).rejects.toThrow(RangeError);
+        await expect(migrator.up({ step: 1.5 })).rejects.toThrow(RangeError);
+        expect(await db.hasTable("_webdb_migrations")).toBe(false);
+
+        // On an empty DB, down({ step: 0 }) must NOT create tracking table, and invalid step must throw
+        const emptyDown0 = await migrator.down({ step: 0 });
+        expect(emptyDown0.executed).toEqual([]);
+        expect(await db.hasTable("_webdb_migrations")).toBe(false);
+        await expect(migrator.down({ step: -1 })).rejects.toThrow(RangeError);
+        await expect(migrator.down({ step: 1.5 })).rejects.toThrow(RangeError);
+        expect(await db.hasTable("_webdb_migrations")).toBe(false);
 
         // Apply all 2 migrations
         const resAll = await migrator.up();
@@ -543,6 +556,251 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
       }
       expect(regexpReplace("foo bar", "foo", "baz", "y")).toBe("baz bar");
       expect(regexpReplace("foo bar", "foo", "baz", "y")).toBe("baz bar");
+    });
+  });
+
+  describe("8. PR Review Regressions (Correlated DML Isolation/groupKeys, WAL Serialization, Atomic Import, Batch Flush)", () => {
+    it("correlated update/delete with groupBy() clears groupKeys and updates row-granularity matches", async () => {
+      const db = await WebDB.open({ storage: "memory" });
+      await db.createTable("users", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "status", type: "TEXT" },
+      ]);
+      await db.createTable("orders", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "user_id", type: "INT32" },
+      ]);
+      await db.insertMany("users", [
+        { id: 1, status: "pending" },
+        { id: 2, status: "pending" },
+        { id: 3, status: "other" },
+      ]);
+      await db.insertMany("orders", [
+        { id: 10, user_id: 1 },
+        { id: 11, user_id: 2 },
+      ]);
+
+      const updated = await db
+        .from("users")
+        .groupBy("status")
+        .whereExists(
+          db.from("orders").where("orders.user_id", "=", col("users.id")),
+        )
+        .update({ status: "done" });
+
+      expect(updated).toBe(2);
+      const rows = await db.from("users").orderBy("id", "asc").toArray();
+      expect(rows).toEqual([
+        { id: 1, status: "done" },
+        { id: 2, status: "done" },
+        { id: 3, status: "other" },
+      ]);
+      await db.close();
+    });
+
+    it("correlated update/delete executes selection and mutation under a single exclusive lease", async () => {
+      const db = await WebDB.open({ storage: "memory" });
+      await db.createTable("users", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "name", type: "TEXT" },
+      ]);
+      await db.createTable("orders", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "user_id", type: "INT32" },
+      ]);
+      await db.insertMany("users", [
+        { id: 1, name: "Alice" },
+        { id: 2, name: "Bob" },
+      ]);
+      await db.insert("orders", { id: 10, user_id: 1 });
+
+      // Start correlated delete and immediately enqueue a concurrent write removing the order.
+      // Because correlated delete holds one exclusive transaction lease across select + delete,
+      // the concurrent write cannot interleave between selection and mutation.
+      const events: string[] = [];
+      const origExecQuery = db.executeQuery;
+      db.executeQuery = async function (...args) {
+        events.push("query_start");
+        await new Promise((r) => setTimeout(r, 15));
+        return origExecQuery.apply(this, args);
+      };
+
+      const p1 = db
+        .from("users")
+        .whereExists(
+          db.from("orders").where("orders.user_id", "=", col("users.id")),
+        )
+        .delete()
+        .then((n) => {
+          events.push("correlated_done");
+          return n;
+        });
+
+      const p2 = db
+        .from("orders")
+        .where("id", "=", 10)
+        .delete()
+        .then((n) => {
+          events.push("concurrent_order_delete_done");
+          return n;
+        });
+
+      const [deletedUsers] = await Promise.all([p1, p2]);
+      expect(deletedUsers).toBe(1);
+      expect(events.indexOf("correlated_done")).toBeLessThan(
+        events.indexOf("concurrent_order_delete_done"),
+      );
+      expect(await db.from("users").toArray()).toEqual([{ id: 2, name: "Bob" }]);
+      await db.close();
+    });
+
+    it("concurrent commitDirectPagesViaWal calls on different pages produce strictly monotonic WAL frameSeq", async () => {
+      const vfs = new MemoryVfsAdapter();
+      const origAppend = vfs.appendWalFrames.bind(vfs);
+      vfs.appendWalFrames = async (frames) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return origAppend(frames);
+      };
+
+      const memory = createWasmMemory(4);
+      const io = new Io({ vfs, memory });
+      const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
+      const coordinator = new TransactionCoordinator(vfs, driver, io);
+
+      const p2 = new Uint8Array(PAGE_SIZE);
+      p2[20] = 0xaa;
+      const p3 = new Uint8Array(PAGE_SIZE);
+      p3[20] = 0xbb;
+
+      await Promise.all([
+        coordinator.commitDirectPagesViaWal([{ pageId: 2, data: p2 }]),
+        coordinator.commitDirectPagesViaWal([{ pageId: 3, data: p3 }]),
+      ]);
+
+      const frameCount = await vfs.getWalFrameCount();
+      expect(frameCount).toBe(4);
+      const rawFrames = await vfs.readWalFrames(0, frameCount);
+      const seqs = rawFrames.map((f) => decodeWalFrameHeader(f).frameSeq);
+      expect(seqs).toEqual([1, 2, 3, 4]);
+    });
+
+    it("failed importBinary() preserves live buffer pool and committed WAL state when replaceDatabaseAtomic rejects", async () => {
+      const vfs = new MemoryVfsAdapter();
+      const sourceDb = await WebDB.open({ storage: "memory" });
+      await sourceDb.createTable("imported_tbl", [
+        { name: "id", type: "INT32", primaryKey: true },
+      ]);
+      await sourceDb.insert("imported_tbl", { id: 99 });
+      const importBytes = await sourceDb.exportBinary();
+      await sourceDb.close();
+
+      const db = await WebDB.open({ vfs });
+      await db.createTable("live_tbl", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "val", type: "TEXT" },
+      ]);
+      await db.transaction(async (tx) => {
+        await tx.insert("live_tbl", { id: 1, val: "still_alive" });
+      });
+
+      // Inject failing replaceDatabaseAtomic
+      (vfs as any).replaceDatabaseAtomic = async () => {
+        throw new Error("Simulated atomic replace failure");
+      };
+
+      await expect(db.importBinary(importBytes)).rejects.toThrow(
+        "Simulated atomic replace failure",
+      );
+
+      // Live DB state & uncheckpointed WAL must remain completely intact!
+      expect(await db.hasTable("live_tbl")).toBe(true);
+      expect(await db.hasTable("imported_tbl")).toBe(false);
+      expect(await db.from("live_tbl").toArray()).toEqual([
+        { id: 1, val: "still_alive" },
+      ]);
+
+      // Checkpointing and reopening must still retain the committed row
+      delete (vfs as any).replaceDatabaseAtomic;
+      await db.checkpoint();
+      await db.close();
+
+      const reopened = await WebDB.open({ vfs });
+      expect(await reopened.from("live_tbl").toArray()).toEqual([
+        { id: 1, val: "still_alive" },
+      ]);
+      await reopened.close();
+    });
+
+    it("Io.writeSlots rechecks earlier batch pages if a new flush starts while waiting on a later page", async () => {
+      const vfs = new MemoryVfsAdapter();
+      const memory = createWasmMemory(6);
+      const io = new Io({ vfs, memory });
+      const driver = new BufferPoolDriver({ io, memory, slotCount: 6 });
+
+      const slotA = await driver.acquirePage(2);
+      const slotB = await driver.acquirePage(3);
+      driver.getPageBytesInSlot(slotA)[20] = 0x10;
+      driver.getPageBytesInSlot(slotB)[20] = 0x20;
+
+      let releaseB!: () => void;
+      let releaseA!: () => void;
+      let activeForPage2 = 0;
+      let maxConcurrentForPage2 = 0;
+      const origWrite = vfs.writePages.bind(vfs);
+      let bStarted!: () => void;
+      const bStartedPromise = new Promise<void>((r) => (bStarted = r));
+      let aStarted!: () => void;
+      const aStartedPromise = new Promise<void>((r) => (aStarted = r));
+
+      let callNum = 0;
+      vfs.writePages = async (pages) => {
+        callNum++;
+        const has2 = pages.some((p) => p.pageId === 2);
+        if (has2) {
+          activeForPage2++;
+          maxConcurrentForPage2 = Math.max(maxConcurrentForPage2, activeForPage2);
+        }
+        try {
+          if (callNum === 1 && pages.length === 1 && pages[0].pageId === 3) {
+            bStarted();
+            await new Promise<void>((r) => (releaseB = r));
+          } else if (callNum === 2 && pages.length === 1 && pages[0].pageId === 2) {
+            aStarted();
+            await new Promise<void>((r) => (releaseA = r));
+          }
+          return await origWrite(pages);
+        } finally {
+          if (has2) activeForPage2--;
+        }
+      };
+
+      // 1. Start an in-flight flush on page 3 (B)
+      const flushB = io.writeSlot(slotB, 3);
+      await bStartedPromise;
+
+      // 2. Start batch writeSlots([A(2), B(3)]) — it will pause awaiting B(3)
+      const batchFlush = io.writeSlots([
+        { slotIdx: slotA, pageId: 2 },
+        { slotIdx: slotB, pageId: 3 },
+      ]);
+
+      // 3. While batch is waiting on B(3), start a flush on A(2) with newer data
+      driver.getPageBytesInSlot(slotA)[20] = 0x33;
+      const flushA = io.writeSlot(slotA, 2);
+      await aStartedPromise;
+
+      // 4. Release B(3) first — batch MUST wait for A(2) too before starting its own write!
+      releaseB();
+      await new Promise((r) => setTimeout(r, 15));
+      expect(maxConcurrentForPage2).toBe(1);
+
+      driver.getPageBytesInSlot(slotA)[20] = 0x44;
+      releaseA();
+      await Promise.all([flushB, flushA, batchFlush]);
+
+      expect(maxConcurrentForPage2).toBe(1);
+      const [diskPage2] = await vfs.readPages([2]);
+      expect(diskPage2![20]).toBe(0x44);
     });
   });
 });

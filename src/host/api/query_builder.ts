@@ -427,6 +427,10 @@ export interface IDatabaseQueryExecutor {
     options?: DmlOptions,
   ): Promise<number>;
   getTable?(tableName: string): Promise<TableMeta>;
+  transaction?<T>(
+    callback: (tx: IDatabaseQueryExecutor) => Promise<T>,
+    options?: DmlOptions,
+  ): Promise<T>;
 }
 
 function assertNotAggregateInWhere(colOrExpr: any): void {
@@ -3911,11 +3915,13 @@ export class QueryBuilder {
   }
 
   private async resolveDmlFilters(
+    execDb: IDatabaseQueryExecutor,
     dmlOptions?: DmlOptions,
   ): Promise<{ filters: QueryFilter[]; emptyMatch: boolean }> {
-    const resolvedFilters = await this.resolveUncorrelatedFilters(this.filters);
+    const bound = execDb === this.db ? this : this.clone(execDb);
+    const resolvedFilters = await bound.resolveUncorrelatedFilters(bound.filters);
     const hasCorrelated = resolvedFilters.some((f) =>
-      this.filterContainsCorrelatedSubquery(f),
+      bound.filterContainsCorrelatedSubquery(f),
     );
     if (!hasCorrelated) {
       return { filters: resolvedFilters, emptyMatch: false };
@@ -3923,19 +3929,21 @@ export class QueryBuilder {
 
     // Evaluate correlated filters cleanly via QueryBuilder's correlated executor,
     // then translate matched rows into concrete PK / exact-row filters for DML.
-    const matcher = this.clone(this.db);
+    const matcher = bound.clone(execDb);
     matcher.selectFields = [];
     matcher.aggExprs = [];
     matcher.groupCols = [];
+    matcher.groupKeys = [];
     matcher.havingFilters = [];
+    matcher.offsetCount = null;
     matcher.limitCount = dmlOptions?.limit ?? matcher.limitCount;
     const matchedRows = await matcher.toArray();
     if (matchedRows.length === 0) {
       return { filters: [], emptyMatch: true };
     }
 
-    const tableMeta = this.db.getTable
-      ? await this.db.getTable(this.tableName)
+    const tableMeta = execDb.getTable
+      ? await execDb.getTable(this.tableName)
       : undefined;
     const pkCols: string[] = tableMeta?.primaryKey ?? [];
     if (pkCols.length === 1) {
@@ -3983,6 +3991,41 @@ export class QueryBuilder {
     };
   }
 
+  private async runIsolatedDml(
+    dmlOptions: DmlOptions | undefined,
+    mutate: (
+      execDb: IDatabaseQueryExecutor,
+      filters: QueryFilter[],
+    ) => Promise<number>,
+  ): Promise<number> {
+    const hasCorrelated = this.filters.some((f) =>
+      this.filterContainsCorrelatedSubquery(f),
+    );
+    const inActiveTx = (this.db as any).currentLeaseId != null;
+
+    if (
+      hasCorrelated &&
+      !inActiveTx &&
+      typeof this.db.transaction === 'function'
+    ) {
+      return this.db.transaction(async (tx) => {
+        const { filters, emptyMatch } = await this.resolveDmlFilters(
+          tx,
+          dmlOptions,
+        );
+        if (emptyMatch) return 0;
+        return mutate(tx, filters);
+      }, dmlOptions);
+    }
+
+    const { filters, emptyMatch } = await this.resolveDmlFilters(
+      this.db,
+      dmlOptions,
+    );
+    if (emptyMatch) return 0;
+    return mutate(this.db, filters);
+  }
+
   async update(
     patch: Partial<DbRow>,
     options?: DmlOptions,
@@ -3992,13 +4035,8 @@ export class QueryBuilder {
     }
     this.assertSubqueryDepth();
     const dmlOptions = this.resolveDmlOptions(options);
-    const { filters, emptyMatch } = await this.resolveDmlFilters(dmlOptions);
-    if (emptyMatch) return 0;
-    return this.db.executeUpdate(
-      this.tableName,
-      filters,
-      patch,
-      dmlOptions,
+    return this.runIsolatedDml(dmlOptions, (execDb, filters) =>
+      execDb.executeUpdate!(this.tableName, filters, patch, dmlOptions),
     );
   }
 
@@ -4008,12 +4046,8 @@ export class QueryBuilder {
     }
     this.assertSubqueryDepth();
     const dmlOptions = this.resolveDmlOptions(options);
-    const { filters, emptyMatch } = await this.resolveDmlFilters(dmlOptions);
-    if (emptyMatch) return 0;
-    return this.db.executeDelete(
-      this.tableName,
-      filters,
-      dmlOptions,
+    return this.runIsolatedDml(dmlOptions, (execDb, filters) =>
+      execDb.executeDelete!(this.tableName, filters, dmlOptions),
     );
   }
 }

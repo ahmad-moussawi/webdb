@@ -63,19 +63,39 @@ export class Io {
     return !!c && !c.isInTransaction() && pageIds.some((id) => c.hasCommittedWalPage(id));
   }
 
+  /**
+   * Waits until a full synchronous check finds no in-flight flushes for any pageId in the batch.
+   * Ensures no earlier page in the batch gained a new in-flight flush while waiting on a later page.
+   */
+  private async awaitBatchInFlightFlushes(pageIds: number[]): Promise<void> {
+    let pending: Promise<void>[];
+    do {
+      pending = [];
+      for (const pageId of pageIds) {
+        const inflight = this.in_flight_flushes.get(pageId);
+        if (inflight) {
+          pending.push(inflight);
+        }
+      }
+      if (pending.length > 0) {
+        await Promise.all(pending);
+      }
+    } while (pending.length > 0);
+  }
+
   /** Atomically logs several slots to the WAL as one committed mini-transaction. */
   async writeSlotsViaWal(slots: Array<{ slotIdx: number; pageId: number }>): Promise<void> {
     if (slots.length === 0) return;
+    const pageIds: number[] = [];
     for (const { pageId } of slots) {
       if (pageId <= 0) {
         throw new Error(
           `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
         );
       }
-      while (this.in_flight_flushes.has(pageId)) {
-        await this.in_flight_flushes.get(pageId);
-      }
+      pageIds.push(pageId);
     }
+    await this.awaitBatchInFlightFlushes(pageIds);
 
     const pages = slots.map(({ slotIdx, pageId }) => {
       this.stampSlotChecksum(slotIdx, pageId);
@@ -316,16 +336,16 @@ export class Io {
       return;
     }
 
+    const pageIds: number[] = [];
     for (const { pageId } of slots) {
       if (pageId <= 0) {
         throw new Error(
           `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
         );
       }
-      while (this.in_flight_flushes.has(pageId)) {
-        await this.in_flight_flushes.get(pageId);
-      }
+      pageIds.push(pageId);
     }
+    await this.awaitBatchInFlightFlushes(pageIds);
 
     const pages: Array<{ pageId: number; data: Uint8Array }> = [];
     for (const { slotIdx, pageId } of slots) {
