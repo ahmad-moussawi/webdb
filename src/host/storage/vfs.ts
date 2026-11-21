@@ -65,6 +65,16 @@ export interface IVfsAdapter {
     walHeader?: Uint8Array,
   ): Promise<number>;
 
+  /**
+   * Optional fast-path: atomically replaces all database pages, truncates any leftover
+   * pages beyond `pages.length`, clears the WAL, and writes a fresh WAL header in a
+   * single storage transaction (used by `importBinary()`).
+   */
+  replaceDatabaseAtomic?(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+    walHeader: Uint8Array,
+  ): Promise<void>;
+
   /** Closes and cleans up storage handles (optional) */
   close?(): Promise<void>;
 }

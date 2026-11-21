@@ -431,4 +431,481 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     await context.close();
   });
+
+  test("5. Real Chromium IDB: single-tx importBinary(), shrinking truncation, overflow-catalog ORDER BY, and padded columnIndices tie-break sort", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const dbName = `e2e_import_edge_${Date.now()}`;
+
+    const page = await context.newPage();
+    await page.goto(baseUrl);
+    await page.waitForFunction(() => (window as any).__harnessReady === true);
+
+    const res = await page.evaluate(async (name) => {
+      const { WebDB } = window as any;
+
+      // 1. Seed a 20-table (>16) DB with >100 pages + single-col index with tie-breakers
+      const src = await WebDB.open({
+        name: `${name}_src`,
+        storage: "idb",
+        core: "wasm",
+        slotCount: 4096,
+        crossTabSync: false,
+      });
+
+      await src.createTable("events", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "grp", type: "TEXT", notNull: true },
+        { name: "pad", type: "TEXT", notNull: true },
+      ]);
+      await src.createIndex("events", ["grp"], { name: "idx_events_grp" });
+
+      for (let t = 1; t <= 19; t++) {
+        const tName = `entity_${String(t).padStart(2, "0")}`;
+        await src.createTable(tName, [
+          { name: "id", type: "INT32", primaryKey: true },
+          { name: "tag", type: "TEXT", notNull: true },
+        ]);
+      }
+      await src.createIndex("entity_19", ["tag"], { name: "idx_e19_tag" });
+
+      const bigPad = "Z".repeat(2500);
+      await src.transaction(async (tx: any) => {
+        await tx.insert("events", { id: 30, grp: "a", pad: bigPad });
+        await tx.insert("events", { id: 10, grp: "a", pad: bigPad });
+        await tx.insert("events", { id: 20, grp: "a", pad: bigPad });
+        await tx.insert("events", { id: 5, grp: "b", pad: bigPad });
+        await tx.insert("events", { id: 1, grp: "b", pad: bigPad });
+        for (let i = 100; i < 200; i++) {
+          await tx.insert("events", { id: i, grp: "z", pad: bigPad });
+        }
+        for (let r = 1; r <= 10; r++) {
+          await tx.insert("entity_19", { id: r, tag: `t19-${String(r).padStart(2, "0")}` });
+        }
+      });
+
+      const largePages = src.driver.getSlotDataView(0).getUint32(12, true);
+      const largeBin = await src.exportBinary();
+      await src.close();
+
+      // 2. Build a tiny 1-table DB
+      const tinySrc = await WebDB.open({
+        name: `${name}_tiny`,
+        storage: "memory",
+        core: "wasm",
+      });
+      await tinySrc.createTable("fresh", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "val", type: "TEXT", notNull: true },
+      ]);
+      await tinySrc.insert("fresh", { id: 1, val: "tiny-seed" });
+      const tinyPages = tinySrc.driver.getSlotDataView(0).getUint32(12, true);
+      const tinyBin = await tinySrc.exportBinary();
+      await tinySrc.close();
+
+      // 3. Import large 20-table DB into tight slotCount: 64 target and count IDB write txs
+      const recorded: Array<{ stores: string[]; mode: string }> = [];
+      const origTx = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (
+        storeNames: any,
+        mode?: any,
+        options?: any,
+      ) {
+        const stores =
+          typeof storeNames === "string"
+            ? [storeNames]
+            : Array.from(storeNames);
+        recorded.push({ stores, mode });
+        return origTx.call(this, storeNames, mode, options);
+      };
+
+      const dst = await WebDB.open({
+        name: `${name}_dst`,
+        storage: "idb",
+        core: "wasm",
+        slotCount: 64,
+        crossTabSync: false,
+      });
+
+      recorded.length = 0;
+      await dst.importBinary(largeBin);
+      const importWriteTxs = recorded.filter((t) => t.mode === "readwrite");
+      IDBDatabase.prototype.transaction = origTx;
+
+      // Verify padded columnIndices tie-breaker ORDER BY grp ASC, id ASC
+      const tied = await dst
+        .from("events")
+        .where("grp", "IN", ["a", "b"])
+        .orderBy("grp", "asc")
+        .orderBy("id", "asc")
+        .select("id", "grp")
+        .toArray();
+
+      // Thrash pool by scanning all 105 overflow rows, then ORDER BY on overflow-catalog table #20
+      const allEvents = await dst.from("events").toArray();
+      const e19Ordered = await dst
+        .from("entity_19")
+        .orderBy("tag", "asc")
+        .toArray();
+
+      // 4. Shrink target DB by importing tinyBin -> leftover pages > tinyPages must be truncated
+      await dst.importBinary(tinyBin);
+      const leftover = await dst.vfs.readPages([
+        tinyPages + 1,
+        Math.floor(largePages / 2),
+        largePages,
+      ]);
+
+      // Allocate fresh pages reusing old page IDs and reopen cleanly
+      await dst.transaction(async (tx: any) => {
+        for (let i = 2; i <= 20; i++) {
+          await tx.insert("fresh", { id: i, val: `reused-${i}-${bigPad}` });
+        }
+      });
+      await dst.checkpoint();
+      await dst.close();
+
+      const reopened = await WebDB.open({
+        name: `${name}_dst`,
+        storage: "idb",
+        core: "wasm",
+        slotCount: 64,
+        crossTabSync: false,
+      });
+      const freshCount = (await reopened.from("fresh").toArray()).length;
+      await reopened.close();
+
+      return {
+        largePages,
+        importWriteTxCount: importWriteTxs.length,
+        importWriteStores: importWriteTxs[0]?.stores,
+        tied,
+        allEventsCount: allEvents.length,
+        e19FirstTag: e19Ordered[0]?.tag,
+        e19Count: e19Ordered.length,
+        leftover,
+        freshCount,
+      };
+    }, dbName);
+
+    expect(res.largePages).toBeGreaterThan(100);
+    expect(res.importWriteTxCount).toBe(1);
+    expect(res.importWriteStores).toEqual(["pages", "wal_frames", "wal_meta"]);
+    expect(res.tied).toEqual([
+      { id: 10, grp: "a" },
+      { id: 20, grp: "a" },
+      { id: 30, grp: "a" },
+      { id: 1, grp: "b" },
+      { id: 5, grp: "b" },
+    ]);
+    expect(res.allEventsCount).toBe(105);
+    expect(res.e19Count).toBe(10);
+    expect(res.e19FirstTag).toBe("t19-01");
+    expect(res.leftover).toEqual([null, null, null]);
+    expect(res.freshCount).toBe(20);
+
+    await context.close();
+  });
+
+  test("6. Real Chromium IDB: zero-read checkpoint() and multi-tx getAll() WAL crash recovery", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const dbName = `e2e_idb_zeroread_cp_${Date.now()}`;
+
+    const tab1 = await context.newPage();
+    await tab1.goto(baseUrl);
+    await tab1.waitForFunction(() => (window as any).__harnessReady === true);
+
+    const cpMetrics = await tab1.evaluate(async (name) => {
+      const { WebDB } = window as any;
+      const db = await WebDB.open({
+        name,
+        storage: "idb",
+        core: "wasm",
+        crossTabSync: false,
+      });
+      await db.createTable("kv", [
+        { name: "id", type: "INT32", primaryKey: true },
+        { name: "v", type: "TEXT", notNull: true },
+      ]);
+
+      await db.transaction(async (tx: any) => {
+        await tx.insert("kv", { id: 1, v: "one" });
+        await tx.insert("kv", { id: 2, v: "two" });
+      });
+
+      const recorded: Array<{ mode: string; stores: string[] }> = [];
+      const origTx = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (
+        storeNames: any,
+        mode?: any,
+        options?: any,
+      ) {
+        const stores =
+          typeof storeNames === "string"
+            ? [storeNames]
+            : Array.from(storeNames);
+        recorded.push({ mode, stores });
+        return origTx.call(this, storeNames, mode, options);
+      };
+
+      await db.checkpoint();
+      IDBDatabase.prototype.transaction = origTx;
+
+      // Now commit 15 separate transactions (30+ WAL frames) WITHOUT checkpointing, then crash tab
+      for (let i = 3; i <= 17; i++) {
+        await db.transaction(async (tx: any) => {
+          await tx.insert("kv", { id: i, v: `wal-${i}` });
+        });
+      }
+
+      return {
+        cpReads: recorded.filter((r) => r.mode === "readonly").length,
+        cpWrites: recorded.filter((r) => r.mode === "readwrite").length,
+      };
+    }, dbName);
+
+    expect(cpMetrics.cpReads).toBe(0);
+    expect(cpMetrics.cpWrites).toBe(1);
+
+    // Abruptly close Tab 1 without db.close()
+    await tab1.close();
+
+    // Tab 2 recovers all 15 uncheckpointed transactions via readWalFrames() (store.getAll()) + checkpointAtomic
+    const tab2 = await context.newPage();
+    await tab2.goto(baseUrl);
+    await tab2.waitForFunction(() => (window as any).__harnessReady === true);
+
+    const recovered = await tab2.evaluate(async (name) => {
+      const { WebDB } = window as any;
+      const db = await WebDB.open({
+        name,
+        storage: "idb",
+        core: "wasm",
+        crossTabSync: false,
+      });
+      const rows = await db.from("kv").orderBy("id", "asc").toArray();
+      const walCount = await db.vfs.getWalFrameCount();
+      await db.close();
+      return { count: rows.length, last: rows[rows.length - 1], walCount };
+    }, dbName);
+
+    expect(recovered.count).toBe(17);
+    expect(recovered.last).toEqual({ id: 17, v: "wal-17" });
+    expect(recovered.walCount).toBe(0);
+
+    await context.close();
+  });
+
+  test("7. Real Chromium Dedicated Worker OPFS (SyncAccessHandle): coalesced I/O + slotCount: 4096 -> 64 export/import", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const dbName = `e2e_opfs_worker_coalesced_${Date.now()}`;
+
+    const page = await context.newPage();
+    await page.goto(baseUrl);
+    await page.waitForFunction(() => (window as any).__harnessReady === true);
+
+    const workerResult = await page.evaluate(async (name) => {
+      const workerCode = `
+        import { WebDB, col } from 'http://localhost/dist/webdb.js';
+
+        self.onmessage = async (e) => {
+          try {
+            const dbName = e.data;
+            const db1 = await WebDB.open({
+              name: dbName + '_src',
+              storage: 'opfs',
+              core: 'wasm',
+              slotCount: 4096,
+              crossTabSync: false,
+            });
+            const isSync = db1.vfs.isSynchronous;
+
+            await db1.createTable('docs', [
+              { name: 'id', type: 'INT32', primaryKey: true },
+              { name: 'code', type: 'TEXT', notNull: true },
+              { name: 'body', type: 'TEXT', notNull: true },
+            ]);
+            await db1.createIndex('docs', ['code'], { name: 'idx_docs_code' });
+
+            const pad = 'W'.repeat(2600);
+            await db1.transaction(async (tx) => {
+              for (let i = 1; i <= 150; i++) {
+                await tx.insert('docs', {
+                  id: i,
+                  code: 'DOC-' + String(i).padStart(4, '0'),
+                  body: 'w-' + i + '-' + pad,
+                });
+              }
+            });
+
+            // Exercises coalesced writePages + readWalFrames + contiguous readPages (exportBinary)
+            await db1.checkpoint();
+            const db1Count = (await db1.from('docs').toArray()).length;
+            const exported = await db1.exportBinary();
+            await db1.close();
+
+            // Import into constrained OPFS pool (slotCount: 64)
+            const db2 = await WebDB.open({
+              name: dbName + '_dst',
+              storage: 'opfs',
+              core: 'wasm',
+              slotCount: 64,
+              crossTabSync: false,
+              initialData: exported,
+            });
+            const db2Initial = (await db2.from('docs').toArray()).length;
+
+            await db2.update('docs', { id: 150 }, { code: 'DOC-UPDATED' });
+            await db2.delete('docs', { id: 1 });
+            const db2After = (await db2.from('docs').toArray()).length;
+            await db2.checkpoint();
+            await db2.close();
+
+            const db3 = await WebDB.open({
+              name: dbName + '_dst',
+              storage: 'opfs',
+              core: 'wasm',
+              slotCount: 64,
+              crossTabSync: false,
+            });
+            const count = (await db3.from('docs').toArray()).length;
+            const hit = await db3.from('docs').where(col('code').eq('DOC-UPDATED')).toArray();
+            await db3.close();
+
+            self.postMessage({
+              ok: true,
+              isSync,
+              db1Count,
+              db2Initial,
+              db2After,
+              count,
+              hitId: hit[0]?.id,
+              hitPrefix: hit[0]?.body?.slice(0, 6),
+            });
+          } catch (err) {
+            self.postMessage({ ok: false, error: String(err && err.stack || err) });
+          }
+        };
+      `;
+      const blob = new Blob([workerCode], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      const worker = new Worker(url, { type: "module" });
+
+      return await new Promise<any>((resolve) => {
+        worker.onmessage = (ev) => {
+          worker.terminate();
+          URL.revokeObjectURL(url);
+          resolve(ev.data);
+        };
+        worker.onerror = (err) => {
+          worker.terminate();
+          URL.revokeObjectURL(url);
+          resolve({ ok: false, error: err.message });
+        };
+        worker.postMessage(name);
+      });
+    }, dbName);
+
+    expect(workerResult.ok, workerResult.error).toBe(true);
+    expect(workerResult.isSync).toBe(true);
+    expect(workerResult.count, JSON.stringify(workerResult)).toBe(149);
+    expect(workerResult.hitId).toBe(150);
+    expect(workerResult.hitPrefix).toBe("w-150-");
+
+    await context.close();
+  });
+
+  test("8. Multi-tab real Chromium BroadcastChannel + importBinary() notifies subscribers for overflow-catalog tables (>16)", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await attachVirtualOriginServer(context);
+    const dbName = `e2e_crosstab_import_overflow_${Date.now()}`;
+
+    const tab1 = await context.newPage();
+    const tab2 = await context.newPage();
+    await Promise.all([tab1.goto(baseUrl), tab2.goto(baseUrl)]);
+    await Promise.all([
+      tab1.waitForFunction(() => (window as any).__harnessReady === true),
+      tab2.waitForFunction(() => (window as any).__harnessReady === true),
+    ]);
+
+    // Tab 1 & Tab 2 both open the shared IDB database
+    await tab1.evaluate(async (name) => {
+      const { WebDB } = window as any;
+      (window as any).__db = await WebDB.open({
+        name,
+        storage: "idb",
+        core: "wasm",
+        slotCount: 256,
+      });
+    }, dbName);
+
+    await tab2.evaluate(async (name) => {
+      const { WebDB } = window as any;
+      const db = await WebDB.open({
+        name,
+        storage: "idb",
+        core: "wasm",
+        slotCount: 256,
+      });
+      (window as any).__db = db;
+      (window as any).__notified = new Promise<string[]>((resolve) => {
+        db.subscribe(["entity_19"], (ev: any) => {
+          if (ev.crossTab) {
+            resolve(ev.tables);
+          }
+        });
+      });
+    }, dbName);
+
+    // Tab 1 builds a 20-table snapshot in memory and imports it into the shared IDB DB
+    await tab1.evaluate(async () => {
+      const { WebDB } = window as any;
+      const tmp = await WebDB.open({
+        name: "tmp_20_tables",
+        storage: "memory",
+        core: "wasm",
+      });
+      for (let t = 0; t < 20; t++) {
+        const tName = `entity_${String(t).padStart(2, "0")}`;
+        await tmp.createTable(tName, [
+          { name: "id", type: "INT32", primaryKey: true },
+          { name: "label", type: "TEXT", notNull: true },
+        ]);
+      }
+      await tmp.insert("entity_19", { id: 1, label: "from-import-overflow" });
+      const snap = await tmp.exportBinary();
+      await tmp.close();
+
+      await (window as any).__db.importBinary(snap);
+    });
+
+    // Tab 2 must receive the cross-tab BroadcastChannel event for entity_19 and read the imported row
+    const tab2Res = await tab2.evaluate(async () => {
+      const notifiedTables = await (window as any).__notified;
+      const rows = await (window as any).__db
+        .from("entity_19")
+        .orderBy("id", "asc")
+        .toArray();
+      await (window as any).__db.close();
+      return { notifiedTables, rows };
+    });
+
+    expect(tab2Res.notifiedTables).toContain("entity_19");
+    expect(tab2Res.rows).toEqual([{ id: 1, label: "from-import-overflow" }]);
+
+    await tab1.evaluate(async () => {
+      await (window as any).__db?.close();
+    });
+    await context.close();
+  });
 });

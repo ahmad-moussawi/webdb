@@ -2406,9 +2406,14 @@ export function isIndexAlignedWithOrderBy(
     if (k.direction === "desc") return false;
   }
 
-  const indexColNames = index.columnIndices.map((i) =>
-    table.columns[i].name.toLowerCase(),
-  );
+  const colCount = Math.min(index.columnCount, index.columnIndices.length);
+  if (colCount <= 0) return false;
+  const indexColNames: string[] = [];
+  for (let i = 0; i < colCount; i++) {
+    const colMeta = table.columns[index.columnIndices[i]];
+    if (!colMeta) return false;
+    indexColNames.push(colMeta.name.toLowerCase());
+  }
 
   // Skip leading index columns that are fixed by equality filters
   let idxPos = 0;
@@ -2529,6 +2534,7 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if ((idx.flags & IndexFlag.PRIMARY) !== 0 && idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
+      if (!colMeta) continue;
       for (let i = 0; i < candidateFilters.length; i++) {
         const f = candidateFilters[i];
         if (
@@ -2573,6 +2579,7 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if ((idx.flags & IndexFlag.UNIQUE) !== 0 && idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
+      if (!colMeta) continue;
       for (let i = 0; i < candidateFilters.length; i++) {
         const f = candidateFilters[i];
         if (
@@ -2621,6 +2628,10 @@ export function chooseIndexScan(
 
       for (let c = 0; c < idx.columnCount; c++) {
         const colMeta = table.columns[idx.columnIndices[c]];
+        if (!colMeta) {
+          allFound = false;
+          break;
+        }
         const f = candidateFilters.find(
           (lf) =>
             lf.type === "cmp" &&
@@ -2668,6 +2679,7 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if (idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
+      if (!colMeta) continue;
       for (let i = 0; i < candidateFilters.length; i++) {
         const f = candidateFilters[i];
         if (
@@ -2693,6 +2705,7 @@ export function chooseIndexScan(
   for (const idx of table.indexes) {
     if (idx.columnCount === 1) {
       const colMeta = table.columns[idx.columnIndices[0]];
+      if (!colMeta) continue;
       for (let i = 0; i < candidateFilters.length; i++) {
         const f = candidateFilters[i];
         if (
@@ -2720,6 +2733,7 @@ export function chooseIndexScan(
       if (isIndexAlignedWithOrderBy(idx, table, orderBy, equalityCols)) {
         if (idx.columnCount === 1) {
           const colMeta = table.columns[idx.columnIndices[0]];
+          if (!colMeta) continue;
           return {
             index: idx,
             scanType: "range",
@@ -2731,8 +2745,13 @@ export function chooseIndexScan(
         } else {
           // Composite index: prefix with equality filter values if present, rest with min values
           const dummyRow: Record<string, any> = {};
+          let validCols = true;
           for (let c = 0; c < idx.columnCount; c++) {
             const col = table.columns[idx.columnIndices[c]];
+            if (!col) {
+              validCols = false;
+              break;
+            }
             const eqFilter = candidateFilters.find(
               (f) =>
                 f.type === "cmp" &&
@@ -2747,6 +2766,7 @@ export function chooseIndexScan(
               dummyRow[col.name] = getMinKeyValueForType(col.type);
             }
           }
+          if (!validCols) continue;
           const compositeKeyBytes = serialize_composite_key(
             table.columns,
             idx.columnIndices,

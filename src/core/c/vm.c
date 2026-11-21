@@ -1269,7 +1269,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               vm_reg_set_null(off_d);
             } else {
               double num = load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64));
-              double q = ((double)((int64_t)(num / denom)));
+              double q = __builtin_trunc((double)(num / denom));
               vm_reg_set_f64(off_d, num - q * denom);
             }
           }

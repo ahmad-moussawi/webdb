@@ -510,6 +510,7 @@ export function regexpMatch(text: unknown, pattern: unknown, flags?: string): nu
   }
   try {
     const re = getRegExp(String(pattern), flags);
+    re.lastIndex = 0;
     return re.test(String(text)) ? 1 : 0;
   } catch {
     return 0;
@@ -530,6 +531,7 @@ export function regexpReplace(
   const repl = replacement !== null && replacement !== undefined ? String(replacement) : '';
   try {
     const re = getRegExp(String(pattern), flags ?? 'g');
+    re.lastIndex = 0;
     return String(text).replace(re, repl);
   } catch {
     return String(text);

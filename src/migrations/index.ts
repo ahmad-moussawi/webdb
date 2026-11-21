@@ -238,10 +238,27 @@ export class Migrator {
     return { applied, pending, all };
   }
 
+  private validateStepOption(
+    step: number | undefined,
+    kind: 'migration' | 'rollback',
+  ): 'zero' | 'valid' {
+    if (step === undefined) return 'valid';
+    if (!Number.isInteger(step) || step < 0) {
+      throw new RangeError(
+        `Invalid ${kind} step: ${step}. Must be a non-negative integer.`,
+      );
+    }
+    return step === 0 ? 'zero' : 'valid';
+  }
+
   /**
    * Executes pending migrations up to the latest registered version (or up to `step`).
    */
   async up(options?: MigrateUpOptions): Promise<MigrationResult> {
+    if (this.validateStepOption(options?.step, 'migration') === 'zero') {
+      return { executed: [] };
+    }
+
     if (this.mode === 'atomic') {
       return this.db.transaction(async (tx) => {
         return this.runUpInternal(tx, options);
@@ -264,7 +281,7 @@ export class Migrator {
       (m) => !appliedSet.has(normalizeVersion(m.version)),
     );
 
-    if (options?.step !== undefined && options.step > 0) {
+    if (options?.step !== undefined) {
       pending = pending.slice(0, options.step);
     }
 
@@ -292,6 +309,10 @@ export class Migrator {
    * Rolls back previously applied migrations. By default rolls back the most recent batch.
    */
   async down(options?: MigrateDownOptions): Promise<MigrationResult> {
+    if (this.validateStepOption(options?.step, 'rollback') === 'zero') {
+      return { executed: [] };
+    }
+
     return this.db.transaction(async (tx) => {
       await this.ensureTrackingTable(tx);
       const applied = await this.getAppliedRecords(tx);
@@ -308,7 +329,7 @@ export class Migrator {
           if (b.batch !== a.batch) return b.batch - a.batch;
           return compareVersions(b.version, a.version);
         });
-      } else if (options?.step !== undefined && options.step > 0) {
+      } else if (options?.step !== undefined) {
         // Roll back last N migrations
         const sorted = [...applied].sort((a, b) => {
           if (b.batch !== a.batch) return b.batch - a.batch;
@@ -330,6 +351,21 @@ export class Migrator {
       const migrationMap = new Map<string, Migration>();
       for (const m of this.migrations) {
         migrationMap.set(normalizeVersion(m.version), m);
+      }
+
+      // Pre-validate all records before executing any down() handlers
+      for (const record of toRevert) {
+        const migration = migrationMap.get(record.version);
+        if (!migration) {
+          throw new Error(
+            `Cannot roll back migration "${record.name}" (version: ${record.version}): migration definition not registered.`,
+          );
+        }
+        if (!migration.down) {
+          throw new Error(
+            `Cannot roll back migration "${record.name}" (version: ${record.version}): no down() rollback handler provided.`,
+          );
+        }
       }
 
       const executed: ExecutedMigration[] = [];
@@ -420,7 +456,7 @@ export class Migrator {
       (m) => !appliedSet.has(normalizeVersion(m.version)),
     );
 
-    if (options?.step !== undefined && options.step > 0) {
+    if (options?.step !== undefined) {
       pending = pending.slice(0, options.step);
     }
 
