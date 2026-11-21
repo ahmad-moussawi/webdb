@@ -81,13 +81,13 @@ int32_t crockford_decode(int32_t c) {
 
 int32_t uuid_encode(const char * uuid_str, uint8_t * target, uint32_t offset) {
   int32_t clean_idx = 0;
-  uint32_t hi = -1;
+  int32_t hi = -1;
   for (uint32_t i = 0; i < strlen(uuid_str); i++) {
-    uint32_t c = uuid_str[i];
+    int32_t c = uuid_str[i];
     if (c != 45) {
       if (clean_idx >= 32) 
         return -1;
-      uint32_t val = hex_val(c);
+      int32_t val = hex_val(c);
       if (val < 0) 
         return -1;
       if (clean_idx % 2 == 0) {
@@ -121,7 +121,7 @@ int32_t ulid_encode(const char * ulid_str, uint8_t * target, uint32_t offset) {
     return -1;
   uint64_t time = 0LL;
   for (uint32_t i = 0; i < 10; i++) {
-    uint32_t v = crockford_decode(ulid_str[i]);
+    int32_t v = crockford_decode(ulid_str[i]);
     if (v < 0) 
       return -1;
     time = (time << 5LL) | ((uint64_t)(v));
@@ -134,14 +134,14 @@ int32_t ulid_encode(const char * ulid_str, uint8_t * target, uint32_t offset) {
   target[offset + 5] = ((uint32_t)(time & 0xffLL));
   uint64_t rand_hi = 0LL;
   for (uint32_t i = 10; i < 18; i++) {
-    uint32_t v = crockford_decode(ulid_str[i]);
+    int32_t v = crockford_decode(ulid_str[i]);
     if (v < 0) 
       return -1;
     rand_hi = (rand_hi << 5LL) | ((uint64_t)(v));
   }
   uint64_t rand_lo = 0LL;
   for (uint32_t i = 18; i < 26; i++) {
-    uint32_t v = crockford_decode(ulid_str[i]);
+    int32_t v = crockford_decode(ulid_str[i]);
     if (v < 0) 
       return -1;
     rand_lo = (rand_lo << 5LL) | ((uint64_t)(v));
@@ -158,7 +158,7 @@ void ulid_decode(const uint8_t * source, uint32_t offset, char * out_str) {
   for (uint32_t i = 0; i < 6; i++) {
     time = (time << 8LL) | ((uint64_t)(source[offset + i]));
   }
-  for (uint32_t i = 9; i >= 0; i--) {
+  for (int32_t i = 9; i >= 0; i--) {
     out_str[i] = CROCKFORD_ALPHABET[((uint32_t)(time % 32LL))];
     time /= 32LL;
   }
@@ -170,11 +170,11 @@ void ulid_decode(const uint8_t * source, uint32_t offset, char * out_str) {
   for (uint32_t i = 0; i < 5; i++) {
     rand_lo = (rand_lo << 8LL) | ((uint64_t)(source[offset + 11 + i]));
   }
-  for (uint32_t i = 25; i >= 18; i--) {
+  for (int32_t i = 25; i >= 18; i--) {
     out_str[i] = CROCKFORD_ALPHABET[((uint32_t)(rand_lo & 31LL))];
     rand_lo >>= 5LL;
   }
-  for (uint32_t i = 17; i >= 10; i--) {
+  for (int32_t i = 17; i >= 10; i--) {
     out_str[i] = CROCKFORD_ALPHABET[((uint32_t)(rand_hi & 31LL))];
     rand_hi >>= 5LL;
   }

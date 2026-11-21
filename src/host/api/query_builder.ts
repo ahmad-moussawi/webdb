@@ -1,5 +1,6 @@
 import {
   DbRow,
+  TableMeta,
   AggregateNotAllowedInWhereError,
   SubqueryNestingTooDeepError,
   JoinType,
@@ -425,6 +426,7 @@ export interface IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options?: DmlOptions,
   ): Promise<number>;
+  getTable?(tableName: string): Promise<TableMeta>;
 }
 
 function assertNotAggregateInWhere(colOrExpr: any): void {
@@ -3908,6 +3910,79 @@ export class QueryBuilder {
     return { ...options, limit: effectiveLimit };
   }
 
+  private async resolveDmlFilters(
+    dmlOptions?: DmlOptions,
+  ): Promise<{ filters: QueryFilter[]; emptyMatch: boolean }> {
+    const resolvedFilters = await this.resolveUncorrelatedFilters(this.filters);
+    const hasCorrelated = resolvedFilters.some((f) =>
+      this.filterContainsCorrelatedSubquery(f),
+    );
+    if (!hasCorrelated) {
+      return { filters: resolvedFilters, emptyMatch: false };
+    }
+
+    // Evaluate correlated filters cleanly via QueryBuilder's correlated executor,
+    // then translate matched rows into concrete PK / exact-row filters for DML.
+    const matcher = this.clone(this.db);
+    matcher.selectFields = [];
+    matcher.aggExprs = [];
+    matcher.groupCols = [];
+    matcher.havingFilters = [];
+    matcher.limitCount = dmlOptions?.limit ?? matcher.limitCount;
+    const matchedRows = await matcher.toArray();
+    if (matchedRows.length === 0) {
+      return { filters: [], emptyMatch: true };
+    }
+
+    const tableMeta = this.db.getTable
+      ? await this.db.getTable(this.tableName)
+      : undefined;
+    const pkCols: string[] = tableMeta?.primaryKey ?? [];
+    if (pkCols.length === 1) {
+      const pkCol = pkCols[0];
+      return {
+        filters: [
+          {
+            type: 'in',
+            colName: pkCol,
+            values: matchedRows.map((r) => r[pkCol]),
+          },
+        ],
+        emptyMatch: false,
+      };
+    }
+
+    const keyCols: string[] =
+      pkCols.length > 1
+        ? pkCols
+        : tableMeta
+          ? tableMeta.columns.map((c) => c.name)
+          : Object.keys(matchedRows[0]);
+    const rowPredicates: QueryFilter[] = matchedRows.map((row) => ({
+      type: 'and',
+      children: keyCols.map((col: string) => {
+        const val = row[col];
+        if (val === null || val === undefined) {
+          return { type: 'null', colName: col, isNull: true } as QueryFilter;
+        }
+        return {
+          type: 'cmp',
+          colName: col,
+          op: '=',
+          value: val,
+        } as QueryFilter;
+      }),
+    }));
+
+    return {
+      filters:
+        rowPredicates.length === 1
+          ? [rowPredicates[0]]
+          : [{ type: 'or', children: rowPredicates }],
+      emptyMatch: false,
+    };
+  }
+
   async update(
     patch: Partial<DbRow>,
     options?: DmlOptions,
@@ -3916,12 +3991,14 @@ export class QueryBuilder {
       throw new Error('Database executor does not support executeUpdate');
     }
     this.assertSubqueryDepth();
-    const resolvedFilters = await this.resolveUncorrelatedFilters(this.filters);
+    const dmlOptions = this.resolveDmlOptions(options);
+    const { filters, emptyMatch } = await this.resolveDmlFilters(dmlOptions);
+    if (emptyMatch) return 0;
     return this.db.executeUpdate(
       this.tableName,
-      resolvedFilters,
+      filters,
       patch,
-      this.resolveDmlOptions(options),
+      dmlOptions,
     );
   }
 
@@ -3930,11 +4007,13 @@ export class QueryBuilder {
       throw new Error('Database executor does not support executeDelete');
     }
     this.assertSubqueryDepth();
-    const resolvedFilters = await this.resolveUncorrelatedFilters(this.filters);
+    const dmlOptions = this.resolveDmlOptions(options);
+    const { filters, emptyMatch } = await this.resolveDmlFilters(dmlOptions);
+    if (emptyMatch) return 0;
     return this.db.executeDelete(
       this.tableName,
-      resolvedFilters,
-      this.resolveDmlOptions(options),
+      filters,
+      dmlOptions,
     );
   }
 }

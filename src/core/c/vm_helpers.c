@@ -339,7 +339,7 @@ uint32_t vm_resolve_table_off(uint32_t ctx_off, uint32_t cursor_idx) {
 uint32_t vm_phys_alloc(uint32_t ctx_off, uint32_t arena_base, uint32_t bytes) {
   uint32_t aligned = (bytes + 7) & ((uint32_t)(~7));
   uint32_t used = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PHYS_ARENA_USED));
-  if (used + aligned > DEFAULT_MAX_QUERY_MEMORY) {
+  if (bytes > DEFAULT_MAX_QUERY_MEMORY || aligned < bytes || used > DEFAULT_MAX_QUERY_MEMORY || aligned > DEFAULT_MAX_QUERY_MEMORY - used) {
     return 0;
   }
   store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PHYS_ARENA_USED), used + aligned);
@@ -360,7 +360,7 @@ void vm_reg_set_i32(uint32_t reg_off, int32_t val) {
   store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
   store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_INT32);
   store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), val);
-  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), ((int64_t)(val)));
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), webdb_f64_to_i64((double)(val)));
   store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), val);
   store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
   store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
@@ -380,8 +380,8 @@ void vm_reg_set_i64(uint32_t reg_off, int64_t val) {
 void vm_reg_set_f64(uint32_t reg_off, double val) {
   store_u8((void *)(uintptr_t)(reg_off + VM_REG_IS_NULL), 0);
   store_u8((void *)(uintptr_t)(reg_off + VM_REG_TYPE), TYPE_FLOAT64);
-  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), ((int32_t)(val)));
-  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), ((int64_t)(val)));
+  store_i32((void *)(uintptr_t)(reg_off + VM_REG_I32), webdb_f64_to_i32((double)(val)));
+  store_i64((void *)(uintptr_t)(reg_off + VM_REG_I64), webdb_f64_to_i64((double)(val)));
   store_f64((void *)(uintptr_t)(reg_off + VM_REG_F64), val);
   store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_OFF), 0);
   store_u32((void *)(uintptr_t)(reg_off + VM_REG_DATA_LEN), 0);
@@ -1188,12 +1188,12 @@ double vm_math_abs(double x) {
 }
 
 double vm_math_floor(double x) {
-  double t = ((double)((int64_t)(x)));
+  double t = __builtin_trunc((double)(x));
   return x < t ? t - 1 : t;
 }
 
 double vm_math_ceil(double x) {
-  double t = ((double)((int64_t)(x)));
+  double t = __builtin_trunc((double)(x));
   return x > t ? t + 1 : t;
 }
 
@@ -1263,7 +1263,7 @@ uint8_t vm_infer_result_col_type(uint32_t ctx_off, uint32_t start_reg, uint32_t 
   uint8_t r_type = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_TYPE));
   if (r_type == TYPE_FLOAT64) {
     double fv = load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64));
-    if (fv == ((double)((int64_t)(fv))) && fv >= -2147483648 && fv <= 2147483647) {
+    if (fv >= -2147483648 && fv <= 2147483647 && fv == __builtin_trunc((double)(fv))) {
       return TYPE_INT32;
     }
     return TYPE_FLOAT64;
@@ -1342,11 +1342,11 @@ int32_t vm_serialize_and_emit_result_row(uint32_t ctx_off, uint32_t start_reg, u
       }
       current_var_table_offset += 4;
     } else     if (col_type == TYPE_INT32) {
-      store_i32((void *)(uintptr_t)(current_fixed_offset), ((int32_t)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64)))));
+      store_i32((void *)(uintptr_t)(current_fixed_offset), webdb_f64_to_i32((double)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64)))));
       current_fixed_offset += 4;
     } else     if (col_type == TYPE_INT64) {
       uint8_t r_type = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_TYPE));
-      int64_t iv = r_type == TYPE_INT64 ? load_i64((const void *)(uintptr_t)(reg_off + VM_REG_I64)) : ((int64_t)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64))));
+      int64_t iv = r_type == TYPE_INT64 ? load_i64((const void *)(uintptr_t)(reg_off + VM_REG_I64)) : webdb_f64_to_i64((double)(load_f64((const void *)(uintptr_t)(reg_off + VM_REG_F64))));
       store_i64((void *)(uintptr_t)(current_fixed_offset), iv);
       current_fixed_offset += 8;
     } else     if (col_type == TYPE_FLOAT64) {

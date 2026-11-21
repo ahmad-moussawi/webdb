@@ -41,10 +41,22 @@ export function memcpy(
   if (d === s) {
     d.copyWithin(dest_offset, src_offset, src_offset + n);
   } else {
-    for (let i = 0; i < n; i++) {
-      d[dest_offset + i] = s[src_offset + i];
-    }
+    d.set(s.subarray(src_offset, src_offset + n), dest_offset);
   }
+}
+
+/**
+ * C: void *memmove(void *dest, const void *src, size_t n);
+ * Safely copies n bytes even when dest and src overlap.
+ */
+export function memmove(
+  dest: Uint8Array | DataView,
+  dest_offset: number,
+  src: Uint8Array | DataView,
+  src_offset: number,
+  n: number,
+): void {
+  memcpy(dest, dest_offset, src, src_offset, n);
 }
 
 /**
@@ -169,11 +181,17 @@ export function i64_to_i32(val: bigint): number {
 }
 
 export function f64_to_i64(val: number): bigint {
-  return BigInt(Math.trunc(val));
+  if (!Number.isFinite(val)) return 0n;
+  const t = Math.trunc(val);
+  if (t < -9223372036854775808 || t >= 9223372036854775808) return 0n;
+  return BigInt(t);
 }
 
 export function f64_to_i32(val: number): number {
-  return Math.trunc(val) | 0;
+  if (!Number.isFinite(val)) return 0;
+  const t = Math.trunc(val);
+  if (t < -2147483648 || t > 2147483647) return 0;
+  return t | 0;
 }
 
 // ============================================================================

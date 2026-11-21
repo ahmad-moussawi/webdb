@@ -264,7 +264,15 @@ export class Migrator {
       (m) => !appliedSet.has(normalizeVersion(m.version)),
     );
 
-    if (options?.step !== undefined && options.step > 0) {
+    if (options?.step !== undefined) {
+      if (!Number.isInteger(options.step) || options.step < 0) {
+        throw new RangeError(
+          `Invalid migration step: ${options.step}. Must be a non-negative integer.`,
+        );
+      }
+      if (options.step === 0) {
+        return { executed: [] };
+      }
       pending = pending.slice(0, options.step);
     }
 
@@ -299,6 +307,17 @@ export class Migrator {
         return { executed: [] };
       }
 
+      if (options?.step !== undefined) {
+        if (!Number.isInteger(options.step) || options.step < 0) {
+          throw new RangeError(
+            `Invalid rollback step: ${options.step}. Must be a non-negative integer.`,
+          );
+        }
+        if (options.step === 0) {
+          return { executed: [] };
+        }
+      }
+
       // Group & order records to revert
       let toRevert: MigrationRecord[];
 
@@ -308,7 +327,7 @@ export class Migrator {
           if (b.batch !== a.batch) return b.batch - a.batch;
           return compareVersions(b.version, a.version);
         });
-      } else if (options?.step !== undefined && options.step > 0) {
+      } else if (options?.step !== undefined) {
         // Roll back last N migrations
         const sorted = [...applied].sort((a, b) => {
           if (b.batch !== a.batch) return b.batch - a.batch;
@@ -330,6 +349,21 @@ export class Migrator {
       const migrationMap = new Map<string, Migration>();
       for (const m of this.migrations) {
         migrationMap.set(normalizeVersion(m.version), m);
+      }
+
+      // Pre-validate all records before executing any down() handlers
+      for (const record of toRevert) {
+        const migration = migrationMap.get(record.version);
+        if (!migration) {
+          throw new Error(
+            `Cannot roll back migration "${record.name}" (version: ${record.version}): migration definition not registered.`,
+          );
+        }
+        if (!migration.down) {
+          throw new Error(
+            `Cannot roll back migration "${record.name}" (version: ${record.version}): no down() rollback handler provided.`,
+          );
+        }
       }
 
       const executed: ExecutedMigration[] = [];
@@ -420,7 +454,15 @@ export class Migrator {
       (m) => !appliedSet.has(normalizeVersion(m.version)),
     );
 
-    if (options?.step !== undefined && options.step > 0) {
+    if (options?.step !== undefined) {
+      if (!Number.isInteger(options.step) || options.step < 0) {
+        throw new RangeError(
+          `Invalid migration step: ${options.step}. Must be a non-negative integer.`,
+        );
+      }
+      if (options.step === 0) {
+        return { executed: [] };
+      }
       pending = pending.slice(0, options.step);
     }
 

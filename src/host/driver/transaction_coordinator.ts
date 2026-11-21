@@ -456,10 +456,12 @@ export class TransactionCoordinator {
       .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
     const frames: Uint8Array[] = [];
+    const stagedPages: Array<{ pageId: number; data: Uint8Array }> = [];
+    let nextFrameSeq = this.walFrameSeq;
     for (const { pageId, data } of pages) {
       const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
       pageCopy.set(data);
-      this.committedWalPages.set(pageId, pageCopy);
+      stagedPages.push({ pageId, data: pageCopy });
       frames.push(
         encodeWalFrame(
           {
@@ -468,7 +470,7 @@ export class TransactionCoordinator {
             txId,
             pageId,
             dbSizePages,
-            frameSeq: ++this.walFrameSeq,
+            frameSeq: ++nextFrameSeq,
           },
           pageCopy,
         ),
@@ -481,11 +483,28 @@ export class TransactionCoordinator {
         txId,
         pageId: 0,
         dbSizePages,
-        frameSeq: ++this.walFrameSeq,
+        frameSeq: ++nextFrameSeq,
       }),
     );
 
     const currentFrames = await this.appendFramesToWal(frames, true);
+
+    // Commit in-memory WAL index & sequence only AFTER durable WAL append succeeds
+    this.walFrameSeq = nextFrameSeq;
+    for (const { pageId, data } of stagedPages) {
+      this.committedWalPages.set(pageId, data);
+      if (pageId === 1) {
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        this.lastDiskChangeCounter = view.getUint32(
+          HEADER_OFFSET_CHANGE_COUNTER,
+          true,
+        );
+        this.lastDiskSchemaVersion = view.getUint32(
+          HEADER_OFFSET_SCHEMA_VERSION,
+          true,
+        );
+      }
+    }
     this.txCommitCount++;
     this.scheduleIdleTimer();
 
@@ -749,16 +768,18 @@ export class TransactionCoordinator {
 
     const txId = this.activeLease.txId;
     const framesToAppend: Uint8Array[] = [];
+    const stagedDirtySlots: Array<{
+      slot: number;
+      pageId: number;
+      data: Uint8Array;
+    }> = [];
+    let nextFrameSeq = this.walFrameSeq;
     const dbSizePages = this.pool
       .getSlotDataView(0)
       .getUint32(HEADER_OFFSET_TOTAL_PAGES, true);
 
-    // Promote any spilled pages from this transaction into committedWalPages first
-    for (const [pageId, data] of this.spilledPages.entries()) {
-      this.committedWalPages.set(pageId, data);
-    }
-
-    // Append all resident dirty pages to WAL as FRAME_PAGE_DATA frames
+    // Stage all resident dirty pages as FRAME_PAGE_DATA frames (do NOT clear dirty or
+    // mutate committedWalPages until durable WAL write succeeds)
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
       if (this.pool.isDirty(slot)) {
         const pageId = this.pool.getAssignedPage(slot);
@@ -769,8 +790,7 @@ export class TransactionCoordinator {
           const pageCopy = new Uint8Array(WAL_PAGE_SIZE);
           pageCopy.set(pageBytes);
 
-          this.committedWalPages.set(pageId, pageCopy);
-          this.pool.clearDirty(slot);
+          stagedDirtySlots.push({ slot, pageId, data: pageCopy });
 
           framesToAppend.push(
             encodeWalFrame(
@@ -780,7 +800,7 @@ export class TransactionCoordinator {
                 txId,
                 pageId,
                 dbSizePages,
-                frameSeq: ++this.walFrameSeq,
+                frameSeq: ++nextFrameSeq,
               },
               pageCopy,
             ),
@@ -797,12 +817,23 @@ export class TransactionCoordinator {
         txId,
         pageId: 0,
         dbSizePages,
-        frameSeq: ++this.walFrameSeq,
+        frameSeq: ++nextFrameSeq,
       }),
     );
 
     // Durably write WAL frames (combining WAL header write when supported)
     const currentFrames = await this.appendFramesToWal(framesToAppend, true);
+
+    // Commit point reached: apply in-memory WAL state & clear dirty bits
+    this.walFrameSeq = nextFrameSeq;
+    for (const [pageId, data] of this.spilledPages.entries()) {
+      this.committedWalPages.set(pageId, data);
+    }
+    for (const { slot, pageId, data } of stagedDirtySlots) {
+      this.committedWalPages.set(pageId, data);
+      this.pool.clearDirty(slot);
+    }
+    this.recordDiskPage1State();
 
     // Cleanup active transaction state
     this.activeLease = null;
@@ -818,7 +849,7 @@ export class TransactionCoordinator {
     // Check passive checkpoint size trigger (> 256 frames or 100 txs)
     if (currentFrames >= 256 || this.txCommitCount >= 100) {
       // Trigger checkpoint asynchronously in queue without blocking caller
-      this.queue.enqueue(() => this.executeCheckpoint());
+      this.queue.enqueue(() => this.executeCheckpoint()).catch(() => {});
     }
   }
 
@@ -886,11 +917,16 @@ export class TransactionCoordinator {
         >();
         const committedTxs = new Set<number>();
 
+        let validFramesProcessed = 0;
         for (const frameBytes of rawFrames) {
           const validation = validateWalFrame(frameBytes);
           if (!validation.valid || !validation.header) {
             break;
           }
+          if (validation.header.frameSeq !== validFramesProcessed + 1) {
+            break;
+          }
+          validFramesProcessed++;
           const { frameType, txId, pageId } = validation.header;
 
           if (!txGroups.has(txId)) txGroups.set(txId, []);
@@ -953,11 +989,12 @@ export class TransactionCoordinator {
     ]);
 
     const pagesToWrite: Array<{ pageId: number; data: Uint8Array }> = [];
+    const dirtySlotsToClear: number[] = [];
     for (const pageId of allPageIds) {
       if (memoryOverride.has(pageId)) {
         const { slotIdx, data } = memoryOverride.get(pageId)!;
         pagesToWrite.push({ pageId, data });
-        this.pool.clearDirty(slotIdx);
+        dirtySlotsToClear.push(slotIdx);
       } else {
         pagesToWrite.push({ pageId, data: walIndex.get(pageId)! });
       }
@@ -987,6 +1024,11 @@ export class TransactionCoordinator {
       // 5. Strictly AFTER flush succeeds, reset WAL to 0
       await this.vfs.truncateWal(0);
       await this.vfs.writeWalHeader(nextWalHeader);
+    }
+
+    // Clear dirty bits only AFTER durable persistence succeeds
+    for (const slotIdx of dirtySlotsToClear) {
+      this.pool.clearDirty(slotIdx);
     }
 
     this.committedWalPages.clear();

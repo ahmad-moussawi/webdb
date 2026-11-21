@@ -19,8 +19,24 @@ size_t strlen(const char *s);
 #define webdb_strlen strlen
 
 #define webdb_memcpy __builtin_memcpy
+#define webdb_memmove __builtin_memmove
 #define webdb_memset __builtin_memset
 #define webdb_memcmp __builtin_memcmp
+
+// Safe non-trapping float-to-integer conversions for wasm32 (avoids i32/i64.trunc_f64_s traps)
+static inline int32_t webdb_f64_to_i32(double v) {
+  if (v != v) return 0; // NaN
+  double t = __builtin_trunc(v);
+  if (t < -2147483648.0 || t > 2147483647.0) return 0;
+  return (int32_t)t;
+}
+
+static inline int64_t webdb_f64_to_i64(double v) {
+  if (v != v) return 0; // NaN
+  double t = __builtin_trunc(v);
+  if (t < -9223372036854775808.0 || t >= 9223372036854775808.0) return 0;
+  return (int64_t)t;
+}
 
 // Bitmask operations
 static inline int get_bit(const uint8_t *mask, uint32_t bit_idx) {
@@ -153,9 +169,10 @@ typedef struct __attribute__((packed)) {
   uint32_t root_page_id;
   uint8_t column_count;
   uint8_t flags;
+  uint16_t column_indices[MAX_INDEX_COLUMNS];
+  uint8_t col_directions[MAX_INDEX_COLUMNS];
   char name[MAX_NAME_LENGTH];
-  uint8_t col_indexes[MAX_INDEX_COLUMNS];
-  uint8_t reserved[46];
+  uint8_t reserved[30];
 } IndexDescriptor;
 
 typedef struct __attribute__((packed)) {

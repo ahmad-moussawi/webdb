@@ -37,7 +37,7 @@ export class Io {
   readonly slotsBaseOffset: number;
 
   private in_flight_flushes = new Map<number, Promise<void>>();
-  private in_flight_reads = new Map<number, Promise<void>>();
+  private in_flight_reads = new Map<number, Promise<Uint8Array | null>>();
   private coordinator: {
     isInTransaction(): boolean;
     spillUncommittedSlot(slotIdx: number, pageId: number): Promise<void>;
@@ -65,12 +65,37 @@ export class Io {
 
   /** Atomically logs several slots to the WAL as one committed mini-transaction. */
   async writeSlotsViaWal(slots: Array<{ slotIdx: number; pageId: number }>): Promise<void> {
+    if (slots.length === 0) return;
+    for (const { pageId } of slots) {
+      if (pageId <= 0) {
+        throw new Error(
+          `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
+        );
+      }
+      while (this.in_flight_flushes.has(pageId)) {
+        await this.in_flight_flushes.get(pageId);
+      }
+    }
+
     const pages = slots.map(({ slotIdx, pageId }) => {
       this.stampSlotChecksum(slotIdx, pageId);
       const offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
       return { pageId, data: this.uint8.slice(offset, offset + PAGE_SIZE) };
     });
-    await this.coordinator!.commitDirectPagesViaWal(pages);
+
+    const wal_promise = this.coordinator!.commitDirectPagesViaWal(pages);
+    for (const { pageId } of pages) {
+      this.in_flight_flushes.set(pageId, wal_promise);
+    }
+    try {
+      await wal_promise;
+    } finally {
+      for (const { pageId } of pages) {
+        if (this.in_flight_flushes.get(pageId) === wal_promise) {
+          this.in_flight_flushes.delete(pageId);
+        }
+      }
+    }
   }
 
   isInTransaction(): boolean {
@@ -138,23 +163,27 @@ export class Io {
     }
 
     // Await any in-flight flush for this page first
-    const in_flight_flush = this.in_flight_flushes.get(pageId);
-
-    if (in_flight_flush) {
-      await in_flight_flush;
+    while (this.in_flight_flushes.has(pageId)) {
+      await this.in_flight_flushes.get(pageId);
     }
 
-    // Coalesce in-flight reads for the same pageId
+    const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
+
+    // Coalesce in-flight reads for the same pageId, copying verified bytes into caller's slotIdx
     const in_flight_read = this.in_flight_reads.get(pageId);
 
     if (in_flight_read) {
-      await in_flight_read;
+      const disk_page = await in_flight_read;
+      if (disk_page) {
+        this.uint8.set(disk_page, slot_offset);
+      } else {
+        this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+      }
       return;
     }
 
-    const read_promise = (async () => {
+    const read_promise = (async (): Promise<Uint8Array | null> => {
       const [disk_page] = await this.vfs.readPages([pageId]);
-      const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
 
       if (disk_page) {
         if (disk_page.byteLength !== PAGE_SIZE) {
@@ -186,18 +215,24 @@ export class Io {
           }
         }
 
-        this.uint8.set(disk_page, slot_offset);
-      } else {
-        this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+        return disk_page;
       }
+      return null;
     })();
 
     this.in_flight_reads.set(pageId, read_promise);
 
     try {
-      await read_promise;
+      const disk_page = await read_promise;
+      if (disk_page) {
+        this.uint8.set(disk_page, slot_offset);
+      } else {
+        this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+      }
     } finally {
-      this.in_flight_reads.delete(pageId);
+      if (this.in_flight_reads.get(pageId) === read_promise) {
+        this.in_flight_reads.delete(pageId);
+      }
     }
   }
 
@@ -212,10 +247,8 @@ export class Io {
       );
     }
 
-    const existing_flush = this.in_flight_flushes.get(pageId);
-    if (existing_flush) {
-      await existing_flush;
-      return;
+    while (this.in_flight_flushes.has(pageId)) {
+      await this.in_flight_flushes.get(pageId);
     }
 
     const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
@@ -242,22 +275,26 @@ export class Io {
       try {
         await wal_promise;
       } finally {
-        this.in_flight_flushes.delete(pageId);
+        if (this.in_flight_flushes.get(pageId) === wal_promise) {
+          this.in_flight_flushes.delete(pageId);
+        }
       }
       return;
     }
 
-    if (this.coordinator) {
-      this.coordinator.onDirectPageWrite(pageId, write_snapshot);
-    }
     const write_promise = this.vfs.writePages([
       { pageId, data: write_snapshot },
     ]);
     this.in_flight_flushes.set(pageId, write_promise);
     try {
       await write_promise;
+      if (this.coordinator) {
+        this.coordinator.onDirectPageWrite(pageId, write_snapshot);
+      }
     } finally {
-      this.in_flight_flushes.delete(pageId);
+      if (this.in_flight_flushes.get(pageId) === write_promise) {
+        this.in_flight_flushes.delete(pageId);
+      }
     }
   }
 
@@ -274,15 +311,19 @@ export class Io {
       return;
     }
 
+    if (this.shouldWriteThroughWal(slots.map((s) => s.pageId))) {
+      await this.writeSlotsViaWal(slots);
+      return;
+    }
+
     for (const { pageId } of slots) {
       if (pageId <= 0) {
         throw new Error(
           `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
         );
       }
-      const existing_flush = this.in_flight_flushes.get(pageId);
-      if (existing_flush) {
-        await existing_flush;
+      while (this.in_flight_flushes.has(pageId)) {
+        await this.in_flight_flushes.get(pageId);
       }
     }
 
@@ -295,9 +336,6 @@ export class Io {
       );
       this.stampSlotChecksum(slotIdx, pageId);
       const write_snapshot = page_bytes.slice();
-      if (this.coordinator) {
-        this.coordinator.onDirectPageWrite(pageId, write_snapshot);
-      }
       pages.push({ pageId, data: write_snapshot });
     }
 
@@ -309,6 +347,11 @@ export class Io {
     }
     try {
       await write_promise;
+      if (this.coordinator) {
+        for (const { pageId, data } of pages) {
+          this.coordinator.onDirectPageWrite(pageId, data);
+        }
+      }
     } finally {
       for (const { pageId } of pages) {
         if (this.in_flight_flushes.get(pageId) === write_promise) {

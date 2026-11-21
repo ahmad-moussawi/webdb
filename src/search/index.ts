@@ -327,6 +327,34 @@ export interface HighlightOptions extends MatchOptions {
   locale?: string;
 }
 
+const SAFE_HIGHLIGHT_TAGS = new Set([
+  'mark',
+  'span',
+  'b',
+  'strong',
+  'em',
+  'i',
+  'u',
+  'code',
+  'small',
+  'ins',
+  'abbr',
+  'cite',
+  'kbd',
+  'samp',
+  'sub',
+  'sup',
+]);
+
+function sanitizeHighlightTag(tag?: string): string {
+  if (!tag || typeof tag !== 'string') return 'mark';
+  const normalized = tag.trim().toLowerCase();
+  if (SAFE_HIGHLIGHT_TAGS.has(normalized)) {
+    return normalized;
+  }
+  return 'mark';
+}
+
 const WORD_RE = /[\p{L}\p{N}]+/gu;
 
 /**
@@ -346,7 +374,7 @@ export function highlight(
     return escapeHtml(source);
   }
 
-  const tag = options?.tag ?? 'mark';
+  const tag = sanitizeHighlightTag(options?.tag);
   const openTag = options?.className
     ? `<${tag} class="${escapeHtml(options.className)}">`
     : `<${tag}>`;
@@ -393,8 +421,8 @@ export function snippet(
   const source = String(text ?? '');
   if (!source) return '';
 
-  const size = options?.size ?? 140;
-  const ellipsis = options?.ellipsis ?? '…';
+  const size = Math.max(0, options?.size ?? 140);
+  const ellipsis = escapeHtml(options?.ellipsis ?? '…');
   const tokens = tokenize(query, options?.locale);
 
   if (tokens.length === 0) {

@@ -240,7 +240,12 @@ export function vm_phys_alloc(
 ): u32 {
   const aligned: u32 = (bytes + 7) & (~7 >>> 0);
   const used: u32 = read_u32(view, ctx_off + VM_CTX_PHYS_ARENA_USED); // JS: ctx.physArenaUsed
-  if (used + aligned > DEFAULT_MAX_QUERY_MEMORY) {
+  if (
+    bytes > DEFAULT_MAX_QUERY_MEMORY ||
+    aligned < bytes ||
+    used > DEFAULT_MAX_QUERY_MEMORY ||
+    aligned > DEFAULT_MAX_QUERY_MEMORY - used
+  ) {
     return 0;
   }
   write_u32(view, ctx_off + VM_CTX_PHYS_ARENA_USED, used + aligned); // JS: ctx.physArenaUsed = used + aligned
@@ -1649,9 +1654,9 @@ export function vm_infer_result_col_type(
   if (r_type === DataType.FLOAT64) {
     const fv: f64 = read_f64(view, reg_off + VM_REG_F64);
     if (
-      fv === Math.trunc(fv) &&
       fv >= -2147483648.0 &&
-      fv <= 2147483647.0
+      fv <= 2147483647.0 &&
+      fv === Math.trunc(fv)
     ) {
       return DataType.INT32;
     }

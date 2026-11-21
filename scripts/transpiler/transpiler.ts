@@ -691,10 +691,10 @@ export class TsToCTranspiler {
       return `((int32_t)(${this.emitExpression(expr.arguments[0])}))`;
     }
     if (calleeText === 'f64_to_i64' && expr.arguments.length === 1) {
-      return `((int64_t)(${this.emitExpression(expr.arguments[0])}))`;
+      return `webdb_f64_to_i64((double)(${this.emitExpression(expr.arguments[0])}))`;
     }
     if (calleeText === 'f64_to_i32' && expr.arguments.length === 1) {
-      return `((int32_t)(${this.emitExpression(expr.arguments[0])}))`;
+      return `webdb_f64_to_i32((double)(${this.emitExpression(expr.arguments[0])}))`;
     }
 
     // strlen(s) -> strlen(s)
@@ -705,7 +705,7 @@ export class TsToCTranspiler {
     // Math.floor, Math.trunc, Math.abs, Math.max, Math.min
     if (calleeText === 'Math.trunc' && expr.arguments.length === 1) {
       const arg = this.emitExpression(expr.arguments[0]);
-      return `((double)((int64_t)(${arg})))`;
+      return `__builtin_trunc((double)(${arg}))`;
     }
     if (calleeText === 'Math.abs' && expr.arguments.length === 1) {
       const arg = this.emitExpression(expr.arguments[0]);
@@ -713,7 +713,7 @@ export class TsToCTranspiler {
     }
     if (calleeText === 'Math.floor' && expr.arguments.length === 1) {
       const arg = this.emitExpression(expr.arguments[0]);
-      return `((int32_t)(${arg}))`;
+      return `__builtin_floor((double)(${arg}))`;
     }
     if (calleeText === 'Math.max' && expr.arguments.length === 2) {
       const a = this.emitExpression(expr.arguments[0]);
@@ -788,12 +788,18 @@ export class TsToCTranspiler {
       return `store_i64((void *)(uintptr_t)(${offset}), ${val})`;
     }
 
-    // memcpy, memset, memcmp
+    // memcpy, memmove, memset, memcmp
     if (calleeText === 'memcpy' && expr.arguments.length === 5) {
       const destOff = this.emitExpression(expr.arguments[1]);
       const srcOff = this.emitExpression(expr.arguments[3]);
       const n = this.emitExpression(expr.arguments[4]);
       return `webdb_memcpy((void *)(uintptr_t)(${destOff}), (const void *)(uintptr_t)(${srcOff}), ${n})`;
+    }
+    if (calleeText === 'memmove' && expr.arguments.length === 5) {
+      const destOff = this.emitExpression(expr.arguments[1]);
+      const srcOff = this.emitExpression(expr.arguments[3]);
+      const n = this.emitExpression(expr.arguments[4]);
+      return `webdb_memmove((void *)(uintptr_t)(${destOff}), (const void *)(uintptr_t)(${srcOff}), ${n})`;
     }
     if (calleeText === 'memset' && expr.arguments.length === 4) {
       const destOff = this.emitExpression(expr.arguments[1]);

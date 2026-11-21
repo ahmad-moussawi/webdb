@@ -1102,10 +1102,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       if (
         idx &&
         (idx.tableId === desc.tableId ||
-          idx.name
-            .toLowerCase()
-            .startsWith(`idx_${tableName.toLowerCase()}_`) ||
-          idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)
+          (idx.tableId === 0 &&
+            (idx.name
+              .toLowerCase()
+              .startsWith(`idx_${tableName.toLowerCase()}_`) ||
+              idx.name.toLowerCase() === `pk_${tableName.toLowerCase()}`)))
       ) {
         if (idx.rootPageId > 1 && idx.rootPageId !== desc.pkRootPageId) {
           await this.freeTableTreePages(idx.rootPageId);
@@ -2489,6 +2490,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         return f.isNull ? isNull : !isNull;
       }
       case "in": {
+        // Handle constant boolean sentinel emitted by uncorrelated EXISTS/NOT EXISTS resolution
+        if (!f.colName && !f.expr && (!f.values || f.values.length === 0)) {
+          return Boolean(f.notIn);
+        }
         const val = f.expr
           ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
           : row[f.colName!];
@@ -2561,7 +2566,9 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
       default:
-        return true;
+        throw new Error(
+          `Unsupported filter type in DML: "${String((f as any).type)}"`,
+        );
     }
   }
 
