@@ -432,6 +432,44 @@ export class WebDB implements IDatabaseQueryExecutor {
     driver: BufferPoolDriver,
   ): Promise<void> {
     const page1View = driver.getSlotDataView(0);
+    const totalPages = catalog_get_total_pages(page1View);
+    // Reserve at least 1 unpinned buffer pool slot for data/index page I/O
+    // (visited includes Page 1 in slot 0, so at most slotCount - 1 total slots may be pinned).
+    const maxPinnedCatalogSlots = Math.max(1, driver.slotCount - 1);
+    const visited = new Set<number>([1]);
+
+    const pinAndReadHeader = async (pageId: number) => {
+      if (pageId < 2 || pageId > totalPages) {
+        throw new InvalidDatabaseError(
+          `Catalog page ID ${pageId} out of bounds (totalPages=${totalPages})`,
+        );
+      }
+      if (visited.has(pageId)) {
+        throw new InvalidDatabaseError(
+          `Cycle detected in catalog page chain at page ${pageId}`,
+        );
+      }
+      if (visited.size >= maxPinnedCatalogSlots) {
+        throw new InvalidDatabaseError(
+          `Catalog pages exceed buffer pool capacity (${driver.slotCount} slots)`,
+        );
+      }
+      visited.add(pageId);
+      const slot = await driver.acquireAndPinPage(pageId);
+      const view = driver.getSlotDataView(slot);
+      const header = catalog_read_page_header(view, 0);
+      if (header.pageType !== PAGE_TYPE_CATALOG_PAGE) {
+        throw new InvalidDatabaseError(
+          `Expected catalog page type (${PAGE_TYPE_CATALOG_PAGE}) at page ${pageId}, found ${header.pageType}`,
+        );
+      }
+      if (header.colCountInPage > MAX_COLUMNS_PER_CATALOG_PAGE) {
+        throw new InvalidDatabaseError(
+          `Catalog page ${pageId} has invalid column count ${header.colCountInPage}`,
+        );
+      }
+      return header;
+    };
 
     // 1. Pin chained table descriptor overflow catalog pages
     let tableCatPageId = page1View.getUint32(
@@ -439,9 +477,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       true,
     );
     while (tableCatPageId !== 0) {
-      const slot = await driver.acquireAndPinPage(tableCatPageId);
-      const view = driver.getSlotDataView(slot);
-      const header = catalog_read_page_header(view, 0);
+      const header = await pinAndReadHeader(tableCatPageId);
       tableCatPageId = header.nextColCatalogPageId;
     }
 
@@ -451,9 +487,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       true,
     );
     while (idxCatPageId !== 0) {
-      const slot = await driver.acquireAndPinPage(idxCatPageId);
-      const view = driver.getSlotDataView(slot);
-      const header = catalog_read_page_header(view, 0);
+      const header = await pinAndReadHeader(idxCatPageId);
       idxCatPageId = header.nextColCatalogPageId;
     }
 
@@ -469,9 +503,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     for (const desc of tableDescriptors) {
       let catPageId = desc.colCatalogPageId;
       while (catPageId !== 0) {
-        const slot = await driver.acquireAndPinPage(catPageId);
-        const view = driver.getSlotDataView(slot);
-        const header = catalog_read_page_header(view, 0);
+        const header = await pinAndReadHeader(catPageId);
         catPageId = header.nextColCatalogPageId;
       }
     }
@@ -4319,7 +4351,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     const col_count = outputColumns.length;
     const null_bitmap_bytes = (col_count + 7) >> 3;
 
-    const result: Record<string, any[]> = {};
+    const result: Record<string, any[]> = Object.create(null);
     for (let i = 0; i < col_count; i++) {
       const c = outputColumns[i];
       if (
@@ -4331,7 +4363,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         result[c.name] = arr;
         if (c.name.includes(".")) {
           const short = c.name.slice(c.name.lastIndexOf(".") + 1);
-          if (!result[short]) {
+          if (result[short] === undefined) {
             result[short] = arr;
           }
         }
@@ -5098,6 +5130,117 @@ export class WebDB implements IDatabaseQueryExecutor {
           if (computedChk !== storedChk) {
             throw new CorruptPageError(p, storedChk, computedChk);
           }
+        }
+      }
+
+      // Pass 1b: Pre-validate header pointers, catalog page chains (bounds, page types, cycles, column counts, and pool pin capacity),
+      // table root/PK pages, and index root pages BEFORE mutating storage, WAL, or the live buffer pool.
+      if (
+        header.freePageHead !== 0 &&
+        (header.freePageHead < 2 || header.freePageHead > numPages)
+      ) {
+        throw new InvalidDatabaseError(
+          `Imported freePageHead ${header.freePageHead} out of bounds (totalPages=${numPages})`,
+        );
+      }
+      // Reserve at least 1 unpinned buffer pool slot for data/index page I/O
+      // (visitedCatalogPages includes Page 1 in slot 0, so at most slotCount - 1 total slots may be pinned).
+      const maxPinnedCatalogSlots = Math.max(1, this.pool.slotCount - 1);
+      const visitedCatalogPages = new Set<number>([1]);
+      const validateCatalogPage = (pageId: number) => {
+        if (pageId < 2 || pageId > numPages) {
+          throw new InvalidDatabaseError(
+            `Imported catalog page ID ${pageId} out of bounds (totalPages=${numPages})`,
+          );
+        }
+        if (visitedCatalogPages.has(pageId)) {
+          throw new InvalidDatabaseError(
+            `Cycle detected in imported catalog page chain at page ${pageId}`,
+          );
+        }
+        if (visitedCatalogPages.size >= maxPinnedCatalogSlots) {
+          throw new InvalidDatabaseError(
+            `Imported catalog exceeds buffer pool capacity (${this.pool.slotCount} slots)`,
+          );
+        }
+        visitedCatalogPages.add(pageId);
+        const offset = (pageId - 1) * PAGE_SIZE;
+        const view = new DataView(bytes.buffer, bytes.byteOffset + offset, PAGE_SIZE);
+        const catHeader = catalog_read_page_header(view, 0);
+        if (catHeader.pageType !== PAGE_TYPE_CATALOG_PAGE) {
+          throw new InvalidDatabaseError(
+            `Expected catalog page type (${PAGE_TYPE_CATALOG_PAGE}) at imported page ${pageId}, found ${catHeader.pageType}`,
+          );
+        }
+        if (catHeader.colCountInPage > MAX_COLUMNS_PER_CATALOG_PAGE) {
+          throw new InvalidDatabaseError(
+            `Imported catalog page ${pageId} has invalid column count ${catHeader.colCountInPage}`,
+          );
+        }
+        return catHeader;
+      };
+
+      let importTableCatPid = page1View.getUint32(
+        HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
+        true,
+      );
+      while (importTableCatPid !== 0) {
+        importTableCatPid = validateCatalogPage(importTableCatPid).nextColCatalogPageId;
+      }
+
+      let importIdxCatPid = page1View.getUint32(
+        HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+        true,
+      );
+      while (importIdxCatPid !== 0) {
+        importIdxCatPid = validateCatalogPage(importIdxCatPid).nextColCatalogPageId;
+      }
+
+      const rawImportPager = {
+        getPageBytes: (pageId: number) => {
+          if (pageId >= 1 && pageId <= numPages) {
+            const offset = (pageId - 1) * PAGE_SIZE;
+            return bytes.subarray(offset, offset + PAGE_SIZE);
+          }
+          return new Uint8Array(PAGE_SIZE);
+        },
+      };
+      const importedTableDescs = catalog_list_table_descriptors(
+        page1View,
+        rawImportPager,
+      );
+      for (const desc of importedTableDescs) {
+        if (desc.rootPageId !== 0 && (desc.rootPageId < 2 || desc.rootPageId > numPages)) {
+          throw new InvalidDatabaseError(
+            `Imported table "${desc.name}" has out-of-bounds rootPageId ${desc.rootPageId}`,
+          );
+        }
+        if (
+          desc.pkRootPageId &&
+          (desc.pkRootPageId < 2 || desc.pkRootPageId > numPages)
+        ) {
+          throw new InvalidDatabaseError(
+            `Imported table "${desc.name}" has out-of-bounds pkRootPageId ${desc.pkRootPageId}`,
+          );
+        }
+        let colCatPid = desc.colCatalogPageId;
+        while (colCatPid !== 0) {
+          colCatPid = validateCatalogPage(colCatPid).nextColCatalogPageId;
+        }
+      }
+
+      const importedIndexDescs = catalog_list_all_indexes(
+        page1View,
+        rawImportPager,
+      );
+      for (const idxDesc of importedIndexDescs) {
+        if (
+          idxDesc.rootPageId !== 0 &&
+          (idxDesc.rootPageId < 2 || idxDesc.rootPageId > numPages)
+        ) {
+          throw new InvalidDatabaseError(
+            `Imported index "${idxDesc.name}" has out-of-bounds rootPageId ${idxDesc.rootPageId}`,
+          );
         }
       }
 

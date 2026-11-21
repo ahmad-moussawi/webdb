@@ -42,6 +42,7 @@ export interface OptimizedPlanResult {
   plan: QueryPlan;
   orderedTables: TableMeta[];
   metrics: PlanCostMetrics | null;
+  rootFilter?: QueryFilter | null;
   isAlwaysFalse?: boolean;
   isAlwaysTrue?: boolean;
   whereMetrics?: WhereMetrics;
@@ -432,6 +433,11 @@ export function reconstructJoinPlans(
         rightColName = `${innerTable.name}.${chosenEdge.colA}`;
         const outerTable = originalTables[chosenEdge.tableB];
         leftColName = `${outerTable.name}.${chosenEdge.colB}`;
+        // Operands swapped (tableB op' tableA instead of tableA op tableB): invert directional op
+        if (op === '<') op = '>';
+        else if (op === '>') op = '<';
+        else if (op === '<=') op = '>=';
+        else if (op === '>=') op = '<=';
       } else {
         rightColName = `${innerTable.name}.${chosenEdge.colB}`;
         const outerTable = originalTables[chosenEdge.tableA];

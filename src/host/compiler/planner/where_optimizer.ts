@@ -1,5 +1,5 @@
 import { TableMeta } from '../../../types/index.js';
-import { QueryFilter } from '../compiler.js';
+import { QueryFilter, resolveColumnAcrossTables } from '../compiler.js';
 import { WhereMetrics } from './types.js';
 
 /**
@@ -367,27 +367,73 @@ function pruneColumnFilters(filters: QueryFilter[]): QueryFilter[] {
   return result;
 }
 
+function serializeFilterValue(v: unknown): string {
+  if (v === null) return 'null';
+  if (v === undefined) return 'undef';
+  if (typeof v === 'bigint') return `bigint:${v.toString()}`;
+  if (typeof v === 'number') return `num:${Object.is(v, -0) ? '-0' : String(v)}`;
+  if (typeof v === 'boolean') return `bool:${v}`;
+  if (typeof v === 'string') return `str:${JSON.stringify(v)}`;
+  if (v instanceof Uint8Array) {
+    let hex = '';
+    for (let i = 0; i < v.byteLength; i++) {
+      hex += v[i].toString(16).padStart(2, '0');
+    }
+    return `blob:${v.byteLength}:${hex}`;
+  }
+  return `other:${JSON.stringify(v)}`;
+}
+
 function filterSignature(f: QueryFilter): string {
-  return `${f.type}:${f.colName ?? ''}:${f.isNull ?? ''}:${f.op ?? ''}:${String(f.value ?? '')}:${f.notIn ?? ''}:${JSON.stringify(f.values ?? '')}`;
+  return JSON.stringify([
+    f.type,
+    f.colName ?? null,
+    f.isNull ?? null,
+    f.op ?? null,
+    serializeFilterValue(f.value),
+    f.notIn ?? null,
+    f.values ? f.values.map(serializeFilterValue) : null,
+  ]);
 }
 
 /**
- * Infers transitive equality predicates across inner/left joins.
+ * Infers transitive equality predicates across inner joins.
+ * Never infers predicates across LEFT JOIN boundaries, since pushing a filter
+ * onto the nullable right-hand table changes outer-join semantics and breaks
+ * anti-join predicates such as `WHERE right.id IS NULL`.
  */
 export function inferTransitivePredicates(
   filters: QueryFilter[],
   joinedPlans: { leftCol: string; op: string; rightCol: string; type: string }[],
+  tables?: TableMeta[],
 ): QueryFilter[] {
   const result = [...filters];
   const normalize = (c: string) => c.toLowerCase();
-  const getBaseName = (c: string) => {
+  const splitCol = (c: string): { tbl: string | null; col: string } => {
     const idx = c.lastIndexOf('.');
-    return idx >= 0 ? c.slice(idx + 1).toLowerCase() : c.toLowerCase();
+    if (idx >= 0) {
+      return {
+        tbl: c.slice(0, idx).toLowerCase(),
+        col: c.slice(idx + 1).toLowerCase(),
+      };
+    }
+    return { tbl: null, col: c.toLowerCase() };
+  };
+
+  const resolveQualified = (c: string): string => {
+    if (c.includes('.') || !tables || tables.length === 0) {
+      return normalize(c);
+    }
+    const resolved = resolveColumnAcrossTables(c, tables);
+    if (resolved) {
+      return `${resolved.table.name.toLowerCase()}.${resolved.col.name.toLowerCase()}`;
+    }
+    return normalize(c);
   };
 
   const findEqualityValue = (col: string): any => {
-    const colNorm = normalize(col);
-    const colBase = getBaseName(col);
+    const targetQual = resolveQualified(col);
+    const targetParts = splitCol(targetQual);
     for (const f of filters) {
       if (
         f.type === 'cmp' &&
@@ -396,10 +442,20 @@ export function inferTransitivePredicates(
         f.value !== null &&
         f.value !== undefined
       ) {
-        const fNorm = normalize(f.colName);
-        const fBase = getBaseName(f.colName);
-        if (fNorm === colNorm || fBase === colNorm || fNorm === colBase) {
+        const fQual = resolveQualified(f.colName);
+        if (fQual === targetQual) {
           return f.value;
+        }
+        // Only match unqualified names when tables metadata is unavailable and
+        // both sides are unqualified (or one is unqualified without conflicting table)
+        if (!tables || tables.length === 0) {
+          const fParts = splitCol(fQual);
+          if (
+            fParts.col === targetParts.col &&
+            (fParts.tbl === null || targetParts.tbl === null)
+          ) {
+            return f.value;
+          }
         }
       }
     }
@@ -407,7 +463,7 @@ export function inferTransitivePredicates(
   };
 
   for (const j of joinedPlans) {
-    if (j.type !== 'inner' && j.type !== 'left') {
+    if (j.type !== 'inner') {
       continue;
     }
     if (j.op !== '=' && (j.op as string) !== '==') {
@@ -424,16 +480,14 @@ export function inferTransitivePredicates(
       });
     }
 
-    if (j.type === 'inner') {
-      const rightVal = findEqualityValue(j.rightCol);
-      if (rightVal !== undefined) {
-        result.push({
-          type: 'cmp',
-          colName: j.leftCol,
-          op: '=',
-          value: rightVal,
-        });
-      }
+    const rightVal = findEqualityValue(j.rightCol);
+    if (rightVal !== undefined) {
+      result.push({
+        type: 'cmp',
+        colName: j.leftCol,
+        op: '=',
+        value: rightVal,
+      });
     }
   }
 

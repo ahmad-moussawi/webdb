@@ -105,7 +105,15 @@ function getRelativeTimeFormatter(
   return fmt;
 }
 
+const MAX_REGEXP_PATTERN_LENGTH = 1024;
+const MAX_PAD_LENGTH = 65536;
+
 function getRegExp(pattern: string, flags?: string): RegExp {
+  if (pattern.length > MAX_REGEXP_PATTERN_LENGTH) {
+    throw new RangeError(
+      `RegExp pattern exceeds maximum length of ${MAX_REGEXP_PATTERN_LENGTH} characters`,
+    );
+  }
   const key = `${pattern}:${flags ?? ''}`;
   let re = reCache.get(key);
   if (!re) {
@@ -572,7 +580,9 @@ export function padLeft(
   padChar: string = ' '
 ): string | null {
   if (str === null || str === undefined) return null;
-  return String(str).padStart(Math.max(0, Math.floor(length)), padChar);
+  if (!Number.isFinite(length)) return String(str);
+  const clamped = Math.min(MAX_PAD_LENGTH, Math.max(0, Math.floor(length)));
+  return String(str).padStart(clamped, padChar);
 }
 
 /**
@@ -584,7 +594,9 @@ export function padRight(
   padChar: string = ' '
 ): string | null {
   if (str === null || str === undefined) return null;
-  return String(str).padEnd(Math.max(0, Math.floor(length)), padChar);
+  if (!Number.isFinite(length)) return String(str);
+  const clamped = Math.min(MAX_PAD_LENGTH, Math.max(0, Math.floor(length)));
+  return String(str).padEnd(clamped, padChar);
 }
 
 // ============================================================================

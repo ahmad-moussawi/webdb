@@ -25,6 +25,9 @@ import {
   optimizeWherePredicates,
   inferTransitivePredicates,
 } from "./where_optimizer.js";
+import { HeuristicPlanner } from "./heuristic.js";
+
+const MAX_DP_JOIN_TABLES = 12;
 
 export interface CostBasedPlannerOptions {
   indexSeekCost?: number;
@@ -77,6 +80,7 @@ export class CostBasedPlanner implements QueryPlanner {
       const withTransitive = inferTransitivePredicates(
         workingFilters,
         plan.joinedTables,
+        originalTables,
       );
       if (withTransitive.length > workingFilters.length) {
         const transRes = optimizeWherePredicates(
@@ -176,6 +180,19 @@ export class CostBasedPlanner implements QueryPlanner {
           tableScanTypes: [base.scanType],
           tableIndexNames: [base.indexName],
         },
+      };
+    }
+
+    // Fall back to greedy HeuristicPlanner when join table count exceeds DP cap
+    // (avoids 2^N memory/CPU blowup and 32-bit bitmask overflow)
+    if (N > MAX_DP_JOIN_TABLES) {
+      const heuristicRes = new HeuristicPlanner().optimize({
+        ...plan,
+        filters: workingFilters,
+      });
+      return {
+        ...heuristicRes,
+        whereMetrics,
       };
     }
 
@@ -406,6 +423,7 @@ export class CostBasedPlanner implements QueryPlanner {
         isOrderSatisfied: finalOrderSatisfied,
       },
       orderedTables,
+      rootFilter,
       metrics: {
         totalCost: winningCost,
         estimatedRows: winningRows,
