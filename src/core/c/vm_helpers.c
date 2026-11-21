@@ -328,6 +328,47 @@ uint32_t vm_cursor_off(uint32_t ctx_off, uint32_t cursor_idx) {
   return ctx_off + VM_CTX_CURSORS_OFF + cursor_idx * VM_CURSOR_SIZE;
 }
 
+int32_t vm_set_status(uint32_t ctx_off, uint32_t pc, int32_t status) {
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
+  store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), status);
+  return status;
+}
+
+int32_t vm_page_fault(uint32_t ctx_off, uint32_t instr_pc, uint32_t page_id) {
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), page_id);
+  store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
+  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+  return VM_STATUS_PAGE_FAULT;
+}
+
+int32_t vm_ensure_resident(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_to_slot_off, uint32_t page_to_slot_buckets, uint32_t cur_off, uint32_t page_id, uint32_t instr_pc) {
+  if (has_buffer_pool != 0 && page_id > 0) {
+    int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, page_id);
+    if (slot < 0) {
+      return vm_page_fault(ctx_off, instr_pc, page_id);
+    }
+    if (cur_off != 0) {
+      store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
+    }
+  }
+  return VM_STATUS_RUNNING;
+}
+
+int32_t vm_position_data_cursor(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_to_slot_off, uint32_t page_to_slot_buckets, uint32_t data_cursor_idx, int64_t matched_rowid, uint32_t instr_pc) {
+  uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
+  int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
+  if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, 0, data_page_id, instr_pc) != VM_STATUS_RUNNING) {
+    return VM_STATUS_PAGE_FAULT;
+  }
+  uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
+  store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
+  store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
+  uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
+  uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
+  store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
+  return VM_STATUS_RUNNING;
+}
+
 uint32_t vm_resolve_table_off(uint32_t ctx_off, uint32_t cursor_idx) {
   uint32_t num_tables = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_NUM_TABLES));
   if (cursor_idx < num_tables) {
@@ -412,29 +453,20 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
   while (curr_pid > 1 && remaining > 0) {
     hops++;
     if (hops > 65536) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_pid);
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_PAGE_FAULT;
+      return vm_page_fault(ctx_off, instr_pc, curr_pid);
     }
     uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
     if (load_u8((const void *)(uintptr_t)(page_off)) != PAGE_TYPE_OVERFLOW) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
     if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid == curr_pid) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     if (chunk_len >= remaining) {
       remaining = 0;
@@ -444,9 +476,7 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
     curr_pid = next_pid;
   }
   if (remaining > 0) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-    return VM_STATUS_ERROR;
+    return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
   }
   uint32_t dest_off = vm_phys_alloc(ctx_off, arena_base, total_len);
   if (dest_off == 0) {
@@ -459,28 +489,20 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
   while (curr_pid > 1 && copied < total_len) {
     copy_hops++;
     if (copy_hops > 65536) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
     if (load_u8((const void *)(uintptr_t)(page_off)) != PAGE_TYPE_OVERFLOW) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
     if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid == curr_pid) {
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-      return VM_STATUS_ERROR;
+      return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
     }
     if (copied + chunk_len > total_len) {
       chunk_len = total_len - copied;
@@ -784,7 +806,7 @@ int32_t vm_compare_index_cell(uint32_t ctx_off, uint32_t page_offset, uint16_t s
   return vm_compare_bytes_raw(target_off, target_len, cell_data, k_len);
 }
 
-int32_t vm_index_seek_leaf_eq(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off) {
+int32_t vm_index_seek_leaf(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off, int32_t exact_only) {
   int32_t cell_count = page_get_cell_count(page_offset);
   int32_t lo = 0;
   int32_t hi = cell_count - 1;
@@ -793,7 +815,7 @@ int32_t vm_index_seek_leaf_eq(uint32_t ctx_off, uint32_t page_offset, uint8_t ke
     int32_t mid = (lo + hi) >> 1;
     int32_t cmp = vm_compare_index_cell(ctx_off, page_offset, mid, key_type, reg_off);
     if (cmp <= 0) {
-      if (cmp == 0) {
+      if (exact_only == 0 || cmp == 0) {
         matched_slot = mid;
       }
       hi = mid - 1;
@@ -802,24 +824,6 @@ int32_t vm_index_seek_leaf_eq(uint32_t ctx_off, uint32_t page_offset, uint8_t ke
     }
   }
   return matched_slot;
-}
-
-int32_t vm_index_seek_leaf_ge(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off) {
-  int32_t cell_count = page_get_cell_count(page_offset);
-  int32_t lo = 0;
-  int32_t hi = cell_count - 1;
-  int32_t candidate_slot = -1;
-  while (lo <= hi) {
-    int32_t mid = (lo + hi) >> 1;
-    int32_t cmp = vm_compare_index_cell(ctx_off, page_offset, mid, key_type, reg_off);
-    if (cmp <= 0) {
-      candidate_slot = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
-  }
-  return candidate_slot;
 }
 
 int32_t sql_like_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len) {
@@ -1022,7 +1026,7 @@ int32_t vm_utf8_char_count(uint32_t str_off, uint32_t byte_len) {
   return count;
 }
 
-void vm_str_lower(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off) {
+void vm_str_case(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off, int32_t to_upper) {
   if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0) {
     vm_reg_set_null(dest_reg_off);
     return;
@@ -1039,29 +1043,8 @@ void vm_str_lower(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, u
     return;
   }
   for (uint32_t i = 0; i < len; i++) {
-    store_u8((void *)(uintptr_t)(out_off + i), to_lower_char(load_u8((const void *)(uintptr_t)(src_off + i))));
-  }
-  vm_reg_set_slice(dest_reg_off, TYPE_TEXT, out_off, len);
-}
-
-void vm_str_upper(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off) {
-  if (load_u8((const void *)(uintptr_t)(src_reg_off + VM_REG_IS_NULL)) != 0) {
-    vm_reg_set_null(dest_reg_off);
-    return;
-  }
-  uint32_t src_off = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_OFF));
-  uint32_t len = load_u32((const void *)(uintptr_t)(src_reg_off + VM_REG_DATA_LEN));
-  if (len == 0) {
-    vm_reg_set_slice(dest_reg_off, TYPE_TEXT, 0, 0);
-    return;
-  }
-  uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, len);
-  if (out_off == 0) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
-    return;
-  }
-  for (uint32_t i = 0; i < len; i++) {
-    store_u8((void *)(uintptr_t)(out_off + i), to_upper_char(load_u8((const void *)(uintptr_t)(src_off + i))));
+    int32_t ch = load_u8((const void *)(uintptr_t)(src_off + i));
+    store_u8((void *)(uintptr_t)(out_off + i), (to_upper != 0 ? to_upper_char(ch) : to_lower_char(ch)));
   }
   vm_reg_set_slice(dest_reg_off, TYPE_TEXT, out_off, len);
 }
@@ -1259,14 +1242,10 @@ int32_t vm_emit_raw_row(uint32_t ctx_off, uint32_t row_src_off, uint32_t row_len
   uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
   uint32_t needed = 2 + row_len;
   if (needed > RESULT_BUFFER_SIZE) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-    return VM_STATUS_ERROR;
+    return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
   }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
-    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-    return VM_STATUS_BUFFER_FULL;
+    return vm_set_status(ctx_off, instr_pc, VM_STATUS_BUFFER_FULL);
   }
   uint32_t out_target = RESULT_BUFFER_OFFSET + result_offset;
   store_u16((void *)(uintptr_t)(out_target), row_len);
@@ -1336,14 +1315,10 @@ int32_t vm_serialize_and_emit_result_row(uint32_t ctx_off, uint32_t start_reg, u
   uint32_t result_offset = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_RESULT_OFFSET));
   uint32_t needed = 2 + total_row_size;
   if (needed > RESULT_BUFFER_SIZE) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-    return VM_STATUS_ERROR;
+    return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
   }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
-    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_BUFFER_FULL);
-    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-    return VM_STATUS_BUFFER_FULL;
+    return vm_set_status(ctx_off, instr_pc, VM_STATUS_BUFFER_FULL);
   }
   uint32_t out_target = RESULT_BUFFER_OFFSET + result_offset;
   store_u16((void *)(uintptr_t)(out_target), total_row_size);
@@ -2028,15 +2003,6 @@ int32_t vm_agg_final_raw(uint32_t ctx_off, uint32_t sum_reg, uint32_t count_reg,
   return VM_STATUS_RUNNING;
 }
 
-uint32_t fnv1a_32_bytes(uint8_t * data, uint32_t len) {
-  uint32_t hash = 2166136261;
-  for (uint32_t i = 0; i < len; i++) {
-    hash ^= data[i];
-    hash = (hash * 16777619);
-  }
-  return hash != 0 ? ((uint32_t)(hash)) : 1;
-}
-
 int32_t sql_like_match_raw(const char * str, uint32_t str_len, const char * pattern, uint32_t pat_len) {
   uint32_t s = 0;
   uint32_t p = 0;
@@ -2062,31 +2028,4 @@ int32_t sql_like_match_raw(const char * str, uint32_t str_len, const char * patt
     p++;
   }
   return p == pat_len ? 1 : 0;
-}
-
-Compare3VLResult compare_3vl_int64(int64_t a, int32_t a_null, int64_t b, int32_t b_null) {
-  if (a_null != 0 || b_null != 0) {
-    return (Compare3VLResult){ .result = 0, .is_unknown = 1 };
-  }
-  return (Compare3VLResult){ .result = a < b ? -1 : a > b ? 1 : 0, .is_unknown = 0 };
-}
-
-Compare3VLResult compare_3vl_float64(double a, int32_t a_null, double b, int32_t b_null) {
-  if (a_null != 0 || b_null != 0) {
-    return (Compare3VLResult){ .result = 0, .is_unknown = 1 };
-  }
-  return (Compare3VLResult){ .result = a < b ? -1 : a > b ? 1 : 0, .is_unknown = 0 };
-}
-
-Compare3VLResult compare_3vl_bytes(uint8_t * a, uint32_t a_len, int32_t a_null, uint8_t * b, uint32_t b_len, int32_t b_null) {
-  if (a_null != 0 || b_null != 0) {
-    return (Compare3VLResult){ .result = 0, .is_unknown = 1 };
-  }
-  uint32_t min_len = a_len < b_len ? a_len : b_len;
-  for (uint32_t i = 0; i < min_len; i++) {
-    if (a[i] != b[i]) {
-      return (Compare3VLResult){ .result = a[i] < b[i] ? -1 : 1, .is_unknown = 0 };
-    }
-  }
-  return (Compare3VLResult){ .result = a_len < b_len ? -1 : a_len > b_len ? 1 : 0, .is_unknown = 0 };
 }
