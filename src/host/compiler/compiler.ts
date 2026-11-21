@@ -649,12 +649,97 @@ export function resolveColumnAcrossTables(
   return null;
 }
 
-function emitLeafJumpOnTrue(
+function createRegAllocator(startReg: number): () => number {
+  let next = startReg;
+  return () => {
+    if (next >= 64) throw new TooManyRegistersError(next);
+    return next++;
+  };
+}
+
+function emitCondJump(
+  emitter: BytecodeEmitter,
+  jumpOnTrue: boolean,
+  patches: number[],
+  emitJumpOnMatch: () => number,
+): void {
+  if (jumpOnTrue) {
+    patches.push(emitJumpOnMatch());
+  } else {
+    const passPatch = emitJumpOnMatch();
+    emitter.emitUint8(OpCode.OP_JUMP);
+    patches.push(emitter.emitUint16(0));
+    emitter.patchUint16(passPatch, emitter.currentOffset());
+  }
+}
+
+function emitFilterLhsToReg(
+  filter: QueryFilter,
+  regCol: number,
+  table: TableMeta,
+  all: TableMeta[],
+  emitter: BytecodeEmitter,
+  scratchBaseReg: number,
+  missingColMsg: string,
+  udfNameMap?: Map<string, number>,
+  joinNullFlags?: JoinNullFlags,
+): void {
+  if (filter.expr) {
+    emitExpression(
+      filter.expr,
+      table,
+      emitter,
+      0,
+      regCol,
+      createRegAllocator(scratchBaseReg),
+      udfNameMap,
+      undefined,
+      all,
+      joinNullFlags,
+    );
+    return;
+  }
+  if (!filter.colName) {
+    throw new Error(missingColMsg);
+  }
+  const resolved = resolveColumnAcrossTables(filter.colName, all);
+  if (resolved) {
+    emitReadColumnGuarded(
+      emitter,
+      resolved.cursor,
+      resolved.colIdx,
+      regCol,
+      resolved.col.type,
+      joinNullFlags,
+    );
+    return;
+  }
+  try {
+    const parsed = parseExpression(filter.colName);
+    emitExpression(
+      parsed,
+      table,
+      emitter,
+      0,
+      regCol,
+      createRegAllocator(scratchBaseReg),
+      udfNameMap,
+      undefined,
+      all,
+      joinNullFlags,
+    );
+  } catch {
+    throw new Error(`Column "${filter.colName}" not found in tables`);
+  }
+}
+
+function emitWhereLeaf(
   filter: QueryFilter,
   leafIdx: number,
+  jumpOnTrue: boolean,
+  patches: number[],
   table: TableMeta,
   emitter: BytecodeEmitter,
-  truePatches: number[],
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
@@ -662,64 +747,55 @@ function emitLeafJumpOnTrue(
   joinNullFlags?: JoinNullFlags,
 ): void {
   const all = tables ?? [table];
+  const regCol = leafIdx * 2;
+  const regConst = leafIdx * 2 + 1;
+
   if (filter.type === "expr") {
-    const regRes = leafIdx * 2;
-    const regOne = leafIdx * 2 + 1;
-    let tempReg = scratchBaseReg;
-    const allocReg = () => {
-      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-      return tempReg++;
-    };
     emitExpression(
       filter.expr!,
       table,
       emitter,
       0,
-      regRes,
-      allocReg,
+      regCol,
+      createRegAllocator(scratchBaseReg),
       udfNameMap,
       undefined,
       all,
       joinNullFlags,
     );
     emitter.emitUint8(OpCode.OP_LOAD_INT);
-    emitter.emitUint8(regOne);
+    emitter.emitUint8(regConst);
     emitter.emitInt32(1);
 
-    emitter.emitUint8(OpCode.OP_EQ);
-    emitter.emitUint8(regRes);
-    emitter.emitUint8(regOne);
-    truePatches.push(emitter.emitUint16(0));
+    emitCondJump(emitter, jumpOnTrue, patches, () => {
+      emitter.emitUint8(OpCode.OP_EQ);
+      emitter.emitUint8(regCol);
+      emitter.emitUint8(regConst);
+      return emitter.emitUint16(0);
+    });
     return;
   }
 
   if (filter.type === "null") {
+    const jumpIfNull = jumpOnTrue ? Boolean(filter.isNull) : !filter.isNull;
     if (filter.expr) {
-      const regCol = leafIdx * 2;
-      let tempReg = scratchBaseReg;
-      const allocReg = () => {
-        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-        return tempReg++;
-      };
       emitExpression(
         filter.expr,
         table,
         emitter,
         0,
         regCol,
-        allocReg,
+        createRegAllocator(scratchBaseReg),
         udfNameMap,
         undefined,
         all,
         joinNullFlags,
       );
-      if (filter.isNull) {
-        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
-      } else {
-        emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
-      }
+      emitter.emitUint8(
+        jumpIfNull ? OpCode.OP_REG_IS_NULL : OpCode.OP_REG_IS_NOT_NULL,
+      );
       emitter.emitUint8(regCol);
-      truePatches.push(emitter.emitUint16(0));
+      patches.push(emitter.emitUint16(0));
       return;
     }
     if (!filter.colName) {
@@ -735,1238 +811,290 @@ function emitLeafJumpOnTrue(
       emitter.emitUint8(nullFlagReg);
       emitter.emitUint8(joinNullFlags!.regZero);
       const checkRealPatch = emitter.emitUint16(0);
-      if (filter.isNull) {
-        // Synthetic NULL row -> IS NULL is true
+      if (jumpIfNull) {
+        // Synthetic NULL row -> take jump
         emitter.emitUint8(OpCode.OP_JUMP);
-        truePatches.push(emitter.emitUint16(0));
+        patches.push(emitter.emitUint16(0));
         emitter.patchUint16(checkRealPatch, emitter.currentOffset());
         emitter.emitUint8(OpCode.OP_IS_NULL);
         emitter.emitUint8(resolved.cursor);
         emitter.emitUint8(resolved.colIdx);
-        truePatches.push(emitter.emitUint16(0));
+        patches.push(emitter.emitUint16(0));
       } else {
-        // Synthetic NULL row -> IS NOT NULL is false (skip real check)
+        // Synthetic NULL row -> do not jump (skip real check)
         emitter.emitUint8(OpCode.OP_JUMP);
         const skipRealPatch = emitter.emitUint16(0);
         emitter.patchUint16(checkRealPatch, emitter.currentOffset());
         emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
         emitter.emitUint8(resolved.cursor);
         emitter.emitUint8(resolved.colIdx);
-        truePatches.push(emitter.emitUint16(0));
+        patches.push(emitter.emitUint16(0));
         emitter.patchUint16(skipRealPatch, emitter.currentOffset());
       }
       return;
     }
-    if (filter.isNull) {
-      emitter.emitUint8(OpCode.OP_IS_NULL);
-    } else {
-      emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
-    }
+    emitter.emitUint8(jumpIfNull ? OpCode.OP_IS_NULL : OpCode.OP_IS_NOT_NULL);
     emitter.emitUint8(resolved.cursor);
     emitter.emitUint8(resolved.colIdx);
-    truePatches.push(emitter.emitUint16(0));
+    patches.push(emitter.emitUint16(0));
     return;
   }
 
   if (filter.type === "in") {
     if (!filter.values || filter.values.length === 0) {
-      if (filter.notIn) {
+      if (jumpOnTrue ? filter.notIn : !filter.notIn) {
         emitter.emitUint8(OpCode.OP_JUMP);
-        truePatches.push(emitter.emitUint16(0));
+        patches.push(emitter.emitUint16(0));
       }
       return;
     }
 
-    const regCol = leafIdx * 2;
-    if (filter.expr) {
-      let tempReg = scratchBaseReg;
-      const allocReg = () => {
-        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-        return tempReg++;
-      };
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        0,
-        regCol,
-        allocReg,
-        udfNameMap,
-        undefined,
-        all,
-        joinNullFlags,
-      );
-    } else {
-      if (!filter.colName) {
-        throw new Error(`Filter IN leaf node missing colName`);
-      }
-      const resolved = resolveColumnAcrossTables(filter.colName, all);
-      if (resolved) {
-        emitReadColumnGuarded(
-          emitter,
-          resolved.cursor,
-          resolved.colIdx,
-          regCol,
-          resolved.col.type,
-          joinNullFlags,
-        );
-      } else {
-        try {
-          const parsed = parseExpression(filter.colName);
-          let tempReg = scratchBaseReg;
-          const allocReg = () => {
-            if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-            return tempReg++;
-          };
-          emitExpression(
-            parsed,
-            table,
-            emitter,
-            0,
-            regCol,
-            allocReg,
-            udfNameMap,
-            undefined,
-            all,
-            joinNullFlags,
-          );
-        } catch {
-          throw new Error(`Column "${filter.colName}" not found in tables`);
-        }
-      }
-    }
+    emitFilterLhsToReg(
+      filter,
+      regCol,
+      table,
+      all,
+      emitter,
+      scratchBaseReg,
+      `Filter IN leaf node missing colName`,
+      udfNameMap,
+      joinNullFlags,
+    );
 
     const setIdx = filterSetMap?.get(filter) ?? 0;
-    if (!filter.notIn) {
-      emitter.emitUint8(OpCode.OP_IN);
-      emitter.emitUint8(regCol);
-      emitter.emitUint16(setIdx);
-      truePatches.push(emitter.emitUint16(0));
+    if (jumpOnTrue) {
+      if (!filter.notIn) {
+        emitter.emitUint8(OpCode.OP_IN);
+        emitter.emitUint8(regCol);
+        emitter.emitUint16(setIdx);
+        patches.push(emitter.emitUint16(0));
+      } else {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+        emitter.emitUint8(regCol);
+        const nullSkipPatch = emitter.emitUint16(0);
+
+        emitter.emitUint8(OpCode.OP_IN);
+        emitter.emitUint8(regCol);
+        emitter.emitUint16(setIdx);
+        const inSkipPatch = emitter.emitUint16(0);
+
+        emitter.emitUint8(OpCode.OP_JUMP);
+        patches.push(emitter.emitUint16(0));
+
+        const notInTruePos = emitter.currentOffset();
+        emitter.patchUint16(nullSkipPatch, notInTruePos);
+        emitter.patchUint16(inSkipPatch, notInTruePos);
+      }
     } else {
+      // In SQL 3VL, NULL IN (...) and NULL NOT IN (...) are both UNKNOWN (excluded).
       emitter.emitUint8(OpCode.OP_REG_IS_NULL);
       emitter.emitUint8(regCol);
-      const nullSkipPatch = emitter.emitUint16(0);
+      patches.push(emitter.emitUint16(0));
 
-      emitter.emitUint8(OpCode.OP_IN);
-      emitter.emitUint8(regCol);
-      emitter.emitUint16(setIdx);
-      const inSkipPatch = emitter.emitUint16(0);
-
-      emitter.emitUint8(OpCode.OP_JUMP);
-      truePatches.push(emitter.emitUint16(0));
-
-      const notInTruePos = emitter.currentOffset();
-      emitter.patchUint16(nullSkipPatch, notInTruePos);
-      emitter.patchUint16(inSkipPatch, notInTruePos);
+      emitCondJump(emitter, Boolean(filter.notIn), patches, () => {
+        emitter.emitUint8(OpCode.OP_IN);
+        emitter.emitUint8(regCol);
+        emitter.emitUint16(setIdx);
+        return emitter.emitUint16(0);
+      });
     }
     return;
   }
 
-  const regCol = leafIdx * 2;
-  const regConst = leafIdx * 2 + 1;
+  emitFilterLhsToReg(
+    filter,
+    regCol,
+    table,
+    all,
+    emitter,
+    scratchBaseReg,
+    `Filter leaf node missing colName`,
+    udfNameMap,
+    joinNullFlags,
+  );
 
+  const cmpOpcode = getCmpOpcode(filter.op);
+  emitCondJump(emitter, jumpOnTrue, patches, () => {
+    emitter.emitUint8(cmpOpcode);
+    emitter.emitUint8(regCol);
+    emitter.emitUint8(regConst);
+    return emitter.emitUint16(0);
+  });
+}
+
+function resolveHavingLhsReg(
+  filter: QueryFilter,
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  udfNameMap?: Map<string, number>,
+): number {
+  const resolved = resolveReg(filter.colName, filter.expr);
+  if (resolved !== undefined) {
+    return resolved;
+  }
+  const regLhs = allocReg();
   if (filter.expr) {
-    let tempReg = scratchBaseReg;
-    const allocReg = () => {
-      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-      return tempReg++;
-    };
     emitExpression(
       filter.expr,
       table,
       emitter,
-      0,
-      regCol,
+      -1,
+      regLhs,
       allocReg,
       udfNameMap,
-      undefined,
-      all,
-      joinNullFlags,
+      resolveReg,
     );
-  } else {
-    if (!filter.colName) {
-      throw new Error(`Filter leaf node missing colName`);
-    }
-    const resolved = resolveColumnAcrossTables(filter.colName, all);
-    if (resolved) {
-      emitReadColumnGuarded(
-        emitter,
-        resolved.cursor,
-        resolved.colIdx,
-        regCol,
-        resolved.col.type,
-        joinNullFlags,
-      );
-    } else {
-      try {
-        const parsed = parseExpression(filter.colName);
-        let tempReg = scratchBaseReg;
-        const allocReg = () => {
-          if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-          return tempReg++;
-        };
-        emitExpression(
-          parsed,
-          table,
-          emitter,
-          0,
-          regCol,
-          allocReg,
-          udfNameMap,
-          undefined,
-          all,
-          joinNullFlags,
-        );
-      } catch {
-        throw new Error(`Column "${filter.colName}" not found in tables`);
-      }
-    }
-  }
-
-  const cmpOpcode = getCmpOpcode(filter.op);
-
-  emitter.emitUint8(cmpOpcode);
-  emitter.emitUint8(regCol);
-  emitter.emitUint8(regConst);
-  truePatches.push(emitter.emitUint16(0));
-}
-
-function emitLeafJumpOnFalse(
-  filter: QueryFilter,
-  leafIdx: number,
-  table: TableMeta,
-  emitter: BytecodeEmitter,
-  falsePatches: number[],
-  udfNameMap?: Map<string, number>,
-  tables?: TableMeta[],
-  filterSetMap?: Map<QueryFilter, number>,
-  scratchBaseReg: number = 50,
-  joinNullFlags?: JoinNullFlags,
-): void {
-  const all = tables ?? [table];
-  if (filter.type === "expr") {
-    const regRes = leafIdx * 2;
-    const regOne = leafIdx * 2 + 1;
-    let tempReg = scratchBaseReg;
-    const allocReg = () => {
-      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-      return tempReg++;
-    };
+  } else if (filter.colName) {
+    const parsed = parseExpression(filter.colName);
     emitExpression(
-      filter.expr!,
+      parsed,
       table,
       emitter,
-      0,
-      regRes,
+      -1,
+      regLhs,
       allocReg,
       udfNameMap,
-      undefined,
-      all,
-      joinNullFlags,
+      resolveReg,
     );
-    emitter.emitUint8(OpCode.OP_LOAD_INT);
-    emitter.emitUint8(regOne);
-    emitter.emitInt32(1);
+  } else {
+    emitter.emitUint8(OpCode.OP_LOAD_NULL);
+    emitter.emitUint8(regLhs);
+  }
+  return regLhs;
+}
 
-    emitter.emitUint8(OpCode.OP_EQ);
-    emitter.emitUint8(regRes);
-    emitter.emitUint8(regOne);
-    const passPatch = emitter.emitUint16(0);
-
-    emitter.emitUint8(OpCode.OP_JUMP);
-    falsePatches.push(emitter.emitUint16(0));
-
-    emitter.patchUint16(passPatch, emitter.currentOffset());
+function emitHavingLeaf(
+  filter: QueryFilter,
+  jumpOnTrue: boolean,
+  patches: number[],
+  table: TableMeta,
+  emitter: BytecodeEmitter,
+  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
+  allocReg: () => number,
+  udfNameMap?: Map<string, number>,
+): void {
+  if (filter.type === "cmp") {
+    const regLhs = resolveHavingLhsReg(
+      filter,
+      table,
+      emitter,
+      resolveReg,
+      allocReg,
+      udfNameMap,
+    );
+    const regConst = allocReg();
+    emitLoadConstant(emitter, regConst, filter.value);
+    const cmpOpcode = getCmpOpcode(filter.op);
+    emitCondJump(emitter, jumpOnTrue, patches, () => {
+      emitter.emitUint8(cmpOpcode);
+      emitter.emitUint8(regLhs);
+      emitter.emitUint8(regConst);
+      return emitter.emitUint16(0);
+    });
     return;
   }
 
   if (filter.type === "null") {
-    if (filter.expr) {
-      const regCol = leafIdx * 2;
-      let tempReg = scratchBaseReg;
-      const allocReg = () => {
-        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-        return tempReg++;
-      };
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        0,
-        regCol,
-        allocReg,
-        udfNameMap,
-        undefined,
-        all,
-        joinNullFlags,
-      );
-      if (filter.isNull) {
-        emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
-      } else {
-        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
-      }
-      emitter.emitUint8(regCol);
-      falsePatches.push(emitter.emitUint16(0));
-      return;
-    }
-    if (!filter.colName) {
-      throw new Error(`Filter leaf node missing colName`);
-    }
-    const resolved = resolveColumnAcrossTables(filter.colName, all);
-    if (!resolved) {
-      throw new Error(`Column "${filter.colName}" not found in tables`);
-    }
-    const nullFlagReg = joinNullFlags?.nullFlagRegs.get(resolved.cursor);
-    if (nullFlagReg !== undefined) {
-      emitter.emitUint8(OpCode.OP_EQ);
-      emitter.emitUint8(nullFlagReg);
-      emitter.emitUint8(joinNullFlags!.regZero);
-      const checkRealPatch = emitter.emitUint16(0);
-      if (filter.isNull) {
-        // Synthetic NULL row -> IS NULL is true (skip false jump)
-        emitter.emitUint8(OpCode.OP_JUMP);
-        const skipRealPatch = emitter.emitUint16(0);
-        emitter.patchUint16(checkRealPatch, emitter.currentOffset());
-        emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
-        emitter.emitUint8(resolved.cursor);
-        emitter.emitUint8(resolved.colIdx);
-        falsePatches.push(emitter.emitUint16(0));
-        emitter.patchUint16(skipRealPatch, emitter.currentOffset());
-      } else {
-        // Synthetic NULL row -> IS NOT NULL is false (jump to falsePatches)
-        emitter.emitUint8(OpCode.OP_JUMP);
-        falsePatches.push(emitter.emitUint16(0));
-        emitter.patchUint16(checkRealPatch, emitter.currentOffset());
-        emitter.emitUint8(OpCode.OP_IS_NULL);
-        emitter.emitUint8(resolved.cursor);
-        emitter.emitUint8(resolved.colIdx);
-        falsePatches.push(emitter.emitUint16(0));
-      }
-      return;
-    }
-    if (filter.isNull) {
-      emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
-    } else {
-      emitter.emitUint8(OpCode.OP_IS_NULL);
-    }
-    emitter.emitUint8(resolved.cursor);
-    emitter.emitUint8(resolved.colIdx);
-    falsePatches.push(emitter.emitUint16(0));
+    const regLhs = resolveHavingLhsReg(
+      filter,
+      table,
+      emitter,
+      resolveReg,
+      allocReg,
+      udfNameMap,
+    );
+    const jumpIfNull = jumpOnTrue ? Boolean(filter.isNull) : !filter.isNull;
+    emitter.emitUint8(
+      jumpIfNull ? OpCode.OP_REG_IS_NULL : OpCode.OP_REG_IS_NOT_NULL,
+    );
+    emitter.emitUint8(regLhs);
+    patches.push(emitter.emitUint16(0));
     return;
   }
 
-  if (filter.type === "in") {
-    if (!filter.values || filter.values.length === 0) {
-      if (!filter.notIn) {
-        emitter.emitUint8(OpCode.OP_JUMP);
-        falsePatches.push(emitter.emitUint16(0));
-      }
-      return;
-    }
-
-    const regCol = leafIdx * 2;
-    if (filter.expr) {
-      let tempReg = scratchBaseReg;
-      const allocReg = () => {
-        if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-        return tempReg++;
-      };
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        0,
-        regCol,
-        allocReg,
-        udfNameMap,
-        undefined,
-        all,
-        joinNullFlags,
-      );
-    } else {
-      if (!filter.colName) {
-        throw new Error(`Filter IN leaf node missing colName`);
-      }
-      const resolved = resolveColumnAcrossTables(filter.colName, all);
-      if (resolved) {
-        emitReadColumnGuarded(
-          emitter,
-          resolved.cursor,
-          resolved.colIdx,
-          regCol,
-          resolved.col.type,
-          joinNullFlags,
-        );
-      } else {
-        try {
-          const parsed = parseExpression(filter.colName);
-          let tempReg = scratchBaseReg;
-          const allocReg = () => {
-            if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-            return tempReg++;
-          };
-          emitExpression(
-            parsed,
-            table,
-            emitter,
-            0,
-            regCol,
-            allocReg,
-            udfNameMap,
-            undefined,
-            all,
-            joinNullFlags,
-          );
-        } catch {
-          throw new Error(`Column "${filter.colName}" not found in tables`);
-        }
-      }
-    }
-
-    const setIdx = filterSetMap?.get(filter) ?? 0;
-    // In SQL 3VL, NULL IN (...) and NULL NOT IN (...) are both UNKNOWN (excluded).
-    emitter.emitUint8(OpCode.OP_REG_IS_NULL);
-    emitter.emitUint8(regCol);
-    falsePatches.push(emitter.emitUint16(0));
-
-    if (!filter.notIn) {
-      emitter.emitUint8(OpCode.OP_IN);
-      emitter.emitUint8(regCol);
-      emitter.emitUint16(setIdx);
-      const matchPatch = emitter.emitUint16(0);
-
-      emitter.emitUint8(OpCode.OP_JUMP);
-      falsePatches.push(emitter.emitUint16(0));
-
-      const passPos = emitter.currentOffset();
-      emitter.patchUint16(matchPatch, passPos);
-    } else {
-      emitter.emitUint8(OpCode.OP_IN);
-      emitter.emitUint8(regCol);
-      emitter.emitUint16(setIdx);
-      falsePatches.push(emitter.emitUint16(0));
-    }
-    return;
-  }
-
-  const regCol = leafIdx * 2;
-  const regConst = leafIdx * 2 + 1;
-
-  if (filter.expr) {
-    let tempReg = scratchBaseReg;
-    const allocReg = () => {
-      if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-      return tempReg++;
-    };
+  if (filter.type === "expr" && filter.expr) {
+    const regRes = allocReg();
     emitExpression(
       filter.expr,
       table,
       emitter,
-      0,
-      regCol,
+      -1,
+      regRes,
       allocReg,
       udfNameMap,
-      undefined,
-      all,
-      joinNullFlags,
+      resolveReg,
     );
-  } else {
-    if (!filter.colName) {
-      throw new Error(`Filter leaf node missing colName`);
-    }
-    const resolved = resolveColumnAcrossTables(filter.colName, all);
-    if (resolved) {
-      emitReadColumnGuarded(
-        emitter,
-        resolved.cursor,
-        resolved.colIdx,
-        regCol,
-        resolved.col.type,
-        joinNullFlags,
-      );
-    } else {
-      try {
-        const parsed = parseExpression(filter.colName);
-        let tempReg = scratchBaseReg;
-        const allocReg = () => {
-          if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
-          return tempReg++;
-        };
-        emitExpression(
-          parsed,
-          table,
-          emitter,
-          0,
-          regCol,
-          allocReg,
-          udfNameMap,
-          undefined,
-          all,
-          joinNullFlags,
-        );
-      } catch {
-        throw new Error(`Column "${filter.colName}" not found in tables`);
-      }
-    }
-  }
+    const regOne = allocReg();
+    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(regOne);
+    emitter.emitInt32(1);
 
-  const cmpOpcode = getCmpOpcode(filter.op);
-
-  emitter.emitUint8(cmpOpcode);
-  emitter.emitUint8(regCol);
-  emitter.emitUint8(regConst);
-  const passPatch = emitter.emitUint16(0);
-
-  emitter.emitUint8(OpCode.OP_JUMP);
-  falsePatches.push(emitter.emitUint16(0));
-
-  emitter.patchUint16(passPatch, emitter.currentOffset());
-}
-
-function emitLeafCondition(
-  filter: QueryFilter,
-  leafIdx: number,
-  table: TableMeta,
-  emitter: BytecodeEmitter,
-  truePatches: number[],
-  falsePatches: number[],
-  fallthrough: "true" | "false" | "none",
-  udfNameMap?: Map<string, number>,
-  tables?: TableMeta[],
-  filterSetMap?: Map<QueryFilter, number>,
-  scratchBaseReg: number = 50,
-  joinNullFlags?: JoinNullFlags,
-): void {
-  if (fallthrough === "true") {
-    emitLeafJumpOnFalse(
-      filter,
-      leafIdx,
-      table,
-      emitter,
-      falsePatches,
-      udfNameMap,
-      tables,
-      filterSetMap,
-      scratchBaseReg,
-      joinNullFlags,
-    );
-  } else if (fallthrough === "false") {
-    emitLeafJumpOnTrue(
-      filter,
-      leafIdx,
-      table,
-      emitter,
-      truePatches,
-      udfNameMap,
-      tables,
-      filterSetMap,
-      scratchBaseReg,
-      joinNullFlags,
-    );
-  } else {
-    emitLeafJumpOnTrue(
-      filter,
-      leafIdx,
-      table,
-      emitter,
-      truePatches,
-      udfNameMap,
-      tables,
-      filterSetMap,
-      scratchBaseReg,
-      joinNullFlags,
-    );
-    emitter.emitUint8(OpCode.OP_JUMP);
-    falsePatches.push(emitter.emitUint16(0));
+    emitCondJump(emitter, jumpOnTrue, patches, () => {
+      emitter.emitUint8(OpCode.OP_EQ);
+      emitter.emitUint8(regRes);
+      emitter.emitUint8(regOne);
+      return emitter.emitUint16(0);
+    });
   }
 }
 
-function compileFilterNode(
+function compileBooleanTree(
   node: QueryFilter,
   emitter: BytecodeEmitter,
-  table: TableMeta,
-  leafRegMap: Map<QueryFilter, number>,
   truePatches: number[],
   falsePatches: number[],
   fallthrough: "true" | "false" | "none",
-  udfNameMap?: Map<string, number>,
-  tables?: TableMeta[],
-  filterSetMap?: Map<QueryFilter, number>,
-  scratchBaseReg: number = 50,
-  joinNullFlags?: JoinNullFlags,
+  emitLeaf: (leaf: QueryFilter, jumpOnTrue: boolean, patches: number[]) => void,
+  allowInLeaf: boolean,
 ): void {
   if (
     node.type === "cmp" ||
     node.type === "null" ||
     node.type === "expr" ||
-    node.type === "in"
+    (allowInLeaf && node.type === "in")
   ) {
-    const leafIdx = leafRegMap.get(node) ?? 0;
-    emitLeafCondition(
-      node,
-      leafIdx,
-      table,
-      emitter,
-      truePatches,
-      falsePatches,
-      fallthrough,
-      udfNameMap,
-      tables,
-      filterSetMap,
-      scratchBaseReg,
-      joinNullFlags,
-    );
-    return;
-  }
-
-  if (node.type === "not") {
-    if (!node.child) {
-      return;
-    }
-    const leaf = node.child;
-    const leafIdx = leafRegMap.get(leaf) ?? 0;
     if (fallthrough === "true") {
-      emitLeafJumpOnTrue(
-        leaf,
-        leafIdx,
-        table,
-        emitter,
-        falsePatches,
-        udfNameMap,
-        tables,
-        filterSetMap,
-        scratchBaseReg,
-        joinNullFlags,
-      );
+      emitLeaf(node, false, falsePatches);
     } else if (fallthrough === "false") {
-      emitLeafJumpOnFalse(
-        leaf,
-        leafIdx,
-        table,
-        emitter,
-        truePatches,
-        udfNameMap,
-        tables,
-        filterSetMap,
-        scratchBaseReg,
-        joinNullFlags,
-      );
+      emitLeaf(node, true, truePatches);
     } else {
-      emitLeafJumpOnFalse(
-        leaf,
-        leafIdx,
-        table,
-        emitter,
-        truePatches,
-        udfNameMap,
-        tables,
-        filterSetMap,
-        scratchBaseReg,
-        joinNullFlags,
-      );
+      emitLeaf(node, true, truePatches);
       emitter.emitUint8(OpCode.OP_JUMP);
       falsePatches.push(emitter.emitUint16(0));
     }
     return;
   }
 
-  if (node.type === "and") {
-    const children = node.children ?? [];
-    if (children.length === 0) {
-      if (fallthrough === "false") {
-        emitter.emitUint8(OpCode.OP_JUMP);
-        truePatches.push(emitter.emitUint16(0));
-      }
-      return;
-    }
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      const isLast = i === children.length - 1;
-      if (!isLast) {
-        const subTruePatches: number[] = [];
-        compileFilterNode(
-          child,
-          emitter,
-          table,
-          leafRegMap,
-          subTruePatches,
-          falsePatches,
-          "true",
-          udfNameMap,
-          tables,
-          filterSetMap,
-          scratchBaseReg,
-          joinNullFlags,
-        );
-        const nextChildPos = emitter.currentOffset();
-        for (const patch of subTruePatches) {
-          emitter.patchUint16(patch, nextChildPos);
-        }
-      } else {
-        compileFilterNode(
-          child,
-          emitter,
-          table,
-          leafRegMap,
-          truePatches,
-          falsePatches,
-          fallthrough,
-          udfNameMap,
-          tables,
-          filterSetMap,
-          scratchBaseReg,
-          joinNullFlags,
-        );
-      }
-    }
-    return;
-  }
-
-  if (node.type === "or") {
-    const children = node.children ?? [];
-    if (children.length === 0) {
-      if (fallthrough === "true") {
-        emitter.emitUint8(OpCode.OP_JUMP);
-        falsePatches.push(emitter.emitUint16(0));
-      }
-      return;
-    }
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      const isLast = i === children.length - 1;
-      if (!isLast) {
-        const subFalsePatches: number[] = [];
-        compileFilterNode(
-          child,
-          emitter,
-          table,
-          leafRegMap,
-          truePatches,
-          subFalsePatches,
-          "false",
-          udfNameMap,
-          tables,
-          filterSetMap,
-          scratchBaseReg,
-          joinNullFlags,
-        );
-        const nextChildPos = emitter.currentOffset();
-        for (const patch of subFalsePatches) {
-          emitter.patchUint16(patch, nextChildPos);
-        }
-      } else {
-        compileFilterNode(
-          child,
-          emitter,
-          table,
-          leafRegMap,
-          truePatches,
-          falsePatches,
-          fallthrough,
-          udfNameMap,
-          tables,
-          filterSetMap,
-          scratchBaseReg,
-          joinNullFlags,
-        );
-      }
-    }
-    return;
-  }
-}
-
-function emitHavingLeafJumpOnFalse(
-  filter: QueryFilter,
-  table: TableMeta,
-  emitter: BytecodeEmitter,
-  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
-  allocReg: () => number,
-  falsePatches: number[],
-  udfNameMap?: Map<string, number>,
-): void {
-  if (filter.type === "cmp") {
-    let regLhs: number;
-    const resolved = resolveReg(filter.colName, filter.expr);
-    if (resolved !== undefined) {
-      regLhs = resolved;
-    } else if (filter.expr) {
-      regLhs = allocReg();
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else if (filter.colName) {
-      regLhs = allocReg();
-      const parsed = parseExpression(filter.colName);
-      emitExpression(
-        parsed,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else {
-      regLhs = allocReg();
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regLhs);
-    }
-
-    const regConst = allocReg();
-    const val = filter.value;
-    if (val === null || val === undefined) {
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regConst);
-    } else if (typeof val === "number") {
-      if (isInt32(val)) {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
-        emitter.emitUint8(regConst);
-        emitter.emitInt32(val);
-      } else {
-        emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
-        emitter.emitUint8(regConst);
-        emitter.emitFloat64(val);
-      }
-    } else if (typeof val === "string") {
-      emitter.emitUint8(OpCode.OP_LOAD_TEXT);
-      emitter.emitUint8(regConst);
-      emitter.emitString(val);
-    } else if (typeof val === "boolean") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT);
-      emitter.emitUint8(regConst);
-      emitter.emitInt32(val ? 1 : 0);
-    } else if (typeof val === "bigint") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT64);
-      emitter.emitUint8(regConst);
-      emitter.emitInt64(val);
-    }
-
-    const cmpOpcode = getCmpOpcode(filter.op);
-
-    emitter.emitUint8(cmpOpcode);
-    emitter.emitUint8(regLhs);
-    emitter.emitUint8(regConst);
-    const passPatch = emitter.emitUint16(0);
-
-    emitter.emitUint8(OpCode.OP_JUMP);
-    falsePatches.push(emitter.emitUint16(0));
-
-    emitter.patchUint16(passPatch, emitter.currentOffset());
-    return;
-  }
-
-  if (filter.type === "null") {
-    let regLhs: number;
-    const resolved = resolveReg(filter.colName, filter.expr);
-    if (resolved !== undefined) {
-      regLhs = resolved;
-    } else if (filter.expr) {
-      regLhs = allocReg();
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else if (filter.colName) {
-      regLhs = allocReg();
-      const parsed = parseExpression(filter.colName);
-      emitExpression(
-        parsed,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else {
-      regLhs = allocReg();
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regLhs);
-    }
-
-    if (filter.isNull) {
-      emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
-      emitter.emitUint8(regLhs);
-      falsePatches.push(emitter.emitUint16(0));
-    } else {
-      emitter.emitUint8(OpCode.OP_REG_IS_NULL);
-      emitter.emitUint8(regLhs);
-      falsePatches.push(emitter.emitUint16(0));
-    }
-    return;
-  }
-
-  if (filter.type === "expr" && filter.expr) {
-    const regRes = allocReg();
-    emitExpression(
-      filter.expr,
-      table,
-      emitter,
-      -1,
-      regRes,
-      allocReg,
-      udfNameMap,
-      resolveReg,
-    );
-
-    const regOne = allocReg();
-    emitter.emitUint8(OpCode.OP_LOAD_INT);
-    emitter.emitUint8(regOne);
-    emitter.emitInt32(1);
-
-    emitter.emitUint8(OpCode.OP_EQ);
-    emitter.emitUint8(regRes);
-    emitter.emitUint8(regOne);
-    const passPatch = emitter.emitUint16(0);
-
-    emitter.emitUint8(OpCode.OP_JUMP);
-    falsePatches.push(emitter.emitUint16(0));
-
-    emitter.patchUint16(passPatch, emitter.currentOffset());
-    return;
-  }
-}
-
-function emitHavingLeafJumpOnTrue(
-  filter: QueryFilter,
-  table: TableMeta,
-  emitter: BytecodeEmitter,
-  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
-  allocReg: () => number,
-  truePatches: number[],
-  udfNameMap?: Map<string, number>,
-): void {
-  if (filter.type === "cmp") {
-    let regLhs: number;
-    const resolved = resolveReg(filter.colName, filter.expr);
-    if (resolved !== undefined) {
-      regLhs = resolved;
-    } else if (filter.expr) {
-      regLhs = allocReg();
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else if (filter.colName) {
-      regLhs = allocReg();
-      const parsed = parseExpression(filter.colName);
-      emitExpression(
-        parsed,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else {
-      regLhs = allocReg();
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regLhs);
-    }
-
-    const regConst = allocReg();
-    const val = filter.value;
-    if (val === null || val === undefined) {
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regConst);
-    } else if (typeof val === "number") {
-      if (isInt32(val)) {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
-        emitter.emitUint8(regConst);
-        emitter.emitInt32(val);
-      } else {
-        emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
-        emitter.emitUint8(regConst);
-        emitter.emitFloat64(val);
-      }
-    } else if (typeof val === "string") {
-      emitter.emitUint8(OpCode.OP_LOAD_TEXT);
-      emitter.emitUint8(regConst);
-      emitter.emitString(val);
-    } else if (typeof val === "boolean") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT);
-      emitter.emitUint8(regConst);
-      emitter.emitInt32(val ? 1 : 0);
-    } else if (typeof val === "bigint") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT64);
-      emitter.emitUint8(regConst);
-      emitter.emitInt64(val);
-    }
-
-    const cmpOpcode = getCmpOpcode(filter.op);
-
-    emitter.emitUint8(cmpOpcode);
-    emitter.emitUint8(regLhs);
-    emitter.emitUint8(regConst);
-    truePatches.push(emitter.emitUint16(0));
-    return;
-  }
-
-  if (filter.type === "null") {
-    let regLhs: number;
-    const resolved = resolveReg(filter.colName, filter.expr);
-    if (resolved !== undefined) {
-      regLhs = resolved;
-    } else if (filter.expr) {
-      regLhs = allocReg();
-      emitExpression(
-        filter.expr,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else if (filter.colName) {
-      regLhs = allocReg();
-      const parsed = parseExpression(filter.colName);
-      emitExpression(
-        parsed,
-        table,
-        emitter,
-        -1,
-        regLhs,
-        allocReg,
-        udfNameMap,
-        resolveReg,
-      );
-    } else {
-      regLhs = allocReg();
-      emitter.emitUint8(OpCode.OP_LOAD_NULL);
-      emitter.emitUint8(regLhs);
-    }
-
-    if (filter.isNull) {
-      emitter.emitUint8(OpCode.OP_REG_IS_NULL);
-      emitter.emitUint8(regLhs);
-      truePatches.push(emitter.emitUint16(0));
-    } else {
-      emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
-      emitter.emitUint8(regLhs);
-      truePatches.push(emitter.emitUint16(0));
-    }
-    return;
-  }
-
-  if (filter.type === "expr" && filter.expr) {
-    const regRes = allocReg();
-    emitExpression(
-      filter.expr,
-      table,
-      emitter,
-      -1,
-      regRes,
-      allocReg,
-      udfNameMap,
-      resolveReg,
-    );
-
-    const regOne = allocReg();
-    emitter.emitUint8(OpCode.OP_LOAD_INT);
-    emitter.emitUint8(regOne);
-    emitter.emitInt32(1);
-
-    emitter.emitUint8(OpCode.OP_EQ);
-    emitter.emitUint8(regRes);
-    emitter.emitUint8(regOne);
-    truePatches.push(emitter.emitUint16(0));
-    return;
-  }
-}
-
-function emitHavingLeafCondition(
-  filter: QueryFilter,
-  table: TableMeta,
-  emitter: BytecodeEmitter,
-  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
-  allocReg: () => number,
-  truePatches: number[],
-  falsePatches: number[],
-  fallthrough: "true" | "false" | "none",
-  udfNameMap?: Map<string, number>,
-): void {
-  if (fallthrough === "true") {
-    emitHavingLeafJumpOnFalse(
-      filter,
-      table,
-      emitter,
-      resolveReg,
-      allocReg,
-      falsePatches,
-      udfNameMap,
-    );
-  } else if (fallthrough === "false") {
-    emitHavingLeafJumpOnTrue(
-      filter,
-      table,
-      emitter,
-      resolveReg,
-      allocReg,
-      truePatches,
-      udfNameMap,
-    );
-  } else {
-    emitHavingLeafJumpOnTrue(
-      filter,
-      table,
-      emitter,
-      resolveReg,
-      allocReg,
-      truePatches,
-      udfNameMap,
-    );
-    emitter.emitUint8(OpCode.OP_JUMP);
-    falsePatches.push(emitter.emitUint16(0));
-  }
-}
-
-function compileHavingFilterNode(
-  node: QueryFilter,
-  emitter: BytecodeEmitter,
-  table: TableMeta,
-  resolveReg: (name?: string, expr?: ExprNode) => number | undefined,
-  allocReg: () => number,
-  truePatches: number[],
-  falsePatches: number[],
-  fallthrough: "true" | "false" | "none",
-  udfNameMap?: Map<string, number>,
-): void {
-  if (node.type === "cmp" || node.type === "null" || node.type === "expr") {
-    emitHavingLeafCondition(
-      node,
-      table,
-      emitter,
-      resolveReg,
-      allocReg,
-      truePatches,
-      falsePatches,
-      fallthrough,
-      udfNameMap,
-    );
-    return;
-  }
-
   if (node.type === "not") {
     if (!node.child) return;
-    const leaf = node.child;
-    if (fallthrough === "true") {
-      compileHavingFilterNode(
-        leaf,
-        emitter,
-        table,
-        resolveReg,
-        allocReg,
-        falsePatches,
-        truePatches,
-        "false",
-        udfNameMap,
-      );
-    } else if (fallthrough === "false") {
-      compileHavingFilterNode(
-        leaf,
-        emitter,
-        table,
-        resolveReg,
-        allocReg,
-        truePatches,
-        falsePatches,
-        "true",
-        udfNameMap,
-      );
-    } else {
-      compileHavingFilterNode(
-        leaf,
-        emitter,
-        table,
-        resolveReg,
-        allocReg,
-        falsePatches,
-        truePatches,
-        "none",
-        udfNameMap,
-      );
-    }
+    const childFallthrough =
+      fallthrough === "true"
+        ? "false"
+        : fallthrough === "false"
+          ? "true"
+          : "none";
+    compileBooleanTree(
+      node.child,
+      emitter,
+      falsePatches,
+      truePatches,
+      childFallthrough,
+      emitLeaf,
+      allowInLeaf,
+    );
     return;
   }
 
-  if (node.type === "and") {
+  if (node.type === "and" || node.type === "or") {
+    const isAnd = node.type === "and";
     const children = node.children ?? [];
     if (children.length === 0) {
-      if (fallthrough === "false") {
+      if (isAnd && fallthrough !== "true") {
         emitter.emitUint8(OpCode.OP_JUMP);
         truePatches.push(emitter.emitUint16(0));
-      }
-      return;
-    }
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      const isLast = i === children.length - 1;
-      if (!isLast) {
-        const subTruePatches: number[] = [];
-        compileHavingFilterNode(
-          child,
-          emitter,
-          table,
-          resolveReg,
-          allocReg,
-          subTruePatches,
-          falsePatches,
-          "true",
-          udfNameMap,
-        );
-        const nextChildPos = emitter.currentOffset();
-        for (const patch of subTruePatches) {
-          emitter.patchUint16(patch, nextChildPos);
-        }
-      } else {
-        compileHavingFilterNode(
-          child,
-          emitter,
-          table,
-          resolveReg,
-          allocReg,
-          truePatches,
-          falsePatches,
-          fallthrough,
-          udfNameMap,
-        );
-      }
-    }
-    return;
-  }
-
-  if (node.type === "or") {
-    const children = node.children ?? [];
-    if (children.length === 0) {
-      if (fallthrough === "true") {
+      } else if (!isAnd && fallthrough !== "false") {
         emitter.emitUint8(OpCode.OP_JUMP);
         falsePatches.push(emitter.emitUint16(0));
       }
@@ -1977,37 +1105,32 @@ function compileHavingFilterNode(
       const child = children[i];
       const isLast = i === children.length - 1;
       if (!isLast) {
-        const subFalsePatches: number[] = [];
-        compileHavingFilterNode(
+        const subPatches: number[] = [];
+        compileBooleanTree(
           child,
           emitter,
-          table,
-          resolveReg,
-          allocReg,
-          truePatches,
-          subFalsePatches,
-          "false",
-          udfNameMap,
+          isAnd ? subPatches : truePatches,
+          isAnd ? falsePatches : subPatches,
+          isAnd ? "true" : "false",
+          emitLeaf,
+          allowInLeaf,
         );
         const nextChildPos = emitter.currentOffset();
-        for (const patch of subFalsePatches) {
+        for (const patch of subPatches) {
           emitter.patchUint16(patch, nextChildPos);
         }
       } else {
-        compileHavingFilterNode(
+        compileBooleanTree(
           child,
           emitter,
-          table,
-          resolveReg,
-          allocReg,
           truePatches,
           falsePatches,
           fallthrough,
-          udfNameMap,
+          emitLeaf,
+          allowInLeaf,
         );
       }
     }
-    return;
   }
 }
 
@@ -2022,16 +1145,24 @@ function emitHavingTree(
 ): void {
   if (!root) return;
   const truePatches: number[] = [];
-  compileHavingFilterNode(
+  compileBooleanTree(
     root,
     emitter,
-    table,
-    resolveReg,
-    allocReg,
     truePatches,
     failPatches,
     "true",
-    udfNameMap,
+    (leaf, jumpOnTrue, patches) =>
+      emitHavingLeaf(
+        leaf,
+        jumpOnTrue,
+        patches,
+        table,
+        emitter,
+        resolveReg,
+        allocReg,
+        udfNameMap,
+      ),
+    false,
   );
   const passPos = emitter.currentOffset();
   for (const patch of truePatches) {
@@ -2053,19 +1184,27 @@ function emitFilterTree(
 ): void {
   if (!root) return;
   const truePatches: number[] = [];
-  compileFilterNode(
+  compileBooleanTree(
     root,
     emitter,
-    table,
-    leafRegMap,
     truePatches,
     nextRowPatches,
     "true",
-    udfNameMap,
-    tables,
-    filterSetMap,
-    scratchBaseReg,
-    joinNullFlags,
+    (leaf, jumpOnTrue, patches) =>
+      emitWhereLeaf(
+        leaf,
+        leafRegMap.get(leaf) ?? 0,
+        jumpOnTrue,
+        patches,
+        table,
+        emitter,
+        udfNameMap,
+        tables,
+        filterSetMap,
+        scratchBaseReg,
+        joinNullFlags,
+      ),
+    true,
   );
   const rowStartPos = emitter.currentOffset();
   for (const patch of truePatches) {
@@ -3354,46 +2493,38 @@ export function compileQuery(
 
   const table = plan.table;
 
+  const finalizeBytecode = (
+    extra?: Record<string, any>,
+    includeOutputColumns: boolean = true,
+    includePlanMetrics: boolean = true,
+  ): Uint8Array => {
+    const result = emitter.toByteArray();
+    (result as any).inSets = inSets;
+    if (includeOutputColumns && plan.outputColumns) {
+      (result as any).outputColumns = plan.outputColumns;
+    }
+    if (includePlanMetrics && planMetrics) {
+      (result as any).planMetrics = planMetrics;
+      (result as any).estimatedCost = planMetrics.totalCost;
+      (result as any).estimatedRows = planMetrics.estimatedRows;
+      (result as any).joinOrder = planMetrics.joinOrder;
+    }
+    if (extra) {
+      Object.assign(result as any, extra);
+    }
+    return result;
+  };
+
   // 1. Preamble: Load constant filter values into registers
   for (let i = 0; i < leafFilters.length; i++) {
     const filter = leafFilters[i];
     if (filter.type === "cmp") {
       const regConst = i * 2 + 1;
-      const val = filter.value;
-
-      if (val === null || val === undefined) {
-        emitter.emitUint8(OpCode.OP_LOAD_NULL);
-        emitter.emitUint8(regConst);
-      } else if (typeof val === "number") {
-        const resolved = filter.colName
+      const resolved =
+        typeof filter.value === "number" && filter.colName
           ? resolveColumnAcrossTables(filter.colName, allTables)
           : undefined;
-        if (resolved && resolved.col.type === DataType.FLOAT64) {
-          emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
-          emitter.emitUint8(regConst);
-          emitter.emitFloat64(val);
-        } else if (!isInt32(val)) {
-          emitter.emitUint8(OpCode.OP_LOAD_FLOAT);
-          emitter.emitUint8(regConst);
-          emitter.emitFloat64(val);
-        } else {
-          emitter.emitUint8(OpCode.OP_LOAD_INT);
-          emitter.emitUint8(regConst);
-          emitter.emitInt32(Math.floor(val));
-        }
-      } else if (typeof val === "bigint") {
-        emitter.emitUint8(OpCode.OP_LOAD_INT64);
-        emitter.emitUint8(regConst);
-        emitter.emitInt64(val);
-      } else if (typeof val === "string") {
-        emitter.emitUint8(OpCode.OP_LOAD_TEXT);
-        emitter.emitUint8(regConst);
-        emitter.emitString(val);
-      } else if (typeof val === "boolean") {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
-        emitter.emitUint8(regConst);
-        emitter.emitInt32(val ? 1 : 0);
-      }
+      emitLoadConstant(emitter, regConst, filter.value, resolved?.col.type);
     }
   }
 
@@ -3858,11 +2989,8 @@ export function compileQuery(
     emitter.emitUint8(OpCode.OP_JUMP);
     emitter.emitUint16(aggEmitLoopPos);
 
-    const result = emitter.toByteArray();
-    (result as any).outputColumns = outputColumns;
-    (result as any).inSets = inSets;
     (plan as any).outputColumns = outputColumns;
-    return result;
+    return finalizeBytecode({ outputColumns }, false, false);
   }
 
   // Check if an active index covers the query filters or directly satisfies ORDER BY
@@ -4040,16 +3168,7 @@ export function compileQuery(
     // Fallthrough on EOF:
     emitter.emitUint8(OpCode.OP_HALT);
 
-    const result = emitter.toByteArray();
-    (result as any).keyInfos = plan.keyInfos;
-    (result as any).inSets = inSets;
-    if (planMetrics) {
-      (result as any).planMetrics = planMetrics;
-      (result as any).estimatedCost = planMetrics.totalCost;
-      (result as any).estimatedRows = planMetrics.estimatedRows;
-      (result as any).joinOrder = planMetrics.joinOrder;
-    }
-    return result;
+    return finalizeBytecode({ keyInfos: plan.keyInfos }, false);
   }
 
   // Case 3: Scan (Unsorted, non-aggregate) / Nested Loop Joins
@@ -4644,10 +3763,6 @@ export function compileQuery(
 
     emitter.emitUint8(OpCode.OP_HALT);
 
-    const result = emitter.toByteArray();
-    if (plan.outputColumns) {
-      (result as any).outputColumns = plan.outputColumns;
-    }
     const joinedTableScans = plan.joinedTables?.map((j, idx) => {
       const tableIdx = idx + 1;
       const cand = joinIndices[tableIdx];
@@ -4658,25 +3773,43 @@ export function compileQuery(
         indexName: cand ? cand.index.name : undefined,
       };
     });
-    (result as any).joinedTableScans = joinedTableScans;
-    (result as any).allTables = allTables;
-    (result as any).inSets = inSets;
-    (result as any).table0Scan = table0Scan;
-    (result as any).isOrderSatisfied = isJoinOrderPreserved;
     if (isJoinOrderPreserved) {
       plan.isOrderSatisfied = true;
     }
-    if (planMetrics) {
-      (result as any).planMetrics = planMetrics;
-      (result as any).estimatedCost = planMetrics.totalCost;
-      (result as any).estimatedRows = planMetrics.estimatedRows;
-      (result as any).joinOrder = planMetrics.joinOrder;
-    }
+    const extra: Record<string, any> = {
+      joinedTableScans,
+      allTables,
+      table0Scan,
+      isOrderSatisfied: isJoinOrderPreserved,
+    };
     if (whereMetrics) {
-      (result as any).whereMetrics = whereMetrics;
+      extra.whereMetrics = whereMetrics;
     }
-    return result;
+    return finalizeBytecode(extra);
   }
+
+  const emitSelectedRow = (): void => {
+    if (hasSelectExprs) {
+      const allocExprReg = createRegAllocator(nextReg);
+      for (let i = 0; i < plan.selectExprs!.length; i++) {
+        emitExpression(
+          plan.selectExprs![i].expr,
+          table,
+          emitter,
+          0,
+          outStartReg + i,
+          allocExprReg,
+          plan.udfNameMap,
+        );
+      }
+      emitter.emitUint8(OpCode.OP_RESULT_ROW);
+      emitter.emitUint8(outStartReg);
+      emitter.emitUint8(plan.selectExprs!.length);
+    } else {
+      emitter.emitUint8(OpCode.OP_EMIT_ROW);
+      emitter.emitUint8(0);
+    }
+  };
 
   if (indexScan) {
     let regKey: number;
@@ -4699,18 +3832,24 @@ export function compileQuery(
       emitLoadConstant(emitter, regKey, minVal, indexScan.keyType);
     }
 
+    const finalizeIndexScan = (includeMetrics: boolean = true): Uint8Array => {
+      const extra: Record<string, any> = { indexScan };
+      if (includeMetrics && indexScan?.satisfiesOrderBy) {
+        extra.isOrderSatisfied = true;
+        plan.isOrderSatisfied = true;
+      }
+      return finalizeBytecode(extra, true, includeMetrics);
+    };
+
     if (indexScan.scanType === "point") {
-      // 1. Open data cursor 0 on table
       emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
       emitter.emitUint8(0);
       emitter.emitUint32(table.rootPageId);
 
-      // 2. Open index cursor 1 on index rootPageId
       emitter.emitUint8(OpCode.OP_OPEN_INDEX);
       emitter.emitUint8(1);
       emitter.emitUint32(indexScan.index.rootPageId);
 
-      // 3. Exact point seek in index
       emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
       emitter.emitUint8(1); // index cursor
       emitter.emitUint8(0); // data cursor
@@ -4718,7 +3857,6 @@ export function compileQuery(
       emitter.emitUint8(indexScan.keyType);
       const seekNotFoundPatch = emitter.emitUint16(0);
 
-      // 4. Run remaining filter predicates on the row (if any)
       const nextRowPatches: number[] = [];
       emitFilterTree(
         rootFilter,
@@ -4739,37 +3877,11 @@ export function compileQuery(
         offsetSkipPatch = emitter.emitUint16(0);
       }
 
-      // 5. Emit matching row
-      if (hasSelectExprs) {
-        let exprTempReg = nextReg;
-        const allocExprReg = () => {
-          if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
-          return exprTempReg++;
-        };
-        for (let i = 0; i < plan.selectExprs!.length; i++) {
-          emitExpression(
-            plan.selectExprs![i].expr,
-            table,
-            emitter,
-            0,
-            outStartReg + i,
-            allocExprReg,
-            plan.udfNameMap,
-          );
-        }
-        emitter.emitUint8(OpCode.OP_RESULT_ROW);
-        emitter.emitUint8(outStartReg);
-        emitter.emitUint8(plan.selectExprs!.length);
-      } else {
-        emitter.emitUint8(OpCode.OP_EMIT_ROW);
-        emitter.emitUint8(0);
-      }
+      emitSelectedRow();
 
-      // 6. Point match handled: jump to EOF
       emitter.emitUint8(OpCode.OP_JUMP);
       const jumpEofPatch = emitter.emitUint16(0);
 
-      // EOF Label
       const eofPos = emitter.currentOffset();
       emitter.patchUint16(seekNotFoundPatch, eofPos);
       emitter.patchUint16(jumpEofPatch, eofPos);
@@ -4781,43 +3893,18 @@ export function compileQuery(
       }
 
       emitter.emitUint8(OpCode.OP_HALT);
-
-      const result = emitter.toByteArray();
-      (result as any).indexScan = indexScan;
-      (result as any).inSets = inSets;
-      if (plan.outputColumns) {
-        (result as any).outputColumns = plan.outputColumns;
-      }
-      if (indexScan?.satisfiesOrderBy) {
-        (result as any).isOrderSatisfied = true;
-        plan.isOrderSatisfied = true;
-      }
-      if (planMetrics) {
-        (result as any).planMetrics = planMetrics;
-        (result as any).estimatedCost = planMetrics.totalCost;
-        (result as any).estimatedRows = planMetrics.estimatedRows;
-        (result as any).joinOrder = planMetrics.joinOrder;
-      }
-      return result;
+      return finalizeIndexScan();
     } else if (indexScan.scanType === "multi_point") {
       const numValues = indexScan.inValues ? indexScan.inValues.length : 0;
       if (numValues === 0) {
         emitter.emitUint8(OpCode.OP_HALT);
-        const result = emitter.toByteArray();
-        (result as any).indexScan = indexScan;
-        (result as any).inSets = inSets;
-        if (plan.outputColumns) {
-          (result as any).outputColumns = plan.outputColumns;
-        }
-        return result;
+        return finalizeIndexScan(false);
       }
 
-      // 1. Open data cursor 0 on table
       emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
       emitter.emitUint8(0);
       emitter.emitUint32(table.rootPageId);
 
-      // 2. Open index cursor 1 on index rootPageId
       emitter.emitUint8(OpCode.OP_OPEN_INDEX);
       emitter.emitUint8(1);
       emitter.emitUint32(indexScan.index.rootPageId);
@@ -4828,7 +3915,6 @@ export function compileQuery(
         const val = indexScan.inValues![vIdx];
         emitLoadConstant(emitter, regKey, val, indexScan.keyType);
 
-        // 3. Exact point seek in index for this value
         emitter.emitUint8(OpCode.OP_INDEX_SEEK_EQ);
         emitter.emitUint8(1); // index cursor
         emitter.emitUint8(0); // data cursor
@@ -4836,7 +3922,6 @@ export function compileQuery(
         emitter.emitUint8(indexScan.keyType);
         const seekNotFoundPatch = emitter.emitUint16(0);
 
-        // 4. Run remaining filter predicates on the row (if any)
         const nextRowPatches: number[] = [];
         emitFilterTree(
           rootFilter,
@@ -4857,31 +3942,7 @@ export function compileQuery(
           offsetSkipPatch = emitter.emitUint16(0);
         }
 
-        // 5. Emit matching row
-        if (hasSelectExprs) {
-          let exprTempReg = nextReg;
-          const allocExprReg = () => {
-            if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
-            return exprTempReg++;
-          };
-          for (let i = 0; i < plan.selectExprs!.length; i++) {
-            emitExpression(
-              plan.selectExprs![i].expr,
-              table,
-              emitter,
-              0,
-              outStartReg + i,
-              allocExprReg,
-              plan.udfNameMap,
-            );
-          }
-          emitter.emitUint8(OpCode.OP_RESULT_ROW);
-          emitter.emitUint8(outStartReg);
-          emitter.emitUint8(plan.selectExprs!.length);
-        } else {
-          emitter.emitUint8(OpCode.OP_EMIT_ROW);
-          emitter.emitUint8(0);
-        }
+        emitSelectedRow();
 
         if (hasLimit) {
           emitter.emitUint8(OpCode.OP_LIMIT);
@@ -4909,30 +3970,12 @@ export function compileQuery(
         }
       }
 
-      // EOF Label
       const eofPos = emitter.currentOffset();
       for (const patch of limitHaltPatches) {
         emitter.patchUint16(patch, eofPos);
       }
       emitter.emitUint8(OpCode.OP_HALT);
-
-      const result = emitter.toByteArray();
-      (result as any).indexScan = indexScan;
-      (result as any).inSets = inSets;
-      if (plan.outputColumns) {
-        (result as any).outputColumns = plan.outputColumns;
-      }
-      if (indexScan?.satisfiesOrderBy) {
-        (result as any).isOrderSatisfied = true;
-        plan.isOrderSatisfied = true;
-      }
-      if (planMetrics) {
-        (result as any).planMetrics = planMetrics;
-        (result as any).estimatedCost = planMetrics.totalCost;
-        (result as any).estimatedRows = planMetrics.estimatedRows;
-        (result as any).joinOrder = planMetrics.joinOrder;
-      }
-      return result;
+      return finalizeIndexScan();
     } else {
       // Range seek in index
       emitter.emitUint8(OpCode.OP_OPEN_CURSOR);
@@ -4972,30 +4015,7 @@ export function compileQuery(
         offsetSkipPatch = emitter.emitUint16(0);
       }
 
-      if (hasSelectExprs) {
-        let exprTempReg = nextReg;
-        const allocExprReg = () => {
-          if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
-          return exprTempReg++;
-        };
-        for (let i = 0; i < plan.selectExprs!.length; i++) {
-          emitExpression(
-            plan.selectExprs![i].expr,
-            table,
-            emitter,
-            0,
-            outStartReg + i,
-            allocExprReg,
-            plan.udfNameMap,
-          );
-        }
-        emitter.emitUint8(OpCode.OP_RESULT_ROW);
-        emitter.emitUint8(outStartReg);
-        emitter.emitUint8(plan.selectExprs!.length);
-      } else {
-        emitter.emitUint8(OpCode.OP_EMIT_ROW);
-        emitter.emitUint8(0);
-      }
+      emitSelectedRow();
 
       let limitHaltPatch = -1;
       if (hasLimit) {
@@ -5028,24 +4048,7 @@ export function compileQuery(
       }
 
       emitter.emitUint8(OpCode.OP_HALT);
-
-      const result = emitter.toByteArray();
-      (result as any).indexScan = indexScan;
-      (result as any).inSets = inSets;
-      if (plan.outputColumns) {
-        (result as any).outputColumns = plan.outputColumns;
-      }
-      if (indexScan?.satisfiesOrderBy) {
-        (result as any).isOrderSatisfied = true;
-        plan.isOrderSatisfied = true;
-      }
-      if (planMetrics) {
-        (result as any).planMetrics = planMetrics;
-        (result as any).estimatedCost = planMetrics.totalCost;
-        (result as any).estimatedRows = planMetrics.estimatedRows;
-        (result as any).joinOrder = planMetrics.joinOrder;
-      }
-      return result;
+      return finalizeIndexScan();
     }
   }
 
@@ -5054,12 +4057,10 @@ export function compileQuery(
   emitter.emitUint8(0);
   emitter.emitUint32(table.rootPageId);
 
-  // Rewind Cursor
   emitter.emitUint8(OpCode.OP_REWIND);
   emitter.emitUint8(0);
   const rewindJumpPatch = emitter.emitUint16(0);
 
-  // Loop start
   const loopStartPos = emitter.currentOffset();
   const nextRowPatches: number[] = [];
 
@@ -5082,31 +4083,7 @@ export function compileQuery(
     offsetSkipPatch = emitter.emitUint16(0);
   }
 
-  // Emit matching row
-  if (hasSelectExprs) {
-    let exprTempReg = nextReg;
-    const allocExprReg = () => {
-      if (exprTempReg >= 64) throw new TooManyRegistersError(exprTempReg);
-      return exprTempReg++;
-    };
-    for (let i = 0; i < plan.selectExprs!.length; i++) {
-      emitExpression(
-        plan.selectExprs![i].expr,
-        table,
-        emitter,
-        0,
-        outStartReg + i,
-        allocExprReg,
-        plan.udfNameMap,
-      );
-    }
-    emitter.emitUint8(OpCode.OP_RESULT_ROW);
-    emitter.emitUint8(outStartReg);
-    emitter.emitUint8(plan.selectExprs!.length);
-  } else {
-    emitter.emitUint8(OpCode.OP_EMIT_ROW);
-    emitter.emitUint8(0);
-  }
+  emitSelectedRow();
 
   let limitHaltPatch = -1;
   if (hasLimit) {
@@ -5115,7 +4092,6 @@ export function compileQuery(
     limitHaltPatch = emitter.emitUint16(0);
   }
 
-  // next_row_label
   const nextRowPos = emitter.currentOffset();
   if (offsetSkipPatch !== -1) {
     emitter.patchUint16(offsetSkipPatch, nextRowPos);
@@ -5124,16 +4100,13 @@ export function compileQuery(
     emitter.patchUint16(patch, nextRowPos);
   }
 
-  // Advance cursor
   emitter.emitUint8(OpCode.OP_NEXT_ROW);
   emitter.emitUint8(0);
   const nextRowEofPatch = emitter.emitUint16(0);
 
-  // Loop back
   emitter.emitUint8(OpCode.OP_JUMP);
   emitter.emitUint16(loopStartPos);
 
-  // EOF Label
   const eofPos = emitter.currentOffset();
   emitter.patchUint16(rewindJumpPatch, eofPos);
   emitter.patchUint16(nextRowEofPatch, eofPos);
@@ -5143,21 +4116,7 @@ export function compileQuery(
 
   emitter.emitUint8(OpCode.OP_HALT);
 
-  const result = emitter.toByteArray();
-  (result as any).inSets = inSets;
-  if (plan.outputColumns) {
-    (result as any).outputColumns = plan.outputColumns;
-  }
-  if (whereMetrics) {
-    (result as any).whereMetrics = whereMetrics;
-  }
-  if (planMetrics) {
-    (result as any).planMetrics = planMetrics;
-    (result as any).estimatedCost = planMetrics.totalCost;
-    (result as any).estimatedRows = planMetrics.estimatedRows;
-    (result as any).joinOrder = planMetrics.joinOrder;
-  }
-  return result;
+  return finalizeBytecode(whereMetrics ? { whereMetrics } : undefined);
 }
 
 export interface DisassembledInstruction {
@@ -5170,6 +4129,58 @@ export interface DisassembledInstruction {
 }
 
 const textDecoder = new TextDecoder();
+
+const DISASM_CURSOR_JUMP_OPS = new Map<number, [string, string]>([
+  [OpCode.OP_REWIND, ["OP_REWIND", "Rewind cursor to first row; jump to {a} if empty"]],
+  [OpCode.OP_NEXT_ROW, ["OP_NEXT_ROW", "Advance cursor to next row; jump to {a} if EOF"]],
+  [OpCode.OP_LAST, ["OP_LAST", "Position cursor to last row; jump to {a} if empty"]],
+  [OpCode.OP_PREV_ROW, ["OP_PREV_ROW", "Advance cursor to previous row; jump to {a} if BOF"]],
+]);
+
+const DISASM_COLUMN_OPS = new Map<number, [string, string]>([
+  [OpCode.OP_COLUMN_INT, ["OP_COLUMN_INT", "INT"]],
+  [OpCode.OP_COLUMN_FLOAT, ["OP_COLUMN_FLOAT", "FLOAT"]],
+  [OpCode.OP_COLUMN_TEXT, ["OP_COLUMN_TEXT", "TEXT"]],
+  [OpCode.OP_COLUMN_BLOB, ["OP_COLUMN_BLOB", "BLOB"]],
+  [OpCode.OP_COLUMN_UUID, ["OP_COLUMN_UUID", "UUID"]],
+  [OpCode.OP_COLUMN_ULID, ["OP_COLUMN_ULID", "ULID"]],
+]);
+
+const DISASM_CMP_OPS = new Map<number, [string, string]>([
+  [OpCode.OP_EQ, ["OP_EQ", "=="]],
+  [OpCode.OP_NE, ["OP_NE", "!="]],
+  [OpCode.OP_GT, ["OP_GT", ">"]],
+  [OpCode.OP_GE, ["OP_GE", ">="]],
+  [OpCode.OP_LT, ["OP_LT", "<"]],
+  [OpCode.OP_LE, ["OP_LE", "<="]],
+  [OpCode.OP_STR_LIKE, ["OP_STR_LIKE", "LIKE"]],
+  [OpCode.OP_STR_NOT_LIKE, ["OP_STR_NOT_LIKE", "NOT LIKE"]],
+  [OpCode.OP_STR_CONTAINS, ["OP_STR_CONTAINS", "CONTAINS"]],
+  [OpCode.OP_STR_STARTS_WITH, ["OP_STR_STARTS_WITH", "STARTS_WITH"]],
+  [OpCode.OP_STR_ENDS_WITH, ["OP_STR_ENDS_WITH", "ENDS_WITH"]],
+  [OpCode.OP_STR_FUZZY_MATCH, ["OP_STR_FUZZY_MATCH", "FUZZY_MATCH"]],
+]);
+
+const DISASM_UNARY_REG_OPS = new Map<number, string>([
+  [OpCode.OP_STR_LOWER, "OP_STR_LOWER"],
+  [OpCode.OP_STR_UPPER, "OP_STR_UPPER"],
+  [OpCode.OP_STR_LENGTH, "OP_STR_LENGTH"],
+  [OpCode.OP_STR_TRIM, "OP_STR_TRIM"],
+  [OpCode.OP_MATH_ABS, "OP_MATH_ABS"],
+  [OpCode.OP_MATH_ROUND, "OP_MATH_ROUND"],
+  [OpCode.OP_MATH_FLOOR, "OP_MATH_FLOOR"],
+  [OpCode.OP_MATH_CEIL, "OP_MATH_CEIL"],
+]);
+
+const DISASM_ARITH_OPS = new Map<number, string>([
+  [OpCode.OP_ADD, "OP_ADD"],
+  [OpCode.OP_SUB, "OP_SUB"],
+  [OpCode.OP_MUL, "OP_MUL"],
+  [OpCode.OP_DIV, "OP_DIV"],
+  [OpCode.OP_MOD, "OP_MOD"],
+]);
+
+const DISASM_AGG_FUNCS = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
 
 /**
  * Disassembles binary bytecode into human-readable instructions.
@@ -5186,858 +4197,351 @@ export function disassembleBytecode(
   );
   let pc = 0;
 
-  const getColName = (idx: number) => {
-    return table?.columns[idx]?.name
-      ? `'${table.columns[idx].name}'`
-      : `col_${idx}`;
-  };
-
+  const getColName = (idx: number) =>
+    table?.columns[idx]?.name ? `'${table.columns[idx].name}'` : `col_${idx}`;
   const fmtAddr = (n: number) => `0x${n.toString(16).padStart(4, "0")}`;
+  const u16 = () => {
+    const v = view.getUint16(pc, true);
+    pc += 2;
+    return v;
+  };
+  const push = (
+    addr: number,
+    opcode: string,
+    p1: string,
+    p2: string,
+    p3: string,
+    comment: string,
+  ) => {
+    instructions.push({ addr, opcode, p1, p2, p3, comment });
+  };
 
   while (pc < bytecode.byteLength) {
     const addr = pc;
     const op = bytecode[pc++];
 
+    const curJump = DISASM_CURSOR_JUMP_OPS.get(op);
+    if (curJump) {
+      const c = bytecode[pc++];
+      const tgt = fmtAddr(u16());
+      push(addr, curJump[0], `c[${c}]`, tgt, "", curJump[1].replace("{a}", tgt));
+      continue;
+    }
+
+    const colOp = DISASM_COLUMN_OPS.get(op);
+    if (colOp) {
+      const c = bytecode[pc++];
+      const col = bytecode[pc++];
+      const r = bytecode[pc++];
+      const colLabel = getColName(col);
+      push(addr, colOp[0], `c[${c}]`, `${col} (${colLabel})`, `r[${r}]`, `Read ${colLabel} as ${colOp[1]} into r[${r}]`);
+      continue;
+    }
+
+    const cmpOp = DISASM_CMP_OPS.get(op);
+    if (cmpOp) {
+      const a = bytecode[pc++];
+      const b = bytecode[pc++];
+      const tgt = fmtAddr(u16());
+      push(addr, cmpOp[0], `r[${a}]`, `r[${b}]`, tgt, `If r[${a}] ${cmpOp[1]} r[${b}] -> jump to ${tgt}`);
+      continue;
+    }
+
+    const unaryOp = DISASM_UNARY_REG_OPS.get(op);
+    if (unaryOp) {
+      const src = bytecode[pc++];
+      const dst = bytecode[pc++];
+      push(addr, unaryOp, `r[${src}]`, `r[${dst}]`, "", `${unaryOp}: r[${dst}] = ${unaryOp.toLowerCase()}(r[${src}])`);
+      continue;
+    }
+
+    const arithOp = DISASM_ARITH_OPS.get(op);
+    if (arithOp) {
+      const a = bytecode[pc++];
+      const b = bytecode[pc++];
+      const dst = bytecode[pc++];
+      push(addr, arithOp, `r[${a}]`, `r[${b}]`, `r[${dst}]`, `${arithOp}: r[${dst}] = r[${a}] ${arithOp.replace("OP_", "")} r[${b}]`);
+      continue;
+    }
+
     switch (op) {
       case OpCode.OP_HALT:
-        instructions.push({
-          addr,
-          opcode: "OP_HALT",
-          p1: "",
-          p2: "",
-          p3: "",
-          comment: "Halt VM execution (STATUS_DONE)",
-        });
+        push(addr, "OP_HALT", "", "", "", "Halt VM execution (STATUS_DONE)");
         break;
 
-      case OpCode.OP_OPEN_CURSOR: {
-        const cursor = bytecode[pc++];
-        const rootPage = view.getUint32(pc, true);
-        pc += 4;
-        instructions.push({
-          addr,
-          opcode: "OP_OPEN_CURSOR",
-          p1: `c[${cursor}]`,
-          p2: `page=${rootPage}`,
-          p3: "",
-          comment: `Open cursor ${cursor} on root page ${rootPage}${table ? ` ('${table.name}')` : ""}`,
-        });
-        break;
-      }
-
+      case OpCode.OP_OPEN_CURSOR:
       case OpCode.OP_OPEN_INDEX: {
-        const cursor = bytecode[pc++];
-        const rootPage = view.getUint32(pc, true);
+        const c = bytecode[pc++];
+        const root = view.getUint32(pc, true);
         pc += 4;
-        instructions.push({
+        const isIdx = op === OpCode.OP_OPEN_INDEX;
+        push(
           addr,
-          opcode: "OP_OPEN_INDEX",
-          p1: `c[${cursor}]`,
-          p2: `page=${rootPage}`,
-          p3: "",
-          comment: `Open index cursor ${cursor} on root page ${rootPage}`,
-        });
+          isIdx ? "OP_OPEN_INDEX" : "OP_OPEN_CURSOR",
+          `c[${c}]`,
+          `page=${root}`,
+          "",
+          isIdx
+            ? `Open index cursor ${c} on root page ${root}`
+            : `Open cursor ${c} on root page ${root}${table ? ` ('${table.name}')` : ""}`,
+        );
         break;
       }
 
-      case OpCode.OP_INDEX_SEEK_EQ: {
-        const idxCursor = bytecode[pc++];
-        const dataCursor = bytecode[pc++];
-        const regKey = bytecode[pc++];
-        const keyType = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_INDEX_SEEK_EQ",
-          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
-          p2: `key=r[${regKey}], type=${keyType}`,
-          p3: fmtAddr(jumpTarget),
-          comment: `Seek exact key in index; position data cursor or jump to ${fmtAddr(jumpTarget)} if not found`,
-        });
-        break;
-      }
-
+      case OpCode.OP_INDEX_SEEK_EQ:
       case OpCode.OP_INDEX_SEEK_GE: {
-        const idxCursor = bytecode[pc++];
-        const dataCursor = bytecode[pc++];
+        const idxC = bytecode[pc++];
+        const dataC = bytecode[pc++];
         const regKey = bytecode[pc++];
         const keyType = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
+        const tgt = fmtAddr(u16());
+        const isEq = op === OpCode.OP_INDEX_SEEK_EQ;
+        push(
           addr,
-          opcode: "OP_INDEX_SEEK_GE",
-          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
-          p2: `key=r[${regKey}], type=${keyType}`,
-          p3: fmtAddr(jumpTarget),
-          comment: `Seek first entry >= key in index; position data cursor or jump to ${fmtAddr(jumpTarget)} if EOF`,
-        });
+          isEq ? "OP_INDEX_SEEK_EQ" : "OP_INDEX_SEEK_GE",
+          `idx=c[${idxC}], data=c[${dataC}]`,
+          `key=r[${regKey}], type=${keyType}`,
+          tgt,
+          isEq
+            ? `Seek exact key in index; position data cursor or jump to ${tgt} if not found`
+            : `Seek first entry >= key in index; position data cursor or jump to ${tgt} if EOF`,
+        );
         break;
       }
 
       case OpCode.OP_INDEX_NEXT: {
-        const idxCursor = bytecode[pc++];
-        const dataCursor = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_INDEX_NEXT",
-          p1: `idx=c[${idxCursor}], data=c[${dataCursor}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Advance index cursor to next entry; jump to ${fmtAddr(jumpTarget)} if EOF`,
-        });
+        const idxC = bytecode[pc++];
+        const dataC = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        push(addr, "OP_INDEX_NEXT", `idx=c[${idxC}], data=c[${dataC}]`, tgt, "", `Advance index cursor to next entry; jump to ${tgt} if EOF`);
         break;
       }
 
-      case OpCode.OP_REWIND: {
-        const cursor = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_REWIND",
-          p1: `c[${cursor}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Rewind cursor to first row; jump to ${fmtAddr(jumpTarget)} if empty`,
-        });
-        break;
-      }
-
-      case OpCode.OP_NEXT_ROW: {
-        const cursor = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_NEXT_ROW",
-          p1: `c[${cursor}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Advance cursor to next row; jump to ${fmtAddr(jumpTarget)} if EOF`,
-        });
-        break;
-      }
-
-      case OpCode.OP_LAST: {
-        const cursor = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_LAST",
-          p1: `c[${cursor}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Position cursor to last row; jump to ${fmtAddr(jumpTarget)} if empty`,
-        });
-        break;
-      }
-
-      case OpCode.OP_PREV_ROW: {
-        const cursor = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_PREV_ROW",
-          p1: `c[${cursor}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Advance cursor to previous row; jump to ${fmtAddr(jumpTarget)} if BOF`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_INT: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_INT",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as INT into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_FLOAT: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_FLOAT",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as FLOAT into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_TEXT: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_TEXT",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as TEXT into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_BLOB: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_BLOB",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as BLOB into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_UUID: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_UUID",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as UUID into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_COLUMN_ULID: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COLUMN_ULID",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: `r[${regIdx}]`,
-          comment: `Read ${getColName(colIdx)} as ULID into r[${regIdx}]`,
-        });
-        break;
-      }
-
-      case OpCode.OP_IS_NULL: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_IS_NULL",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: fmtAddr(jumpTarget),
-          comment: `If ${getColName(colIdx)} IS NULL -> jump to ${fmtAddr(jumpTarget)}`,
-        });
-        break;
-      }
-
+      case OpCode.OP_IS_NULL:
       case OpCode.OP_IS_NOT_NULL: {
-        const cursor = bytecode[pc++];
-        const colIdx = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_IS_NOT_NULL",
-          p1: `c[${cursor}]`,
-          p2: `${colIdx} (${getColName(colIdx)})`,
-          p3: fmtAddr(jumpTarget),
-          comment: `If ${getColName(colIdx)} IS NOT NULL -> jump to ${fmtAddr(jumpTarget)}`,
-        });
-        break;
-      }
-
-      case OpCode.OP_EQ:
-      case OpCode.OP_NE:
-      case OpCode.OP_GT:
-      case OpCode.OP_GE:
-      case OpCode.OP_LT:
-      case OpCode.OP_LE: {
-        const opNames: Record<number, string> = {
-          [OpCode.OP_EQ]: "OP_EQ",
-          [OpCode.OP_NE]: "OP_NE",
-          [OpCode.OP_GT]: "OP_GT",
-          [OpCode.OP_GE]: "OP_GE",
-          [OpCode.OP_LT]: "OP_LT",
-          [OpCode.OP_LE]: "OP_LE",
-        };
-        const symbols: Record<number, string> = {
-          [OpCode.OP_EQ]: "==",
-          [OpCode.OP_NE]: "!=",
-          [OpCode.OP_GT]: ">",
-          [OpCode.OP_GE]: ">=",
-          [OpCode.OP_LT]: "<",
-          [OpCode.OP_LE]: "<=",
-        };
-        const regA = bytecode[pc++];
-        const regB = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: opNames[op],
-          p1: `r[${regA}]`,
-          p2: `r[${regB}]`,
-          p3: fmtAddr(jumpTarget),
-          comment: `If r[${regA}] ${symbols[op]} r[${regB}] -> jump to ${fmtAddr(jumpTarget)}`,
-        });
+        const c = bytecode[pc++];
+        const col = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        const isNull = op === OpCode.OP_IS_NULL;
+        const colLabel = getColName(col);
+        push(addr, isNull ? "OP_IS_NULL" : "OP_IS_NOT_NULL", `c[${c}]`, `${col} (${colLabel})`, tgt, `If ${colLabel} ${isNull ? "IS NULL" : "IS NOT NULL"} -> jump to ${tgt}`);
         break;
       }
 
       case OpCode.OP_JUMP: {
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_JUMP",
-          p1: fmtAddr(jumpTarget),
-          p2: "",
-          p3: "",
-          comment: `Unconditional jump to ${fmtAddr(jumpTarget)}`,
-        });
-        break;
-      }
-
-      case OpCode.OP_STR_LIKE:
-      case OpCode.OP_STR_NOT_LIKE:
-      case OpCode.OP_STR_CONTAINS:
-      case OpCode.OP_STR_STARTS_WITH:
-      case OpCode.OP_STR_ENDS_WITH:
-      case OpCode.OP_STR_FUZZY_MATCH: {
-        const opNames: Record<number, string> = {
-          [OpCode.OP_STR_LIKE]: "OP_STR_LIKE",
-          [OpCode.OP_STR_NOT_LIKE]: "OP_STR_NOT_LIKE",
-          [OpCode.OP_STR_CONTAINS]: "OP_STR_CONTAINS",
-          [OpCode.OP_STR_STARTS_WITH]: "OP_STR_STARTS_WITH",
-          [OpCode.OP_STR_ENDS_WITH]: "OP_STR_ENDS_WITH",
-          [OpCode.OP_STR_FUZZY_MATCH]: "OP_STR_FUZZY_MATCH",
-        };
-        const descriptions: Record<number, string> = {
-          [OpCode.OP_STR_LIKE]: "LIKE",
-          [OpCode.OP_STR_NOT_LIKE]: "NOT LIKE",
-          [OpCode.OP_STR_CONTAINS]: "CONTAINS",
-          [OpCode.OP_STR_STARTS_WITH]: "STARTS_WITH",
-          [OpCode.OP_STR_ENDS_WITH]: "ENDS_WITH",
-          [OpCode.OP_STR_FUZZY_MATCH]: "FUZZY_MATCH",
-        };
-        const regA = bytecode[pc++];
-        const regB = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: opNames[op],
-          p1: `r[${regA}]`,
-          p2: `r[${regB}]`,
-          p3: fmtAddr(jumpTarget),
-          comment: `If r[${regA}] ${descriptions[op]} r[${regB}] -> jump to ${fmtAddr(jumpTarget)}`,
-        });
+        const tgt = fmtAddr(u16());
+        push(addr, "OP_JUMP", tgt, "", "", `Unconditional jump to ${tgt}`);
         break;
       }
 
       case OpCode.OP_IN: {
-        const regVal = bytecode[pc++];
-        const setIdx = view.getUint16(pc, true);
-        pc += 2;
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_IN",
-          p1: `r[${regVal}]`,
-          p2: `set[${setIdx}]`,
-          p3: fmtAddr(jumpTarget),
-          comment: `If r[${regVal}] IN set[${setIdx}] -> jump to ${fmtAddr(jumpTarget)}`,
-        });
+        const r = bytecode[pc++];
+        const setIdx = u16();
+        const tgt = fmtAddr(u16());
+        push(addr, "OP_IN", `r[${r}]`, `set[${setIdx}]`, tgt, `If r[${r}] IN set[${setIdx}] -> jump to ${tgt}`);
         break;
       }
 
       case OpCode.OP_LOAD_INT: {
-        const regIdx = bytecode[pc++];
+        const r = bytecode[pc++];
         const val = view.getInt32(pc, true);
         pc += 4;
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_INT",
-          p1: `r[${regIdx}]`,
-          p2: `${val}`,
-          p3: "",
-          comment: `Load literal int ${val} into r[${regIdx}]`,
-        });
+        push(addr, "OP_LOAD_INT", `r[${r}]`, `${val}`, "", `Load literal int ${val} into r[${r}]`);
         break;
       }
 
       case OpCode.OP_LOAD_INT64: {
-        const regIdx = bytecode[pc++];
-        const val = view.getBigInt64(pc, true);
+        const r = bytecode[pc++];
+        const val = view.getBigInt64(pc, true).toString();
         pc += 8;
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_INT64",
-          p1: `r[${regIdx}]`,
-          p2: `${val.toString()}n`,
-          p3: "",
-          comment: `Load literal int64 ${val.toString()}n into r[${regIdx}]`,
-        });
+        push(addr, "OP_LOAD_INT64", `r[${r}]`, `${val}n`, "", `Load literal int64 ${val}n into r[${r}]`);
         break;
       }
 
       case OpCode.OP_LOAD_FLOAT: {
-        const regIdx = bytecode[pc++];
+        const r = bytecode[pc++];
         const val = view.getFloat64(pc, true);
         pc += 8;
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_FLOAT",
-          p1: `r[${regIdx}]`,
-          p2: `${val}`,
-          p3: "",
-          comment: `Load literal float ${val} into r[${regIdx}]`,
-        });
+        push(addr, "OP_LOAD_FLOAT", `r[${r}]`, `${val}`, "", `Load literal float ${val} into r[${r}]`);
         break;
       }
 
       case OpCode.OP_LOAD_TEXT: {
-        const regIdx = bytecode[pc++];
-        const len = view.getUint16(pc, true);
-        pc += 2;
-        const textBytes = new Uint8Array(
-          bytecode.buffer,
-          bytecode.byteOffset + pc,
-          len,
-        );
-        const str = textDecoder.decode(textBytes);
+        const r = bytecode[pc++];
+        const len = u16();
+        const str = textDecoder.decode(new Uint8Array(bytecode.buffer, bytecode.byteOffset + pc, len));
         pc += len;
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_TEXT",
-          p1: `r[${regIdx}]`,
-          p2: `"${str}"`,
-          p3: "",
-          comment: `Load literal text "${str}" into r[${regIdx}]`,
-        });
+        push(addr, "OP_LOAD_TEXT", `r[${r}]`, `"${str}"`, "", `Load literal text "${str}" into r[${r}]`);
         break;
       }
 
       case OpCode.OP_LOAD_BLOB: {
-        const regIdx = bytecode[pc++];
-        const len = view.getUint16(pc, true);
-        pc += 2 + len;
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_BLOB",
-          p1: `r[${regIdx}]`,
-          p2: `len=${len}`,
-          p3: "",
-          comment: `Load literal BLOB (${len} bytes) into r[${regIdx}]`,
-        });
+        const r = bytecode[pc++];
+        const len = u16();
+        pc += len;
+        push(addr, "OP_LOAD_BLOB", `r[${r}]`, `len=${len}`, "", `Load literal BLOB (${len} bytes) into r[${r}]`);
         break;
       }
 
       case OpCode.OP_LOAD_NULL: {
-        const regIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_LOAD_NULL",
-          p1: `r[${regIdx}]`,
-          p2: "NULL",
-          p3: "",
-          comment: `Set r[${regIdx}] to NULL`,
-        });
+        const r = bytecode[pc++];
+        push(addr, "OP_LOAD_NULL", `r[${r}]`, "NULL", "", `Set r[${r}] to NULL`);
         break;
       }
 
       case OpCode.OP_EMIT_ROW: {
-        const cursor = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_EMIT_ROW",
-          p1: `c[${cursor}]`,
-          p2: "",
-          p3: "",
-          comment: `Row passed all filters -> emit to Output Result Buffer`,
-        });
+        const c = bytecode[pc++];
+        push(addr, "OP_EMIT_ROW", `c[${c}]`, "", "", "Row passed all filters -> emit to Output Result Buffer");
         break;
       }
 
       case OpCode.OP_RESULT_ROW: {
-        const startReg = bytecode[pc++];
-        const numCols = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_RESULT_ROW",
-          p1: `r[${startReg}]`,
-          p2: `cols=${numCols}`,
-          p3: "",
-          comment: `Serialize registers r[${startReg}..${startReg + numCols - 1}] to Result Buffer`,
-        });
+        const start = bytecode[pc++];
+        const cols = bytecode[pc++];
+        push(addr, "OP_RESULT_ROW", `r[${start}]`, `cols=${cols}`, "", `Serialize registers r[${start}..${start + cols - 1}] to Result Buffer`);
         break;
       }
 
-      case OpCode.OP_OFFSET: {
-        const offsetReg = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_OFFSET",
-          p1: `r[${offsetReg}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `If r[${offsetReg}] > 0 -> decrement and skip row to ${fmtAddr(jumpTarget)}`,
-        });
-        break;
-      }
-
+      case OpCode.OP_OFFSET:
       case OpCode.OP_LIMIT: {
-        const limitReg = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
+        const r = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        const isOff = op === OpCode.OP_OFFSET;
+        push(
           addr,
-          opcode: "OP_LIMIT",
-          p1: `r[${limitReg}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `If r[${limitReg}] <= 1 -> halt to ${fmtAddr(jumpTarget)}, else decrement`,
-        });
-        break;
-      }
-      case OpCode.OP_CALL_UDF: {
-        const udfId = view.getUint16(pc, true);
-        pc += 2;
-        const startArgReg = bytecode[pc++];
-        const numArgs = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_CALL_UDF",
-          p1: `udf#${udfId}`,
-          p2: `r[${startArgReg}..${startArgReg + numArgs - 1}]`,
-          p3: `r[${destReg}]`,
-          comment: `Call UDF #${udfId} with ${numArgs} args -> r[${destReg}]`,
-        });
+          isOff ? "OP_OFFSET" : "OP_LIMIT",
+          `r[${r}]`,
+          tgt,
+          "",
+          isOff
+            ? `If r[${r}] > 0 -> decrement and skip row to ${tgt}`
+            : `If r[${r}] <= 1 -> halt to ${tgt}, else decrement`,
+        );
         break;
       }
 
-      case OpCode.OP_STR_LOWER:
-      case OpCode.OP_STR_UPPER:
-      case OpCode.OP_STR_LENGTH:
-      case OpCode.OP_STR_TRIM:
-      case OpCode.OP_MATH_ABS:
-      case OpCode.OP_MATH_ROUND:
-      case OpCode.OP_MATH_FLOOR:
-      case OpCode.OP_MATH_CEIL: {
-        const opNames: Record<number, string> = {
-          [OpCode.OP_STR_LOWER]: "OP_STR_LOWER",
-          [OpCode.OP_STR_UPPER]: "OP_STR_UPPER",
-          [OpCode.OP_STR_LENGTH]: "OP_STR_LENGTH",
-          [OpCode.OP_STR_TRIM]: "OP_STR_TRIM",
-          [OpCode.OP_MATH_ABS]: "OP_MATH_ABS",
-          [OpCode.OP_MATH_ROUND]: "OP_MATH_ROUND",
-          [OpCode.OP_MATH_FLOOR]: "OP_MATH_FLOOR",
-          [OpCode.OP_MATH_CEIL]: "OP_MATH_CEIL",
-        };
-        const srcReg = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: opNames[op],
-          p1: `r[${srcReg}]`,
-          p2: `r[${destReg}]`,
-          p3: "",
-          comment: `${opNames[op]}: r[${destReg}] = ${opNames[op].toLowerCase()}(r[${srcReg}])`,
-        });
+      case OpCode.OP_CALL_UDF: {
+        const udfId = u16();
+        const start = bytecode[pc++];
+        const nArgs = bytecode[pc++];
+        const dst = bytecode[pc++];
+        push(addr, "OP_CALL_UDF", `udf#${udfId}`, `r[${start}..${start + nArgs - 1}]`, `r[${dst}]`, `Call UDF #${udfId} with ${nArgs} args -> r[${dst}]`);
         break;
       }
 
       case OpCode.OP_STR_SUBSTR: {
-        const srcReg = bytecode[pc++];
-        const startReg = bytecode[pc++];
-        const lenReg = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_STR_SUBSTR",
-          p1: `r[${srcReg}]`,
-          p2: `start=r[${startReg}], len=r[${lenReg}]`,
-          p3: `r[${destReg}]`,
-          comment: `Extract substring from r[${srcReg}] into r[${destReg}]`,
-        });
+        const src = bytecode[pc++];
+        const start = bytecode[pc++];
+        const len = bytecode[pc++];
+        const dst = bytecode[pc++];
+        push(addr, "OP_STR_SUBSTR", `r[${src}]`, `start=r[${start}], len=r[${len}]`, `r[${dst}]`, `Extract substring from r[${src}] into r[${dst}]`);
         break;
       }
 
       case OpCode.OP_STR_LEVENSHTEIN: {
-        const regA = bytecode[pc++];
-        const regB = bytecode[pc++];
-        const regDest = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_STR_LEVENSHTEIN",
-          p1: `r[${regA}]`,
-          p2: `r[${regB}]`,
-          p3: `r[${regDest}]`,
-          comment: `r[${regDest}] = levenshtein(r[${regA}], r[${regB}])`,
-        });
-        break;
-      }
-
-      case OpCode.OP_ADD:
-      case OpCode.OP_SUB:
-      case OpCode.OP_MUL:
-      case OpCode.OP_DIV:
-      case OpCode.OP_MOD: {
-        const opNames: Record<number, string> = {
-          [OpCode.OP_ADD]: "OP_ADD",
-          [OpCode.OP_SUB]: "OP_SUB",
-          [OpCode.OP_MUL]: "OP_MUL",
-          [OpCode.OP_DIV]: "OP_DIV",
-          [OpCode.OP_MOD]: "OP_MOD",
-        };
-        const regA = bytecode[pc++];
-        const regB = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: opNames[op],
-          p1: `r[${regA}]`,
-          p2: `r[${regB}]`,
-          p3: `r[${destReg}]`,
-          comment: `${opNames[op]}: r[${destReg}] = r[${regA}] ${opNames[op].replace("OP_", "")} r[${regB}]`,
-        });
+        const a = bytecode[pc++];
+        const b = bytecode[pc++];
+        const dst = bytecode[pc++];
+        push(addr, "OP_STR_LEVENSHTEIN", `r[${a}]`, `r[${b}]`, `r[${dst}]`, `r[${dst}] = levenshtein(r[${a}], r[${b}])`);
         break;
       }
 
       case OpCode.OP_STR_CONCAT:
       case OpCode.OP_COALESCE: {
-        const opNames: Record<number, string> = {
-          [OpCode.OP_STR_CONCAT]: "OP_STR_CONCAT",
-          [OpCode.OP_COALESCE]: "OP_COALESCE",
-        };
-        const startReg = bytecode[pc++];
-        const numRegs = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: opNames[op],
-          p1: `r[${startReg}..${startReg + numRegs - 1}]`,
-          p2: `count=${numRegs}`,
-          p3: `r[${destReg}]`,
-          comment: `${opNames[op]}: r[${destReg}]`,
-        });
+        const name = op === OpCode.OP_STR_CONCAT ? "OP_STR_CONCAT" : "OP_COALESCE";
+        const start = bytecode[pc++];
+        const n = bytecode[pc++];
+        const dst = bytecode[pc++];
+        push(addr, name, `r[${start}..${start + n - 1}]`, `count=${n}`, `r[${dst}]`, `${name}: r[${dst}]`);
         break;
       }
 
       case OpCode.OP_COPY: {
-        const srcReg = bytecode[pc++];
-        const destReg = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_COPY",
-          p1: `r[${srcReg}]`,
-          p2: `r[${destReg}]`,
-          p3: "",
-          comment: `Copy r[${srcReg}] to r[${destReg}]`,
-        });
+        const src = bytecode[pc++];
+        const dst = bytecode[pc++];
+        push(addr, "OP_COPY", `r[${src}]`, `r[${dst}]`, "", `Copy r[${src}] to r[${dst}]`);
         break;
       }
 
       case OpCode.OP_SORTER_OPEN: {
-        const sorterId = bytecode[pc++];
-        const keyInfoIdx = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_SORTER_OPEN",
-          p1: `s[${sorterId}]`,
-          p2: `keyInfo=${keyInfoIdx}`,
-          p3: "",
-          comment: `Open sorter ${sorterId} with keyInfo ${keyInfoIdx}`,
-        });
+        const id = bytecode[pc++];
+        const ki = bytecode[pc++];
+        push(addr, "OP_SORTER_OPEN", `s[${id}]`, `keyInfo=${ki}`, "", `Open sorter ${id} with keyInfo ${ki}`);
         break;
       }
 
       case OpCode.OP_SORTER_INSERT: {
-        const sorterId = bytecode[pc++];
-        const startReg = bytecode[pc++];
-        const numKeys = bytecode[pc++];
-        const cursor = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_SORTER_INSERT",
-          p1: `s[${sorterId}]`,
-          p2: `r[${startReg}..+${numKeys}]`,
-          p3: `c[${cursor}]`,
-          comment: `Insert row from cursor ${cursor} into sorter ${sorterId}`,
-        });
+        const id = bytecode[pc++];
+        const start = bytecode[pc++];
+        const nKeys = bytecode[pc++];
+        const c = bytecode[pc++];
+        push(addr, "OP_SORTER_INSERT", `s[${id}]`, `r[${start}..+${nKeys}]`, `c[${c}]`, `Insert row from cursor ${c} into sorter ${id}`);
         break;
       }
 
       case OpCode.OP_SORTER_SORT: {
-        const sorterId = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_SORTER_SORT",
-          p1: `s[${sorterId}]`,
-          p2: "",
-          p3: "",
-          comment: `Sort entries in sorter ${sorterId}`,
-        });
+        const id = bytecode[pc++];
+        push(addr, "OP_SORTER_SORT", `s[${id}]`, "", "", `Sort entries in sorter ${id}`);
         break;
       }
 
       case OpCode.OP_SORTER_NEXT: {
-        const sorterId = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_SORTER_NEXT",
-          p1: `s[${sorterId}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Emit next sorted row from sorter ${sorterId}; jump to ${fmtAddr(jumpTarget)} while more rows`,
-        });
+        const id = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        push(addr, "OP_SORTER_NEXT", `s[${id}]`, tgt, "", `Emit next sorted row from sorter ${id}; jump to ${tgt} while more rows`);
         break;
       }
 
       case OpCode.OP_AGG_INIT: {
-        const aggId = bytecode[pc++];
-        const startKeyReg = bytecode[pc++];
-        const numKeys = bytecode[pc++];
+        const id = bytecode[pc++];
+        const start = bytecode[pc++];
+        const nKeys = bytecode[pc++];
         const mode = bytecode[pc++];
-        instructions.push({
-          addr,
-          opcode: "OP_AGG_INIT",
-          p1: `agg[${aggId}]`,
-          p2: `keys=r[${startKeyReg}..+${numKeys}]`,
-          p3: `mode=${mode === 0 ? "hash" : "stream"}`,
-          comment: `Initialize aggregator ${aggId} (${mode === 0 ? "hash table" : "stream"})`,
-        });
+        push(addr, "OP_AGG_INIT", `agg[${id}]`, `keys=r[${start}..+${nKeys}]`, `mode=${mode === 0 ? "hash" : "stream"}`, `Initialize aggregator ${id} (${mode === 0 ? "hash table" : "stream"})`);
         break;
       }
 
       case OpCode.OP_AGG_STEP: {
-        const aggId = bytecode[pc++];
-        const startKeyReg = bytecode[pc++];
-        const numKeys = bytecode[pc++];
+        const id = bytecode[pc++];
+        const start = bytecode[pc++];
+        const nKeys = bytecode[pc++];
         const valReg = bytecode[pc++];
-        const rawFuncId = bytecode[pc++];
-        const funcId = rawFuncId & 0x07;
-        const slotIdx = rawFuncId >> 3;
-        const funcNames = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
-        instructions.push({
-          addr,
-          opcode: "OP_AGG_STEP",
-          p1: `agg[${aggId}]`,
-          p2: `val=${valReg === 255 ? "*" : `r[${valReg}]`}`,
-          p3: funcNames[funcId] ?? `${funcId}`,
-          comment: `Update accumulator ${funcNames[funcId] ?? funcId} (slot ${slotIdx}) for group r[${startKeyReg}..+${numKeys}]`,
-        });
+        const raw = bytecode[pc++];
+        const fn = DISASM_AGG_FUNCS[raw & 0x07] ?? `${raw & 0x07}`;
+        push(addr, "OP_AGG_STEP", `agg[${id}]`, `val=${valReg === 255 ? "*" : `r[${valReg}]`}`, fn, `Update accumulator ${fn} (slot ${raw >> 3}) for group r[${start}..+${nKeys}]`);
         break;
       }
 
       case OpCode.OP_AGG_NEXT: {
-        const aggId = bytecode[pc++];
-        const outKeyReg = bytecode[pc++];
-        const outAccReg = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_AGG_NEXT",
-          p1: `agg[${aggId}]`,
-          p2: `out_keys=r[${outKeyReg}], out_acc=r[${outAccReg}]`,
-          p3: fmtAddr(jumpTarget),
-          comment: `Iterate next group bucket; jump to ${fmtAddr(jumpTarget)}`,
-        });
+        const id = bytecode[pc++];
+        const outKey = bytecode[pc++];
+        const outAcc = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        push(addr, "OP_AGG_NEXT", `agg[${id}]`, `out_keys=r[${outKey}], out_acc=r[${outAcc}]`, tgt, `Iterate next group bucket; jump to ${tgt}`);
         break;
       }
 
       case OpCode.OP_AGG_FINAL: {
         const sumReg = bytecode[pc++];
-        const countReg = bytecode[pc++];
+        const cntReg = bytecode[pc++];
         const outReg = bytecode[pc++];
-        const rawFuncId = bytecode[pc++];
-        const funcId = rawFuncId & 0x07;
-        const slotIdx = rawFuncId >> 3;
-        const funcNames = ["COUNT", "SUM", "AVG", "MIN", "MAX"];
-        instructions.push({
-          addr,
-          opcode: "OP_AGG_FINAL",
-          p1: `sum=r[${sumReg}], cnt=r[${countReg}]`,
-          p2: `r[${outReg}]`,
-          p3: funcNames[funcId] ?? `${funcId}`,
-          comment: `Finalize ${funcNames[funcId] ?? funcId} (slot ${slotIdx}) into r[${outReg}]`,
-        });
+        const raw = bytecode[pc++];
+        const fn = DISASM_AGG_FUNCS[raw & 0x07] ?? `${raw & 0x07}`;
+        push(addr, "OP_AGG_FINAL", `sum=r[${sumReg}], cnt=r[${cntReg}]`, `r[${outReg}]`, fn, `Finalize ${fn} (slot ${raw >> 3}) into r[${outReg}]`);
         break;
       }
 
-      case OpCode.OP_REG_IS_NULL: {
-        const reg = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_REG_IS_NULL",
-          p1: `r[${reg}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Jump to ${fmtAddr(jumpTarget)} if r[${reg}] is NULL`,
-        });
-        break;
-      }
-
+      case OpCode.OP_REG_IS_NULL:
       case OpCode.OP_REG_IS_NOT_NULL: {
-        const reg = bytecode[pc++];
-        const jumpTarget = view.getUint16(pc, true);
-        pc += 2;
-        instructions.push({
-          addr,
-          opcode: "OP_REG_IS_NOT_NULL",
-          p1: `r[${reg}]`,
-          p2: fmtAddr(jumpTarget),
-          p3: "",
-          comment: `Jump to ${fmtAddr(jumpTarget)} if r[${reg}] is NOT NULL`,
-        });
+        const r = bytecode[pc++];
+        const tgt = fmtAddr(u16());
+        const isNull = op === OpCode.OP_REG_IS_NULL;
+        push(addr, isNull ? "OP_REG_IS_NULL" : "OP_REG_IS_NOT_NULL", `r[${r}]`, tgt, "", `Jump to ${tgt} if r[${r}] is ${isNull ? "NULL" : "NOT NULL"}`);
         break;
       }
 
       default:
-        instructions.push({
-          addr,
-          opcode: `OP_UNKNOWN(0x${op.toString(16)})`,
-          p1: "",
-          p2: "",
-          p3: "",
-          comment: "Unknown opcode",
-        });
+        push(addr, `OP_UNKNOWN(0x${op.toString(16)})`, "", "", "", "Unknown opcode");
         break;
     }
   }

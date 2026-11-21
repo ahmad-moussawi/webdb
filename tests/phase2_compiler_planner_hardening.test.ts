@@ -989,5 +989,47 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
         .toArray();
       expect(rows2.map((r) => r.id)).toEqual([1]);
     });
+
+    it("evaluates NOT inside OR in both WHERE and HAVING (swapped patch targets)", async () => {
+      await db.createTable("items", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "grp", type: DataType.TEXT },
+        { name: "name", type: DataType.TEXT },
+        { name: "amount", type: DataType.INT32 },
+      ]);
+      await db.insert("items", { id: 1, grp: "A", name: "foobar", amount: 20 });
+      await db.insert("items", { id: 2, grp: "A", name: "baz", amount: 5 });
+      await db.insert("items", { id: 3, grp: "B", name: "foo", amount: 30 });
+      await db.insert("items", { id: 4, grp: "C", name: "qux", amount: 4 });
+      await db.insert("items", { id: 5, grp: "D", name: "foobar", amount: 50 });
+
+      // WHERE NOT (name CONTAINS 'foo') OR id = 5
+      // Should match id=2 ('baz'), id=4 ('qux'), and id=5 (id=5) — NOT drop id=2,4!
+      const whereRows = await db
+        .from("items")
+        .whereNot((q) => q.whereContains("name", "foo"))
+        .orWhere("id", "=", 5)
+        .toArray();
+      expect(whereRows.map((r) => r.id).sort((a, b) => Number(a) - Number(b))).toEqual([
+        2, 4, 5,
+      ]);
+
+      // HAVING NOT (SUM(amount) > 10) OR COUNT(*) = 1
+      // Group A: sum=25 (>10), count=2 -> excluded
+      // Group B: sum=30 (>10), count=1 -> included (count=1)
+      // Group C: sum=4 (<=10), count=1 -> included (both)
+      // Group D: sum=50 (>10), count=1 -> included (count=1)
+      // Add second row to Group C so count=2 and sum=8 (<=10), isolating the NOT(SUM > 10) branch!
+      await db.insert("items", { id: 6, grp: "C", name: "quux", amount: 4 });
+      const havingRows = await db
+        .from("items")
+        .groupBy("grp")
+        .sum("amount", "total")
+        .count("*", "cnt")
+        .havingNot("total", ">", 10)
+        .orHaving("cnt", "=", 1)
+        .toArray();
+      expect(havingRows.map((r) => r.grp).sort()).toEqual(["B", "C", "D"]);
+    });
   });
 });

@@ -546,5 +546,652 @@ describe("Bytecode Compiler & Emitter Unit Tests", () => {
       expect(assembly).toContain("OP_OPEN_CURSOR");
       expect(assembly).toContain("OP_HALT");
     });
+
+    it("exhaustively decodes all 71 supported opcode layouts with exact PC advancement and descriptor fields", () => {
+      const table = createMockTable();
+      const emitter = new BytecodeEmitter();
+      const expected: Array<{
+        addr: number;
+        opcode: string;
+        p1: string;
+        p2: string;
+        p3: string;
+        comment: string;
+      }> = [];
+      const testedOpcodes = new Set<number>();
+
+      const record = (
+        op: OpCode,
+        emitOperands: () => void,
+        desc: { opcode: string; p1: string; p2: string; p3: string; comment: string },
+      ) => {
+        const addr = emitter.currentOffset();
+        testedOpcodes.add(op);
+        emitter.emitUint8(op);
+        emitOperands();
+        expected.push({ addr, ...desc });
+      };
+
+      // 1. Cursor jump table (4 opcodes)
+      const cursorJumpCases: Array<[OpCode, string, string]> = [
+        [OpCode.OP_REWIND, "OP_REWIND", "Rewind cursor to first row; jump to 0x0123 if empty"],
+        [OpCode.OP_NEXT_ROW, "OP_NEXT_ROW", "Advance cursor to next row; jump to 0x0123 if EOF"],
+        [OpCode.OP_LAST, "OP_LAST", "Position cursor to last row; jump to 0x0123 if empty"],
+        [OpCode.OP_PREV_ROW, "OP_PREV_ROW", "Advance cursor to previous row; jump to 0x0123 if BOF"],
+      ];
+      for (const [op, name, comment] of cursorJumpCases) {
+        record(
+          op,
+          () => {
+            emitter.emitUint8(1);
+            emitter.emitUint16(0x0123);
+          },
+          { opcode: name, p1: "c[1]", p2: "0x0123", p3: "", comment },
+        );
+      }
+
+      // 2. Column read table (6 opcodes)
+      const columnCases: Array<[OpCode, string, string]> = [
+        [OpCode.OP_COLUMN_INT, "OP_COLUMN_INT", "INT"],
+        [OpCode.OP_COLUMN_FLOAT, "OP_COLUMN_FLOAT", "FLOAT"],
+        [OpCode.OP_COLUMN_TEXT, "OP_COLUMN_TEXT", "TEXT"],
+        [OpCode.OP_COLUMN_BLOB, "OP_COLUMN_BLOB", "BLOB"],
+        [OpCode.OP_COLUMN_UUID, "OP_COLUMN_UUID", "UUID"],
+        [OpCode.OP_COLUMN_ULID, "OP_COLUMN_ULID", "ULID"],
+      ];
+      for (const [op, name, kind] of columnCases) {
+        record(
+          op,
+          () => {
+            emitter.emitUint8(0);
+            emitter.emitUint8(2);
+            emitter.emitUint8(5);
+          },
+          {
+            opcode: name,
+            p1: "c[0]",
+            p2: "2 ('age')",
+            p3: "r[5]",
+            comment: `Read 'age' as ${kind} into r[5]`,
+          },
+        );
+      }
+
+      // 3. Comparison & string predicate table (12 opcodes)
+      const cmpCases: Array<[OpCode, string, string]> = [
+        [OpCode.OP_EQ, "OP_EQ", "=="],
+        [OpCode.OP_NE, "OP_NE", "!="],
+        [OpCode.OP_GT, "OP_GT", ">"],
+        [OpCode.OP_GE, "OP_GE", ">="],
+        [OpCode.OP_LT, "OP_LT", "<"],
+        [OpCode.OP_LE, "OP_LE", "<="],
+        [OpCode.OP_STR_LIKE, "OP_STR_LIKE", "LIKE"],
+        [OpCode.OP_STR_NOT_LIKE, "OP_STR_NOT_LIKE", "NOT LIKE"],
+        [OpCode.OP_STR_CONTAINS, "OP_STR_CONTAINS", "CONTAINS"],
+        [OpCode.OP_STR_STARTS_WITH, "OP_STR_STARTS_WITH", "STARTS_WITH"],
+        [OpCode.OP_STR_ENDS_WITH, "OP_STR_ENDS_WITH", "ENDS_WITH"],
+        [OpCode.OP_STR_FUZZY_MATCH, "OP_STR_FUZZY_MATCH", "FUZZY_MATCH"],
+      ];
+      for (const [op, name, sym] of cmpCases) {
+        record(
+          op,
+          () => {
+            emitter.emitUint8(3);
+            emitter.emitUint8(4);
+            emitter.emitUint16(0x00ab);
+          },
+          {
+            opcode: name,
+            p1: "r[3]",
+            p2: "r[4]",
+            p3: "0x00ab",
+            comment: `If r[3] ${sym} r[4] -> jump to 0x00ab`,
+          },
+        );
+      }
+
+      // 4. Unary register table (8 opcodes)
+      const unaryCases: Array<[OpCode, string]> = [
+        [OpCode.OP_STR_LOWER, "OP_STR_LOWER"],
+        [OpCode.OP_STR_UPPER, "OP_STR_UPPER"],
+        [OpCode.OP_STR_LENGTH, "OP_STR_LENGTH"],
+        [OpCode.OP_STR_TRIM, "OP_STR_TRIM"],
+        [OpCode.OP_MATH_ABS, "OP_MATH_ABS"],
+        [OpCode.OP_MATH_ROUND, "OP_MATH_ROUND"],
+        [OpCode.OP_MATH_FLOOR, "OP_MATH_FLOOR"],
+        [OpCode.OP_MATH_CEIL, "OP_MATH_CEIL"],
+      ];
+      for (const [op, name] of unaryCases) {
+        record(
+          op,
+          () => {
+            emitter.emitUint8(6);
+            emitter.emitUint8(7);
+          },
+          {
+            opcode: name,
+            p1: "r[6]",
+            p2: "r[7]",
+            p3: "",
+            comment: `${name}: r[7] = ${name.toLowerCase()}(r[6])`,
+          },
+        );
+      }
+
+      // 5. Binary arithmetic table (5 opcodes)
+      const arithCases: Array<[OpCode, string]> = [
+        [OpCode.OP_ADD, "OP_ADD"],
+        [OpCode.OP_SUB, "OP_SUB"],
+        [OpCode.OP_MUL, "OP_MUL"],
+        [OpCode.OP_DIV, "OP_DIV"],
+        [OpCode.OP_MOD, "OP_MOD"],
+      ];
+      for (const [op, name] of arithCases) {
+        record(
+          op,
+          () => {
+            emitter.emitUint8(8);
+            emitter.emitUint8(9);
+            emitter.emitUint8(10);
+          },
+          {
+            opcode: name,
+            p1: "r[8]",
+            p2: "r[9]",
+            p3: "r[10]",
+            comment: `${name}: r[10] = r[8] ${name.replace("OP_", "")} r[9]`,
+          },
+        );
+      }
+
+      // 6. Switch-dispatched opcodes (36 opcodes)
+      record(OpCode.OP_OPEN_CURSOR, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint32(42);
+      }, {
+        opcode: "OP_OPEN_CURSOR",
+        p1: "c[0]",
+        p2: "page=42",
+        p3: "",
+        comment: "Open cursor 0 on root page 42 ('users')",
+      });
+
+      record(OpCode.OP_OPEN_INDEX, () => {
+        emitter.emitUint8(2);
+        emitter.emitUint32(99);
+      }, {
+        opcode: "OP_OPEN_INDEX",
+        p1: "c[2]",
+        p2: "page=99",
+        p3: "",
+        comment: "Open index cursor 2 on root page 99",
+      });
+
+      record(OpCode.OP_INDEX_SEEK_EQ, () => {
+        emitter.emitUint8(2);
+        emitter.emitUint8(0);
+        emitter.emitUint8(3);
+        emitter.emitUint8(DataType.INT32);
+        emitter.emitUint16(0x0200);
+      }, {
+        opcode: "OP_INDEX_SEEK_EQ",
+        p1: "idx=c[2], data=c[0]",
+        p2: `key=r[3], type=${DataType.INT32}`,
+        p3: "0x0200",
+        comment: "Seek exact key in index; position data cursor or jump to 0x0200 if not found",
+      });
+
+      record(OpCode.OP_INDEX_SEEK_GE, () => {
+        emitter.emitUint8(2);
+        emitter.emitUint8(0);
+        emitter.emitUint8(4);
+        emitter.emitUint8(DataType.TEXT);
+        emitter.emitUint16(0x0210);
+      }, {
+        opcode: "OP_INDEX_SEEK_GE",
+        p1: "idx=c[2], data=c[0]",
+        p2: `key=r[4], type=${DataType.TEXT}`,
+        p3: "0x0210",
+        comment: "Seek first entry >= key in index; position data cursor or jump to 0x0210 if EOF",
+      });
+
+      record(OpCode.OP_INDEX_NEXT, () => {
+        emitter.emitUint8(2);
+        emitter.emitUint8(0);
+        emitter.emitUint16(0x0220);
+      }, {
+        opcode: "OP_INDEX_NEXT",
+        p1: "idx=c[2], data=c[0]",
+        p2: "0x0220",
+        p3: "",
+        comment: "Advance index cursor to next entry; jump to 0x0220 if EOF",
+      });
+
+      record(OpCode.OP_IS_NULL, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(1);
+        emitter.emitUint16(0x0230);
+      }, {
+        opcode: "OP_IS_NULL",
+        p1: "c[0]",
+        p2: "1 ('name')",
+        p3: "0x0230",
+        comment: "If 'name' IS NULL -> jump to 0x0230",
+      });
+
+      record(OpCode.OP_IS_NOT_NULL, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(1);
+        emitter.emitUint16(0x0240);
+      }, {
+        opcode: "OP_IS_NOT_NULL",
+        p1: "c[0]",
+        p2: "1 ('name')",
+        p3: "0x0240",
+        comment: "If 'name' IS NOT NULL -> jump to 0x0240",
+      });
+
+      record(OpCode.OP_JUMP, () => {
+        emitter.emitUint16(0x0250);
+      }, {
+        opcode: "OP_JUMP",
+        p1: "0x0250",
+        p2: "",
+        p3: "",
+        comment: "Unconditional jump to 0x0250",
+      });
+
+      record(OpCode.OP_IN, () => {
+        emitter.emitUint8(5);
+        emitter.emitUint16(7);
+        emitter.emitUint16(0x0260);
+      }, {
+        opcode: "OP_IN",
+        p1: "r[5]",
+        p2: "set[7]",
+        p3: "0x0260",
+        comment: "If r[5] IN set[7] -> jump to 0x0260",
+      });
+
+      record(OpCode.OP_LOAD_INT, () => {
+        emitter.emitUint8(1);
+        emitter.emitInt32(-123456);
+      }, {
+        opcode: "OP_LOAD_INT",
+        p1: "r[1]",
+        p2: "-123456",
+        p3: "",
+        comment: "Load literal int -123456 into r[1]",
+      });
+
+      record(OpCode.OP_LOAD_INT64, () => {
+        emitter.emitUint8(2);
+        emitter.emitInt64(9007199254740993n);
+      }, {
+        opcode: "OP_LOAD_INT64",
+        p1: "r[2]",
+        p2: "9007199254740993n",
+        p3: "",
+        comment: "Load literal int64 9007199254740993n into r[2]",
+      });
+
+      record(OpCode.OP_LOAD_FLOAT, () => {
+        emitter.emitUint8(3);
+        emitter.emitFloat64(3.5);
+      }, {
+        opcode: "OP_LOAD_FLOAT",
+        p1: "r[3]",
+        p2: "3.5",
+        p3: "",
+        comment: "Load literal float 3.5 into r[3]",
+      });
+
+      record(OpCode.OP_LOAD_TEXT, () => {
+        emitter.emitUint8(4);
+        emitter.emitString("hello");
+      }, {
+        opcode: "OP_LOAD_TEXT",
+        p1: "r[4]",
+        p2: '"hello"',
+        p3: "",
+        comment: 'Load literal text "hello" into r[4]',
+      });
+
+      record(OpCode.OP_LOAD_BLOB, () => {
+        emitter.emitUint8(5);
+        emitter.emitBytes(new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+      }, {
+        opcode: "OP_LOAD_BLOB",
+        p1: "r[5]",
+        p2: "len=4",
+        p3: "",
+        comment: "Load literal BLOB (4 bytes) into r[5]",
+      });
+
+      record(OpCode.OP_LOAD_NULL, () => {
+        emitter.emitUint8(6);
+      }, {
+        opcode: "OP_LOAD_NULL",
+        p1: "r[6]",
+        p2: "NULL",
+        p3: "",
+        comment: "Set r[6] to NULL",
+      });
+
+      record(OpCode.OP_EMIT_ROW, () => {
+        emitter.emitUint8(0);
+      }, {
+        opcode: "OP_EMIT_ROW",
+        p1: "c[0]",
+        p2: "",
+        p3: "",
+        comment: "Row passed all filters -> emit to Output Result Buffer",
+      });
+
+      record(OpCode.OP_RESULT_ROW, () => {
+        emitter.emitUint8(10);
+        emitter.emitUint8(3);
+      }, {
+        opcode: "OP_RESULT_ROW",
+        p1: "r[10]",
+        p2: "cols=3",
+        p3: "",
+        comment: "Serialize registers r[10..12] to Result Buffer",
+      });
+
+      record(OpCode.OP_OFFSET, () => {
+        emitter.emitUint8(11);
+        emitter.emitUint16(0x0270);
+      }, {
+        opcode: "OP_OFFSET",
+        p1: "r[11]",
+        p2: "0x0270",
+        p3: "",
+        comment: "If r[11] > 0 -> decrement and skip row to 0x0270",
+      });
+
+      record(OpCode.OP_LIMIT, () => {
+        emitter.emitUint8(12);
+        emitter.emitUint16(0x0280);
+      }, {
+        opcode: "OP_LIMIT",
+        p1: "r[12]",
+        p2: "0x0280",
+        p3: "",
+        comment: "If r[12] <= 1 -> halt to 0x0280, else decrement",
+      });
+
+      record(OpCode.OP_CALL_UDF, () => {
+        emitter.emitUint16(5);
+        emitter.emitUint8(13);
+        emitter.emitUint8(2);
+        emitter.emitUint8(15);
+      }, {
+        opcode: "OP_CALL_UDF",
+        p1: "udf#5",
+        p2: "r[13..14]",
+        p3: "r[15]",
+        comment: "Call UDF #5 with 2 args -> r[15]",
+      });
+
+      record(OpCode.OP_STR_SUBSTR, () => {
+        emitter.emitUint8(1);
+        emitter.emitUint8(2);
+        emitter.emitUint8(3);
+        emitter.emitUint8(4);
+      }, {
+        opcode: "OP_STR_SUBSTR",
+        p1: "r[1]",
+        p2: "start=r[2], len=r[3]",
+        p3: "r[4]",
+        comment: "Extract substring from r[1] into r[4]",
+      });
+
+      record(OpCode.OP_STR_LEVENSHTEIN, () => {
+        emitter.emitUint8(1);
+        emitter.emitUint8(2);
+        emitter.emitUint8(3);
+      }, {
+        opcode: "OP_STR_LEVENSHTEIN",
+        p1: "r[1]",
+        p2: "r[2]",
+        p3: "r[3]",
+        comment: "r[3] = levenshtein(r[1], r[2])",
+      });
+
+      record(OpCode.OP_STR_CONCAT, () => {
+        emitter.emitUint8(2);
+        emitter.emitUint8(3);
+        emitter.emitUint8(5);
+      }, {
+        opcode: "OP_STR_CONCAT",
+        p1: "r[2..4]",
+        p2: "count=3",
+        p3: "r[5]",
+        comment: "OP_STR_CONCAT: r[5]",
+      });
+
+      record(OpCode.OP_COALESCE, () => {
+        emitter.emitUint8(6);
+        emitter.emitUint8(2);
+        emitter.emitUint8(8);
+      }, {
+        opcode: "OP_COALESCE",
+        p1: "r[6..7]",
+        p2: "count=2",
+        p3: "r[8]",
+        comment: "OP_COALESCE: r[8]",
+      });
+
+      record(OpCode.OP_COPY, () => {
+        emitter.emitUint8(9);
+        emitter.emitUint8(10);
+      }, {
+        opcode: "OP_COPY",
+        p1: "r[9]",
+        p2: "r[10]",
+        p3: "",
+        comment: "Copy r[9] to r[10]",
+      });
+
+      record(OpCode.OP_SORTER_OPEN, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(2);
+      }, {
+        opcode: "OP_SORTER_OPEN",
+        p1: "s[0]",
+        p2: "keyInfo=2",
+        p3: "",
+        comment: "Open sorter 0 with keyInfo 2",
+      });
+
+      record(OpCode.OP_SORTER_INSERT, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(4);
+        emitter.emitUint8(2);
+        emitter.emitUint8(1);
+      }, {
+        opcode: "OP_SORTER_INSERT",
+        p1: "s[0]",
+        p2: "r[4..+2]",
+        p3: "c[1]",
+        comment: "Insert row from cursor 1 into sorter 0",
+      });
+
+      record(OpCode.OP_SORTER_SORT, () => {
+        emitter.emitUint8(0);
+      }, {
+        opcode: "OP_SORTER_SORT",
+        p1: "s[0]",
+        p2: "",
+        p3: "",
+        comment: "Sort entries in sorter 0",
+      });
+
+      record(OpCode.OP_SORTER_NEXT, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint16(0x0290);
+      }, {
+        opcode: "OP_SORTER_NEXT",
+        p1: "s[0]",
+        p2: "0x0290",
+        p3: "",
+        comment: "Emit next sorted row from sorter 0; jump to 0x0290 while more rows",
+      });
+
+      record(OpCode.OP_AGG_INIT, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(2);
+        emitter.emitUint8(1);
+        emitter.emitUint8(0);
+      }, {
+        opcode: "OP_AGG_INIT",
+        p1: "agg[0]",
+        p2: "keys=r[2..+1]",
+        p3: "mode=hash",
+        comment: "Initialize aggregator 0 (hash table)",
+      });
+
+      record(OpCode.OP_AGG_INIT, () => {
+        emitter.emitUint8(1);
+        emitter.emitUint8(3);
+        emitter.emitUint8(2);
+        emitter.emitUint8(1);
+      }, {
+        opcode: "OP_AGG_INIT",
+        p1: "agg[1]",
+        p2: "keys=r[3..+2]",
+        p3: "mode=stream",
+        comment: "Initialize aggregator 1 (stream)",
+      });
+
+      record(OpCode.OP_AGG_STEP, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(2);
+        emitter.emitUint8(1);
+        emitter.emitUint8(255);
+        emitter.emitUint8((1 << 3) | 0); // slot 1, COUNT
+      }, {
+        opcode: "OP_AGG_STEP",
+        p1: "agg[0]",
+        p2: "val=*",
+        p3: "COUNT",
+        comment: "Update accumulator COUNT (slot 1) for group r[2..+1]",
+      });
+
+      record(OpCode.OP_AGG_STEP, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(2);
+        emitter.emitUint8(1);
+        emitter.emitUint8(5);
+        emitter.emitUint8((2 << 3) | 1); // slot 2, SUM
+      }, {
+        opcode: "OP_AGG_STEP",
+        p1: "agg[0]",
+        p2: "val=r[5]",
+        p3: "SUM",
+        comment: "Update accumulator SUM (slot 2) for group r[2..+1]",
+      });
+
+      record(OpCode.OP_AGG_NEXT, () => {
+        emitter.emitUint8(0);
+        emitter.emitUint8(10);
+        emitter.emitUint8(12);
+        emitter.emitUint16(0x02a0);
+      }, {
+        opcode: "OP_AGG_NEXT",
+        p1: "agg[0]",
+        p2: "out_keys=r[10], out_acc=r[12]",
+        p3: "0x02a0",
+        comment: "Iterate next group bucket; jump to 0x02a0",
+      });
+
+      record(OpCode.OP_AGG_FINAL, () => {
+        emitter.emitUint8(12);
+        emitter.emitUint8(13);
+        emitter.emitUint8(14);
+        emitter.emitUint8((3 << 3) | 2); // slot 3, AVG
+      }, {
+        opcode: "OP_AGG_FINAL",
+        p1: "sum=r[12], cnt=r[13]",
+        p2: "r[14]",
+        p3: "AVG",
+        comment: "Finalize AVG (slot 3) into r[14]",
+      });
+
+      record(OpCode.OP_REG_IS_NULL, () => {
+        emitter.emitUint8(14);
+        emitter.emitUint16(0x02b0);
+      }, {
+        opcode: "OP_REG_IS_NULL",
+        p1: "r[14]",
+        p2: "0x02b0",
+        p3: "",
+        comment: "Jump to 0x02b0 if r[14] is NULL",
+      });
+
+      record(OpCode.OP_REG_IS_NOT_NULL, () => {
+        emitter.emitUint8(15);
+        emitter.emitUint16(0x02c0);
+      }, {
+        opcode: "OP_REG_IS_NOT_NULL",
+        p1: "r[15]",
+        p2: "0x02c0",
+        p3: "",
+        comment: "Jump to 0x02c0 if r[15] is NOT NULL",
+      });
+
+      // Trailing sentinel: catches any PC drift from preceding instructions
+      record(OpCode.OP_HALT, () => {}, {
+        opcode: "OP_HALT",
+        p1: "",
+        p2: "",
+        p3: "",
+        comment: "Halt VM execution (STATUS_DONE)",
+      });
+
+      // Guard against newly added opcodes silently missing disassembler coverage
+      const unimplementedOpcodes = new Set<number>([
+        OpCode.OP_ENTER_SUBQUERY,
+        OpCode.OP_RETURN_SUBQUERY,
+        OpCode.OP_DELETE_ROW,
+        OpCode.OP_UPDATE_FIELD,
+        OpCode.OP_INSERT_ROW,
+      ]);
+      const allNumericOpcodes = Object.values(OpCode).filter(
+        (v): v is number => typeof v === "number",
+      );
+      expect(testedOpcodes.size).toBe(71);
+      for (const op of allNumericOpcodes) {
+        expect(
+          testedOpcodes.has(op) || unimplementedOpcodes.has(op),
+          `OpCode 0x${op.toString(16)} is missing from exhaustive disassembler test`,
+        ).toBe(true);
+      }
+
+      const decoded = disassembleBytecode(emitter.toByteArray(), table);
+      expect(decoded).toEqual(expected);
+
+      // Verify unknown opcode fallback advances PC by 1 and doesn't corrupt trailing instructions
+      const unknownBytes = new Uint8Array([0xff, OpCode.OP_HALT]);
+      expect(disassembleBytecode(unknownBytes)).toEqual([
+        {
+          addr: 0,
+          opcode: "OP_UNKNOWN(0xff)",
+          p1: "",
+          p2: "",
+          p3: "",
+          comment: "Unknown opcode",
+        },
+        {
+          addr: 1,
+          opcode: "OP_HALT",
+          p1: "",
+          p2: "",
+          p3: "",
+          comment: "Halt VM execution (STATUS_DONE)",
+        },
+      ]);
+    });
   });
 });
