@@ -203,6 +203,11 @@ export function catalog_read_page1_header(
   }
 
   const page_size = view.getUint16(HEADER_OFFSET_PAGE_SIZE, true);
+  if (page_size !== PAGE_SIZE) {
+    throw new InvalidDatabaseError(
+      `Invalid database file: unsupported page size ${page_size} (expected ${PAGE_SIZE})`,
+    );
+  }
   const file_format_version = view.getUint16(
     HEADER_OFFSET_FILE_FORMAT_VERSION,
     true,
@@ -482,7 +487,10 @@ export function catalog_get_table_slot_capacity(
 ): number {
   let total = MAX_TABLES_PAGE1;
   let page_id = page1_view.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true);
+  const visited = new Set<number>();
   while (page_id !== 0) {
+    if (visited.has(page_id)) break;
+    visited.add(page_id);
     const pv = catalog_resolve_page_view(page1_view, page_id, pager);
     if (!pv) break;
     total += MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
@@ -794,7 +802,10 @@ export function catalog_get_index_slot_capacity(
     HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
     true,
   );
+  const visited = new Set<number>();
   while (page_id !== 0) {
+    if (visited.has(page_id)) break;
+    visited.add(page_id);
     const pv = catalog_resolve_page_view(page1_view, page_id, pager);
     if (!pv) break;
     total += MAX_DESCRIPTORS_PER_OVERFLOW_PAGE;
@@ -1525,11 +1536,29 @@ export function catalog_load_table_meta(
 
   let current_cat_page_id = desc.colCatalogPageId;
   let loaded_count = 0;
+  const visited_cat_pages = new Set<number>();
 
   while (current_cat_page_id !== 0 && loaded_count < desc.columnCount) {
+    if (visited_cat_pages.has(current_cat_page_id)) {
+      throw new CorruptPageError(
+        current_cat_page_id,
+        `Cycle detected in column catalog chain for table "${table_name}"`,
+      );
+    }
+    visited_cat_pages.add(current_cat_page_id);
     const page_bytes = pager.getPageBytes(current_cat_page_id);
-    const view = new DataView(page_bytes.buffer, page_bytes.byteOffset);
+    const view = new DataView(
+      page_bytes.buffer,
+      page_bytes.byteOffset,
+      Math.min(page_bytes.byteLength, PAGE_SIZE),
+    );
     const header = catalog_read_page_header(view, 0);
+    if (header.colCountInPage > MAX_COLUMNS_PER_CATALOG_PAGE) {
+      throw new CorruptPageError(
+        current_cat_page_id,
+        `Invalid column count ${header.colCountInPage} in catalog page (max ${MAX_COLUMNS_PER_CATALOG_PAGE})`,
+      );
+    }
 
     for (let i = 0; i < header.colCountInPage; i++) {
       const col = catalog_read_column_meta(view, 0, i);

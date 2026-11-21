@@ -338,6 +338,7 @@ typedef enum {
 
   OP_STR_FUZZY_MATCH    = 0x44,
   OP_STR_LEVENSHTEIN    = 0x45,
+  OP_LOAD_INT64         = 0x46,
 
   OP_REG_IS_NULL        = 0x48,
   OP_REG_IS_NOT_NULL    = 0x49,

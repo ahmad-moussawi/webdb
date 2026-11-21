@@ -69,13 +69,16 @@ export function tokenize(value: unknown, locale: string = 'en'): string[] {
  * E.g., `ngrams("webdb", 3)` -> `["web", "ebd", "bdb"]`.
  * If `pad` is true, pads start and end with boundary markers `^` and `$`.
  */
+const MAX_NGRAM_SIZE = 64;
+
 export function ngrams(
   value: unknown,
   n: number = 3,
   options?: { pad?: boolean; locale?: string }
 ): string[] {
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_NGRAM_SIZE) return [];
   const norm = normalizeText(value);
-  if (!norm || n <= 0) return [];
+  if (!norm) return [];
 
   const tokens = tokenize(norm, options?.locale);
   const result: string[] = [];
@@ -108,6 +111,7 @@ export function wordNgrams(
   n: number = 2,
   options?: { locale?: string }
 ): string[] {
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_NGRAM_SIZE) return [];
   const tokens = tokenize(value, options?.locale);
   if (tokens.length < n) return tokens.length > 0 ? [tokens.join(' ')] : [];
 
@@ -166,56 +170,86 @@ export function damerauLevenshtein(
   maxDistance: number = Infinity
 ): number {
   if (a === b) return 0;
+  if (maxDistance < 0) return maxDistance + 1;
+  // Swap so `b` is the shorter string -> O(min(|a|, |b|)) memory
+  if (a.length < b.length) {
+    const tmp = a;
+    a = b;
+    b = tmp;
+  }
   const la = a.length;
   const lb = b.length;
-  if (Math.abs(la - lb) > maxDistance) return maxDistance + 1;
-  if (la === 0) return lb <= maxDistance ? lb : maxDistance + 1;
+  if (la - lb > maxDistance) return maxDistance + 1;
   if (lb === 0) return la <= maxDistance ? la : maxDistance + 1;
 
-  const d: number[][] = [];
-  for (let i = 0; i <= la; i++) {
-    d[i] = new Array(lb + 1);
-    d[i][0] = i;
-  }
+  const isBounded = Number.isFinite(maxDistance);
+  const bound = isBounded ? Math.floor(maxDistance) : la;
+  const INF = bound + 1;
+
+  // Three rolling 1D Int32Array rows (O(min(|a|, |b|)) space) + Ukkonen diagonal band
+  let prevPrev = new Int32Array(lb + 1);
+  let prev = new Int32Array(lb + 1);
+  let curr = new Int32Array(lb + 1);
+
+  prevPrev.fill(INF);
   for (let j = 0; j <= lb; j++) {
-    d[0][j] = j;
+    prev[j] = j <= bound ? j : INF;
   }
 
   for (let i = 1; i <= la; i++) {
-    let rowMin = d[i][0];
-    const ai = a[i - 1];
+    const jStart = isBounded ? Math.max(1, i - bound) : 1;
+    const jEnd = isBounded ? Math.min(lb, i + bound) : lb;
 
-    for (let j = 1; j <= lb; j++) {
-      const cost = ai === b[j - 1] ? 0 : 1;
-      let minVal = Math.min(
-        d[i - 1][j] + 1, // deletion
-        d[i][j - 1] + 1, // insertion
-        d[i - 1][j - 1] + cost // substitution
-      );
+    curr[0] = i <= bound ? i : INF;
+    if (jStart > 1) {
+      curr[jStart - 1] = INF;
+    }
+    if (jEnd < lb) {
+      curr[jEnd + 1] = INF;
+    }
 
-      // Transposition
+    let rowMin = jStart === 1 ? curr[0] : INF;
+    const ai = a.charCodeAt(i - 1);
+    const aiPrev = i > 1 ? a.charCodeAt(i - 2) : -1;
+
+    for (let j = jStart; j <= jEnd; j++) {
+      const bj = b.charCodeAt(j - 1);
+      const cost = ai === bj ? 0 : 1;
+      let minVal = prev[j] + 1; // deletion
+      const insVal = curr[j - 1] + 1; // insertion
+      if (insVal < minVal) minVal = insVal;
+      const subVal = prev[j - 1] + cost; // substitution
+      if (subVal < minVal) minVal = subVal;
+
+      // Adjacent transposition
       if (
         i > 1 &&
         j > 1 &&
-        ai === b[j - 2] &&
-        a[i - 2] === b[j - 1]
+        ai === b.charCodeAt(j - 2) &&
+        aiPrev === bj
       ) {
-        const transVal = d[i - 2][j - 2] + 1;
+        const transVal = prevPrev[j - 2] + 1;
         if (transVal < minVal) {
           minVal = transVal;
         }
       }
 
-      d[i][j] = minVal;
+      curr[j] = minVal;
       if (minVal < rowMin) rowMin = minVal;
     }
 
-    if (rowMin > maxDistance) {
+    if (isBounded && rowMin > bound) {
       return maxDistance + 1;
     }
+
+    const tmp = prevPrev;
+    prevPrev = prev;
+    prev = curr;
+    curr = tmp;
   }
 
-  return d[la][lb];
+  const dist = prev[lb];
+  return isBounded && dist > bound ? maxDistance + 1 : dist;
 }
 
 /**
@@ -945,8 +979,12 @@ export function computeBM25ScoreRow(
     }
 
     if (tf > 0) {
-      const df = docFreqs[qt] ?? 1;
-      const idf = Math.log(1 + (totalDocs - df + 0.5) / (df + 0.5));
+      const rawDf = Object.hasOwn(docFreqs, qt) ? docFreqs[qt] : undefined;
+      const df =
+        typeof rawDf === 'number' && Number.isFinite(rawDf) && rawDf >= 0
+          ? rawDf
+          : 1;
+      const idf = Math.log(1 + Math.max(0, totalDocs - df + 0.5) / (df + 0.5));
       const num = tf * (k1 + 1);
       const denom = tf + k1 * (1 - b + b * (docLen / avgdl));
       totalScore += idf * (num / denom);
@@ -1422,8 +1460,21 @@ export class SearchIndex<T extends Record<string, unknown> = Record<string, unkn
     const qb = this.buildQuery(queryString, options);
     const rows = (await qb.toArray()) as Record<string, any>[];
 
+    const setSafeProp = (obj: Record<string, any>, key: string, value: any) => {
+      if (key === '__proto__') {
+        Object.defineProperty(obj, key, {
+          value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        obj[key] = value;
+      }
+    };
+
     const hits: SearchHit<T>[] = rows.map((r) => {
-      const id = r[this.idField];
+      const id = Object.hasOwn(r, this.idField) ? r[this.idField] : undefined;
       const score = Number(r._search_score ?? 0);
       const highlights: Record<string, string> = {};
       const snippets: Record<string, string> = {};
@@ -1431,13 +1482,13 @@ export class SearchIndex<T extends Record<string, unknown> = Record<string, unkn
 
       for (const [k, v] of Object.entries(r)) {
         if (k.startsWith('_search_hl_')) {
-          highlights[k.slice('_search_hl_'.length)] = String(v ?? '');
+          setSafeProp(highlights, k.slice('_search_hl_'.length), String(v ?? ''));
         } else if (k.startsWith('_search_snip_')) {
-          snippets[k.slice('_search_snip_'.length)] = String(v ?? '');
+          setSafeProp(snippets, k.slice('_search_snip_'.length), String(v ?? ''));
         } else if (k === '_search_score') {
           // Internal score field
         } else {
-          cleanRow[k] = v;
+          setSafeProp(cleanRow, k, v);
         }
       }
 

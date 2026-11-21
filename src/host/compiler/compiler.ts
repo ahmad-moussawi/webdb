@@ -152,9 +152,50 @@ export interface QueryPlan {
   sortCostAvoided?: number;
 }
 
+const SHARED_TEXT_ENCODER = new TextEncoder();
+const SCRATCH_8_BUF = new ArrayBuffer(8);
+const SCRATCH_8_VIEW = new DataView(SCRATCH_8_BUF);
+const SCRATCH_8_U8 = new Uint8Array(SCRATCH_8_BUF);
+
+const MAX_FILTER_DEPTH = 64;
+const NORMALIZED_FILTER_CACHE = new WeakMap<QueryFilter, QueryFilter>();
+
+const INVERSE_OPS = new Map<string, ComparisonOp>([
+  ["=", "!="],
+  ["==", "!="],
+  ["!=", "="],
+  ["<>", "="],
+  [">", "<="],
+  [">=", "<"],
+  ["<", ">="],
+  ["<=", ">"],
+  ["like", "not like"],
+  ["not like", "like"],
+]);
+
+const UNARY_OPS = new Map<string, OpCode>([
+  ["upper", OpCode.OP_STR_UPPER],
+  ["lower", OpCode.OP_STR_LOWER],
+  ["length", OpCode.OP_STR_LENGTH],
+  ["trim", OpCode.OP_STR_TRIM],
+  ["abs", OpCode.OP_MATH_ABS],
+  ["round", OpCode.OP_MATH_ROUND],
+  ["floor", OpCode.OP_MATH_FLOOR],
+  ["ceil", OpCode.OP_MATH_CEIL],
+]);
+
+const PATTERN_OPS = new Map<string, OpCode>([
+  ["starts_with", OpCode.OP_STR_STARTS_WITH],
+  ["startswith", OpCode.OP_STR_STARTS_WITH],
+  ["ends_with", OpCode.OP_STR_ENDS_WITH],
+  ["endswith", OpCode.OP_STR_ENDS_WITH],
+  ["like", OpCode.OP_STR_LIKE],
+  ["contains", OpCode.OP_STR_CONTAINS],
+  ["fuzzy", OpCode.OP_STR_FUZZY_MATCH],
+]);
+
 export class BytecodeEmitter {
   private buffer: number[] = [];
-  private textEncoder = new TextEncoder();
 
   emitUint8(val: number): number {
     const pos = this.buffer.length;
@@ -163,6 +204,11 @@ export class BytecodeEmitter {
   }
 
   emitUint16(val: number): number {
+    if (val < 0 || val > 0xffff) {
+      throw new RangeError(
+        `Bytecode uint16 operand out of range: ${val} (must be 0..65535)`,
+      );
+    }
     const pos = this.buffer.length;
     this.buffer.push(val & 0xff);
     this.buffer.push((val >> 8) & 0xff);
@@ -182,19 +228,26 @@ export class BytecodeEmitter {
     return this.emitUint32(val);
   }
 
+  emitInt64(val: bigint): number {
+    const pos = this.buffer.length;
+    SCRATCH_8_VIEW.setBigInt64(0, val, true);
+    for (let i = 0; i < 8; i++) {
+      this.buffer.push(SCRATCH_8_U8[i]);
+    }
+    return pos;
+  }
+
   emitFloat64(val: number): number {
     const pos = this.buffer.length;
-    const buf = new ArrayBuffer(8);
-    new DataView(buf).setFloat64(0, val, true);
-    const u8 = new Uint8Array(buf);
+    SCRATCH_8_VIEW.setFloat64(0, val, true);
     for (let i = 0; i < 8; i++) {
-      this.buffer.push(u8[i]);
+      this.buffer.push(SCRATCH_8_U8[i]);
     }
     return pos;
   }
 
   emitString(str: string): number {
-    const bytes = this.textEncoder.encode(str);
+    const bytes = SHARED_TEXT_ENCODER.encode(str);
     const pos = this.emitUint16(bytes.byteLength);
     for (let i = 0; i < bytes.byteLength; i++) {
       this.buffer.push(bytes[i]);
@@ -211,6 +264,11 @@ export class BytecodeEmitter {
   }
 
   patchUint16(pos: number, val: number): void {
+    if (val < 0 || val > 0xffff) {
+      throw new RangeError(
+        `Bytecode jump target out of range: ${val} (must be 0..65535)`,
+      );
+    }
     this.buffer[pos] = val & 0xff;
     this.buffer[pos + 1] = (val >> 8) & 0xff;
   }
@@ -264,20 +322,45 @@ function emitReadColumn(
   }
 }
 
-export function normalizeFilter(filter: QueryFilter): QueryFilter {
+function cacheNormalizedFilter(
+  input: QueryFilter,
+  output: QueryFilter,
+): QueryFilter {
+  NORMALIZED_FILTER_CACHE.set(input, output);
+  if (output !== input) {
+    NORMALIZED_FILTER_CACHE.set(output, output);
+  }
+  return output;
+}
+
+export function normalizeFilter(
+  filter: QueryFilter,
+  depth: number = 0,
+): QueryFilter {
+  if (depth > MAX_FILTER_DEPTH) {
+    throw new RangeError(
+      `Filter nesting depth exceeds maximum limit of ${MAX_FILTER_DEPTH}`,
+    );
+  }
+  const cached = NORMALIZED_FILTER_CACHE.get(filter);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   if (filter.type === "in") {
     if (filter.values && filter.values.length > MAX_IN_LIST_SIZE) {
       throw new RangeError(
         `WebDB: whereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
       );
     }
-    return {
+    const normalized: QueryFilter = {
       type: "in",
       colName: filter.colName,
       expr: filter.expr,
       values: filter.values ? Array.from(new Set(filter.values)) : [],
       notIn: !!filter.notIn,
     };
+    return cacheNormalizedFilter(filter, normalized);
   }
 
   if (filter.type === "cmp") {
@@ -289,132 +372,155 @@ export function normalizeFilter(filter: QueryFilter): QueryFilter {
           `WebDB: whereIn list exceeds maximum limit of ${MAX_IN_LIST_SIZE} elements`,
         );
       }
-      return {
+      const normalized: QueryFilter = {
         type: "in",
         colName: filter.colName,
         expr: filter.expr,
         values: Array.from(new Set(arr)),
         notIn: opNorm === "not in",
       };
+      return cacheNormalizedFilter(filter, normalized);
     }
   }
 
-  if (filter.type === "and") {
-    return {
-      type: "and",
-      children: filter.children ? filter.children.map(normalizeFilter) : [],
+  if (filter.type === "and" || filter.type === "or") {
+    const origChildren = filter.children ?? [];
+    let changed = !filter.children;
+    const newChildren: QueryFilter[] = new Array(origChildren.length);
+    for (let i = 0; i < origChildren.length; i++) {
+      const c = normalizeFilter(origChildren[i], depth + 1);
+      newChildren[i] = c;
+      if (c !== origChildren[i]) {
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return cacheNormalizedFilter(filter, filter);
+    }
+    const normalized: QueryFilter = {
+      type: filter.type,
+      children: newChildren,
     };
-  }
-
-  if (filter.type === "or") {
-    return {
-      type: "or",
-      children: filter.children ? filter.children.map(normalizeFilter) : [],
-    };
+    return cacheNormalizedFilter(filter, normalized);
   }
 
   if (filter.type === "not") {
     const child = filter.child;
-    if (!child) return filter;
+    if (!child) {
+      return cacheNormalizedFilter(filter, filter);
+    }
 
     // Double negation: NOT (NOT x) => x
     if (child.type === "not" && child.child) {
-      return normalizeFilter(child.child);
+      return cacheNormalizedFilter(filter, normalizeFilter(child.child, depth + 1));
     }
 
     // NOT (x IN (A)) => x NOT IN (A)
     // NOT (x NOT IN (A)) => x IN (A)
     if (child.type === "in") {
-      return {
-        type: "in",
-        colName: child.colName,
-        expr: child.expr,
-        values: child.values,
-        notIn: !child.notIn,
-      };
+      return cacheNormalizedFilter(
+        filter,
+        normalizeFilter(
+          {
+            type: "in",
+            colName: child.colName,
+            expr: child.expr,
+            values: child.values,
+            notIn: !child.notIn,
+          },
+          depth + 1,
+        ),
+      );
     }
 
     // De Morgan: NOT (A AND B) => (NOT A) OR (NOT B)
     if (child.type === "and") {
-      return {
+      const normalized: QueryFilter = {
         type: "or",
         children: child.children
           ? child.children.map((c) =>
-              normalizeFilter({ type: "not", child: c }),
+              normalizeFilter({ type: "not", child: c }, depth + 1),
             )
           : [],
       };
+      return cacheNormalizedFilter(filter, normalized);
     }
 
     // De Morgan: NOT (A OR B) => (NOT A) AND (NOT B)
     if (child.type === "or") {
-      return {
+      const normalized: QueryFilter = {
         type: "and",
         children: child.children
           ? child.children.map((c) =>
-              normalizeFilter({ type: "not", child: c }),
+              normalizeFilter({ type: "not", child: c }, depth + 1),
             )
           : [],
       };
+      return cacheNormalizedFilter(filter, normalized);
     }
 
     // NOT (col IS NULL) => col IS NOT NULL
     // NOT (col IS NOT NULL) => col IS NULL
     if (child.type === "null") {
-      return {
+      const normalized: QueryFilter = {
         type: "null",
         colName: child.colName,
         expr: child.expr,
         isNull: !child.isNull,
       };
+      return cacheNormalizedFilter(filter, normalized);
     }
 
     // NOT (cmp)
     if (child.type === "cmp") {
       const opNorm = child.op ? String(child.op).trim().toLowerCase() : "";
       if (opNorm === "in" || opNorm === "not in") {
-        return normalizeFilter({
-          type: "in",
-          colName: child.colName,
-          expr: child.expr,
-          values: Array.isArray(child.value) ? child.value : [child.value],
-          notIn: opNorm === "in", // inverted
-        });
+        return cacheNormalizedFilter(
+          filter,
+          normalizeFilter(
+            {
+              type: "in",
+              colName: child.colName,
+              expr: child.expr,
+              values: Array.isArray(child.value) ? child.value : [child.value],
+              notIn: opNorm === "in", // inverted
+            },
+            depth + 1,
+          ),
+        );
       }
 
-      const inverseOps: Record<string, ComparisonOp> = {
-        "=": "!=",
-        "!=": "=",
-        ">": "<=",
-        ">=": "<",
-        "<": ">=",
-        "<=": ">",
-        like: "not like",
-        "not like": "like",
-      };
-
-      if (child.op && inverseOps[child.op]) {
-        return {
+      const inverseOp = INVERSE_OPS.get(opNorm);
+      if (inverseOp) {
+        const normalized: QueryFilter = {
           type: "cmp",
           colName: child.colName,
-          op: inverseOps[child.op],
+          expr: child.expr,
+          op: inverseOp,
           value: child.value,
         };
+        return cacheNormalizedFilter(filter, normalized);
       }
 
       // For CONTAINS, STARTS_WITH, ENDS_WITH:
       // In 3VL: NOT(col CONTAINS val) requires col IS NOT NULL AND NOT(col CONTAINS val)
-      return {
+      const normalized: QueryFilter = {
         type: "and",
         children: [
-          { type: "null", colName: child.colName, isNull: false },
+          {
+            type: "null",
+            colName: child.colName,
+            expr: child.expr,
+            isNull: false,
+          },
           { type: "not", child },
         ],
       };
+      return cacheNormalizedFilter(filter, normalized);
     }
   }
 
-  return filter;
+  return cacheNormalizedFilter(filter, filter);
 }
 
 export function buildRootFilter(filters: QueryFilter[]): QueryFilter | null {
@@ -533,12 +639,14 @@ function emitLeafJumpOnTrue(
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
+  scratchBaseReg: number = 50,
+  nullCursorThreshold?: number,
 ): void {
   const all = tables ?? [table];
   if (filter.type === "expr") {
     const regRes = leafIdx * 2;
     const regOne = leafIdx * 2 + 1;
-    let tempReg = 50;
+    let tempReg = scratchBaseReg;
     const allocReg = () => {
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
@@ -553,6 +661,7 @@ function emitLeafJumpOnTrue(
       udfNameMap,
       undefined,
       all,
+      nullCursorThreshold,
     );
     emitter.emitUint8(OpCode.OP_LOAD_INT);
     emitter.emitUint8(regOne);
@@ -568,7 +677,7 @@ function emitLeafJumpOnTrue(
   if (filter.type === "null") {
     if (filter.expr) {
       const regCol = leafIdx * 2;
-      let tempReg = 50;
+      let tempReg = scratchBaseReg;
       const allocReg = () => {
         if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
         return tempReg++;
@@ -583,6 +692,7 @@ function emitLeafJumpOnTrue(
         udfNameMap,
         undefined,
         all,
+        nullCursorThreshold,
       );
       if (filter.isNull) {
         emitter.emitUint8(OpCode.OP_REG_IS_NULL);
@@ -599,6 +709,16 @@ function emitLeafJumpOnTrue(
     const resolved = resolveColumnAcrossTables(filter.colName, all);
     if (!resolved) {
       throw new Error(`Column "${filter.colName}" not found in tables`);
+    }
+    if (
+      nullCursorThreshold !== undefined &&
+      resolved.tableIdx >= nullCursorThreshold
+    ) {
+      if (filter.isNull) {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        truePatches.push(emitter.emitUint16(0));
+      }
+      return;
     }
     if (filter.isNull) {
       emitter.emitUint8(OpCode.OP_IS_NULL);
@@ -622,7 +742,7 @@ function emitLeafJumpOnTrue(
 
     const regCol = leafIdx * 2;
     if (filter.expr) {
-      let tempReg = 50;
+      let tempReg = scratchBaseReg;
       const allocReg = () => {
         if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
         return tempReg++;
@@ -637,6 +757,7 @@ function emitLeafJumpOnTrue(
         udfNameMap,
         undefined,
         all,
+        nullCursorThreshold,
       );
     } else {
       if (!filter.colName) {
@@ -644,6 +765,13 @@ function emitLeafJumpOnTrue(
       }
       const resolved = resolveColumnAcrossTables(filter.colName, all);
       if (resolved) {
+        if (
+          nullCursorThreshold !== undefined &&
+          resolved.tableIdx >= nullCursorThreshold
+        ) {
+          // NULL IN (...) and NULL NOT IN (...) are both UNKNOWN/false in SQL 3VL
+          return;
+        }
         emitReadColumn(
           emitter,
           resolved.cursor,
@@ -654,7 +782,7 @@ function emitLeafJumpOnTrue(
       } else {
         try {
           const parsed = parseExpression(filter.colName);
-          let tempReg = 50;
+          let tempReg = scratchBaseReg;
           const allocReg = () => {
             if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
             return tempReg++;
@@ -669,6 +797,7 @@ function emitLeafJumpOnTrue(
             udfNameMap,
             undefined,
             all,
+            nullCursorThreshold,
           );
         } catch {
           throw new Error(`Column "${filter.colName}" not found in tables`);
@@ -692,6 +821,10 @@ function emitLeafJumpOnTrue(
           emitter.emitUint8(resolved.colIdx);
           nullSkipPatch = emitter.emitUint16(0);
         }
+      } else if (filter.expr) {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+        emitter.emitUint8(regCol);
+        nullSkipPatch = emitter.emitUint16(0);
       }
 
       emitter.emitUint8(OpCode.OP_IN);
@@ -715,7 +848,7 @@ function emitLeafJumpOnTrue(
   const regConst = leafIdx * 2 + 1;
 
   if (filter.expr) {
-    let tempReg = 50;
+    let tempReg = scratchBaseReg;
     const allocReg = () => {
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
@@ -730,6 +863,7 @@ function emitLeafJumpOnTrue(
       udfNameMap,
       undefined,
       all,
+      nullCursorThreshold,
     );
   } else {
     if (!filter.colName) {
@@ -737,17 +871,25 @@ function emitLeafJumpOnTrue(
     }
     const resolved = resolveColumnAcrossTables(filter.colName, all);
     if (resolved) {
-      emitReadColumn(
-        emitter,
-        resolved.cursor,
-        resolved.colIdx,
-        regCol,
-        resolved.col.type,
-      );
+      if (
+        nullCursorThreshold !== undefined &&
+        resolved.tableIdx >= nullCursorThreshold
+      ) {
+        emitter.emitUint8(OpCode.OP_LOAD_NULL);
+        emitter.emitUint8(regCol);
+      } else {
+        emitReadColumn(
+          emitter,
+          resolved.cursor,
+          resolved.colIdx,
+          regCol,
+          resolved.col.type,
+        );
+      }
     } else {
       try {
         const parsed = parseExpression(filter.colName);
-        let tempReg = 50;
+        let tempReg = scratchBaseReg;
         const allocReg = () => {
           if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
           return tempReg++;
@@ -762,6 +904,7 @@ function emitLeafJumpOnTrue(
           udfNameMap,
           undefined,
           all,
+          nullCursorThreshold,
         );
       } catch {
         throw new Error(`Column "${filter.colName}" not found in tables`);
@@ -786,12 +929,14 @@ function emitLeafJumpOnFalse(
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
+  scratchBaseReg: number = 50,
+  nullCursorThreshold?: number,
 ): void {
   const all = tables ?? [table];
   if (filter.type === "expr") {
     const regRes = leafIdx * 2;
     const regOne = leafIdx * 2 + 1;
-    let tempReg = 50;
+    let tempReg = scratchBaseReg;
     const allocReg = () => {
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
@@ -806,6 +951,7 @@ function emitLeafJumpOnFalse(
       udfNameMap,
       undefined,
       all,
+      nullCursorThreshold,
     );
     emitter.emitUint8(OpCode.OP_LOAD_INT);
     emitter.emitUint8(regOne);
@@ -826,7 +972,7 @@ function emitLeafJumpOnFalse(
   if (filter.type === "null") {
     if (filter.expr) {
       const regCol = leafIdx * 2;
-      let tempReg = 50;
+      let tempReg = scratchBaseReg;
       const allocReg = () => {
         if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
         return tempReg++;
@@ -841,6 +987,7 @@ function emitLeafJumpOnFalse(
         udfNameMap,
         undefined,
         all,
+        nullCursorThreshold,
       );
       if (filter.isNull) {
         emitter.emitUint8(OpCode.OP_REG_IS_NOT_NULL);
@@ -857,6 +1004,16 @@ function emitLeafJumpOnFalse(
     const resolved = resolveColumnAcrossTables(filter.colName, all);
     if (!resolved) {
       throw new Error(`Column "${filter.colName}" not found in tables`);
+    }
+    if (
+      nullCursorThreshold !== undefined &&
+      resolved.tableIdx >= nullCursorThreshold
+    ) {
+      if (!filter.isNull) {
+        emitter.emitUint8(OpCode.OP_JUMP);
+        falsePatches.push(emitter.emitUint16(0));
+      }
+      return;
     }
     if (filter.isNull) {
       emitter.emitUint8(OpCode.OP_IS_NOT_NULL);
@@ -880,7 +1037,7 @@ function emitLeafJumpOnFalse(
 
     const regCol = leafIdx * 2;
     if (filter.expr) {
-      let tempReg = 50;
+      let tempReg = scratchBaseReg;
       const allocReg = () => {
         if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
         return tempReg++;
@@ -895,6 +1052,7 @@ function emitLeafJumpOnFalse(
         udfNameMap,
         undefined,
         all,
+        nullCursorThreshold,
       );
     } else {
       if (!filter.colName) {
@@ -902,6 +1060,15 @@ function emitLeafJumpOnFalse(
       }
       const resolved = resolveColumnAcrossTables(filter.colName, all);
       if (resolved) {
+        if (
+          nullCursorThreshold !== undefined &&
+          resolved.tableIdx >= nullCursorThreshold
+        ) {
+          // NULL IN (...) and NULL NOT IN (...) are both UNKNOWN/false in SQL 3VL
+          emitter.emitUint8(OpCode.OP_JUMP);
+          falsePatches.push(emitter.emitUint16(0));
+          return;
+        }
         emitReadColumn(
           emitter,
           resolved.cursor,
@@ -912,7 +1079,7 @@ function emitLeafJumpOnFalse(
       } else {
         try {
           const parsed = parseExpression(filter.colName);
-          let tempReg = 50;
+          let tempReg = scratchBaseReg;
           const allocReg = () => {
             if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
             return tempReg++;
@@ -927,6 +1094,7 @@ function emitLeafJumpOnFalse(
             udfNameMap,
             undefined,
             all,
+            nullCursorThreshold,
           );
         } catch {
           throw new Error(`Column "${filter.colName}" not found in tables`);
@@ -944,6 +1112,10 @@ function emitLeafJumpOnFalse(
           emitter.emitUint8(resolved.colIdx);
           falsePatches.push(emitter.emitUint16(0));
         }
+      } else if (filter.expr) {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+        emitter.emitUint8(regCol);
+        falsePatches.push(emitter.emitUint16(0));
       }
 
       emitter.emitUint8(OpCode.OP_IN);
@@ -965,6 +1137,10 @@ function emitLeafJumpOnFalse(
           emitter.emitUint8(resolved.colIdx);
           falsePatches.push(emitter.emitUint16(0));
         }
+      } else if (filter.expr) {
+        emitter.emitUint8(OpCode.OP_REG_IS_NULL);
+        emitter.emitUint8(regCol);
+        falsePatches.push(emitter.emitUint16(0));
       }
 
       emitter.emitUint8(OpCode.OP_IN);
@@ -979,7 +1155,7 @@ function emitLeafJumpOnFalse(
   const regConst = leafIdx * 2 + 1;
 
   if (filter.expr) {
-    let tempReg = 50;
+    let tempReg = scratchBaseReg;
     const allocReg = () => {
       if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
       return tempReg++;
@@ -994,6 +1170,7 @@ function emitLeafJumpOnFalse(
       udfNameMap,
       undefined,
       all,
+      nullCursorThreshold,
     );
   } else {
     if (!filter.colName) {
@@ -1001,17 +1178,25 @@ function emitLeafJumpOnFalse(
     }
     const resolved = resolveColumnAcrossTables(filter.colName, all);
     if (resolved) {
-      emitReadColumn(
-        emitter,
-        resolved.cursor,
-        resolved.colIdx,
-        regCol,
-        resolved.col.type,
-      );
+      if (
+        nullCursorThreshold !== undefined &&
+        resolved.tableIdx >= nullCursorThreshold
+      ) {
+        emitter.emitUint8(OpCode.OP_LOAD_NULL);
+        emitter.emitUint8(regCol);
+      } else {
+        emitReadColumn(
+          emitter,
+          resolved.cursor,
+          resolved.colIdx,
+          regCol,
+          resolved.col.type,
+        );
+      }
     } else {
       try {
         const parsed = parseExpression(filter.colName);
-        let tempReg = 50;
+        let tempReg = scratchBaseReg;
         const allocReg = () => {
           if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
           return tempReg++;
@@ -1026,6 +1211,7 @@ function emitLeafJumpOnFalse(
           udfNameMap,
           undefined,
           all,
+          nullCursorThreshold,
         );
       } catch {
         throw new Error(`Column "${filter.colName}" not found in tables`);
@@ -1057,6 +1243,8 @@ function emitLeafCondition(
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
+  scratchBaseReg: number = 50,
+  nullCursorThreshold?: number,
 ): void {
   if (fallthrough === "true") {
     emitLeafJumpOnFalse(
@@ -1068,6 +1256,8 @@ function emitLeafCondition(
       udfNameMap,
       tables,
       filterSetMap,
+      scratchBaseReg,
+      nullCursorThreshold,
     );
   } else if (fallthrough === "false") {
     emitLeafJumpOnTrue(
@@ -1079,6 +1269,8 @@ function emitLeafCondition(
       udfNameMap,
       tables,
       filterSetMap,
+      scratchBaseReg,
+      nullCursorThreshold,
     );
   } else {
     emitLeafJumpOnTrue(
@@ -1090,6 +1282,8 @@ function emitLeafCondition(
       udfNameMap,
       tables,
       filterSetMap,
+      scratchBaseReg,
+      nullCursorThreshold,
     );
     emitter.emitUint8(OpCode.OP_JUMP);
     falsePatches.push(emitter.emitUint16(0));
@@ -1107,6 +1301,8 @@ function compileFilterNode(
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
+  scratchBaseReg: number = 50,
+  nullCursorThreshold?: number,
 ): void {
   if (
     node.type === "cmp" ||
@@ -1126,6 +1322,8 @@ function compileFilterNode(
       udfNameMap,
       tables,
       filterSetMap,
+      scratchBaseReg,
+      nullCursorThreshold,
     );
     return;
   }
@@ -1146,6 +1344,8 @@ function compileFilterNode(
         udfNameMap,
         tables,
         filterSetMap,
+        scratchBaseReg,
+        nullCursorThreshold,
       );
     } else if (fallthrough === "false") {
       emitLeafJumpOnFalse(
@@ -1157,6 +1357,8 @@ function compileFilterNode(
         udfNameMap,
         tables,
         filterSetMap,
+        scratchBaseReg,
+        nullCursorThreshold,
       );
     } else {
       emitLeafJumpOnFalse(
@@ -1168,6 +1370,8 @@ function compileFilterNode(
         udfNameMap,
         tables,
         filterSetMap,
+        scratchBaseReg,
+        nullCursorThreshold,
       );
       emitter.emitUint8(OpCode.OP_JUMP);
       falsePatches.push(emitter.emitUint16(0));
@@ -1201,6 +1405,8 @@ function compileFilterNode(
           udfNameMap,
           tables,
           filterSetMap,
+          scratchBaseReg,
+          nullCursorThreshold,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subTruePatches) {
@@ -1218,6 +1424,8 @@ function compileFilterNode(
           udfNameMap,
           tables,
           filterSetMap,
+          scratchBaseReg,
+          nullCursorThreshold,
         );
       }
     }
@@ -1250,6 +1458,8 @@ function compileFilterNode(
           udfNameMap,
           tables,
           filterSetMap,
+          scratchBaseReg,
+          nullCursorThreshold,
         );
         const nextChildPos = emitter.currentOffset();
         for (const patch of subFalsePatches) {
@@ -1267,6 +1477,8 @@ function compileFilterNode(
           udfNameMap,
           tables,
           filterSetMap,
+          scratchBaseReg,
+          nullCursorThreshold,
         );
       }
     }
@@ -1343,9 +1555,9 @@ function emitHavingLeafJumpOnFalse(
       emitter.emitUint8(regConst);
       emitter.emitInt32(val ? 1 : 0);
     } else if (typeof val === "bigint") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(OpCode.OP_LOAD_INT64);
       emitter.emitUint8(regConst);
-      emitter.emitInt32(Number(val));
+      emitter.emitInt64(val);
     }
 
     const cmpOpcode = getCmpOpcode(filter.op);
@@ -1510,9 +1722,9 @@ function emitHavingLeafJumpOnTrue(
       emitter.emitUint8(regConst);
       emitter.emitInt32(val ? 1 : 0);
     } else if (typeof val === "bigint") {
-      emitter.emitUint8(OpCode.OP_LOAD_INT);
+      emitter.emitUint8(OpCode.OP_LOAD_INT64);
       emitter.emitUint8(regConst);
-      emitter.emitInt32(Number(val));
+      emitter.emitInt64(val);
     }
 
     const cmpOpcode = getCmpOpcode(filter.op);
@@ -1845,6 +2057,8 @@ function emitFilterTree(
   udfNameMap?: Map<string, number>,
   tables?: TableMeta[],
   filterSetMap?: Map<QueryFilter, number>,
+  scratchBaseReg: number = 50,
+  nullCursorThreshold?: number,
 ): void {
   if (!root) return;
   const truePatches: number[] = [];
@@ -1859,6 +2073,8 @@ function emitFilterTree(
     udfNameMap,
     tables,
     filterSetMap,
+    scratchBaseReg,
+    nullCursorThreshold,
   );
   const rowStartPos = emitter.currentOffset();
   for (const patch of truePatches) {
@@ -1941,6 +2157,7 @@ export function emitExpression(
   udfNameMap?: Map<string, number>,
   resolveReg?: (name?: string, expr?: ExprNode) => number | undefined,
   tables?: TableMeta[],
+  nullCursorThreshold?: number,
 ): void {
   if (resolveReg) {
     const colName = expr.type === "col" ? expr.name : undefined;
@@ -1970,6 +2187,10 @@ export function emitExpression(
         emitter.emitUint8(targetReg);
         emitter.emitFloat64(val);
       }
+    } else if (typeof val === "bigint") {
+      emitter.emitUint8(OpCode.OP_LOAD_INT64);
+      emitter.emitUint8(targetReg);
+      emitter.emitInt64(val);
     } else if (typeof val === "string") {
       emitter.emitUint8(OpCode.OP_LOAD_TEXT);
       emitter.emitUint8(targetReg);
@@ -2000,6 +2221,14 @@ export function emitExpression(
         `Column "${expr.name}" does not exist in table "${table.name}"`,
       );
     }
+    if (
+      nullCursorThreshold !== undefined &&
+      resolved.tableIdx >= nullCursorThreshold
+    ) {
+      emitter.emitUint8(OpCode.OP_LOAD_NULL);
+      emitter.emitUint8(targetReg);
+      return;
+    }
     emitReadColumn(
       emitter,
       resolved.cursor,
@@ -2023,6 +2252,7 @@ export function emitExpression(
       udfNameMap,
       resolveReg,
       tables,
+      nullCursorThreshold,
     );
     emitExpression(
       expr.right,
@@ -2034,6 +2264,7 @@ export function emitExpression(
       udfNameMap,
       resolveReg,
       tables,
+      nullCursorThreshold,
     );
 
     let opCode = OpCode.OP_ADD;
@@ -2090,18 +2321,8 @@ export function emitExpression(
   if (expr.type === "fn") {
     const fnName = expr.name.toLowerCase();
 
-    const unaryOps: Record<string, OpCode> = {
-      upper: OpCode.OP_STR_UPPER,
-      lower: OpCode.OP_STR_LOWER,
-      length: OpCode.OP_STR_LENGTH,
-      trim: OpCode.OP_STR_TRIM,
-      abs: OpCode.OP_MATH_ABS,
-      round: OpCode.OP_MATH_ROUND,
-      floor: OpCode.OP_MATH_FLOOR,
-      ceil: OpCode.OP_MATH_CEIL,
-    };
-
-    if (unaryOps[fnName]) {
+    const unaryOp = UNARY_OPS.get(fnName);
+    if (unaryOp !== undefined) {
       const srcReg = allocReg();
       const arg = expr.args[0] ?? { type: "literal", value: null };
       emitExpression(
@@ -2114,8 +2335,9 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
-      emitter.emitUint8(unaryOps[fnName]);
+      emitter.emitUint8(unaryOp);
       emitter.emitUint8(srcReg);
       emitter.emitUint8(targetReg);
       return;
@@ -2135,6 +2357,7 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
       emitExpression(
         expr.args[1] ?? { type: "literal", value: 1 },
@@ -2146,6 +2369,7 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
       if (expr.args[2] !== undefined) {
         emitExpression(
@@ -2158,6 +2382,7 @@ export function emitExpression(
           udfNameMap,
           resolveReg,
           tables,
+          nullCursorThreshold,
         );
       } else {
         emitter.emitUint8(OpCode.OP_LOAD_NULL);
@@ -2184,6 +2409,7 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
       emitExpression(
         expr.args[1] ?? { type: "literal", value: null },
@@ -2195,6 +2421,7 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
       emitter.emitUint8(OpCode.OP_STR_LEVENSHTEIN);
       emitter.emitUint8(regStr1);
@@ -2203,16 +2430,8 @@ export function emitExpression(
       return;
     }
 
-    const patternOps: Record<string, OpCode> = {
-      starts_with: OpCode.OP_STR_STARTS_WITH,
-      startswith: OpCode.OP_STR_STARTS_WITH,
-      ends_with: OpCode.OP_STR_ENDS_WITH,
-      endswith: OpCode.OP_STR_ENDS_WITH,
-      like: OpCode.OP_STR_LIKE,
-      contains: OpCode.OP_STR_CONTAINS,
-      fuzzy: OpCode.OP_STR_FUZZY_MATCH,
-    };
-    if (patternOps[fnName]) {
+    const patternOp = PATTERN_OPS.get(fnName);
+    if (patternOp !== undefined) {
       const regStr = allocReg();
       const regPat = allocReg();
       emitExpression(
@@ -2225,6 +2444,7 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
       emitExpression(
         expr.args[1] ?? { type: "literal", value: "" },
@@ -2236,9 +2456,10 @@ export function emitExpression(
         udfNameMap,
         resolveReg,
         tables,
+        nullCursorThreshold,
       );
 
-      emitter.emitUint8(patternOps[fnName]);
+      emitter.emitUint8(patternOp);
       emitter.emitUint8(regStr);
       emitter.emitUint8(regPat);
       const truePatch = emitter.emitUint16(0);
@@ -2277,6 +2498,7 @@ export function emitExpression(
           udfNameMap,
           resolveReg,
           tables,
+          nullCursorThreshold,
         );
       }
       const op =
@@ -2308,6 +2530,7 @@ export function emitExpression(
             udfNameMap,
             resolveReg,
             tables,
+            nullCursorThreshold,
           );
         }
       }
@@ -2343,9 +2566,9 @@ function emitLoadConstant(
       emitter.emitInt32(Math.floor(val));
     }
   } else if (typeof val === "bigint") {
-    emitter.emitUint8(OpCode.OP_LOAD_INT);
+    emitter.emitUint8(OpCode.OP_LOAD_INT64);
     emitter.emitUint8(reg);
-    emitter.emitInt32(Number(val));
+    emitter.emitInt64(val);
   } else if (typeof val === "string") {
     emitter.emitUint8(OpCode.OP_LOAD_TEXT);
     emitter.emitUint8(reg);
@@ -2562,14 +2785,26 @@ export function chooseIndexScan(
           const uniqueValues = Array.from(
             new Set(f.values.filter((v) => v !== null && v !== undefined)),
           );
-          return tagCandidate({
-            index: idx,
-            scanType: "multi_point",
-            seekFilter: f,
-            filterIndex: allLeaves.indexOf(f),
-            keyType: colMeta.type,
-            inValues: uniqueValues,
-          });
+          // Cap multi_point unrolling so generated bytecode stays well within BYTECODE_SIZE (8 KB).
+          // Larger IN lists fall back to a compact OP_IN hash-set scan.
+          const MAX_MULTI_POINT_UNROLL = 64;
+          const MAX_MULTI_POINT_BYTES = 2048;
+          if (uniqueValues.length > 0 && uniqueValues.length <= MAX_MULTI_POINT_UNROLL) {
+            let approxKeyBytes = 0;
+            for (const v of uniqueValues) {
+              approxKeyBytes += typeof v === "string" ? v.length * 3 + 16 : 16;
+            }
+            if (approxKeyBytes <= MAX_MULTI_POINT_BYTES) {
+              return tagCandidate({
+                index: idx,
+                scanType: "multi_point",
+                seekFilter: f,
+                filterIndex: allLeaves.indexOf(f),
+                keyType: colMeta.type,
+                inValues: uniqueValues,
+              });
+            }
+          }
         }
       }
     }
@@ -2607,14 +2842,26 @@ export function chooseIndexScan(
           const uniqueValues = Array.from(
             new Set(f.values.filter((v) => v !== null && v !== undefined)),
           );
-          return tagCandidate({
-            index: idx,
-            scanType: "multi_point",
-            seekFilter: f,
-            filterIndex: allLeaves.indexOf(f),
-            keyType: colMeta.type,
-            inValues: uniqueValues,
-          });
+          // Cap multi_point unrolling so generated bytecode stays well within BYTECODE_SIZE (8 KB).
+          // Larger IN lists fall back to a compact OP_IN hash-set scan.
+          const MAX_MULTI_POINT_UNROLL = 64;
+          const MAX_MULTI_POINT_BYTES = 2048;
+          if (uniqueValues.length > 0 && uniqueValues.length <= MAX_MULTI_POINT_UNROLL) {
+            let approxKeyBytes = 0;
+            for (const v of uniqueValues) {
+              approxKeyBytes += typeof v === "string" ? v.length * 3 + 16 : 16;
+            }
+            if (approxKeyBytes <= MAX_MULTI_POINT_BYTES) {
+              return tagCandidate({
+                index: idx,
+                scanType: "multi_point",
+                seekFilter: f,
+                filterIndex: allLeaves.indexOf(f),
+                keyType: colMeta.type,
+                inValues: uniqueValues,
+              });
+            }
+          }
         }
       }
     }
@@ -2962,7 +3209,7 @@ export function compileQuery(
       })
     : undefined;
 
-  const table0Scan = isJoinQuery
+  let table0Scan = isJoinQuery
     ? chooseIndexScan(
         allTables[0],
         pushedFilters[0],
@@ -2970,6 +3217,11 @@ export function compileQuery(
         orderKeysForTable0,
       )
     : null;
+  // Driving-table join loop only supports single point or range seeks; multi_point
+  // requires an outer value loop that is handled in single-table mode only.
+  if (table0Scan?.scanType === "multi_point") {
+    table0Scan = null;
+  }
 
   const isJoinOrderPreserved = canPreserve && !!table0Scan?.satisfiesOrderBy;
 
@@ -3104,9 +3356,9 @@ export function compileQuery(
           emitter.emitInt32(Math.floor(val));
         }
       } else if (typeof val === "bigint") {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
+        emitter.emitUint8(OpCode.OP_LOAD_INT64);
         emitter.emitUint8(regConst);
-        emitter.emitInt32(Number(val));
+        emitter.emitInt64(val);
       } else if (typeof val === "string") {
         emitter.emitUint8(OpCode.OP_LOAD_TEXT);
         emitter.emitUint8(regConst);
@@ -3236,6 +3488,7 @@ export function compileQuery(
       plan.udfNameMap,
       undefined,
       filterSetMap,
+      totalRegs,
     );
 
     // Extract group keys into registers
@@ -3653,13 +3906,14 @@ export function compileQuery(
       plan.udfNameMap,
       undefined,
       filterSetMap,
+      totalRegs,
     );
 
     // Extract sort keys into registers
     for (let k = 0; k < K; k++) {
       const sortKey = plan.orderBy[k];
       const targetReg = sortKeyStartReg + k;
-      let tempReg = 50;
+      let tempReg = totalRegs;
       const allocReg = () => {
         if (tempReg >= 64) throw new TooManyRegistersError(tempReg);
         return tempReg++;
@@ -3845,7 +4099,6 @@ export function compileQuery(
         if (nextReg >= 64) throw new TooManyRegistersError(nextReg);
         emitter.emitUint8(OpCode.OP_LOAD_BLOB);
         emitter.emitUint8(regKey0);
-        emitter.emitUint32(table0Scan.compositeValue.length);
         emitter.emitBytes(table0Scan.compositeValue);
       } else if (table0Scan.scanType === "multi_point") {
         regKey0 = nextReg++;
@@ -3935,6 +4188,7 @@ export function compileQuery(
         plan.udfNameMap,
         allTables,
         filterSetMap,
+        nextReg,
       );
     }
 
@@ -3983,6 +4237,7 @@ export function compileQuery(
             plan.udfNameMap,
             allTables,
             filterSetMap,
+            nextReg,
           );
         }
 
@@ -4045,6 +4300,7 @@ export function compileQuery(
             plan.udfNameMap,
             allTables,
             filterSetMap,
+            nextReg,
           );
         }
 
@@ -4146,6 +4402,7 @@ export function compileQuery(
             plan.udfNameMap,
             allTables,
             filterSetMap,
+            nextReg,
           );
         }
 
@@ -4167,6 +4424,7 @@ export function compileQuery(
       plan.udfNameMap,
       allTables,
       filterSetMap,
+      nextReg,
     );
 
     const hasOrderBy = plan.orderBy !== undefined && plan.orderBy.length > 0;
@@ -4253,68 +4511,99 @@ export function compileQuery(
 
       const joinPlan = plan.joinedTables![i - 1];
       if (joinPlan.type === "left") {
-        emitter.emitUint8(OpCode.OP_LOAD_INT);
-        emitter.emitUint8(regZero);
-        emitter.emitInt32(0);
-
-        emitter.emitUint8(OpCode.OP_EQ);
-        emitter.emitUint8(regMatched[i]);
-        emitter.emitUint8(regZero);
-        const nullRowBranchPatch = emitter.emitUint16(0);
-
-        emitter.emitUint8(OpCode.OP_JUMP);
-        const skipNullRowPatch = emitter.emitUint16(0);
-
-        emitter.patchUint16(nullRowBranchPatch, emitter.currentOffset());
-
-        for (let k = 0; k < outSelectExprs.length; k++) {
-          const se = outSelectExprs[k];
-          let refTableIdx = -1;
-          if (se.expr.type === "col") {
-            const resolved = resolveColumnAcrossTables(se.expr.name, allTables);
-            if (resolved) {
-              refTableIdx = resolved.tableIdx;
+        // If a subsequent INNER JOIN depends on columns from table >= i, a NULL-extended
+        // row at level i can never satisfy the downstream INNER JOIN condition.
+        let blockedByLaterInnerJoin = false;
+        for (let later = i + 1; later < N; later++) {
+          const laterJoin = plan.joinedTables![later - 1];
+          if (laterJoin.type === "inner") {
+            const resL = resolveColumnAcrossTables(laterJoin.leftCol, allTables);
+            const resR = resolveColumnAcrossTables(laterJoin.rightCol, allTables);
+            if (
+              (resL && resL.tableIdx >= i && resL.tableIdx < later) ||
+              (resR && resR.tableIdx >= i && resR.tableIdx < later)
+            ) {
+              blockedByLaterInnerJoin = true;
+              break;
             }
           }
-          if (refTableIdx >= i) {
-            emitter.emitUint8(OpCode.OP_LOAD_NULL);
-            emitter.emitUint8(outStartReg + k);
-          } else {
+        }
+
+        if (!blockedByLaterInnerJoin) {
+          emitter.emitUint8(OpCode.OP_LOAD_INT);
+          emitter.emitUint8(regZero);
+          emitter.emitInt32(0);
+
+          emitter.emitUint8(OpCode.OP_EQ);
+          emitter.emitUint8(regMatched[i]);
+          emitter.emitUint8(regZero);
+          const nullRowBranchPatch = emitter.emitUint16(0);
+
+          emitter.emitUint8(OpCode.OP_JUMP);
+          const skipNullRowPatch = emitter.emitUint16(0);
+
+          emitter.patchUint16(nullRowBranchPatch, emitter.currentOffset());
+
+          const afterNullRowPatches: number[] = [];
+
+          // Evaluate remaining WHERE filters with columns from tables >= i treated as NULL
+          emitFilterTree(
+            rootRemainingFilter,
+            table,
+            emitter,
+            leafRegMap,
+            afterNullRowPatches,
+            plan.udfNameMap,
+            allTables,
+            filterSetMap,
+            nextReg,
+            i,
+          );
+
+          if (hasOffset && shouldApplyLimitOffset) {
+            emitter.emitUint8(OpCode.OP_OFFSET);
+            emitter.emitUint8(regOffset);
+            afterNullRowPatches.push(emitter.emitUint16(0));
+          }
+
+          let nullExprTempReg = nextReg;
+          const allocNullExprReg = () => {
+            if (nullExprTempReg >= 64) {
+              throw new TooManyRegistersError(nullExprTempReg);
+            }
+            return nullExprTempReg++;
+          };
+
+          for (let k = 0; k < outSelectExprs.length; k++) {
             emitExpression(
-              se.expr,
+              outSelectExprs[k].expr,
               table,
               emitter,
               0,
               outStartReg + k,
-              allocExprReg,
+              allocNullExprReg,
               plan.udfNameMap,
               undefined,
               allTables,
+              i,
             );
           }
-        }
 
-        const afterNullRowPatches: number[] = [];
-        if (hasOffset && shouldApplyLimitOffset) {
-          emitter.emitUint8(OpCode.OP_OFFSET);
-          emitter.emitUint8(regOffset);
-          afterNullRowPatches.push(emitter.emitUint16(0));
-        }
+          emitter.emitUint8(OpCode.OP_RESULT_ROW);
+          emitter.emitUint8(outStartReg);
+          emitter.emitUint8(outSelectExprs.length);
 
-        emitter.emitUint8(OpCode.OP_RESULT_ROW);
-        emitter.emitUint8(outStartReg);
-        emitter.emitUint8(outSelectExprs.length);
+          if (hasLimit && shouldApplyLimitOffset) {
+            emitter.emitUint8(OpCode.OP_LIMIT);
+            emitter.emitUint8(regLimit);
+            limitHaltPatches.push(emitter.emitUint16(0));
+          }
 
-        if (hasLimit && shouldApplyLimitOffset) {
-          emitter.emitUint8(OpCode.OP_LIMIT);
-          emitter.emitUint8(regLimit);
-          limitHaltPatches.push(emitter.emitUint16(0));
-        }
-
-        const afterNullRowPos = emitter.currentOffset();
-        emitter.patchUint16(skipNullRowPatch, afterNullRowPos);
-        for (const p of afterNullRowPatches) {
-          emitter.patchUint16(p, afterNullRowPos);
+          const afterNullRowPos = emitter.currentOffset();
+          emitter.patchUint16(skipNullRowPatch, afterNullRowPos);
+          for (const p of afterNullRowPatches) {
+            emitter.patchUint16(p, afterNullRowPos);
+          }
         }
       }
     }
@@ -4440,6 +4729,7 @@ export function compileQuery(
         plan.udfNameMap,
         undefined,
         filterSetMap,
+        nextReg,
       );
 
       let offsetSkipPatch = -1;
@@ -4557,6 +4847,7 @@ export function compileQuery(
           plan.udfNameMap,
           undefined,
           filterSetMap,
+          nextReg,
         );
 
         let offsetSkipPatch = -1;
@@ -4671,6 +4962,7 @@ export function compileQuery(
         plan.udfNameMap,
         undefined,
         filterSetMap,
+        nextReg,
       );
 
       let offsetSkipPatch = -1;
@@ -4780,6 +5072,7 @@ export function compileQuery(
     plan.udfNameMap,
     undefined,
     filterSetMap,
+    nextReg,
   );
 
   let offsetSkipPatch = -1;
@@ -5297,6 +5590,21 @@ export function disassembleBytecode(
           p2: `${val}`,
           p3: "",
           comment: `Load literal int ${val} into r[${regIdx}]`,
+        });
+        break;
+      }
+
+      case OpCode.OP_LOAD_INT64: {
+        const regIdx = bytecode[pc++];
+        const val = view.getBigInt64(pc, true);
+        pc += 8;
+        instructions.push({
+          addr,
+          opcode: "OP_LOAD_INT64",
+          p1: `r[${regIdx}]`,
+          p2: `${val.toString()}n`,
+          p3: "",
+          comment: `Load literal int64 ${val.toString()}n into r[${regIdx}]`,
         });
         break;
       }
