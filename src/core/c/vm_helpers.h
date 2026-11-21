@@ -3,15 +3,14 @@
 
 #include "webdb_types.h"
 
-typedef struct {
-  int32_t result;
-  int32_t is_unknown;
-} Compare3VLResult;
-
 WEBDB_EXPORT int32_t to_lower_char(int32_t c);
 WEBDB_EXPORT int32_t to_upper_char(int32_t c);
 WEBDB_EXPORT uint32_t vm_reg_off(uint32_t ctx_off, uint32_t reg_idx);
 WEBDB_EXPORT uint32_t vm_cursor_off(uint32_t ctx_off, uint32_t cursor_idx);
+WEBDB_EXPORT int32_t vm_set_status(uint32_t ctx_off, uint32_t pc, int32_t status);
+WEBDB_EXPORT int32_t vm_page_fault(uint32_t ctx_off, uint32_t instr_pc, uint32_t page_id);
+WEBDB_EXPORT int32_t vm_ensure_resident(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_to_slot_off, uint32_t page_to_slot_buckets, uint32_t cur_off, uint32_t page_id, uint32_t instr_pc);
+WEBDB_EXPORT int32_t vm_position_data_cursor(uint32_t ctx_off, uint32_t has_buffer_pool, uint32_t page_to_slot_off, uint32_t page_to_slot_buckets, uint32_t data_cursor_idx, int64_t matched_rowid, uint32_t instr_pc);
 WEBDB_EXPORT uint32_t vm_resolve_table_off(uint32_t ctx_off, uint32_t cursor_idx);
 WEBDB_EXPORT uint32_t vm_phys_alloc(uint32_t ctx_off, uint32_t arena_base, uint32_t bytes);
 WEBDB_EXPORT void vm_reg_set_null(uint32_t reg_off);
@@ -35,8 +34,7 @@ WEBDB_EXPORT uint32_t vm_compute_var_col_idx(uint32_t tbl_off, uint32_t target_c
 WEBDB_EXPORT int32_t vm_compare_bytes_raw(uint32_t off_a, uint32_t len_a, uint32_t off_b, uint32_t len_b);
 WEBDB_EXPORT int32_t vm_compare_reg_3vl(uint32_t reg_a_off, uint32_t reg_b_off);
 WEBDB_EXPORT int32_t vm_compare_index_cell(uint32_t ctx_off, uint32_t page_offset, uint16_t slot_idx, uint8_t key_type, uint32_t reg_off);
-WEBDB_EXPORT int32_t vm_index_seek_leaf_eq(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off);
-WEBDB_EXPORT int32_t vm_index_seek_leaf_ge(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off);
+WEBDB_EXPORT int32_t vm_index_seek_leaf(uint32_t ctx_off, uint32_t page_offset, uint8_t key_type, uint32_t reg_off, int32_t exact_only);
 WEBDB_EXPORT int32_t sql_like_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len);
 WEBDB_EXPORT int32_t vm_str_contains_view(uint32_t str_off, uint32_t str_len, uint32_t sub_off, uint32_t sub_len);
 WEBDB_EXPORT int32_t vm_str_starts_with_view(uint32_t str_off, uint32_t str_len, uint32_t pfx_off, uint32_t pfx_len);
@@ -44,8 +42,7 @@ WEBDB_EXPORT int32_t vm_str_ends_with_view(uint32_t str_off, uint32_t str_len, u
 WEBDB_EXPORT int32_t vm_str_levenshtein_view(uint32_t s1_off, uint32_t s1_len, uint32_t s2_off, uint32_t s2_len, uint32_t max_dist);
 WEBDB_EXPORT int32_t vm_str_fuzzy_match_view(uint32_t str_off, uint32_t str_len, uint32_t pat_off, uint32_t pat_len, uint32_t max_dist, uint32_t allow_prefix);
 WEBDB_EXPORT int32_t vm_utf8_char_count(uint32_t str_off, uint32_t byte_len);
-WEBDB_EXPORT void vm_str_lower(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off);
-WEBDB_EXPORT void vm_str_upper(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off);
+WEBDB_EXPORT void vm_str_case(uint32_t ctx_off, uint32_t arena_base, uint32_t src_reg_off, uint32_t dest_reg_off, int32_t to_upper);
 WEBDB_EXPORT void vm_str_trim(uint32_t src_reg_off, uint32_t dest_reg_off);
 WEBDB_EXPORT void vm_utf8_substr(uint32_t src_reg_off, uint32_t start_reg_off, uint32_t len_reg_off, uint32_t dest_reg_off);
 WEBDB_EXPORT uint32_t vm_format_i64_to_scratch(uint32_t scratch_off, int64_t val);
@@ -71,10 +68,6 @@ WEBDB_EXPORT int32_t vm_agg_init_raw(uint32_t ctx_off, uint32_t arena_base, uint
 WEBDB_EXPORT int32_t vm_agg_step_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t agg_id, uint32_t start_key_reg, uint32_t num_keys, uint32_t val_reg, uint32_t raw_func_id);
 WEBDB_EXPORT int32_t vm_agg_next_raw(uint32_t ctx_off, uint32_t agg_id, uint32_t out_key_reg, uint32_t out_acc_reg, uint32_t jump_target);
 WEBDB_EXPORT int32_t vm_agg_final_raw(uint32_t ctx_off, uint32_t sum_reg, uint32_t count_reg, uint32_t out_reg, uint32_t raw_func_id);
-WEBDB_EXPORT uint32_t fnv1a_32_bytes(uint8_t * data, uint32_t len);
 WEBDB_EXPORT int32_t sql_like_match_raw(const char * str, uint32_t str_len, const char * pattern, uint32_t pat_len);
-WEBDB_EXPORT Compare3VLResult compare_3vl_int64(int64_t a, int32_t a_null, int64_t b, int32_t b_null);
-WEBDB_EXPORT Compare3VLResult compare_3vl_float64(double a, int32_t a_null, double b, int32_t b_null);
-WEBDB_EXPORT Compare3VLResult compare_3vl_bytes(uint8_t * a, uint32_t a_len, int32_t a_null, uint8_t * b, uint32_t b_len, int32_t b_null);
 
 #endif // WEBDB_VM_HELPERS_H

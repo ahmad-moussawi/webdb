@@ -8,28 +8,16 @@ import {
   PAGE_SIZE,
   RESULT_BUFFER_OFFSET,
   RESULT_BUFFER_SIZE,
-  PAGE_TO_SLOT_OFFSET,
-  PAGE_TO_SLOT_SIZE,
   TRANSIENT_ARENA_OFFSET,
-  DEFAULT_PAGE_TO_SLOT_BUCKETS,
   DEFAULT_MAX_QUERY_MEMORY,
   MAX_TOPK_HEAP_LIMIT,
   OVERFLOW_HEADER_SIZE,
   OVERFLOW_PAYLOAD_SIZE,
   PAGE_TYPE_OVERFLOW,
 } from "../../constants.ts";
-import {
-  VmStatus,
-  DataType,
-  ColumnMeta,
-  ColumnFlag,
-} from "../../types/index.ts";
+import { VmStatus, DataType } from "../../types/index.ts";
 import { u8, u16, u32, i32, i64, f64 } from "../types.ts";
-import {
-  page_get_cell_count,
-  page_get_cell_offset,
-  page_serialize_row,
-} from "./page.c.ts";
+import { page_get_cell_count, page_get_cell_offset } from "./page.c.ts";
 import { buf_pool_get_resident_slot } from "./buffer_pool.c.ts";
 import { hex_val, crockford_decode } from "./codecs.c.ts";
 import {
@@ -52,14 +40,7 @@ import {
   f64_to_i64,
   f64_to_i32,
 } from "../../shared/c_runtime.ts";
-import {
-  type VmCursor,
-  type VmContext,
-  type VmKeyInfo,
-  type VmSorter,
-  type VmSorterEntry,
-  type VmAggBucket,
-} from "../../shared/index.ts";
+import { type VmKeyInfo } from "../../shared/index.ts";
 
 // ============================================================================
 // Flat Linear-Memory VmContext Layout Constants (at VM_CONTEXT_OFFSET)
@@ -214,6 +195,126 @@ export function vm_reg_off(ctx_off: u32, reg_idx: u32): u32 {
  */
 export function vm_cursor_off(ctx_off: u32, cursor_idx: u32): u32 {
   return ctx_off + VM_CTX_CURSORS_OFF + cursor_idx * VM_CURSOR_SIZE;
+}
+
+/**
+ * @export_c
+ * Writes PC and VM status to VM_CONTEXT and returns status.
+ */
+export function vm_set_status(
+  view: DataView,
+  ctx_off: u32,
+  pc: u32,
+  status: i32,
+): i32 {
+  write_u32(view, ctx_off + VM_CTX_PC, pc);
+  write_i32(view, ctx_off + VM_CTX_STATUS, status);
+  return status;
+}
+
+/**
+ * @export_c
+ * Records a page fault on `page_id` at `instr_pc` and returns VmStatus.PAGE_FAULT.
+ */
+export function vm_page_fault(
+  view: DataView,
+  ctx_off: u32,
+  instr_pc: u32,
+  page_id: u32,
+): i32 {
+  write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, page_id);
+  write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
+  write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+  return VmStatus.PAGE_FAULT;
+}
+
+/**
+ * @export_c
+ * Ensures `page_id` is resident in the buffer pool (if active), optionally
+ * storing its slot index in `cur_off` (when `cur_off !== 0`).
+ * Returns VmStatus.RUNNING when ready or VmStatus.PAGE_FAULT on miss.
+ */
+export function vm_ensure_resident(
+  view: DataView,
+  ctx_off: u32,
+  has_buffer_pool: u32,
+  page_to_slot_off: u32,
+  page_to_slot_buckets: u32,
+  cur_off: u32,
+  page_id: u32,
+  instr_pc: u32,
+): i32 {
+  if (has_buffer_pool !== 0 && page_id > 0) {
+    const slot: i32 = buf_pool_get_resident_slot(
+      view,
+      page_to_slot_off,
+      page_to_slot_buckets,
+      page_id,
+    );
+    if (slot < 0) {
+      return vm_page_fault(view, ctx_off, instr_pc, page_id);
+    }
+    if (cur_off !== 0) {
+      write_i32(view, cur_off + VM_CUR_SLOT_IDX, slot);
+    }
+  }
+  return VmStatus.RUNNING;
+}
+
+/**
+ * @export_c
+ * Positions `data_cursor_idx` onto the row addressed by `matched_rowid`
+ * (high 48 bits = data page ID, low 16 bits = cell index).
+ * Returns VmStatus.RUNNING on success or VmStatus.PAGE_FAULT if the data page is not resident.
+ */
+export function vm_position_data_cursor(
+  view: DataView,
+  ctx_off: u32,
+  has_buffer_pool: u32,
+  page_to_slot_off: u32,
+  page_to_slot_buckets: u32,
+  data_cursor_idx: u32,
+  matched_rowid: i64,
+  instr_pc: u32,
+): i32 {
+  const data_page_id: u32 = i64_to_i32(matched_rowid >> 16n) as u32;
+  const data_cell_idx: i32 = i64_to_i32(matched_rowid & 0xffffn);
+
+  if (
+    vm_ensure_resident(
+      view,
+      ctx_off,
+      has_buffer_pool,
+      page_to_slot_off,
+      page_to_slot_buckets,
+      0,
+      data_page_id,
+      instr_pc,
+    ) !== VmStatus.RUNNING
+  ) {
+    return VmStatus.PAGE_FAULT;
+  }
+
+  const data_cur_off: u32 = vm_cursor_off(ctx_off, data_cursor_idx);
+  write_u32(view, data_cur_off + VM_CUR_PAGE_ID, data_page_id);
+  write_i32(view, data_cur_off + VM_CUR_CELL_IDX, data_cell_idx);
+  const data_page_offset: u32 = vm_resolve_page_offset(
+    view,
+    ctx_off,
+    has_buffer_pool,
+    data_page_id,
+  );
+  const rel_cell_offset: u16 = page_get_cell_offset(
+    view,
+    data_page_offset,
+    data_cell_idx as u16,
+  );
+  write_u32(
+    view,
+    data_cur_off + VM_CUR_ROW_OFFSET,
+    data_page_offset + rel_cell_offset,
+  );
+  return VmStatus.RUNNING;
 }
 
 /**
@@ -374,9 +475,7 @@ export function vm_load_overflow_column(
   while (curr_pid > 1 && remaining > 0) {
     hops++;
     if (hops > 65536) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     const slot: i32 = buf_pool_get_resident_slot(
       view,
@@ -385,16 +484,11 @@ export function vm_load_overflow_column(
       curr_pid,
     );
     if (slot < 0) {
-      write_u32(view, ctx_off + VM_CTX_FAULT_PAGE_ID, curr_pid);
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.PAGE_FAULT);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.PAGE_FAULT;
+      return vm_page_fault(view, ctx_off, instr_pc, curr_pid);
     }
     const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
     if (read_u8(view, page_off) !== PAGE_TYPE_OVERFLOW) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     const chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
@@ -403,9 +497,7 @@ export function vm_load_overflow_column(
       chunk_len > OVERFLOW_PAYLOAD_SIZE ||
       next_pid === curr_pid
     ) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     if (chunk_len >= remaining) {
       remaining = 0;
@@ -416,9 +508,7 @@ export function vm_load_overflow_column(
   }
 
   if (remaining > 0) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-    return VmStatus.ERROR;
+    return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
   }
 
   const dest_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, total_len);
@@ -434,9 +524,7 @@ export function vm_load_overflow_column(
   while (curr_pid > 1 && copied < total_len) {
     copy_hops++;
     if (copy_hops > 65536) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     const slot: i32 = buf_pool_get_resident_slot(
       view,
@@ -445,22 +533,16 @@ export function vm_load_overflow_column(
       curr_pid,
     );
     if (slot < 0) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
     if (read_u8(view, page_off) !== PAGE_TYPE_OVERFLOW) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     let chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
     if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid === curr_pid) {
-      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-      return VmStatus.ERROR;
+      return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
     }
     if (copied + chunk_len > total_len) {
       chunk_len = total_len - copied;
@@ -933,13 +1015,16 @@ export function vm_compare_index_cell(
 
 /**
  * @export_c
+ * Binary-searches an index leaf page for the leftmost key `== target` (`exact_only !== 0`)
+ * or `>= target` (`exact_only === 0`). Returns slot index or -1 if not found.
  */
-export function vm_index_seek_leaf_eq(
+export function vm_index_seek_leaf(
   view: DataView,
   ctx_off: u32,
   page_offset: u32,
   key_type: u8,
   reg_off: u32,
+  exact_only: i32,
 ): i32 {
   const cell_count: i32 = page_get_cell_count(view, page_offset);
   let lo: i32 = 0;
@@ -957,7 +1042,7 @@ export function vm_index_seek_leaf_eq(
       reg_off,
     );
     if (cmp <= 0) {
-      if (cmp === 0) {
+      if (exact_only === 0 || cmp === 0) {
         matched_slot = mid;
       }
       hi = mid - 1;
@@ -966,41 +1051,6 @@ export function vm_index_seek_leaf_eq(
     }
   }
   return matched_slot;
-}
-
-/**
- * @export_c
- */
-export function vm_index_seek_leaf_ge(
-  view: DataView,
-  ctx_off: u32,
-  page_offset: u32,
-  key_type: u8,
-  reg_off: u32,
-): i32 {
-  const cell_count: i32 = page_get_cell_count(view, page_offset);
-  let lo: i32 = 0;
-  let hi: i32 = cell_count - 1;
-  let candidate_slot: i32 = -1;
-
-  while (lo <= hi) {
-    const mid: i32 = (lo + hi) >> 1;
-    const cmp: i32 = vm_compare_index_cell(
-      view,
-      ctx_off,
-      page_offset,
-      mid as u16,
-      key_type,
-      reg_off,
-    );
-    if (cmp <= 0) {
-      candidate_slot = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
-  }
-  return candidate_slot;
 }
 
 // ============================================================================
@@ -1335,13 +1385,15 @@ export function vm_utf8_char_count(
 
 /**
  * @export_c
+ * Converts an ASCII TEXT register to uppercase (`to_upper !== 0`) or lowercase (`to_upper === 0`).
  */
-export function vm_str_lower(
+export function vm_str_case(
   view: DataView,
   ctx_off: u32,
   arena_base: u32,
   src_reg_off: u32,
   dest_reg_off: u32,
+  to_upper: i32,
 ): void {
   if (read_u8(view, src_reg_off + VM_REG_IS_NULL) !== 0) {
     vm_reg_set_null(view, dest_reg_off);
@@ -1359,45 +1411,11 @@ export function vm_str_lower(
     return;
   }
   for (let i: u32 = 0; i < len; i++) {
+    const ch: i32 = read_u8(view, src_off + i);
     write_u8(
       view,
       out_off + i,
-      to_lower_char(read_u8(view, src_off + i)) as u8,
-    );
-  }
-  vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, out_off, len);
-}
-
-/**
- * @export_c
- */
-export function vm_str_upper(
-  view: DataView,
-  ctx_off: u32,
-  arena_base: u32,
-  src_reg_off: u32,
-  dest_reg_off: u32,
-): void {
-  if (read_u8(view, src_reg_off + VM_REG_IS_NULL) !== 0) {
-    vm_reg_set_null(view, dest_reg_off);
-    return;
-  }
-  const src_off: u32 = read_u32(view, src_reg_off + VM_REG_DATA_OFF);
-  const len: u32 = read_u32(view, src_reg_off + VM_REG_DATA_LEN);
-  if (len === 0) {
-    vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, 0, 0);
-    return;
-  }
-  const out_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, len);
-  if (out_off === 0) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
-    return;
-  }
-  for (let i: u32 = 0; i < len; i++) {
-    write_u8(
-      view,
-      out_off + i,
-      to_upper_char(read_u8(view, src_off + i)) as u8,
+      (to_upper !== 0 ? to_upper_char(ch) : to_lower_char(ch)) as u8,
     );
   }
   vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, out_off, len);
@@ -1709,14 +1727,10 @@ export function vm_emit_raw_row(
   const result_offset: u32 = read_u32(view, ctx_off + VM_CTX_RESULT_OFFSET);
   const needed: u32 = 2 + row_len;
   if (needed > RESULT_BUFFER_SIZE) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-    return VmStatus.ERROR;
+    return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
   }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.BUFFER_FULL);
-    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-    return VmStatus.BUFFER_FULL;
+    return vm_set_status(view, ctx_off, instr_pc, VmStatus.BUFFER_FULL);
   }
 
   const out_target: u32 = RESULT_BUFFER_OFFSET + result_offset;
@@ -1823,14 +1837,10 @@ export function vm_serialize_and_emit_result_row(
   const result_offset: u32 = read_u32(view, ctx_off + VM_CTX_RESULT_OFFSET);
   const needed: u32 = 2 + total_row_size;
   if (needed > RESULT_BUFFER_SIZE) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
-    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-    return VmStatus.ERROR;
+    return vm_set_status(view, ctx_off, instr_pc, VmStatus.ERROR);
   }
   if (result_offset + needed > RESULT_BUFFER_SIZE) {
-    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.BUFFER_FULL);
-    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
-    return VmStatus.BUFFER_FULL;
+    return vm_set_status(view, ctx_off, instr_pc, VmStatus.BUFFER_FULL);
   }
 
   const out_target: u32 = RESULT_BUFFER_OFFSET + result_offset;
@@ -2941,18 +2951,6 @@ export function vm_agg_final_raw(
 /**
  * @export_c
  */
-export function fnv1a_32_bytes(data: Uint8Array, len: u32): u32 {
-  let hash: u32 = 0x811c9dc5;
-  for (let i: u32 = 0; i < len; i++) {
-    hash ^= data[i];
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash !== 0 ? hash >>> 0 : 1;
-}
-
-/**
- * @export_c
- */
 export function sql_like_match_raw(
   str: string,
   str_len: u32,
@@ -2989,88 +2987,6 @@ export function sql_like_match_raw(
   }
 
   return p === pat_len ? 1 : 0;
-}
-
-export interface Compare3VLResult {
-  result: i32;
-  is_unknown: i32;
-}
-
-/**
- * @export_c
- */
-export function compare_3vl_int64(
-  a: i64,
-  a_null: i32,
-  b: i64,
-  b_null: i32,
-): Compare3VLResult {
-  if (a_null !== 0 || b_null !== 0) {
-    return { result: 0, is_unknown: 1 };
-  }
-  return { result: a < b ? -1 : a > b ? 1 : 0, is_unknown: 0 };
-}
-
-/**
- * @export_c
- */
-export function compare_3vl_float64(
-  a: f64,
-  a_null: i32,
-  b: f64,
-  b_null: i32,
-): Compare3VLResult {
-  if (a_null !== 0 || b_null !== 0) {
-    return { result: 0, is_unknown: 1 };
-  }
-  return { result: a < b ? -1 : a > b ? 1 : 0, is_unknown: 0 };
-}
-
-/**
- * @export_c
- */
-export function compare_3vl_bytes(
-  a: Uint8Array,
-  a_len: u32,
-  a_null: i32,
-  b: Uint8Array,
-  b_len: u32,
-  b_null: i32,
-): Compare3VLResult {
-  if (a_null !== 0 || b_null !== 0) {
-    return { result: 0, is_unknown: 1 };
-  }
-  const min_len: u32 = a_len < b_len ? a_len : b_len;
-  for (let i: u32 = 0; i < min_len; i++) {
-    if (a[i] !== b[i]) {
-      return { result: a[i] < b[i] ? -1 : 1, is_unknown: 0 };
-    }
-  }
-  return { result: a_len < b_len ? -1 : a_len > b_len ? 1 : 0, is_unknown: 0 };
-}
-
-export function get_cursor(ctx: VmContext, cursor_idx: number): VmCursor {
-  if (ctx.cursors && ctx.cursors[cursor_idx]) {
-    return ctx.cursors[cursor_idx];
-  }
-  return ctx.cursor;
-}
-
-export function resolve_page_offset(view: DataView, page_id: number): number {
-  if (page_id <= 0) return 0;
-  const pool = (view.buffer as any).__webdbPool;
-  if (pool) {
-    const slot = buf_pool_get_resident_slot(
-      view,
-      pool.pageToSlotOffset,
-      pool.pageToSlotBuckets,
-      page_id,
-    );
-    if (slot >= 0) {
-      return pool.slotsBaseOffset + slot * PAGE_SIZE;
-    }
-  }
-  return (page_id - 1) * PAGE_SIZE;
 }
 
 export function compare_3vl(
@@ -3151,19 +3067,6 @@ export function compare_sorter_keys(
   return 0;
 }
 
-export function compare_registers_to_sorter_keys(
-  registers: any[],
-  start_reg: number,
-  keys_b: any[],
-  key_info: VmKeyInfo,
-): number {
-  return compare_sorter_keys(
-    registers.slice(start_reg, start_reg + key_info.numKeys),
-    keys_b,
-    key_info,
-  );
-}
-
 export function fnv1a_32(values: any[]): number {
   let hash = 0x811c9dc5;
   for (let k = 0; k < values.length; k++) {
@@ -3184,148 +3087,4 @@ export function fnv1a_32(values: any[]): number {
   }
   hash = hash >>> 0;
   return hash === 0 ? 1 : hash;
-}
-
-export function group_keys_match(keys_a: any[], keys_b: any[]): boolean {
-  if (keys_a.length !== keys_b.length) return false;
-  for (let i = 0; i < keys_a.length; i++) {
-    const a = keys_a[i];
-    const b = keys_b[i];
-    if ((a === null || a === undefined) && (b === null || b === undefined))
-      continue;
-    if (a === null || a === undefined || b === null || b === undefined)
-      return false;
-    if (compare_3vl(a, b).result !== 0) return false;
-  }
-  return true;
-}
-
-export function create_agg_buckets(capacity: number): VmAggBucket[] {
-  return Array.from({ length: capacity }, () => ({
-    hash: 0,
-    keys: [],
-    count: 0,
-    sum: 0,
-    min_val: Infinity,
-    max_val: -Infinity,
-    has_val: false,
-  }));
-}
-
-export function sort_sorter_entries(sorter: VmSorter): void {
-  sorter.entries.sort((a, b) =>
-    compare_sorter_keys(a.keys, b.keys, sorter.keyInfo),
-  );
-  sorter.readIdx = sorter.keyInfo.offset ?? 0;
-}
-
-export function sorter_insert_row(
-  ctx: VmContext,
-  sorter: VmSorter,
-  keys: any[],
-  cursor_row_offset: number,
-  row_len: number,
-  view: DataView,
-  _max_k: number,
-): VmStatus {
-  const row_data = new Uint8Array(row_len);
-  row_data.set(
-    new Uint8Array(view.buffer, view.byteOffset + cursor_row_offset, row_len),
-  );
-  sorter.entries.push({
-    keys,
-    rowOffset: cursor_row_offset,
-    rowLen: row_len,
-    rowData: row_data,
-  });
-  return ctx.status;
-}
-
-export function serialize_result_registers(
-  ctx: VmContext,
-  start_reg: number,
-  num_cols: number,
-): Uint8Array {
-  const cols: ColumnMeta[] =
-    ctx.outputColumns && num_cols === ctx.outputColumns.length
-      ? ctx.outputColumns
-      : ctx.table && num_cols === ctx.table.columns.length
-        ? ctx.table.columns
-        : Array.from({ length: num_cols }, (_, c) => ({
-            name: `col_${c}`,
-            type: DataType.TEXT,
-            flags: ColumnFlag.NONE,
-            colOffset: 0,
-          }));
-  const record: Record<string, any> = {};
-  for (let c = 0; c < num_cols; c++) {
-    record[cols[c].name] = ctx.registers[start_reg + c];
-  }
-  return page_serialize_row(cols, record);
-}
-
-export function emit_to_result_buffer(
-  ctx: VmContext,
-  view: DataView,
-  row_bytes: Uint8Array,
-  instr_pc: number,
-): VmStatus {
-  const needed = 2 + row_bytes.byteLength;
-  if (needed > RESULT_BUFFER_SIZE) {
-    ctx.status = VmStatus.ERROR;
-    ctx.pc = instr_pc;
-    return VmStatus.ERROR;
-  }
-  if (ctx.resultOffset + needed > RESULT_BUFFER_SIZE) {
-    ctx.status = VmStatus.BUFFER_FULL;
-    ctx.pc = instr_pc;
-    return VmStatus.BUFFER_FULL;
-  }
-  const out_target = RESULT_BUFFER_OFFSET + ctx.resultOffset;
-  view.setUint16(out_target, row_bytes.byteLength, true);
-  new Uint8Array(
-    view.buffer,
-    view.byteOffset + out_target + 2,
-    row_bytes.byteLength,
-  ).set(row_bytes);
-  ctx.resultOffset += needed;
-  ctx.resultCount++;
-  return VmStatus.RUNNING;
-}
-
-export function row_is_null(
-  view: DataView,
-  null_bitmap_offset: number,
-  col_idx: number,
-): boolean {
-  return vm_row_is_null(view, null_bitmap_offset, col_idx) !== 0;
-}
-
-export function compute_fixed_column_offset(
-  view: DataView,
-  null_bitmap_offset: number,
-  null_bitmap_bytes: number,
-  columns: ColumnMeta[],
-  target_col_idx: number,
-): number {
-  let col_offset = null_bitmap_offset + null_bitmap_bytes;
-  for (let i = 0; i < target_col_idx; i++) {
-    if (!row_is_null(view, null_bitmap_offset, i)) {
-      const prev_col = columns[i];
-      switch (prev_col.type) {
-        case DataType.INT32:
-          col_offset += 4;
-          break;
-        case DataType.INT64:
-        case DataType.FLOAT64:
-          col_offset += 8;
-          break;
-        case DataType.UUID:
-        case DataType.ULID:
-          col_offset += 16;
-          break;
-      }
-    }
-  }
-  return col_offset;
 }

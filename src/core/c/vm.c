@@ -6,7 +6,6 @@
 #include "vm.h"
 #include "vm_helpers.h"
 #include "page.h"
-#include "buffer_pool.h"
 
 int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint32_t arena_base) {
   uint32_t MAX_CYCLES = 10000000;
@@ -18,9 +17,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
   while (pc < code_len) {
     cycles++;
     if (cycles > MAX_CYCLES) {
-      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_TIMEOUT);
-      return VM_STATUS_TIMEOUT;
+      return vm_set_status(ctx_off, pc, VM_STATUS_TIMEOUT);
     }
     uint32_t instr_pc = pc;
     uint8_t op = load_u8((const void *)(uintptr_t)(code_off + pc));
@@ -29,67 +26,47 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_HALT:
 {
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_OFFSET), 0);
-          store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-          store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_DONE);
-          return VM_STATUS_DONE;
+          return vm_set_status(ctx_off, pc, VM_STATUS_DONE);
         }
       case OP_OPEN_CURSOR:
+      case OP_OPEN_INDEX:
 {
           if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           if (cursor_idx >= 16) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t root_page_id = load_u32((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 5;
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           store_u32((void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID), root_page_id);
+          if (op == OP_OPEN_INDEX) {
+            store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROOT_PAGE_ID), root_page_id);
+          }
           store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
           store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), 0);
-          if (has_buffer_pool != 0 && root_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, root_page_id);
-            if (slot < 0) {
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), root_page_id);
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_PAGE_FAULT;
-            }
-            store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
+          if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, cur_off, root_page_id, instr_pc) != VM_STATUS_RUNNING) {
+            return VM_STATUS_PAGE_FAULT;
           }
           break;
         }
       case OP_REWIND:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
-          if (has_buffer_pool != 0 && page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, page_id);
-            if (slot < 0) {
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), page_id);
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_PAGE_FAULT;
-            }
-            store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
+          if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, cur_off, page_id, instr_pc) != VM_STATUS_RUNNING) {
+            return VM_STATUS_PAGE_FAULT;
           }
           uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, page_id);
           if (page_get_type(page_offset) != PAGE_TYPE_LEAF_DATA) {
@@ -115,17 +92,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_NEXT_ROW:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
@@ -143,15 +116,8 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           } else {
             uint32_t next_page_id = page_get_next_page_id(page_offset);
             if (next_page_id != 0 && next_page_id != page_id) {
-              if (has_buffer_pool != 0) {
-                int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, next_page_id);
-                if (slot < 0) {
-                  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), next_page_id);
-                  store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                  return VM_STATUS_PAGE_FAULT;
-                }
-                store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
+              if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, cur_off, next_page_id, instr_pc) != VM_STATUS_RUNNING) {
+                return VM_STATUS_PAGE_FAULT;
               }
               uint32_t next_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, next_page_id);
               if (page_get_type(next_offset) != PAGE_TYPE_LEAF_DATA) {
@@ -177,17 +143,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_LAST:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
@@ -210,17 +172,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_PREV_ROW:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t page_id = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID));
@@ -237,55 +195,17 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           break;
         }
       case OP_COLUMN_INT:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (cursor_idx >= 16 || reg_idx >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
-          uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
-          uint32_t tbl_off = vm_resolve_table_off(ctx_off, cursor_idx);
-          uint32_t null_bitmap_bytes = load_u16((const void *)(uintptr_t)(tbl_off + 2));
-          uint32_t null_bitmap_offset = row_offset + 3;
-          uint32_t reg_off = vm_reg_off(ctx_off, reg_idx);
-          if (vm_row_is_null(null_bitmap_offset, col_idx) != 0) {
-            vm_reg_set_null(reg_off);
-            break;
-          }
-          uint32_t col_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, col_idx);
-          uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + col_idx));
-          if (col_type == TYPE_INT32) {
-            vm_reg_set_i32(reg_off, load_i32((const void *)(uintptr_t)(col_offset)));
-          } else           if (col_type == TYPE_INT64) {
-            vm_reg_set_i64(reg_off, load_i64((const void *)(uintptr_t)(col_offset)));
-          }
-          break;
-        }
       case OP_COLUMN_FLOAT:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 3;
           if (cursor_idx >= 16 || reg_idx >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
@@ -298,107 +218,32 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             break;
           }
           uint32_t col_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, col_idx);
-          vm_reg_set_f64(reg_off, load_f64((const void *)(uintptr_t)(col_offset)));
+          if (op == OP_COLUMN_FLOAT) {
+            vm_reg_set_f64(reg_off, load_f64((const void *)(uintptr_t)(col_offset)));
+          } else {
+            uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + col_idx));
+            if (col_type == TYPE_INT32) {
+              vm_reg_set_i32(reg_off, load_i32((const void *)(uintptr_t)(col_offset)));
+            } else             if (col_type == TYPE_INT64) {
+              vm_reg_set_i64(reg_off, load_i64((const void *)(uintptr_t)(col_offset)));
+            }
+          }
           break;
         }
       case OP_COLUMN_UUID:
       case OP_COLUMN_ULID:
       case OP_COLUMN_TEXT:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (cursor_idx >= 16 || reg_idx >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
-          uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
-          uint32_t tbl_off = vm_resolve_table_off(ctx_off, cursor_idx);
-          uint32_t num_cols = load_u16((const void *)(uintptr_t)(tbl_off + 0));
-          uint32_t null_bitmap_bytes = load_u16((const void *)(uintptr_t)(tbl_off + 2));
-          uint32_t null_bitmap_offset = row_offset + 3;
-          uint32_t reg_off = vm_reg_off(ctx_off, reg_idx);
-          if (vm_row_is_null(null_bitmap_offset, col_idx) != 0) {
-            vm_reg_set_null(reg_off);
-            break;
-          }
-          uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + col_idx));
-          if (col_type == TYPE_UUID || col_type == TYPE_ULID) {
-            uint32_t col_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, col_idx);
-            if (col_type == TYPE_UUID) {
-              uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, 36);
-              if (out_off == 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
-                return VM_STATUS_ARENA_EXHAUSTED;
-              }
-              vm_uuid_decode_view(col_offset, out_off);
-              vm_reg_set_slice(reg_off, TYPE_UUID, out_off, 36);
-            } else {
-              uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, 26);
-              if (out_off == 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
-                return VM_STATUS_ARENA_EXHAUSTED;
-              }
-              vm_ulid_decode_view(col_offset, out_off);
-              vm_reg_set_slice(reg_off, TYPE_ULID, out_off, 26);
-            }
-            break;
-          }
-          uint16_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
-          uint32_t var_table_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, num_cols);
-          uint32_t var_idx = vm_compute_var_col_idx(tbl_off, col_idx);
-          uint32_t entry_offset = var_table_offset + (var_idx << 2);
-          if (row_len > MAX_ROW_SIZE || entry_offset + 4 > row_offset + row_len) {
-            vm_reg_set_null(reg_off);
-            break;
-          }
-          uint16_t rel_offset = load_u16((const void *)(uintptr_t)(entry_offset));
-          uint16_t len = load_u16((const void *)(uintptr_t)(entry_offset + 2));
-          if ((len & OVERFLOW_LEN_FLAG) != 0) {
-            if (rel_offset + OVERFLOW_DESCRIPTOR_SIZE > row_len || row_offset + rel_offset < entry_offset + 4) {
-              vm_reg_set_null(reg_off);
-              break;
-            }
-            uint32_t first_pid = load_u32((const void *)(uintptr_t)(row_offset + rel_offset));
-            uint32_t total_len = load_u32((const void *)(uintptr_t)(row_offset + rel_offset + 4));
-            int32_t ov_status = vm_load_overflow_column(ctx_off, reg_off, TYPE_TEXT, first_pid, total_len, instr_pc);
-            if (ov_status != VM_STATUS_RUNNING) {
-              return ov_status;
-            }
-            break;
-          }
-          if (rel_offset + len > row_len || (len > 0 && row_offset + rel_offset < entry_offset + 4)) {
-            vm_reg_set_null(reg_off);
-            break;
-          }
-          vm_reg_set_slice(reg_off, TYPE_TEXT, row_offset + rel_offset, len);
-          break;
-        }
       case OP_COLUMN_BLOB:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 3;
           if (cursor_idx >= 16 || reg_idx >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
@@ -411,6 +256,25 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             vm_reg_set_null(reg_off);
             break;
           }
+          if (op != OP_COLUMN_BLOB) {
+            uint8_t col_type = load_u8((const void *)(uintptr_t)(tbl_off + 4 + col_idx));
+            if (col_type == TYPE_UUID || col_type == TYPE_ULID) {
+              uint32_t col_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, col_idx);
+              uint32_t out_len = col_type == TYPE_UUID ? 36 : 26;
+              uint32_t out_off = vm_phys_alloc(ctx_off, arena_base, out_len);
+              if (out_off == 0) {
+                return vm_set_status(ctx_off, pc, VM_STATUS_ARENA_EXHAUSTED);
+              }
+              if (col_type == TYPE_UUID) {
+                vm_uuid_decode_view(col_offset, out_off);
+              } else {
+                vm_ulid_decode_view(col_offset, out_off);
+              }
+              vm_reg_set_slice(reg_off, col_type, out_off, out_len);
+              break;
+            }
+          }
+          uint8_t target_type = op == OP_COLUMN_BLOB ? TYPE_BLOB : TYPE_TEXT;
           uint16_t row_len = load_u16((const void *)(uintptr_t)(row_offset + 1));
           uint32_t var_table_offset = vm_compute_fixed_col_offset(null_bitmap_offset, null_bitmap_bytes, tbl_off, num_cols);
           uint32_t var_idx = vm_compute_var_col_idx(tbl_off, col_idx);
@@ -428,7 +292,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             }
             uint32_t first_pid = load_u32((const void *)(uintptr_t)(row_offset + rel_offset));
             uint32_t total_len = load_u32((const void *)(uintptr_t)(row_offset + rel_offset + 4));
-            int32_t ov_status = vm_load_overflow_column(ctx_off, reg_off, TYPE_BLOB, first_pid, total_len, instr_pc);
+            int32_t ov_status = vm_load_overflow_column(ctx_off, reg_off, target_type, first_pid, total_len, instr_pc);
             if (ov_status != VM_STATUS_RUNNING) {
               return ov_status;
             }
@@ -438,62 +302,27 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             vm_reg_set_null(reg_off);
             break;
           }
-          vm_reg_set_slice(reg_off, TYPE_BLOB, row_offset + rel_offset, len);
-          break;
-        }
-      case OP_OPEN_INDEX:
-{
-          if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          if (cursor_idx >= 16) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t root_page_id = load_u32((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 5;
-          uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
-          store_u32((void *)(uintptr_t)(cur_off + VM_CUR_PAGE_ID), root_page_id);
-          store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROOT_PAGE_ID), root_page_id);
-          store_i32((void *)(uintptr_t)(cur_off + VM_CUR_CELL_IDX), 0);
-          store_u32((void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET), 0);
-          if (has_buffer_pool != 0 && root_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, root_page_id);
-            if (slot < 0) {
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), root_page_id);
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_PAGE_FAULT;
-            }
-            store_i32((void *)(uintptr_t)(cur_off + VM_CUR_SLOT_IDX), slot);
-          }
+          vm_reg_set_slice(reg_off, target_type, row_offset + rel_offset, len);
           break;
         }
       case OP_INDEX_SEEK_EQ:
+      case OP_INDEX_SEEK_GE:
 {
           if (pc + 6 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t index_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t data_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t reg_key = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           uint8_t key_type = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
-          uint32_t jump_not_found = load_u16((const void *)(uintptr_t)(code_off + pc + 4));
+          uint32_t jump_miss = load_u16((const void *)(uintptr_t)(code_off + pc + 4));
           pc += 6;
-          if (index_cursor_idx >= 16 || data_cursor_idx >= 16 || reg_key >= 64 || jump_not_found > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+          if (index_cursor_idx >= 16 || data_cursor_idx >= 16 || reg_key >= 64 || jump_miss > code_len) {
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t key_reg_off = vm_reg_off(ctx_off, reg_key);
           if (load_u8((const void *)(uintptr_t)(key_reg_off + VM_REG_IS_NULL)) != 0) {
-            pc = jump_not_found;
+            pc = jump_miss;
             break;
           }
           uint32_t idx_cur_off = vm_cursor_off(ctx_off, index_cursor_idx);
@@ -505,22 +334,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           while (curr_page_id != 0) {
             hops++;
             if (hops > 100000) {
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_ERROR;
+              return vm_set_status(ctx_off, instr_pc, VM_STATUS_ERROR);
             }
-            if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
-              if (slot < 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                return VM_STATUS_PAGE_FAULT;
-              }
-              store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
+            if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, idx_cur_off, curr_page_id, instr_pc) != VM_STATUS_RUNNING) {
+              return VM_STATUS_PAGE_FAULT;
             }
             uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
-            int32_t matched_slot = vm_index_seek_leaf_eq(ctx_off, page_offset, key_type, key_reg_off);
+            int32_t matched_slot = vm_index_seek_leaf(ctx_off, page_offset, key_type, key_reg_off, op == OP_INDEX_SEEK_EQ ? 1 : 0);
             if (matched_slot >= 0) {
               found = 1;
               store_u32((void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID), curr_page_id);
@@ -533,125 +353,23 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
             curr_page_id = page_get_next_page_id(page_offset);
           }
           if (found == 0) {
-            pc = jump_not_found;
-          } else {
-            uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
-            int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
-            if (has_buffer_pool != 0 && data_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
-              if (slot < 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                return VM_STATUS_PAGE_FAULT;
-              }
-            }
-            uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
-            store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
-            store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-            uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
-            uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
-            store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
-          }
-          break;
-        }
-      case OP_INDEX_SEEK_GE:
-{
-          if (pc + 6 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t index_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t data_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t reg_key = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          uint8_t key_type = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
-          uint32_t jump_eof = load_u16((const void *)(uintptr_t)(code_off + pc + 4));
-          pc += 6;
-          if (index_cursor_idx >= 16 || data_cursor_idx >= 16 || reg_key >= 64 || jump_eof > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t key_reg_off = vm_reg_off(ctx_off, reg_key);
-          if (load_u8((const void *)(uintptr_t)(key_reg_off + VM_REG_IS_NULL)) != 0) {
-            pc = jump_eof;
-            break;
-          }
-          uint32_t idx_cur_off = vm_cursor_off(ctx_off, index_cursor_idx);
-          uint32_t root_pid = load_u32((const void *)(uintptr_t)(idx_cur_off + VM_CUR_ROOT_PAGE_ID));
-          uint32_t curr_page_id = root_pid != 0 ? root_pid : load_u32((const void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID));
-          int32_t found = 0;
-          int64_t matched_rowid = 0LL;
-          uint32_t hops = 0;
-          while (curr_page_id != 0) {
-            hops++;
-            if (hops > 100000) {
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_ERROR;
-            }
-            if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
-              if (slot < 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                return VM_STATUS_PAGE_FAULT;
-              }
-              store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
-            }
-            uint32_t page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
-            int32_t candidate_slot = vm_index_seek_leaf_ge(ctx_off, page_offset, key_type, key_reg_off);
-            if (candidate_slot >= 0) {
-              found = 1;
-              store_u32((void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID), curr_page_id);
-              store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_CELL_IDX), candidate_slot);
-              uint16_t cell_offset = page_get_cell_offset(page_offset, candidate_slot);
-              uint16_t k_len = load_u16((const void *)(uintptr_t)(page_offset + cell_offset));
-              matched_rowid = load_i64((const void *)(uintptr_t)(page_offset + cell_offset + 2 + k_len));
-              break;
-            }
-            curr_page_id = page_get_next_page_id(page_offset);
-          }
-          if (found == 0) {
-            pc = jump_eof;
-          } else {
-            uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
-            int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
-            if (has_buffer_pool != 0 && data_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
-              if (slot < 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                return VM_STATUS_PAGE_FAULT;
-              }
-            }
-            uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
-            store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
-            store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-            uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
-            uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
-            store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
+            pc = jump_miss;
+          } else           if (vm_position_data_cursor(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, data_cursor_idx, matched_rowid, instr_pc) != VM_STATUS_RUNNING) {
+            return VM_STATUS_PAGE_FAULT;
           }
           break;
         }
       case OP_INDEX_NEXT:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t index_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t data_cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t jump_eof = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 4;
           if (index_cursor_idx >= 16 || data_cursor_idx >= 16 || jump_eof > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t idx_cur_off = vm_cursor_off(ctx_off, index_cursor_idx);
           uint32_t curr_page_id = load_u32((const void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID));
@@ -664,15 +382,8 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
               pc = jump_eof;
               break;
             }
-            if (has_buffer_pool != 0 && curr_page_id > 0) {
-              int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_page_id);
-              if (slot < 0) {
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_page_id);
-                store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-                store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-                return VM_STATUS_PAGE_FAULT;
-              }
-              store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_SLOT_IDX), slot);
+            if (vm_ensure_resident(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, idx_cur_off, curr_page_id, instr_pc) != VM_STATUS_RUNNING) {
+              return VM_STATUS_PAGE_FAULT;
             }
             page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, curr_page_id);
             next_cell_idx = 0;
@@ -682,201 +393,72 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint16_t cell_offset = page_get_cell_offset(page_offset, next_cell_idx);
           uint16_t k_len = load_u16((const void *)(uintptr_t)(page_offset + cell_offset));
           int64_t matched_rowid = load_i64((const void *)(uintptr_t)(page_offset + cell_offset + 2 + k_len));
-          uint32_t data_page_id = ((int32_t)(matched_rowid >> 16LL));
-          int32_t data_cell_idx = ((int32_t)(matched_rowid & 0xffffLL));
-          if (has_buffer_pool != 0 && data_page_id > 0) {
-            int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, data_page_id);
-            if (slot < 0) {
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), data_page_id);
-              store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_PAGE_FAULT);
-              store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-              return VM_STATUS_PAGE_FAULT;
-            }
+          if (vm_position_data_cursor(ctx_off, has_buffer_pool, page_to_slot_off, page_to_slot_buckets, data_cursor_idx, matched_rowid, instr_pc) != VM_STATUS_RUNNING) {
+            return VM_STATUS_PAGE_FAULT;
           }
           store_u32((void *)(uintptr_t)(idx_cur_off + VM_CUR_PAGE_ID), curr_page_id);
           store_i32((void *)(uintptr_t)(idx_cur_off + VM_CUR_CELL_IDX), next_cell_idx);
-          uint32_t data_cur_off = vm_cursor_off(ctx_off, data_cursor_idx);
-          store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_PAGE_ID), data_page_id);
-          store_i32((void *)(uintptr_t)(data_cur_off + VM_CUR_CELL_IDX), data_cell_idx);
-          uint32_t data_page_offset = vm_resolve_page_offset(ctx_off, has_buffer_pool, data_page_id);
-          uint16_t rel_cell_offset = page_get_cell_offset(data_page_offset, data_cell_idx);
-          store_u32((void *)(uintptr_t)(data_cur_off + VM_CUR_ROW_OFFSET), data_page_offset + rel_cell_offset);
           break;
         }
       case OP_IS_NULL:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
-          uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
-          if (vm_row_is_null(row_offset + 3, col_idx) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_IS_NOT_NULL:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t col_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 4;
           if (cursor_idx >= 16 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
-          if (vm_row_is_null(row_offset + 3, col_idx) == 0) {
+          int32_t is_null = vm_row_is_null(row_offset + 3, col_idx);
+          if ((op == OP_IS_NULL && is_null != 0) || (op == OP_IS_NOT_NULL && is_null == 0)) {
             pc = jump_target;
           }
           break;
         }
       case OP_EQ:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp == 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_NE:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp != -2 && cmp != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_GT:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp == 1) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_GE:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp == 0 || cmp == 1) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_LT:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp == -1) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_LE:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 4;
           if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t cmp = vm_compare_reg_3vl(vm_reg_off(ctx_off, reg_a), vm_reg_off(ctx_off, reg_b));
-          if (cmp == -1 || cmp == 0) {
+          int32_t jump = 0;
+          if (op == OP_EQ) {
+            if (cmp == 0) 
+              jump = 1;
+          } else           if (op == OP_NE) {
+            if (cmp != -2 && cmp != 0) 
+              jump = 1;
+          } else           if (op == OP_GT) {
+            if (cmp == 1) 
+              jump = 1;
+          } else           if (op == OP_GE) {
+            if (cmp == 0 || cmp == 1) 
+              jump = 1;
+          } else           if (op == OP_LT) {
+            if (cmp == -1) 
+              jump = 1;
+          } else           if (cmp == -1 || cmp == 0) {
+            jump = 1;
+          }
+          if (jump != 0) {
             pc = jump_target;
           }
           break;
@@ -884,171 +466,56 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_JUMP:
 {
           if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc));
           if (jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           pc = jump_target;
           break;
         }
       case OP_STR_LIKE:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_pat = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
-          uint32_t p_off = vm_reg_off(ctx_off, reg_pat);
-          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(p_off + VM_REG_IS_NULL)) != 0) {
-            break;
-          }
-          if (sql_like_match_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_LEN))) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_STR_NOT_LIKE:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_pat = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
-          uint32_t p_off = vm_reg_off(ctx_off, reg_pat);
-          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(p_off + VM_REG_IS_NULL)) != 0) {
-            break;
-          }
-          if (sql_like_match_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_LEN))) == 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_STR_CONTAINS:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_sub = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_str >= 64 || reg_sub >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
-          uint32_t sub_off = vm_reg_off(ctx_off, reg_sub);
-          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(sub_off + VM_REG_IS_NULL)) != 0) {
-            break;
-          }
-          if (vm_str_contains_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(sub_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(sub_off + VM_REG_DATA_LEN))) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_STR_STARTS_WITH:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_pfx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_str >= 64 || reg_pfx >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
-          uint32_t pfx_off = vm_reg_off(ctx_off, reg_pfx);
-          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(pfx_off + VM_REG_IS_NULL)) != 0) {
-            break;
-          }
-          if (vm_str_starts_with_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(pfx_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(pfx_off + VM_REG_DATA_LEN))) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_STR_ENDS_WITH:
-{
-          if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_sfx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 4;
-          if (reg_str >= 64 || reg_sfx >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t s_off = vm_reg_off(ctx_off, reg_str);
-          uint32_t sfx_off = vm_reg_off(ctx_off, reg_sfx);
-          if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(sfx_off + VM_REG_IS_NULL)) != 0) {
-            break;
-          }
-          if (vm_str_ends_with_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(sfx_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(sfx_off + VM_REG_DATA_LEN))) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_STR_FUZZY_MATCH:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_str = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t reg_pat = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 4;
           if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t s_off = vm_reg_off(ctx_off, reg_str);
           uint32_t p_off = vm_reg_off(ctx_off, reg_pat);
           if (load_u8((const void *)(uintptr_t)(s_off + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(p_off + VM_REG_IS_NULL)) != 0) {
             break;
           }
-          if (vm_str_fuzzy_match_view(load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_LEN)), 1, 1) != 0) {
+          uint32_t s_data = load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_OFF));
+          uint32_t s_len = load_u32((const void *)(uintptr_t)(s_off + VM_REG_DATA_LEN));
+          uint32_t p_data = load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_OFF));
+          uint32_t p_len = load_u32((const void *)(uintptr_t)(p_off + VM_REG_DATA_LEN));
+          int32_t matched = 0;
+          if (op == OP_STR_LIKE) {
+            matched = sql_like_match_view(s_data, s_len, p_data, p_len) != 0 ? 1 : 0;
+          } else           if (op == OP_STR_NOT_LIKE) {
+            matched = sql_like_match_view(s_data, s_len, p_data, p_len) == 0 ? 1 : 0;
+          } else           if (op == OP_STR_CONTAINS) {
+            matched = vm_str_contains_view(s_data, s_len, p_data, p_len) != 0 ? 1 : 0;
+          } else           if (op == OP_STR_STARTS_WITH) {
+            matched = vm_str_starts_with_view(s_data, s_len, p_data, p_len) != 0 ? 1 : 0;
+          } else           if (op == OP_STR_ENDS_WITH) {
+            matched = vm_str_ends_with_view(s_data, s_len, p_data, p_len) != 0 ? 1 : 0;
+          } else {
+            matched = vm_str_fuzzy_match_view(s_data, s_len, p_data, p_len, 1, 1) != 0 ? 1 : 0;
+          }
+          if (matched != 0) {
             pc = jump_target;
           }
           break;
@@ -1056,18 +523,14 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_IN:
 {
           if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_val = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t set_idx = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 5;
           if (reg_val >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           if (vm_in_set_contains(ctx_off, set_idx, vm_reg_off(ctx_off, reg_val)) != 0) {
             pc = jump_target;
@@ -1077,15 +540,11 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_LOAD_INT:
 {
           if (pc + 5 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           if (reg_idx >= 64) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t val = load_i32((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 5;
@@ -1093,91 +552,48 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           break;
         }
       case OP_LOAD_INT64:
-{
-          if (pc + 9 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          if (reg_idx >= 64) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          int64_t val = load_i64((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 9;
-          vm_reg_set_i64(vm_reg_off(ctx_off, reg_idx), val);
-          break;
-        }
       case OP_LOAD_FLOAT:
 {
           if (pc + 9 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           if (reg_idx >= 64) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
-          double val = load_f64((const void *)(uintptr_t)(code_off + pc + 1));
+          uint32_t reg_off = vm_reg_off(ctx_off, reg_idx);
+          if (op == OP_LOAD_INT64) {
+            vm_reg_set_i64(reg_off, load_i64((const void *)(uintptr_t)(code_off + pc + 1)));
+          } else {
+            vm_reg_set_f64(reg_off, load_f64((const void *)(uintptr_t)(code_off + pc + 1)));
+          }
           pc += 9;
-          vm_reg_set_f64(vm_reg_off(ctx_off, reg_idx), val);
           break;
         }
       case OP_LOAD_TEXT:
-{
-          if (pc + 3 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint16_t len = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
-          if (reg_idx >= 64 || (len) > code_len - (pc + 3)) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t str_off = code_off + pc + 3;
-          pc += 3 + len;
-          vm_reg_set_slice(vm_reg_off(ctx_off, reg_idx), TYPE_TEXT, str_off, len);
-          break;
-        }
       case OP_LOAD_BLOB:
 {
           if (pc + 3 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint16_t len = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           if (reg_idx >= 64 || (len) > code_len - (pc + 3)) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
-          uint32_t blob_off = code_off + pc + 3;
+          uint32_t data_off = code_off + pc + 3;
           pc += 3 + len;
-          vm_reg_set_slice(vm_reg_off(ctx_off, reg_idx), TYPE_BLOB, blob_off, len);
+          vm_reg_set_slice(vm_reg_off(ctx_off, reg_idx), op == OP_LOAD_TEXT ? TYPE_TEXT : TYPE_BLOB, data_off, len);
           break;
         }
       case OP_LOAD_NULL:
 {
           if (pc + 1 > code_len) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           if (reg_idx >= 64) {
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           pc += 1;
           vm_reg_set_null(vm_reg_off(ctx_off, reg_idx));
@@ -1186,16 +602,12 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_EMIT_ROW:
 {
           if (pc + 1 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc));
           pc += 1;
           if (cursor_idx >= 16) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t cur_off = vm_cursor_off(ctx_off, cursor_idx);
           uint32_t row_offset = load_u32((const void *)(uintptr_t)(cur_off + VM_CUR_ROW_OFFSET));
@@ -1210,59 +622,36 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           break;
         }
       case OP_OFFSET:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t offset_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 3;
-          if (offset_reg >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_off = vm_reg_off(ctx_off, offset_reg);
-          int32_t offset_val = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL)) != 0 ? 0 : load_i32((const void *)(uintptr_t)(reg_off + VM_REG_I32));
-          if (offset_val > 0) {
-            vm_reg_set_i32(reg_off, offset_val - 1);
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_LIMIT:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
-          uint32_t limit_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
+          uint32_t count_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
-          if (limit_reg >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+          if (count_reg >= 64 || jump_target > code_len) {
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
-          uint32_t reg_off = vm_reg_off(ctx_off, limit_reg);
-          int32_t limit_val = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL)) != 0 ? 0 : load_i32((const void *)(uintptr_t)(reg_off + VM_REG_I32));
-          if (limit_val <= 1) {
+          uint32_t reg_off = vm_reg_off(ctx_off, count_reg);
+          int32_t val = load_u8((const void *)(uintptr_t)(reg_off + VM_REG_IS_NULL)) != 0 ? 0 : load_i32((const void *)(uintptr_t)(reg_off + VM_REG_I32));
+          if (op == OP_OFFSET) {
+            if (val > 0) {
+              vm_reg_set_i32(reg_off, val - 1);
+              pc = jump_target;
+            }
+          } else           if (val <= 1) {
             vm_reg_set_i32(reg_off, 0);
             pc = jump_target;
           } else {
-            vm_reg_set_i32(reg_off, limit_val - 1);
+            vm_reg_set_i32(reg_off, val - 1);
           }
           break;
         }
       case OP_CALL_UDF:
 {
           if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t udf_id = load_u16((const void *)(uintptr_t)(code_off + pc));
           uint32_t start_arg_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
@@ -1270,72 +659,38 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 4));
           pc += 5;
           if (dest_reg >= 64 || start_arg_reg + num_args > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_UDF_ID), udf_id);
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_UDF_START_REG), start_arg_reg);
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_UDF_NUM_ARGS), num_args);
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_UDF_DEST_REG), dest_reg);
-          store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-          store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_HOST_UDF);
-          return VM_STATUS_HOST_UDF;
+          return vm_set_status(ctx_off, pc, VM_STATUS_HOST_UDF);
         }
       case OP_STR_LOWER:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          vm_str_lower(ctx_off, arena_base, vm_reg_off(ctx_off, src_reg), vm_reg_off(ctx_off, dest_reg));
-          break;
-        }
       case OP_STR_UPPER:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          vm_str_upper(ctx_off, arena_base, vm_reg_off(ctx_off, src_reg), vm_reg_off(ctx_off, dest_reg));
-          break;
-        }
       case OP_STR_LENGTH:
+      case OP_STR_TRIM:
+      case OP_COPY:
 {
           if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 2;
           if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t src_off = vm_reg_off(ctx_off, src_reg);
           uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
+          if (op == OP_STR_LOWER || op == OP_STR_UPPER) {
+            vm_str_case(ctx_off, arena_base, src_off, dst_off, op == OP_STR_UPPER ? 1 : 0);
+          } else           if (op == OP_STR_TRIM) {
+            vm_str_trim(src_off, dst_off);
+          } else           if (op == OP_COPY) {
+            vm_reg_copy(dst_off, src_off);
+          } else           if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
             vm_reg_set_null(dst_off);
           } else {
             int32_t char_len = vm_utf8_char_count(load_u32((const void *)(uintptr_t)(src_off + VM_REG_DATA_OFF)), load_u32((const void *)(uintptr_t)(src_off + VM_REG_DATA_LEN)));
@@ -1346,9 +701,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_STR_SUBSTR:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t start_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1356,46 +709,22 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 4;
           if (src_reg >= 64 || start_reg >= 64 || len_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           vm_utf8_substr(vm_reg_off(ctx_off, src_reg), vm_reg_off(ctx_off, start_reg), vm_reg_off(ctx_off, len_reg), vm_reg_off(ctx_off, dest_reg));
-          break;
-        }
-      case OP_STR_TRIM:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          vm_str_trim(vm_reg_off(ctx_off, src_reg), vm_reg_off(ctx_off, dest_reg));
           break;
         }
       case OP_STR_LEVENSHTEIN:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_str1 = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t reg_str2 = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 3;
           if (reg_str1 >= 64 || reg_str2 >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t s1_off = vm_reg_off(ctx_off, reg_str1);
           uint32_t s2_off = vm_reg_off(ctx_off, reg_str2);
@@ -1409,67 +738,49 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           break;
         }
       case OP_MATH_ABS:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_off = vm_reg_off(ctx_off, src_reg);
-          uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(dst_off);
-          } else {
-            vm_reg_set_f64(dst_off, vm_math_abs(load_f64((const void *)(uintptr_t)(src_off + VM_REG_F64))));
-          }
-          break;
-        }
       case OP_MATH_ROUND:
+      case OP_MATH_FLOOR:
+      case OP_MATH_CEIL:
 {
           if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 2;
           if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t src_off = vm_reg_off(ctx_off, src_reg);
           uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
           if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
             vm_reg_set_null(dst_off);
           } else {
-            vm_reg_set_f64(dst_off, vm_math_round(load_f64((const void *)(uintptr_t)(src_off + VM_REG_F64))));
+            double x = load_f64((const void *)(uintptr_t)(src_off + VM_REG_F64));
+            double res = 0;
+            if (op == OP_MATH_ABS) {
+              res = vm_math_abs(x);
+            } else             if (op == OP_MATH_ROUND) {
+              res = vm_math_round(x);
+            } else             if (op == OP_MATH_FLOOR) {
+              res = vm_math_floor(x);
+            } else {
+              res = vm_math_ceil(x);
+            }
+            vm_reg_set_f64(dst_off, res);
           }
           break;
         }
       case OP_RESULT_ROW:
 {
           if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t start_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t num_cols = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 2;
           if (start_reg + num_cols > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t emit_status = vm_serialize_and_emit_result_row(ctx_off, start_reg, num_cols, instr_pc);
           if (emit_status != VM_STATUS_RUNNING) {
@@ -1480,17 +791,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_SORTER_OPEN:
 {
           if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t sorter_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t key_info_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 2;
           if (sorter_id >= 4 || key_info_idx >= 8) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t open_status = vm_sorter_open_raw(ctx_off, arena_base, sorter_id, key_info_idx);
           if (open_status != VM_STATUS_RUNNING) {
@@ -1502,9 +809,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_SORTER_INSERT:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t sorter_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t start_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1512,9 +817,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t cursor_idx = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 4;
           if (sorter_id >= 4 || cursor_idx >= 16 || num_keys > 8 || start_reg + num_keys > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t ins_status = vm_sorter_insert_raw(ctx_off, arena_base, sorter_id, start_reg, num_keys, cursor_idx);
           if (ins_status != VM_STATUS_RUNNING) {
@@ -1526,16 +829,12 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_SORTER_SORT:
 {
           if (pc + 1 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t sorter_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           pc += 1;
           if (sorter_id >= 4) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t sort_status = vm_sorter_sort_raw(ctx_off, arena_base, sorter_id);
           if (sort_status != VM_STATUS_RUNNING) {
@@ -1547,17 +846,13 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_SORTER_NEXT:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t sorter_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (sorter_id >= 4 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
           int32_t next_status = vm_sorter_next_raw(ctx_off, sorter_id, jump_target, instr_pc);
@@ -1567,270 +862,83 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           pc = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_PC));
           break;
         }
-      case OP_MATH_FLOOR:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_off = vm_reg_off(ctx_off, src_reg);
-          uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(dst_off);
-          } else {
-            vm_reg_set_f64(dst_off, vm_math_floor(load_f64((const void *)(uintptr_t)(src_off + VM_REG_F64))));
-          }
-          break;
-        }
-      case OP_MATH_CEIL:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_off = vm_reg_off(ctx_off, src_reg);
-          uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(src_off + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(dst_off);
-          } else {
-            vm_reg_set_f64(dst_off, vm_math_ceil(load_f64((const void *)(uintptr_t)(src_off + VM_REG_F64))));
-          }
-          break;
-        }
       case OP_ADD:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t off_a = vm_reg_off(ctx_off, reg_a);
-          uint32_t off_b = vm_reg_off(ctx_off, reg_b);
-          uint32_t off_d = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(off_a + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(off_b + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(off_d);
-          } else {
-            vm_reg_set_f64(off_d, load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64)) + load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64)));
-          }
-          break;
-        }
       case OP_SUB:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t off_a = vm_reg_off(ctx_off, reg_a);
-          uint32_t off_b = vm_reg_off(ctx_off, reg_b);
-          uint32_t off_d = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(off_a + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(off_b + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(off_d);
-          } else {
-            vm_reg_set_f64(off_d, load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64)) - load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64)));
-          }
-          break;
-        }
       case OP_MUL:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t off_a = vm_reg_off(ctx_off, reg_a);
-          uint32_t off_b = vm_reg_off(ctx_off, reg_b);
-          uint32_t off_d = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(off_a + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(off_b + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(off_d);
-          } else {
-            vm_reg_set_f64(off_d, load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64)) * load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64)));
-          }
-          break;
-        }
       case OP_DIV:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t off_a = vm_reg_off(ctx_off, reg_a);
-          uint32_t off_b = vm_reg_off(ctx_off, reg_b);
-          uint32_t off_d = vm_reg_off(ctx_off, dest_reg);
-          if (load_u8((const void *)(uintptr_t)(off_a + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(off_b + VM_REG_IS_NULL)) != 0) {
-            vm_reg_set_null(off_d);
-          } else {
-            double denom = load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64));
-            if (denom == 0) {
-              vm_reg_set_null(off_d);
-            } else {
-              vm_reg_set_f64(off_d, load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64)) / denom);
-            }
-          }
-          break;
-        }
       case OP_MOD:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg_a = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t reg_b = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 3;
           if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t off_a = vm_reg_off(ctx_off, reg_a);
           uint32_t off_b = vm_reg_off(ctx_off, reg_b);
           uint32_t off_d = vm_reg_off(ctx_off, dest_reg);
           if (load_u8((const void *)(uintptr_t)(off_a + VM_REG_IS_NULL)) != 0 || load_u8((const void *)(uintptr_t)(off_b + VM_REG_IS_NULL)) != 0) {
             vm_reg_set_null(off_d);
+            break;
+          }
+          double a = load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64));
+          double b = load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64));
+          if (op == OP_ADD) {
+            vm_reg_set_f64(off_d, a + b);
+          } else           if (op == OP_SUB) {
+            vm_reg_set_f64(off_d, a - b);
+          } else           if (op == OP_MUL) {
+            vm_reg_set_f64(off_d, a * b);
+          } else           if (b == 0) {
+            vm_reg_set_null(off_d);
+          } else           if (op == OP_DIV) {
+            vm_reg_set_f64(off_d, a / b);
           } else {
-            double denom = load_f64((const void *)(uintptr_t)(off_b + VM_REG_F64));
-            if (denom == 0) {
-              vm_reg_set_null(off_d);
-            } else {
-              double num = load_f64((const void *)(uintptr_t)(off_a + VM_REG_F64));
-              double q = __builtin_trunc((double)(num / denom));
-              vm_reg_set_f64(off_d, num - q * denom);
-            }
+            double q = __builtin_trunc((double)(a / b));
+            vm_reg_set_f64(off_d, a - q * b);
           }
           break;
         }
       case OP_STR_CONCAT:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t start_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t num_regs = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
-          pc += 3;
-          if (dest_reg >= 64 || start_reg + num_regs > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          vm_str_concat(ctx_off, arena_base, start_reg, num_regs, dest_reg);
-          break;
-        }
       case OP_COALESCE:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t start_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t num_regs = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
           uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 2));
           pc += 3;
           if (dest_reg >= 64 || start_reg + num_regs > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
-          uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
-          int32_t found = 0;
-          for (uint32_t i = 0; i < num_regs; i++) {
-            uint32_t r_off = vm_reg_off(ctx_off, start_reg + i);
-            if (load_u8((const void *)(uintptr_t)(r_off + VM_REG_IS_NULL)) == 0) {
-              vm_reg_copy(dst_off, r_off);
-              found = 1;
-              break;
+          if (op == OP_STR_CONCAT) {
+            vm_str_concat(ctx_off, arena_base, start_reg, num_regs, dest_reg);
+          } else {
+            uint32_t dst_off = vm_reg_off(ctx_off, dest_reg);
+            int32_t found = 0;
+            for (uint32_t i = 0; i < num_regs; i++) {
+              uint32_t r_off = vm_reg_off(ctx_off, start_reg + i);
+              if (load_u8((const void *)(uintptr_t)(r_off + VM_REG_IS_NULL)) == 0) {
+                vm_reg_copy(dst_off, r_off);
+                found = 1;
+                break;
+              }
+            }
+            if (found == 0) {
+              vm_reg_set_null(dst_off);
             }
           }
-          if (found == 0) {
-            vm_reg_set_null(dst_off);
-          }
-          break;
-        }
-      case OP_COPY:
-{
-          if (pc + 2 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t src_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t dest_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 2;
-          if (src_reg >= 64 || dest_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          vm_reg_copy(vm_reg_off(ctx_off, dest_reg), vm_reg_off(ctx_off, src_reg));
           break;
         }
       case OP_AGG_INIT:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t agg_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t start_key_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1838,9 +946,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t mode = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 4;
           if (agg_id >= 4 || num_keys > 8 || start_key_reg + num_keys > 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t init_status = vm_agg_init_raw(ctx_off, arena_base, agg_id, start_key_reg, num_keys, mode);
           if (init_status != VM_STATUS_RUNNING) {
@@ -1852,9 +958,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_AGG_STEP:
 {
           if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t agg_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t start_key_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1863,9 +967,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t raw_func_id = load_u8((const void *)(uintptr_t)(code_off + pc + 4));
           pc += 5;
           if (agg_id >= 4 || num_keys > 8 || start_key_reg + num_keys > 64 || (val_reg != 255 && val_reg >= 64)) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           int32_t step_status = vm_agg_step_raw(ctx_off, arena_base, agg_id, start_key_reg, num_keys, val_reg, raw_func_id);
           if (step_status != VM_STATUS_RUNNING) {
@@ -1877,9 +979,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_AGG_NEXT:
 {
           if (pc + 5 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t agg_id = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t out_key_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1887,9 +987,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 5;
           if (agg_id >= 4 || out_key_reg >= 64 || out_acc_reg + 4 > 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
           store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
           int32_t next_status = vm_agg_next_raw(ctx_off, agg_id, out_key_reg, out_acc_reg, jump_target);
@@ -1902,9 +1000,7 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
       case OP_AGG_FINAL:
 {
           if (pc + 4 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t sum_reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t count_reg = load_u8((const void *)(uintptr_t)(code_off + pc + 1));
@@ -1912,60 +1008,32 @@ int32_t vm_step_raw(uint32_t ctx_off, uint32_t code_off, uint32_t code_len, uint
           uint32_t raw_func_id = load_u8((const void *)(uintptr_t)(code_off + pc + 3));
           pc += 4;
           if (sum_reg >= 64 || count_reg >= 64 || out_reg >= 64) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           vm_agg_final_raw(ctx_off, sum_reg, count_reg, out_reg, raw_func_id);
           break;
         }
       case OP_REG_IS_NULL:
-{
-          if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          uint32_t reg = load_u8((const void *)(uintptr_t)(code_off + pc));
-          uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
-          pc += 3;
-          if (reg >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
-          }
-          if (load_u8((const void *)(uintptr_t)(vm_reg_off(ctx_off, reg) + VM_REG_IS_NULL)) != 0) {
-            pc = jump_target;
-          }
-          break;
-        }
       case OP_REG_IS_NOT_NULL:
 {
           if (pc + 3 > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, instr_pc, VM_STATUS_INVALID_BYTECODE);
           }
           uint32_t reg = load_u8((const void *)(uintptr_t)(code_off + pc));
           uint32_t jump_target = load_u16((const void *)(uintptr_t)(code_off + pc + 1));
           pc += 3;
           if (reg >= 64 || jump_target > code_len) {
-            store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-            store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-            return VM_STATUS_INVALID_BYTECODE;
+            return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
           }
-          if (load_u8((const void *)(uintptr_t)(vm_reg_off(ctx_off, reg) + VM_REG_IS_NULL)) == 0) {
+          uint8_t is_null = load_u8((const void *)(uintptr_t)(vm_reg_off(ctx_off, reg) + VM_REG_IS_NULL));
+          if ((op == OP_REG_IS_NULL && is_null != 0) || (op == OP_REG_IS_NOT_NULL && is_null == 0)) {
             pc = jump_target;
           }
           break;
         }
       default:
-        store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-        store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
-        return VM_STATUS_INVALID_BYTECODE;
+        return vm_set_status(ctx_off, pc, VM_STATUS_INVALID_BYTECODE);
     }
   }
-  store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), pc);
-  store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_DONE);
-  return VM_STATUS_DONE;
+  return vm_set_status(ctx_off, pc, VM_STATUS_DONE);
 }
