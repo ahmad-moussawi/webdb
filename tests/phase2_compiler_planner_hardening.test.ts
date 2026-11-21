@@ -934,5 +934,60 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
         { id: 2, repr: "number:42" },
       ]);
     });
+
+    it("handles BLOB (Uint8Array) constants in primary-key multi_point index scans", async () => {
+      await db.createTable("blob_keys", [
+        { name: "k", type: DataType.BLOB, primaryKey: true },
+        { name: "label", type: DataType.TEXT },
+      ]);
+      const k1 = new Uint8Array([0x01, 0x02, 0x03]);
+      const k2 = new Uint8Array([0x01, 0x02, 0x04]);
+      const k3 = new Uint8Array([0x02, 0x00]);
+      await db.insert("blob_keys", { k: k1, label: "first" });
+      await db.insert("blob_keys", { k: k2, label: "second" });
+      await db.insert("blob_keys", { k: k3, label: "third" });
+
+      // Include a duplicate Uint8Array instance with identical bytes to verify deduplication
+      const qb = db
+        .from("blob_keys")
+        .whereIn("k", [k3, new Uint8Array([0x01, 0x02, 0x03]), k1])
+        .orderBy("k", "asc");
+
+      const explained = await qb.explain();
+      expect(explained.plan.scanType).toBe("IndexScan");
+      expect(
+        explained.instructions.some((ins) => ins.opcode === "OP_LOAD_BLOB"),
+      ).toBe(true);
+
+      const rows = await qb.toArray();
+      expect(rows.map((r) => r.label)).toEqual(["first", "third"]);
+    });
+
+    it("does not drop distinct whereIn predicates whose string representations collide", async () => {
+      await db.createTable("tags", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "tag", type: DataType.TEXT },
+      ]);
+      await db.insert("tags", { id: 1, tag: "a,b" });
+      await db.insert("tags", { id: 2, tag: "c" });
+      await db.insert("tags", { id: 3, tag: "a" });
+      await db.insert("tags", { id: 4, tag: "b,c" });
+
+      // ["a,b", "c"] AND ["a", "b,c"] have disjoint elements — must NOT be deduplicated as identical
+      const rows = await db
+        .from("tags")
+        .whereIn("tag", ["a,b", "c"])
+        .whereIn("tag", ["a", "b,c"])
+        .toArray();
+      expect(rows).toEqual([]);
+
+      // Also ensure "1n" (TEXT) and 1n (BigInt) / "1" and 1 do not collide in filterSignature
+      const rows2 = await db
+        .from("tags")
+        .where("tag", "=", "a,b")
+        .whereIn("tag", ["a,b", "c"])
+        .toArray();
+      expect(rows2.map((r) => r.id)).toEqual([1]);
+    });
   });
 });

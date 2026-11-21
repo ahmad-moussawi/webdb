@@ -368,16 +368,32 @@ function pruneColumnFilters(filters: QueryFilter[]): QueryFilter[] {
 }
 
 function serializeFilterValue(v: unknown): string {
-  if (typeof v === 'bigint') return `${v.toString()}n`;
-  if (v instanceof Uint8Array) return `blob:${v.byteLength}:${Array.from(v).join(',')}`;
-  return String(v ?? '');
+  if (v === null) return 'null';
+  if (v === undefined) return 'undef';
+  if (typeof v === 'bigint') return `bigint:${v.toString()}`;
+  if (typeof v === 'number') return `num:${Object.is(v, -0) ? '-0' : String(v)}`;
+  if (typeof v === 'boolean') return `bool:${v}`;
+  if (typeof v === 'string') return `str:${JSON.stringify(v)}`;
+  if (v instanceof Uint8Array) {
+    let hex = '';
+    for (let i = 0; i < v.byteLength; i++) {
+      hex += v[i].toString(16).padStart(2, '0');
+    }
+    return `blob:${v.byteLength}:${hex}`;
+  }
+  return `other:${JSON.stringify(v)}`;
 }
 
 function filterSignature(f: QueryFilter): string {
-  const valsStr = f.values
-    ? `[${f.values.map(serializeFilterValue).join(',')}]`
-    : '';
-  return `${f.type}:${f.colName ?? ''}:${f.isNull ?? ''}:${f.op ?? ''}:${serializeFilterValue(f.value)}:${f.notIn ?? ''}:${valsStr}`;
+  return JSON.stringify([
+    f.type,
+    f.colName ?? null,
+    f.isNull ?? null,
+    f.op ?? null,
+    serializeFilterValue(f.value),
+    f.notIn ?? null,
+    f.values ? f.values.map(serializeFilterValue) : null,
+  ]);
 }
 
 /**

@@ -433,7 +433,9 @@ export class WebDB implements IDatabaseQueryExecutor {
   ): Promise<void> {
     const page1View = driver.getSlotDataView(0);
     const totalPages = catalog_get_total_pages(page1View);
-    const maxCatalogPins = Math.max(1, driver.slotCount - 1);
+    // Reserve at least 1 unpinned buffer pool slot for data/index page I/O
+    // (visited includes Page 1 in slot 0, so at most slotCount - 1 total slots may be pinned).
+    const maxPinnedCatalogSlots = Math.max(1, driver.slotCount - 1);
     const visited = new Set<number>([1]);
 
     const pinAndReadHeader = async (pageId: number) => {
@@ -447,7 +449,7 @@ export class WebDB implements IDatabaseQueryExecutor {
           `Cycle detected in catalog page chain at page ${pageId}`,
         );
       }
-      if (visited.size >= maxCatalogPins) {
+      if (visited.size >= maxPinnedCatalogSlots) {
         throw new InvalidDatabaseError(
           `Catalog pages exceed buffer pool capacity (${driver.slotCount} slots)`,
         );
@@ -5141,7 +5143,9 @@ export class WebDB implements IDatabaseQueryExecutor {
           `Imported freePageHead ${header.freePageHead} out of bounds (totalPages=${numPages})`,
         );
       }
-      const maxCatalogPins = Math.max(1, this.pool.slotCount - 1);
+      // Reserve at least 1 unpinned buffer pool slot for data/index page I/O
+      // (visitedCatalogPages includes Page 1 in slot 0, so at most slotCount - 1 total slots may be pinned).
+      const maxPinnedCatalogSlots = Math.max(1, this.pool.slotCount - 1);
       const visitedCatalogPages = new Set<number>([1]);
       const validateCatalogPage = (pageId: number) => {
         if (pageId < 2 || pageId > numPages) {
@@ -5154,7 +5158,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             `Cycle detected in imported catalog page chain at page ${pageId}`,
           );
         }
-        if (visitedCatalogPages.size >= maxCatalogPins) {
+        if (visitedCatalogPages.size >= maxPinnedCatalogSlots) {
           throw new InvalidDatabaseError(
             `Imported catalog exceeds buffer pool capacity (${this.pool.slotCount} slots)`,
           );
