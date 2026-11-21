@@ -408,7 +408,14 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
   uint32_t arena_base = load_u32((const void *)(uintptr_t)(ctx_off + VM_CTX_ARENA_BASE_OFF));
   uint32_t curr_pid = first_page_id;
   uint32_t remaining = total_len;
+  uint32_t hops = 0;
   while (curr_pid > 1 && remaining > 0) {
+    hops++;
+    if (hops > 65536) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
+    }
     int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
       store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_FAULT_PAGE_ID), curr_pid);
@@ -417,9 +424,14 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
       return VM_STATUS_PAGE_FAULT;
     }
     uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
+    if (load_u8((const void *)(uintptr_t)(page_off)) != PAGE_TYPE_OVERFLOW) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
+    }
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
-    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid == curr_pid) {
       break;
     }
     if (chunk_len >= remaining) {
@@ -1698,6 +1710,8 @@ int32_t vm_group_key_slots_match(uint32_t keys_a_base, uint32_t keys_b_base, uin
 }
 
 uint32_t vm_alloc_agg_bucket(uint32_t ctx_off, uint32_t arena_base, uint32_t hash, uint32_t num_keys, uint32_t src_keys_base) {
+  if (num_keys > 8) 
+    return 0;
   uint32_t bucket_off = vm_phys_alloc(ctx_off, arena_base, 1320);
   if (bucket_off == 0) 
     return 0;
@@ -1805,6 +1819,10 @@ int32_t vm_agg_step_raw(uint32_t ctx_off, uint32_t arena_base, uint32_t agg_id, 
     if (target_bucket == 0) {
       store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
       return VM_STATUS_ARENA_EXHAUSTED;
+    }
+    if (slot_idx >= 32) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_INVALID_BYTECODE);
+      return VM_STATUS_INVALID_BYTECODE;
     }
     uint32_t agg_slot_off = target_bucket + 296 + (slot_idx << 5);
     int32_t val_is_non_null = val_reg != 255 && load_u8((const void *)(uintptr_t)(vm_reg_off(ctx_off, val_reg) + VM_REG_IS_NULL)) == 0 ? 1 : 0;

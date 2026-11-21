@@ -7,6 +7,20 @@ import {
   DmlOptions,
 } from '../../types/index.js';
 import { MAX_IN_LIST_SIZE } from '../../constants.js';
+import { sql_like_match } from '../../core/index.js';
+
+function setRowProp(obj: DbRow, key: string, value: any): void {
+  if (key === '__proto__') {
+    Object.defineProperty(obj, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  } else {
+    obj[key] = value;
+  }
+}
 import {
   ComparisonOp,
   QueryFilter,
@@ -2458,14 +2472,14 @@ export class QueryBuilder {
   }
 
   private getRowValue(row: DbRow, colRef: string): any {
-    if (colRef in row) return row[colRef];
+    if (Object.hasOwn(row, colRef)) return row[colRef];
     if (colRef.startsWith('outer.')) {
       const stripped = colRef.slice('outer.'.length);
-      if (stripped in row) return row[stripped];
+      if (Object.hasOwn(row, stripped)) return row[stripped];
     }
     if (colRef.includes('.')) {
       const short = colRef.slice(colRef.lastIndexOf('.') + 1);
-      if (short in row) return row[short];
+      if (Object.hasOwn(row, short)) return row[short];
     }
     return undefined;
   }
@@ -2801,12 +2815,7 @@ export class QueryBuilder {
         return String(leftVal).includes(String(rightVal));
       case 'like':
       case 'not like': {
-        const pattern = String(rightVal)
-          .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-          .replace(/%/g, '.*')
-          .replace(/_/g, '.');
-        const regex = new RegExp(`^${pattern}$`, 's');
-        const matched = regex.test(String(leftVal));
+        const matched = sql_like_match(String(leftVal), String(rightVal));
         return normOp === 'not like' ? !matched : matched;
       }
       default:
@@ -3129,9 +3138,9 @@ export class QueryBuilder {
             matchedAny = true;
             const merged: DbRow = { ...lRow };
             for (const [k, v] of Object.entries(rRow)) {
-              merged[`${join.table}.${k}`] = v;
-              if (!(k in merged)) {
-                merged[k] = v;
+              setRowProp(merged, `${join.table}.${k}`, v);
+              if (!Object.hasOwn(merged, k)) {
+                setRowProp(merged, k, v);
               }
             }
             joined.push(merged);
@@ -3230,7 +3239,7 @@ export class QueryBuilder {
       this.selectFields.length > 0 &&
       explicitAggs.length === 0 &&
       firstKeys.length === this.selectFields.length &&
-      this.selectFields.every((f) => f.alias in rows[0])
+      this.selectFields.every((f) => Object.hasOwn(rows[0], f.alias))
     ) {
       return rows;
     }
@@ -3254,11 +3263,19 @@ export class QueryBuilder {
       const defaultAlias = field.expr ? deriveDefaultAlias(field.expr) : undefined;
       const sourceCol = field.sourceCol;
 
-      if (sampleRow[targetAlias] !== undefined) {
+      if (Object.hasOwn(sampleRow, targetAlias) && sampleRow[targetAlias] !== undefined) {
         mappings.push({ targetAlias, sourceKey: targetAlias });
-      } else if (defaultAlias !== undefined && sampleRow[defaultAlias] !== undefined) {
+      } else if (
+        defaultAlias !== undefined &&
+        Object.hasOwn(sampleRow, defaultAlias) &&
+        sampleRow[defaultAlias] !== undefined
+      ) {
         mappings.push({ targetAlias, sourceKey: defaultAlias });
-      } else if (sourceCol !== undefined && sampleRow[sourceCol] !== undefined) {
+      } else if (
+        sourceCol !== undefined &&
+        Object.hasOwn(sampleRow, sourceCol) &&
+        sampleRow[sourceCol] !== undefined
+      ) {
         mappings.push({ targetAlias, sourceKey: sourceCol });
       } else if (field.expr) {
         mappings.push({ targetAlias, expr: field.expr });
@@ -3268,7 +3285,7 @@ export class QueryBuilder {
     }
 
     // Evaluate any missing batch expressions upfront across all rows
-    const evalResults: Record<string, any[]> = {};
+    const evalResults: Record<string, any[]> = Object.create(null);
     for (const m of mappings) {
       if (m.expr) {
         evalResults[m.targetAlias] = evalExprNodeBatch(m.expr, rows, udfs, 128, exprCache);
@@ -3278,7 +3295,7 @@ export class QueryBuilder {
     const aggNames: string[] = [];
     for (const agg of explicitAggs) {
       const name = agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
-      if (sampleRow[name] !== undefined) {
+      if (Object.hasOwn(sampleRow, name) && sampleRow[name] !== undefined) {
         aggNames.push(name);
       }
     }
@@ -3293,17 +3310,17 @@ export class QueryBuilder {
       for (let j = 0; j < numMappings; j++) {
         const m = mappings[j];
         if (m.sourceKey) {
-          obj[m.targetAlias] = r[m.sourceKey];
+          setRowProp(obj, m.targetAlias, Object.hasOwn(r, m.sourceKey) ? r[m.sourceKey] : null);
         } else if (m.expr) {
-          obj[m.targetAlias] = evalResults[m.targetAlias][i];
+          setRowProp(obj, m.targetAlias, evalResults[m.targetAlias][i]);
         } else {
-          obj[m.targetAlias] = null;
+          setRowProp(obj, m.targetAlias, null);
         }
       }
       for (let k = 0; k < numAggs; k++) {
         const aName = aggNames[k];
-        if (obj[aName] === undefined) {
-          obj[aName] = r[aName];
+        if (!Object.hasOwn(obj, aName)) {
+          setRowProp(obj, aName, Object.hasOwn(r, aName) ? r[aName] : null);
         }
       }
       projectedRows[i] = obj;
@@ -3325,7 +3342,7 @@ export class QueryBuilder {
       this.selectFields.length > 0 &&
       explicitAggs.length === 0 &&
       keys.length === this.selectFields.length &&
-      this.selectFields.every((f) => f.alias in row)
+      this.selectFields.every((f) => Object.hasOwn(row, f.alias))
     ) {
       return row;
     }
@@ -3333,33 +3350,40 @@ export class QueryBuilder {
     const projected: DbRow = {};
     for (const field of this.selectFields) {
       const targetAlias = field.alias;
-      if (row[targetAlias] !== undefined) {
-        projected[targetAlias] = row[targetAlias];
+      const defaultAlias = field.expr ? deriveDefaultAlias(field.expr) : undefined;
+      if (Object.hasOwn(row, targetAlias) && row[targetAlias] !== undefined) {
+        setRowProp(projected, targetAlias, row[targetAlias]);
       } else if (
-        field.expr &&
-        row[deriveDefaultAlias(field.expr)] !== undefined
+        defaultAlias !== undefined &&
+        Object.hasOwn(row, defaultAlias) &&
+        row[defaultAlias] !== undefined
       ) {
-        projected[targetAlias] = row[deriveDefaultAlias(field.expr)];
+        setRowProp(projected, targetAlias, row[defaultAlias]);
       } else if (
         field.sourceCol !== undefined &&
+        Object.hasOwn(row, field.sourceCol) &&
         row[field.sourceCol] !== undefined
       ) {
-        projected[targetAlias] = row[field.sourceCol];
+        setRowProp(projected, targetAlias, row[field.sourceCol]);
       } else if (field.expr) {
         let udfs: any;
         if (typeof (this.db as any).getUdf === 'function') {
           udfs = (name: string) => (this.db as any).getUdf(name)?.def;
         }
-        projected[targetAlias] = evalExprNode(field.expr, row, udfs);
+        setRowProp(projected, targetAlias, evalExprNode(field.expr, row, udfs));
       } else {
-        projected[targetAlias] = null;
+        setRowProp(projected, targetAlias, null);
       }
     }
     for (const agg of explicitAggs) {
       const aggName =
         agg.alias ?? (agg.colName ? `${agg.func}_${agg.colName}` : agg.func);
-      if (!(aggName in projected) && row[aggName] !== undefined) {
-        projected[aggName] = row[aggName];
+      if (
+        !Object.hasOwn(projected, aggName) &&
+        Object.hasOwn(row, aggName) &&
+        row[aggName] !== undefined
+      ) {
+        setRowProp(projected, aggName, row[aggName]);
       }
     }
     return projected;

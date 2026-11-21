@@ -16,6 +16,7 @@ import {
   MAX_TOPK_HEAP_LIMIT,
   OVERFLOW_HEADER_SIZE,
   OVERFLOW_PAYLOAD_SIZE,
+  PAGE_TYPE_OVERFLOW,
 } from "../../constants.ts";
 import {
   VmStatus,
@@ -356,10 +357,17 @@ export function vm_load_overflow_column(
   const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
   const arena_base: u32 = read_u32(view, ctx_off + VM_CTX_ARENA_BASE_OFF);
 
-  // Pass 1: Verify all overflow pages in the chain are resident before allocating arena memory
+  // Pass 1: Verify all overflow pages in the chain are resident and valid before allocating arena memory
   let curr_pid: u32 = first_page_id;
   let remaining: u32 = total_len;
+  let hops: u32 = 0;
   while (curr_pid > 1 && remaining > 0) {
+    hops++;
+    if (hops > 65536) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
+    }
     const slot: i32 = buf_pool_get_resident_slot(
       view,
       page_to_slot_off,
@@ -373,9 +381,14 @@ export function vm_load_overflow_column(
       return VmStatus.PAGE_FAULT;
     }
     const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
+    if (read_u8(view, page_off) !== PAGE_TYPE_OVERFLOW) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
+    }
     const chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
-    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
+    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid === curr_pid) {
       break;
     }
     if (chunk_len >= remaining) {
@@ -2343,6 +2356,7 @@ export function vm_alloc_agg_bucket(
   num_keys: u32,
   src_keys_base: u32,
 ): u32 {
+  if (num_keys > 8) return 0;
   const bucket_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, 1320);
   if (bucket_off === 0) return 0;
 
@@ -2508,6 +2522,10 @@ export function vm_agg_step_raw(
       return VmStatus.ARENA_EXHAUSTED;
     }
 
+    if (slot_idx >= 32) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+      return VmStatus.INVALID_BYTECODE;
+    }
     const agg_slot_off: u32 = target_bucket + 296 + (slot_idx << 5);
     const val_is_non_null: i32 =
       val_reg !== 255 &&

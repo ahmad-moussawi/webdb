@@ -170,7 +170,7 @@ export class CustomOrderPlanner implements QueryPlanner {
         totalCost,
         estimatedRows,
         joinOrder: orderedTables.map((t) => t.name),
-        singleTableFilters: reorderedSingleTableFilters,
+        singleTableFilters,
         crossFilters,
         tableScanTypes,
         tableIndexNames,
