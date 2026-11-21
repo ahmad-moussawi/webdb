@@ -603,6 +603,21 @@ export function padRight(
 // 5. Registration Functions for WebDB
 // ============================================================================
 
+function registerVectorUdf(
+  db: WebDB,
+  name: string,
+  returnType: DataType,
+  call: (...args: any[]) => any,
+  deterministic: boolean = true
+): void {
+  db.registerFunction(name, {
+    deterministic,
+    returnType,
+    call,
+    batchCall: (argsBatch) => argsBatch.map((args) => call(...args)),
+  });
+}
+
 /**
  * Registers date and time formatting UDFs on a WebDB instance:
  * - `format_date(ts, [style='medium'], [locale], [tz]) -> TEXT`
@@ -616,87 +631,32 @@ export function padRight(
  * - `to_timestamp(isoStr) -> INT64/FLOAT64`
  */
 export function registerDateFunctions(db: WebDB): WebDB {
-  db.registerFunction('format_date', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (ts: any, style?: any, locale?: any, tz?: any) =>
-      formatDate(ts, style, locale, tz),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts, style, locale, tz]) =>
-        formatDate(ts, style, locale, tz)
-      ),
-  });
-
-  db.registerFunction('format_time', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (ts: any, style?: any, locale?: any, tz?: any) =>
-      formatTime(ts, style, locale, tz),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts, style, locale, tz]) =>
-        formatTime(ts, style, locale, tz)
-      ),
-  });
-
-  db.registerFunction('time_ago', {
-    deterministic: false, // Relies on Date.now() when baseTs is not specified
-    returnType: DataType.TEXT,
-    call: (ts: any, baseTs?: any, locale?: any) => timeAgo(ts, baseTs, locale),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts, baseTs, locale]) => timeAgo(ts, baseTs, locale)),
-  });
-
-  db.registerFunction('date_part', {
-    deterministic: true,
-    returnType: DataType.INT32,
-    call: (part: any, ts: any) => datePart(String(part), ts),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([part, ts]) => (part !== null ? datePart(String(part), ts) : null)),
-  });
-
-  db.registerFunction('days_since', {
-    deterministic: false,
-    returnType: DataType.INT32,
-    call: (ts: any, baseTs?: any) => daysSince(ts, baseTs),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts, baseTs]) => daysSince(ts, baseTs)),
-  });
-
-  db.registerFunction('date_add', {
-    deterministic: true,
-    returnType: DataType.FLOAT64,
-    call: (ts: any, amount: any, unit: any) =>
-      dateAdd(ts, Number(amount), String(unit)),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts, amount, unit]) =>
-        dateAdd(ts, Number(amount), String(unit ?? 'day'))
-      ),
-  });
-
-  db.registerFunction('date_diff', {
-    deterministic: true,
-    returnType: DataType.FLOAT64,
-    call: (ts1: any, ts2: any, unit: any) =>
-      dateDiff(ts1, ts2, String(unit)),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ts1, ts2, unit]) =>
-        dateDiff(ts1, ts2, String(unit ?? 'day'))
-      ),
-  });
-
-  db.registerFunction('iso_date', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (ts: any) => isoDate(ts),
-    batchCall: (argsBatch) => argsBatch.map(([ts]) => isoDate(ts)),
-  });
-
-  db.registerFunction('to_timestamp', {
-    deterministic: true,
-    returnType: DataType.FLOAT64,
-    call: (iso: any) => toTimestamp(iso),
-    batchCall: (argsBatch) => argsBatch.map(([iso]) => toTimestamp(iso)),
-  });
+  registerVectorUdf(db, 'format_date', DataType.TEXT, (ts: any, style?: any, locale?: any, tz?: any) =>
+    formatDate(ts, style, locale, tz)
+  );
+  registerVectorUdf(db, 'format_time', DataType.TEXT, (ts: any, style?: any, locale?: any, tz?: any) =>
+    formatTime(ts, style, locale, tz)
+  );
+  // Relies on Date.now() when baseTs is not specified
+  registerVectorUdf(db, 'time_ago', DataType.TEXT, (ts: any, baseTs?: any, locale?: any) =>
+    timeAgo(ts, baseTs, locale),
+    false
+  );
+  registerVectorUdf(db, 'date_part', DataType.INT32, (part: any, ts: any) =>
+    part !== null && part !== undefined ? datePart(String(part), ts) : null
+  );
+  registerVectorUdf(db, 'days_since', DataType.INT32, (ts: any, baseTs?: any) =>
+    daysSince(ts, baseTs),
+    false
+  );
+  registerVectorUdf(db, 'date_add', DataType.FLOAT64, (ts: any, amount: any, unit: any) =>
+    dateAdd(ts, Number(amount), String(unit ?? 'day'))
+  );
+  registerVectorUdf(db, 'date_diff', DataType.FLOAT64, (ts1: any, ts2: any, unit: any) =>
+    dateDiff(ts1, ts2, String(unit ?? 'day'))
+  );
+  registerVectorUdf(db, 'iso_date', DataType.TEXT, (ts: any) => isoDate(ts));
+  registerVectorUdf(db, 'to_timestamp', DataType.FLOAT64, (iso: any) => toTimestamp(iso));
 
   return db;
 }
@@ -711,78 +671,33 @@ export function registerDateFunctions(db: WebDB): WebDB {
  * - `plural(count, singular, [pluralText], [zeroText]) -> TEXT`
  */
 export function registerNumberFunctions(db: WebDB): WebDB {
-  db.registerFunction('format_currency', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (amount: any, currency?: any, locale?: any) =>
-      formatCurrency(amount, currency, locale),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([amount, currency, locale]) =>
-        formatCurrency(amount, currency, locale)
-      ),
-  });
-
-  db.registerFunction('format_number', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (num: any, decimals?: any, locale?: any) =>
-      formatNumber(num, decimals !== undefined ? Number(decimals) : undefined, locale),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([num, decimals, locale]) =>
-        formatNumber(num, decimals !== undefined ? Number(decimals) : undefined, locale)
-      ),
-  });
-
-  db.registerFunction('format_compact', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (num: any, locale?: any) => formatCompact(num, locale),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([num, locale]) => formatCompact(num, locale)),
-  });
-
-  db.registerFunction('format_percent', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (ratio: any, decimals?: any, locale?: any) =>
-      formatPercent(ratio, decimals !== undefined ? Number(decimals) : 1, locale),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([ratio, decimals, locale]) =>
-        formatPercent(ratio, decimals !== undefined ? Number(decimals) : 1, locale)
-      ),
-  });
-
-  db.registerFunction('format_bytes', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (bytes: any, decimals?: any) =>
-      formatBytes(bytes, decimals !== undefined ? Number(decimals) : 1),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([bytes, decimals]) =>
-        formatBytes(bytes, decimals !== undefined ? Number(decimals) : 1)
-      ),
-  });
-
-  db.registerFunction('plural', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (count: any, singular: any, pluralText?: any, zeroText?: any) =>
+  registerVectorUdf(db, 'format_currency', DataType.TEXT, (amount: any, currency?: any, locale?: any) =>
+    formatCurrency(amount, currency, locale)
+  );
+  registerVectorUdf(db, 'format_number', DataType.TEXT, (num: any, decimals?: any, locale?: any) =>
+    formatNumber(num, decimals !== undefined ? Number(decimals) : undefined, locale)
+  );
+  registerVectorUdf(db, 'format_compact', DataType.TEXT, (num: any, locale?: any) =>
+    formatCompact(num, locale)
+  );
+  registerVectorUdf(db, 'format_percent', DataType.TEXT, (ratio: any, decimals?: any, locale?: any) =>
+    formatPercent(ratio, decimals !== undefined ? Number(decimals) : 1, locale)
+  );
+  registerVectorUdf(db, 'format_bytes', DataType.TEXT, (bytes: any, decimals?: any) =>
+    formatBytes(bytes, decimals !== undefined ? Number(decimals) : 1)
+  );
+  registerVectorUdf(
+    db,
+    'plural',
+    DataType.TEXT,
+    (count: any, singular: any, pluralText?: any, zeroText?: any) =>
       plural(
         count,
         String(singular),
         pluralText ? String(pluralText) : undefined,
         zeroText ? String(zeroText) : undefined
-      ),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([count, singular, pluralText, zeroText]) =>
-        plural(
-          count,
-          String(singular),
-          pluralText ? String(pluralText) : undefined,
-          zeroText ? String(zeroText) : undefined
-        )
-      ),
-  });
+      )
+  );
 
   return db;
 }
@@ -797,61 +712,24 @@ export function registerNumberFunctions(db: WebDB): WebDB {
  * - `pad_right(str, length, [padChar=' ']) -> TEXT`
  */
 export function registerStringFunctions(db: WebDB): WebDB {
-  db.registerFunction('regexp_match', {
-    deterministic: true,
-    returnType: DataType.INT32,
-    call: (text: any, pattern: any, flags?: any) =>
-      regexpMatch(text, pattern, flags),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([text, pattern, flags]) => regexpMatch(text, pattern, flags)),
-  });
-
-  db.registerFunction('regexp_replace', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (text: any, pattern: any, replacement: any, flags?: any) =>
-      regexpReplace(text, pattern, replacement, flags),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([text, pattern, replacement, flags]) =>
-        regexpReplace(text, pattern, replacement, flags)
-      ),
-  });
-
-  db.registerFunction('slugify', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (text: any) => slugify(text),
-    batchCall: (argsBatch) => argsBatch.map(([text]) => slugify(text)),
-  });
-
-  db.registerFunction('unaccent', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (text: any) => unaccent(text),
-    batchCall: (argsBatch) => argsBatch.map(([text]) => unaccent(text)),
-  });
-
-  db.registerFunction('pad_left', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (str: any, length: any, padChar?: any) =>
-      padLeft(str, Number(length), padChar ? String(padChar) : ' '),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([str, length, padChar]) =>
-        padLeft(str, Number(length), padChar ? String(padChar) : ' ')
-      ),
-  });
-
-  db.registerFunction('pad_right', {
-    deterministic: true,
-    returnType: DataType.TEXT,
-    call: (str: any, length: any, padChar?: any) =>
-      padRight(str, Number(length), padChar ? String(padChar) : ' '),
-    batchCall: (argsBatch) =>
-      argsBatch.map(([str, length, padChar]) =>
-        padRight(str, Number(length), padChar ? String(padChar) : ' ')
-      ),
-  });
+  registerVectorUdf(db, 'regexp_match', DataType.INT32, (text: any, pattern: any, flags?: any) =>
+    regexpMatch(text, pattern, flags)
+  );
+  registerVectorUdf(
+    db,
+    'regexp_replace',
+    DataType.TEXT,
+    (text: any, pattern: any, replacement: any, flags?: any) =>
+      regexpReplace(text, pattern, replacement, flags)
+  );
+  registerVectorUdf(db, 'slugify', DataType.TEXT, (text: any) => slugify(text));
+  registerVectorUdf(db, 'unaccent', DataType.TEXT, (text: any) => unaccent(text));
+  registerVectorUdf(db, 'pad_left', DataType.TEXT, (str: any, length: any, padChar?: any) =>
+    padLeft(str, Number(length), padChar ? String(padChar) : ' ')
+  );
+  registerVectorUdf(db, 'pad_right', DataType.TEXT, (str: any, length: any, padChar?: any) =>
+    padRight(str, Number(length), padChar ? String(padChar) : ' ')
+  );
 
   return db;
 }

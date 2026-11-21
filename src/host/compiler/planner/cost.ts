@@ -9,7 +9,7 @@ import {
   QueryPlanner,
   OptimizedPlanResult,
   JoinEdge,
-  getFilterReferencedTables,
+  partitionFiltersByTable,
   getSingleTableBaseCost,
   doesTableSatisfyJoinOrderKeys,
   findIndexOnColumn,
@@ -143,24 +143,10 @@ export class CostBasedPlanner implements QueryPlanner {
     const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
 
     // Partition filters: single-table filters per table, and cross-table filters
-    const singleTableFilters = new Map<number, QueryFilter[]>();
-    const crossFilters: QueryFilter[] = [];
-
-    for (let i = 0; i < N; i++) {
-      singleTableFilters.set(i, []);
-    }
-
-    for (const filter of topConjunctions) {
-      const refs = getFilterReferencedTables(filter, originalTables);
-      if (refs.size === 1) {
-        const tblIdx = refs.values().next().value;
-        if (tblIdx !== undefined) {
-          singleTableFilters.get(tblIdx)?.push(filter);
-        }
-      } else {
-        crossFilters.push(filter);
-      }
-    }
+    const { singleTableFilters, crossFilters } = partitionFiltersByTable(
+      topConjunctions,
+      originalTables,
+    );
 
     // Single-table query: trivial case
     if (N <= 1 || !plan.joinedTables || plan.joinedTables.length === 0) {

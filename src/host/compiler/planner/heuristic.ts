@@ -8,7 +8,7 @@ import {
 import {
   QueryPlanner,
   OptimizedPlanResult,
-  getFilterReferencedTables,
+  partitionFiltersByTable,
   getSingleTableBaseCost,
   doesTableSatisfyJoinOrderKeys,
   findIndexOnColumn,
@@ -37,24 +37,10 @@ export class HeuristicPlanner implements QueryPlanner {
     const rootFilter = buildRootFilter(plan.filters);
     const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
 
-    const singleTableFilters = new Map<number, QueryFilter[]>();
-    const crossFilters: QueryFilter[] = [];
-
-    for (let i = 0; i < N; i++) {
-      singleTableFilters.set(i, []);
-    }
-
-    for (const filter of topConjunctions) {
-      const refs = getFilterReferencedTables(filter, originalTables);
-      if (refs.size === 1) {
-        const tblIdx = refs.values().next().value;
-        if (tblIdx !== undefined) {
-          singleTableFilters.get(tblIdx)?.push(filter);
-        }
-      } else {
-        crossFilters.push(filter);
-      }
-    }
+    const { singleTableFilters, crossFilters } = partitionFiltersByTable(
+      topConjunctions,
+      originalTables,
+    );
 
     if (N <= 1 || !plan.joinedTables || plan.joinedTables.length === 0) {
       const base = getSingleTableBaseCost(

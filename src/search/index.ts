@@ -584,6 +584,19 @@ export function scoreRow(
 // 4. Low-Level UDF Registration & Expression Helpers (Option 1)
 // ============================================================================
 
+function registerBatchUdf(
+  db: WebDB,
+  name: string,
+  returnType: DataType,
+  call: (...args: any[]) => any
+): void {
+  db.registerFunction(name, {
+    call,
+    batchCall: (argsBatch: any[][]) => argsBatch.map((args) => call(...args)),
+    returnType,
+  });
+}
+
 /**
  * Registers WebDB search UDFs:
  * - `fuzzy(field, query, [fuzzy=1], [prefix=1])` -> 1 or 0
@@ -597,54 +610,41 @@ export function scoreRow(
  */
 export function registerFuzzySearch(db: WebDB): void {
   // 1. Single column boolean match
-  db.registerFunction('fuzzy', {
-    call: (fieldVal: unknown, query: unknown, fuzzy?: unknown, prefix?: unknown) => {
+  registerBatchUdf(
+    db,
+    'fuzzy',
+    DataType.INT32,
+    (fieldVal: unknown, query: unknown, fuzzy?: unknown, prefix?: unknown) => {
       const q = String(query ?? '').trim();
       if (!q) return 0;
       const f = fuzzy === undefined ? true : Number(fuzzy) === 1;
       const p = prefix === undefined ? true : Number(prefix) === 1;
       const score = scoreRow([fieldVal], [1], q, { fuzzy: f, prefix: p, matchAll: true });
       return score > 0 ? 1 : 0;
-    },
-    batchCall: (argsBatch: any[][]) => {
-      return argsBatch.map(([fieldVal, query, fuzzy, prefix]) => {
-        const q = String(query ?? '').trim();
-        if (!q) return 0;
-        const f = fuzzy === undefined ? true : Number(fuzzy) === 1;
-        const p = prefix === undefined ? true : Number(prefix) === 1;
-        const score = scoreRow([fieldVal], [1], q, { fuzzy: f, prefix: p, matchAll: true });
-        return score > 0 ? 1 : 0;
-      });
-    },
-    returnType: DataType.INT32,
-  });
+    }
+  );
 
   // 2. Single column score
-  db.registerFunction('fuzzy_score', {
-    call: (fieldVal: unknown, query: unknown, weight?: unknown, fuzzy?: unknown, prefix?: unknown) => {
+  registerBatchUdf(
+    db,
+    'fuzzy_score',
+    DataType.FLOAT64,
+    (fieldVal: unknown, query: unknown, weight?: unknown, fuzzy?: unknown, prefix?: unknown) => {
       const q = String(query ?? '').trim();
       if (!q) return 0;
       const w = Number(weight) || 1;
       const f = fuzzy === undefined ? true : Number(fuzzy) === 1;
       const p = prefix === undefined ? true : Number(prefix) === 1;
       return scoreRow([fieldVal], [w], q, { fuzzy: f, prefix: p, matchAll: false });
-    },
-    batchCall: (argsBatch: any[][]) => {
-      return argsBatch.map(([fieldVal, query, weight, fuzzy, prefix]) => {
-        const q = String(query ?? '').trim();
-        if (!q) return 0;
-        const w = Number(weight) || 1;
-        const f = fuzzy === undefined ? true : Number(fuzzy) === 1;
-        const p = prefix === undefined ? true : Number(prefix) === 1;
-        return scoreRow([fieldVal], [w], q, { fuzzy: f, prefix: p, matchAll: false });
-      });
-    },
-    returnType: DataType.FLOAT64,
-  });
+    }
+  );
 
   // 3. Multi-column search score
-  db.registerFunction('search_score', {
-    call: (query: unknown, configJson: unknown, ...fieldValues: unknown[]) => {
+  registerBatchUdf(
+    db,
+    'search_score',
+    DataType.FLOAT64,
+    (query: unknown, configJson: unknown, ...fieldValues: unknown[]) => {
       const q = String(query ?? '').trim();
       if (!q) return 0;
       let config: any = {};
@@ -659,27 +659,8 @@ export function registerFuzzySearch(db: WebDB): void {
       const matchAll = config.matchAll === undefined ? true : Number(config.matchAll) === 1;
 
       return scoreRow(fieldValues, weights, q, { fuzzy, prefix, matchAll });
-    },
-    batchCall: (argsBatch: any[][]) => {
-      return argsBatch.map(([query, configJson, ...fieldValues]) => {
-        const q = String(query ?? '').trim();
-        if (!q) return 0;
-        let config: any = {};
-        try {
-          config = typeof configJson === 'string' ? JSON.parse(configJson) : configJson ?? {};
-        } catch {
-          config = {};
-        }
-        const weights = Array.isArray(config.weights) ? config.weights : [];
-        const fuzzy = config.fuzzy === undefined ? true : Number(config.fuzzy) === 1;
-        const prefix = config.prefix === undefined ? true : Number(config.prefix) === 1;
-        const matchAll = config.matchAll === undefined ? true : Number(config.matchAll) === 1;
-
-        return scoreRow(fieldValues, weights, q, { fuzzy, prefix, matchAll });
-      });
-    },
-    returnType: DataType.FLOAT64,
-  });
+    }
+  );
 
   // 4. Highlight
   db.registerFunction('highlight', {
@@ -764,32 +745,25 @@ export function registerFuzzySearch(db: WebDB): void {
   });
 
   // 9. N-gram similarity (0.0 to 1.0)
-  db.registerFunction('ngram_similarity', {
-    call: (valA: unknown, valB: unknown, n?: unknown) => {
+  registerBatchUdf(
+    db,
+    'ngram_similarity',
+    DataType.FLOAT64,
+    (valA: unknown, valB: unknown, n?: unknown) => {
       const numN = Number(n) || 3;
       return ngramSimilarity(String(valA ?? ''), String(valB ?? ''), numN);
-    },
-    batchCall: (argsBatch: any[][]) => {
-      return argsBatch.map(([valA, valB, n]) => {
-        const numN = Number(n) || 3;
-        return ngramSimilarity(String(valA ?? ''), String(valB ?? ''), numN);
-      });
-    },
-    returnType: DataType.FLOAT64,
-  });
+    }
+  );
 
   // 10. Multi-field BM25 relevance score
-  db.registerFunction('bm25_score', {
-    call: (query: unknown, configJson: unknown, ...fieldValues: unknown[]) => {
+  registerBatchUdf(
+    db,
+    'bm25_score',
+    DataType.FLOAT64,
+    (query: unknown, configJson: unknown, ...fieldValues: unknown[]) => {
       return computeBM25ScoreRow(query, configJson, fieldValues);
-    },
-    batchCall: (argsBatch: any[][]) => {
-      return argsBatch.map(([query, configJson, ...fieldValues]) => {
-        return computeBM25ScoreRow(query, configJson, fieldValues);
-      });
-    },
-    returnType: DataType.FLOAT64,
-  });
+    }
+  );
 }
 
 /** Wraps a literal value in an ExpressionBuilder node. */
@@ -968,10 +942,41 @@ export function computeBM25ScoreRow(
     docLen += tokens.length * w;
   }
 
+  return computeBM25TokensScore(
+    queryTokens,
+    fieldTokens,
+    weights,
+    docLen,
+    avgdl,
+    k1,
+    b,
+    fuzzy,
+    (qt) => {
+      const rawDf = Object.hasOwn(docFreqs, qt) ? docFreqs[qt] : undefined;
+      const df =
+        typeof rawDf === 'number' && Number.isFinite(rawDf) && rawDf >= 0
+          ? rawDf
+          : 1;
+      return Math.log(1 + Math.max(0, totalDocs - df + 0.5) / (df + 0.5));
+    }
+  );
+}
+
+function computeBM25TokensScore(
+  queryTokens: string[],
+  fieldTokens: string[][],
+  weights: number[],
+  docLen: number,
+  avgdl: number,
+  k1: number,
+  b: number,
+  fuzzy: boolean,
+  getIdf: (qt: string) => number
+): number {
   let totalScore = 0;
   for (const qt of queryTokens) {
     let tf = 0;
-    for (let i = 0; i < fieldValues.length; i++) {
+    for (let i = 0; i < fieldTokens.length; i++) {
       const w = weights[i] ?? 1;
       const tokens = fieldTokens[i];
       for (const t of tokens) {
@@ -988,18 +993,12 @@ export function computeBM25ScoreRow(
     }
 
     if (tf > 0) {
-      const rawDf = Object.hasOwn(docFreqs, qt) ? docFreqs[qt] : undefined;
-      const df =
-        typeof rawDf === 'number' && Number.isFinite(rawDf) && rawDf >= 0
-          ? rawDf
-          : 1;
-      const idf = Math.log(1 + Math.max(0, totalDocs - df + 0.5) / (df + 0.5));
+      const idfVal = getIdf(qt);
       const num = tf * (k1 + 1);
       const denom = tf + k1 * (1 - b + b * (docLen / avgdl));
-      totalScore += idf * (num / denom);
+      totalScore += idfVal * (num / denom);
     }
   }
-
   return totalScore;
 }
 
@@ -1028,6 +1027,8 @@ export class BM25Index<T extends Record<string, unknown> = Record<string, unknow
   readonly locale: string;
   readonly fuzzy: boolean;
 
+  private fieldWeights: number[];
+  private readonly boundIdf = (qt: string): number => this.idf(qt);
   private docs: { id: any; row: T; fieldTokens: string[][]; length: number }[] = [];
   private docFreqs = new Map<string, number>();
   private avgdl: number = 0;
@@ -1049,6 +1050,7 @@ export class BM25Index<T extends Record<string, unknown> = Record<string, unknow
             snippet: f.snippet ?? false,
           }
     );
+    this.fieldWeights = this.fields.map((f) => f.weight ?? 1);
   }
 
   get totalDocuments(): number {
@@ -1077,7 +1079,7 @@ export class BM25Index<T extends Record<string, unknown> = Record<string, unknow
       const val = (row as any)[fieldConfig.name];
       const tokens = tokenize(val, this.locale);
       fieldTokens.push(tokens);
-      const w = fieldConfig.weight ?? 1;
+      const w = this.fieldWeights[f];
       docLen += tokens.length * w;
 
       for (const t of tokens) {
@@ -1105,36 +1107,17 @@ export class BM25Index<T extends Record<string, unknown> = Record<string, unknow
     const d = this.docs[docIdx];
     if (!d || queryTerms.length === 0) return 0;
 
-    const avgdl = this.avgdl || 1;
-    let totalScore = 0;
-
-    for (const qt of queryTerms) {
-      let tf = 0;
-      for (let f = 0; f < this.fields.length; f++) {
-        const w = this.fields[f].weight ?? 1;
-        const tokens = d.fieldTokens[f];
-        for (const t of tokens) {
-          if (t === qt) {
-            tf += w;
-          } else if (this.fuzzy) {
-            if (t.startsWith(qt)) {
-              tf += w * 0.7;
-            } else if (withinEdits(t, qt, qt.length <= 4 ? 1 : 2)) {
-              tf += w * 0.5;
-            }
-          }
-        }
-      }
-
-      if (tf > 0) {
-        const idfVal = this.idf(qt);
-        const num = tf * (this.k1 + 1);
-        const denom = tf + this.k1 * (1 - this.b + this.b * (d.length / avgdl));
-        totalScore += idfVal * (num / denom);
-      }
-    }
-
-    return totalScore;
+    return computeBM25TokensScore(
+      queryTerms,
+      d.fieldTokens,
+      this.fieldWeights,
+      d.length,
+      this.avgdl || 1,
+      this.k1,
+      this.b,
+      this.fuzzy,
+      this.boundIdf
+    );
   }
 
   search(queryString: string, options?: { limit?: number; threshold?: number }): SearchResult<T> {
@@ -1151,38 +1134,11 @@ export class BM25Index<T extends Record<string, unknown> = Record<string, unknow
 
     const queryTokens = tokenize(q, this.locale);
     const threshold = options?.threshold ?? 0;
-    const avgdl = this.avgdl || 1;
     const hits: SearchHit<T>[] = [];
 
     for (let i = 0; i < this.docs.length; i++) {
       const d = this.docs[i];
-      let totalScore = 0;
-
-      for (const qt of queryTokens) {
-        let tf = 0;
-        for (let f = 0; f < this.fields.length; f++) {
-          const w = this.fields[f].weight ?? 1;
-          const tokens = d.fieldTokens[f];
-          for (const t of tokens) {
-            if (t === qt) {
-              tf += w;
-            } else if (this.fuzzy) {
-              if (t.startsWith(qt)) {
-                tf += w * 0.7;
-              } else if (withinEdits(t, qt, qt.length <= 4 ? 1 : 2)) {
-                tf += w * 0.5;
-              }
-            }
-          }
-        }
-
-        if (tf > 0) {
-          const idfVal = this.idf(qt);
-          const num = tf * (this.k1 + 1);
-          const denom = tf + this.k1 * (1 - this.b + this.b * (d.length / avgdl));
-          totalScore += idfVal * (num / denom);
-        }
-      }
+      const totalScore = this.score(i, queryTokens);
 
       if (totalScore > threshold) {
         const highlights: Record<string, string> = {};

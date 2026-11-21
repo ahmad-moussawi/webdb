@@ -9,7 +9,7 @@ import {
 import {
   QueryPlanner,
   OptimizedPlanResult,
-  getFilterReferencedTables,
+  partitionFiltersByTable,
   getSingleTableBaseCost,
   buildJoinEdges,
   materializeOutputSelectExprs,
@@ -42,24 +42,10 @@ export class CustomOrderPlanner implements QueryPlanner {
     const rootFilter = buildRootFilter(plan.filters);
     const topConjunctions = getTopLevelConjunctionFilters(rootFilter);
 
-    const singleTableFilters = new Map<number, QueryFilter[]>();
-    const crossFilters: QueryFilter[] = [];
-
-    for (let i = 0; i < N; i++) {
-      singleTableFilters.set(i, []);
-    }
-
-    for (const filter of topConjunctions) {
-      const refs = getFilterReferencedTables(filter, originalTables);
-      if (refs.size === 1) {
-        const tblIdx = refs.values().next().value;
-        if (tblIdx !== undefined) {
-          singleTableFilters.get(tblIdx)?.push(filter);
-        }
-      } else {
-        crossFilters.push(filter);
-      }
-    }
+    const { singleTableFilters, crossFilters } = partitionFiltersByTable(
+      topConjunctions,
+      originalTables,
+    );
 
     if (!isJoin || N <= 1) {
       const base = getSingleTableBaseCost(
@@ -124,19 +110,8 @@ export class CustomOrderPlanner implements QueryPlanner {
     };
 
     // Rebuild filter pushdowns for the reordered tables
-    const reorderedSingleTableFilters = new Map<number, QueryFilter[]>();
-    for (let i = 0; i < N; i++) {
-      reorderedSingleTableFilters.set(i, []);
-    }
-    for (const filter of topConjunctions) {
-      const refs = getFilterReferencedTables(filter, orderedTables);
-      if (refs.size === 1) {
-        const tblIdx = refs.values().next().value;
-        if (tblIdx !== undefined) {
-          reorderedSingleTableFilters.get(tblIdx)?.push(filter);
-        }
-      }
-    }
+    const { singleTableFilters: reorderedSingleTableFilters } =
+      partitionFiltersByTable(topConjunctions, orderedTables);
 
     const baseTableCost = getSingleTableBaseCost(
       orderedTables[0],
