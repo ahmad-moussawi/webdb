@@ -867,57 +867,65 @@ export class TransactionCoordinator {
   }
 
   async executeCheckpoint(): Promise<{ pagesWritten: number }> {
-    const frameCount = await this.vfs.getWalFrameCount();
-
-    // 1. Scan WAL frames chronologically
+    // 1. Collect committed WAL pages.
+    // Fast-path: when this coordinator owns the active WAL (walHeaderReady && txCommitCount > 0),
+    // `committedWalPages` already holds the exact latest committed image for every WAL page in RAM,
+    // so we can skip reading and re-validating WAL frames from storage.
     const walIndex = new Map<number, Uint8Array>();
-    if (frameCount > 0) {
-      const rawFrames = await this.vfs.readWalFrames(0, frameCount);
-      const txGroups = new Map<
-        number,
-        Array<{ pageId: number; data: Uint8Array }>
-      >();
-      const committedTxs = new Set<number>();
-
-      for (const frameBytes of rawFrames) {
-        const validation = validateWalFrame(frameBytes);
-        if (!validation.valid || !validation.header) {
-          break;
-        }
-        const { frameType, txId, pageId } = validation.header;
-
-        if (!txGroups.has(txId)) txGroups.set(txId, []);
-
-        if (frameType === WAL_FRAME_TYPE_TX_COMMIT) {
-          committedTxs.add(txId);
-        } else if (
-          frameType === WAL_FRAME_TYPE_PAGE_DATA ||
-          frameType === WAL_FRAME_TYPE_TX_UNCOMMITTED
-        ) {
-          const pageData = new Uint8Array(
-            frameBytes.buffer,
-            frameBytes.byteOffset + WAL_FRAME_HEADER_SIZE,
-            WAL_PAGE_SIZE,
-          );
-          const copy = new Uint8Array(WAL_PAGE_SIZE);
-          copy.set(pageData);
-          txGroups.get(txId)!.push({ pageId, data: copy });
-        }
+    if (this.walHeaderReady && this.txCommitCount > 0) {
+      for (const [pageId, data] of this.committedWalPages.entries()) {
+        walIndex.set(pageId, data);
       }
+    } else {
+      const frameCount = await this.vfs.getWalFrameCount();
+      if (frameCount > 0) {
+        const rawFrames = await this.vfs.readWalFrames(0, frameCount);
+        const txGroups = new Map<
+          number,
+          Array<{ pageId: number; data: Uint8Array }>
+        >();
+        const committedTxs = new Set<number>();
 
-      for (const [txId, frames] of txGroups.entries()) {
-        if (committedTxs.has(txId)) {
-          for (const f of frames) {
-            if (f.pageId > 0) {
-              walIndex.set(f.pageId, f.data);
+        for (const frameBytes of rawFrames) {
+          const validation = validateWalFrame(frameBytes);
+          if (!validation.valid || !validation.header) {
+            break;
+          }
+          const { frameType, txId, pageId } = validation.header;
+
+          if (!txGroups.has(txId)) txGroups.set(txId, []);
+
+          if (frameType === WAL_FRAME_TYPE_TX_COMMIT) {
+            committedTxs.add(txId);
+          } else if (
+            frameType === WAL_FRAME_TYPE_PAGE_DATA ||
+            frameType === WAL_FRAME_TYPE_TX_UNCOMMITTED
+          ) {
+            const pageData = new Uint8Array(
+              frameBytes.buffer,
+              frameBytes.byteOffset + WAL_FRAME_HEADER_SIZE,
+              WAL_PAGE_SIZE,
+            );
+            const copy = new Uint8Array(WAL_PAGE_SIZE);
+            copy.set(pageData);
+            txGroups.get(txId)!.push({ pageId, data: copy });
+          }
+        }
+
+        for (const [txId, frames] of txGroups.entries()) {
+          if (committedTxs.has(txId)) {
+            for (const f of frames) {
+              if (f.pageId > 0) {
+                walIndex.set(f.pageId, f.data);
+              }
             }
           }
         }
       }
-    }
 
-    for (const [pageId, data] of this.committedWalPages.entries()) {
-      walIndex.set(pageId, data);
+      for (const [pageId, data] of this.committedWalPages.entries()) {
+        walIndex.set(pageId, data);
+      }
     }
 
     // 2. Inspect resident dirty slots in memory (memory_override)
@@ -992,7 +1000,9 @@ export class TransactionCoordinator {
     return { pagesWritten: pagesToWrite.length };
   }
 
-  async resetWalAfterImport(): Promise<void> {
+  async resetWalAfterImport(
+    pagesToReplace?: Array<{ pageId: number; data: Uint8Array }>,
+  ): Promise<void> {
     this.spilledPages.clear();
     this.committedWalPages.clear();
     const nextCheckpointSeq = this.checkpointSeq + 1;
@@ -1001,11 +1011,20 @@ export class TransactionCoordinator {
       salt1: this.instanceSalt,
     });
 
-    if (this.vfs.checkpointAtomic) {
-      await this.vfs.checkpointAtomic([], nextWalHeader);
+    if (pagesToReplace && this.vfs.replaceDatabaseAtomic) {
+      await this.vfs.replaceDatabaseAtomic(pagesToReplace, nextWalHeader);
     } else {
-      await this.vfs.truncateWal(0);
-      await this.vfs.writeWalHeader(nextWalHeader);
+      if (pagesToReplace) {
+        await this.vfs.writePages(pagesToReplace);
+        await this.vfs.truncate(pagesToReplace.length);
+        await this.vfs.flush?.();
+      }
+      if (this.vfs.checkpointAtomic) {
+        await this.vfs.checkpointAtomic([], nextWalHeader);
+      } else {
+        await this.vfs.truncateWal(0);
+        await this.vfs.writeWalHeader(nextWalHeader);
+      }
     }
 
     this.checkpointSeq = nextCheckpointSeq;

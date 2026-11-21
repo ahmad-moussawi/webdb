@@ -43,8 +43,39 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     if (pageIds.length === 0) return [];
     await this.initHandles();
 
+    // Helper: check if pageIds is strictly consecutive ascending (e.g. exportBinary 1..N)
+    let isContiguous = pageIds.length >= 2;
+    if (isContiguous) {
+      for (let i = 1; i < pageIds.length; i++) {
+        if (pageIds[i] !== pageIds[i - 1] + 1) {
+          isContiguous = false;
+          break;
+        }
+      }
+    }
+
     if (this.dbSyncHandle) {
       const size = this.dbSyncHandle.getSize();
+      if (isContiguous) {
+        const startOffset = (pageIds[0] - 1) * 4096;
+        if (startOffset >= size) {
+          return new Array(pageIds.length).fill(null);
+        }
+        const readablePages = Math.min(
+          pageIds.length,
+          Math.floor((size - startOffset) / 4096),
+        );
+        const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
+        if (readablePages > 0) {
+          const bulk = new Uint8Array(readablePages * 4096);
+          this.dbSyncHandle.read(bulk, { at: startOffset });
+          for (let i = 0; i < readablePages; i++) {
+            results[i] = bulk.slice(i * 4096, (i + 1) * 4096);
+          }
+        }
+        return results;
+      }
+
       return pageIds.map((pageId) => {
         const offset = (pageId - 1) * 4096;
         if (offset + 4096 > size) return null;
@@ -55,37 +86,100 @@ export class OpfsVfsAdapter implements IVfsAdapter {
     }
 
     const file = await this.dbFileHandle!.getFile();
-    const results: Array<Uint8Array | null> = [];
-    for (const pageId of pageIds) {
-      const offset = (pageId - 1) * 4096;
-      if (offset + 4096 > file.size) {
-        results.push(null);
-      } else {
-        const slice = file.slice(offset, offset + 4096);
-        const arrayBuf = await slice.arrayBuffer();
-        results.push(new Uint8Array(arrayBuf));
+    if (isContiguous) {
+      const startOffset = (pageIds[0] - 1) * 4096;
+      if (startOffset >= file.size) {
+        return new Array(pageIds.length).fill(null);
+      }
+      const readablePages = Math.min(
+        pageIds.length,
+        Math.floor((file.size - startOffset) / 4096),
+      );
+      const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
+      if (readablePages > 0) {
+        const bulkBuf = await file
+          .slice(startOffset, startOffset + readablePages * 4096)
+          .arrayBuffer();
+        const bulk = new Uint8Array(bulkBuf);
+        for (let i = 0; i < readablePages; i++) {
+          results[i] = bulk.slice(i * 4096, (i + 1) * 4096);
+        }
+      }
+      return results;
+    }
+
+    return Promise.all(
+      pageIds.map(async (pageId) => {
+        const offset = (pageId - 1) * 4096;
+        if (offset + 4096 > file.size) {
+          return null;
+        }
+        const arrayBuf = await file.slice(offset, offset + 4096).arrayBuffer();
+        return new Uint8Array(arrayBuf);
+      }),
+    );
+  }
+
+  /**
+   * Coalesces contiguous runs of sorted pages into single buffers so writePages()
+   * issues 1 write syscall/IPC per contiguous run instead of 1 per 4 KB page.
+   */
+  private coalesceWriteRuns(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+  ): Array<{ offset: number; data: Uint8Array }> {
+    if (pages.length === 1) {
+      return [{ offset: (pages[0].pageId - 1) * 4096, data: pages[0].data }];
+    }
+
+    // Sort a shallow copy if not already sorted by pageId
+    let sorted = pages;
+    for (let i = 1; i < pages.length; i++) {
+      if (pages[i].pageId < pages[i - 1].pageId) {
+        sorted = [...pages].sort((a, b) => a.pageId - b.pageId);
+        break;
       }
     }
-    return results;
+
+    const runs: Array<{ offset: number; data: Uint8Array }> = [];
+    let i = 0;
+    while (i < sorted.length) {
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].pageId === sorted[j - 1].pageId + 1) {
+        j++;
+      }
+      const startOffset = (sorted[i].pageId - 1) * 4096;
+      if (j === i + 1) {
+        runs.push({ offset: startOffset, data: sorted[i].data });
+      } else {
+        const count = j - i;
+        const combined = new Uint8Array(count * 4096);
+        for (let k = 0; k < count; k++) {
+          combined.set(sorted[i + k].data, k * 4096);
+        }
+        runs.push({ offset: startOffset, data: combined });
+      }
+      i = j;
+    }
+    return runs;
   }
 
   async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
     if (pages.length === 0) return;
     await this.initHandles();
 
+    const runs = this.coalesceWriteRuns(pages);
+
     if (this.dbSyncHandle) {
-      for (const { pageId, data } of pages) {
-        const offset = (pageId - 1) * 4096;
-        this.dbSyncHandle.write(data, { at: offset });
+      for (const run of runs) {
+        this.dbSyncHandle.write(run.data, { at: run.offset });
       }
       return;
     }
 
     const writable = await (this.dbFileHandle as any).createWritable({ keepExistingData: true });
-    for (const { pageId, data } of pages) {
-      const offset = (pageId - 1) * 4096;
-      await writable.seek(offset);
-      await writable.write(data);
+    for (const run of runs) {
+      await writable.seek(run.offset);
+      await writable.write(run.data);
     }
     await writable.close();
   }
@@ -139,52 +233,72 @@ export class OpfsVfsAdapter implements IVfsAdapter {
 
   async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
     await this.initHandles();
-    const frames: Uint8Array[] = [];
-    let idx = startFrameIndex;
-    const limit = maxFrames !== undefined ? startFrameIndex + maxFrames : Infinity;
+    const startOffset = 32 + startFrameIndex * 4128;
+
+    const sliceFramesFromBulk = (bulk: Uint8Array): Uint8Array[] => {
+      const frames: Uint8Array[] = [];
+      for (let off = 0; off < bulk.byteLength; off += 4128) {
+        const end = Math.min(off + 4128, bulk.byteLength);
+        frames.push(bulk.slice(off, end));
+      }
+      return frames;
+    };
 
     if (this.walSyncHandle) {
       const size = this.walSyncHandle.getSize();
-      while (idx < limit) {
-        const offset = 32 + idx * 4128;
-        if (offset >= size) break;
-        const readLen = Math.min(4128, size - offset);
-        const frame = new Uint8Array(readLen);
-        this.walSyncHandle.read(frame, { at: offset });
-        frames.push(frame);
-        idx++;
-      }
-      return frames;
+      if (startOffset >= size) return [];
+      const availableBytes = size - startOffset;
+      const bytesToRead =
+        maxFrames !== undefined
+          ? Math.min(availableBytes, maxFrames * 4128)
+          : availableBytes;
+      if (bytesToRead <= 0) return [];
+      const bulk = new Uint8Array(bytesToRead);
+      this.walSyncHandle.read(bulk, { at: startOffset });
+      return sliceFramesFromBulk(bulk);
     }
 
     const file = await this.walFileHandle!.getFile();
-    while (idx < limit) {
-      const offset = 32 + idx * 4128;
-      if (offset >= file.size) break;
-      const readLen = Math.min(4128, file.size - offset);
-      const slice = file.slice(offset, offset + readLen);
-      frames.push(new Uint8Array(await slice.arrayBuffer()));
-      idx++;
-    }
-    return frames;
+    if (startOffset >= file.size) return [];
+    const availableBytes = file.size - startOffset;
+    const bytesToRead =
+      maxFrames !== undefined
+        ? Math.min(availableBytes, maxFrames * 4128)
+        : availableBytes;
+    if (bytesToRead <= 0) return [];
+    const bulk = new Uint8Array(
+      await file.slice(startOffset, startOffset + bytesToRead).arrayBuffer(),
+    );
+    return sliceFramesFromBulk(bulk);
   }
 
   async appendWalFrames(frames: Uint8Array[]): Promise<void> {
+    if (frames.length === 0) return;
     await this.initHandles();
-    if (this.walSyncHandle) {
-      let offset = Math.max(32, this.walSyncHandle.getSize());
-      for (const frame of frames) {
-        this.walSyncHandle.write(frame, { at: offset });
-        offset += frame.byteLength;
+
+    let payload: Uint8Array;
+    if (frames.length === 1) {
+      payload = frames[0];
+    } else {
+      let totalLen = 0;
+      for (const f of frames) totalLen += f.byteLength;
+      payload = new Uint8Array(totalLen);
+      let pos = 0;
+      for (const f of frames) {
+        payload.set(f, pos);
+        pos += f.byteLength;
       }
+    }
+
+    if (this.walSyncHandle) {
+      const offset = Math.max(32, this.walSyncHandle.getSize());
+      this.walSyncHandle.write(payload, { at: offset });
       return;
     }
     const file = await this.walFileHandle!.getFile();
     const writable = await (this.walFileHandle as any).createWritable({ keepExistingData: true });
     await writable.seek(Math.max(32, file.size));
-    for (const frame of frames) {
-      await writable.write(frame);
-    }
+    await writable.write(payload);
     await writable.close();
   }
 
