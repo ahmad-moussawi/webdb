@@ -14,9 +14,14 @@ import {
   BYTECODE_SIZE,
   MAX_IN_LIST_SIZE,
   PAGE_TYPE_LEAF_DATA,
+  PAGE_TYPE_OVERFLOW,
+  HEADER_OFFSET_FREE_PAGE_HEAD,
+  HEADER_OFFSET_PAGE_CHECKSUM,
+  INDEX_CATALOG_OFFSET,
 } from "../src/constants.js";
 import {
   compileQuery,
+  chooseIndexScan,
   normalizeFilter,
   BytecodeEmitter,
   type QueryFilter,
@@ -30,7 +35,11 @@ import {
   CostBasedPlanner,
   CustomOrderPlanner,
 } from "../src/host/compiler/planner/index.js";
-import { vm_step, catalog_list_table_descriptors } from "../src/core/index.js";
+import {
+  vm_step,
+  catalog_list_table_descriptors,
+  catalog_update_page1_checksum,
+} from "../src/core/index.js";
 import { createVmContext } from "../src/shared/index.js";
 import { computePageChecksum } from "../src/host/storage/crc32.js";
 import {
@@ -72,14 +81,22 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
       await db.insert("orders", { id: 10, account_id: 1, total: 500 });
       await db.insert("orders", { id: 11, account_id: 2, total: 900 });
 
-      const rows = await db
+      // Verify explain/bytecode actually hits composite table0Scan + OP_LOAD_BLOB
+      const qb = db
         .from("accounts")
         .innerJoin("orders", "accounts.id", "=", "orders.account_id")
         .where("accounts.tenant", "=", "acme")
         .where("accounts.code", "=", 100)
-        .select("accounts.id AS aid", "orders.total AS total")
-        .toArray();
+        .select("accounts.id AS aid", "orders.total AS total");
 
+      const explained = await qb.explain();
+      expect(explained.plan.scanType).toBe("IndexScan");
+      expect(explained.plan.indexName).toBe("idx_tenant_code");
+      expect(
+        explained.instructions.some((ins) => ins.opcode === "OP_LOAD_BLOB"),
+      ).toBe(true);
+
+      const rows = await qb.toArray();
       expect(rows).toEqual([{ aid: 1, total: 500 }]);
     });
 
@@ -100,13 +117,28 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
       await db.insert("posts", { id: 100, user_id: 1, title: "Hello" });
       await db.insert("posts", { id: 101, user_id: 3, title: "World" });
 
-      const rows = await db
+      // Confirm chooseIndexScan recognizes qualified users.id as multi_point,
+      // and compileQuery explicitly drops multi_point for join driving-table scans.
+      const usersMeta = (await db.getTable("users"))!;
+      const inFilter: QueryFilter = {
+        type: "in",
+        colName: "users.id",
+        values: [1, 3],
+        notIn: false,
+      };
+      expect(chooseIndexScan(usersMeta, [inFilter])?.scanType).toBe("multi_point");
+
+      const qb = db
         .from("users")
         .innerJoin("posts", "users.id", "=", "posts.user_id")
         .whereIn("users.id", [1, 3])
-        .select("users.name AS author", "posts.title AS title")
-        .toArray();
+        .select("users.name AS author", "posts.title AS title");
 
+      const explained = await qb.explain();
+      expect(explained.plan.scanType).toBe("TableScan");
+      expect(explained.plan.indexName).toBeUndefined();
+
+      const rows = await qb.toArray();
       expect(rows).toHaveLength(2);
       expect(rows.map((r) => r.author).sort()).toEqual(["Alice", "Charlie"]);
     });
@@ -496,9 +528,105 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
       const badAgg = new Uint8Array([OpCode.OP_AGG_INIT, 4, 0, 1, 0]);
       expect(vm_step(ctx6, view, badAgg)).toBe(VmStatus.INVALID_BYTECODE);
 
-      // 7. BytecodeEmitter rejects uint16 jump overflow
+      // 7. Comprehensive bounds checks across remaining opcodes (arithmetic, column, index, string, jump, offset/limit)
+      const invalidPrograms: Uint8Array[] = [
+        new Uint8Array([OpCode.OP_ADD, 255, 255, 255]),
+        new Uint8Array([OpCode.OP_SUB, 0, 64, 0]),
+        new Uint8Array([OpCode.OP_MUL, 0, 0, 64]),
+        new Uint8Array([OpCode.OP_DIV, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_MOD, 0, 64, 0]),
+        new Uint8Array([OpCode.OP_COLUMN_INT, 200, 0, 0]),
+        new Uint8Array([OpCode.OP_COLUMN_INT, 0, 0, 200]),
+        new Uint8Array([OpCode.OP_COLUMN_FLOAT, 16, 0, 0]),
+        new Uint8Array([OpCode.OP_COLUMN_TEXT, 0, 0, 64]),
+        new Uint8Array([OpCode.OP_COLUMN_BLOB, 16, 0, 64]),
+        new Uint8Array([OpCode.OP_OPEN_INDEX, 20, 2, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_INDEX_SEEK_EQ, 20, 0, 0, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_INDEX_SEEK_GE, 0, 20, 0, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_INDEX_SEEK_GE, 0, 0, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_INDEX_NEXT, 0, 20, 0, 0]),
+        new Uint8Array([OpCode.OP_IS_NULL, 20, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_IS_NOT_NULL, 20, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_EQ, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_NE, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_GT, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_GE, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_LT, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_LE, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_JUMP, 0]), // truncated
+        new Uint8Array([OpCode.OP_STR_LIKE, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_NOT_LIKE, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_CONTAINS, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_STARTS_WITH, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_ENDS_WITH, 64, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_FUZZY_MATCH, 0, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_IN, 64, 0, 0, 0, 0]),
+        new Uint8Array([OpCode.OP_EMIT_ROW, 20]),
+        new Uint8Array([OpCode.OP_OFFSET, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_LIMIT, 64, 0, 0]),
+        new Uint8Array([OpCode.OP_STR_LOWER, 64, 0]),
+        new Uint8Array([OpCode.OP_STR_UPPER, 0, 64]),
+        new Uint8Array([OpCode.OP_STR_LENGTH, 64, 0]),
+        new Uint8Array([OpCode.OP_STR_SUBSTR, 0, 0, 0, 64]),
+        new Uint8Array([OpCode.OP_STR_TRIM, 64, 0]),
+        new Uint8Array([OpCode.OP_STR_LEVENSHTEIN, 0, 64, 0]),
+        new Uint8Array([OpCode.OP_MATH_ABS, 64, 0]),
+        new Uint8Array([OpCode.OP_MATH_ROUND, 0, 64]),
+        new Uint8Array([OpCode.OP_MATH_FLOOR, 64, 0]),
+        new Uint8Array([OpCode.OP_MATH_CEIL, 0, 64]),
+        new Uint8Array([OpCode.OP_LAST, 20, 0, 0]),
+        new Uint8Array([OpCode.OP_PREV_ROW, 20, 0, 0]),
+      ];
+      for (const prog of invalidPrograms) {
+        const c = createVmContext();
+        expect(vm_step(c, view, prog)).toBe(VmStatus.INVALID_BYTECODE);
+      }
+
+      // 8. BytecodeEmitter rejects uint16 jump overflow and out-of-range int64
       const em = new BytecodeEmitter();
       expect(() => em.emitUint16(70000)).toThrow(RangeError);
+      expect(() => em.emitInt64(9223372036854775808n)).toThrow(RangeError);
+      expect(() => em.emitInt64(-9223372036854775809n)).toThrow(RangeError);
+    });
+
+    it("fails with VM error on self-cyclic overflow page instead of returning corrupted data", async () => {
+      await db.createTable("blobs", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "content", type: DataType.TEXT },
+      ]);
+      // > 4KB string spans multiple overflow pages
+      const bigText = "A".repeat(9000);
+      await db.insert("blobs", { id: 1, content: bigText });
+
+      const img = new Uint8Array(await db.exportBinary());
+      const numPages = img.byteLength / PAGE_SIZE;
+
+      // Find the first overflow page and make it point to itself (self-cycle)
+      let foundOverflowPid = -1;
+      for (let p = 2; p <= numPages; p++) {
+        const off = (p - 1) * PAGE_SIZE;
+        if (img[off] === PAGE_TYPE_OVERFLOW) {
+          foundOverflowPid = p;
+          const v = new DataView(img.buffer, off, PAGE_SIZE);
+          v.setUint32(6, p, true); // next_pid = curr_pid (self-cycle!)
+          v.setUint32(12, 0, true);
+          v.setUint32(
+            12,
+            computePageChecksum(img.subarray(off, off + PAGE_SIZE)),
+            true,
+          );
+          break;
+        }
+      }
+      expect(foundOverflowPid).toBeGreaterThanOrEqual(2);
+
+      const db2 = await WebDB.open({ name: "test_cyclic_overflow", storage: "memory" });
+      await db2.importBinary(img);
+
+      // Querying the column in WHERE triggers vm_load_overflow_column inside VM
+      await expect(
+        db2.from("blobs").where("content", "like", "A%").toArray(),
+      ).rejects.toThrow(/VM execution error/);
     });
 
     it("rejects corrupted/cyclic catalog chains in importBinary without harming live DB", async () => {
@@ -563,6 +691,31 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
         InvalidDatabaseError,
       );
 
+      // Case D: Out-of-bounds freePageHead in Page 1 header
+      const badFreeHeadImg = new Uint8Array(validExport);
+      const badFreeP1 = new DataView(badFreeHeadImg.buffer, 0, PAGE_SIZE);
+      badFreeP1.setUint32(HEADER_OFFSET_FREE_PAGE_HEAD, 999, true);
+      badFreeP1.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, 0, true);
+      catalog_update_page1_checksum(badFreeP1);
+
+      await expect(db.importBinary(badFreeHeadImg)).rejects.toThrow(
+        InvalidDatabaseError,
+      );
+
+      // Case E: Out-of-bounds index rootPageId
+      await db.createIndex("live_items", ["name"], { name: "idx_live_name" });
+      const indexedExport = await db.exportBinary();
+      const badIdxImg = new Uint8Array(indexedExport);
+      const badIdxP1 = new DataView(badIdxImg.buffer, 0, PAGE_SIZE);
+      // First index descriptor slot is at INDEX_CATALOG_OFFSET; rootPageId is at +4
+      badIdxP1.setUint32(INDEX_CATALOG_OFFSET + 4, 999, true);
+      badIdxP1.setUint32(HEADER_OFFSET_PAGE_CHECKSUM, 0, true);
+      catalog_update_page1_checksum(badIdxP1);
+
+      await expect(db.importBinary(badIdxImg)).rejects.toThrow(
+        InvalidDatabaseError,
+      );
+
       // Live DB MUST remain completely intact after all rejected imports!
       const liveRows = await db.from("live_items").toArray();
       expect(liveRows).toEqual([{ id: 1, name: "original" }]);
@@ -571,12 +724,13 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
 
   // 9. DoS Vectors: damerauLevenshtein, ngrams, LIKE ReDoS, padLeft, recursion depth
   describe("DoS Hardening (Search, Intl, LIKE ReDoS, Recursion)", () => {
-    it("computes damerauLevenshtein in O(min(n,m)) space with Ukkonen band", () => {
+    it("computes damerauLevenshtein in O(min(n,m)) space with Ukkonen band, handles NaN, and bounds CPU work", () => {
       expect(damerauLevenshtein("tehs", "thes")).toBe(1);
       expect(damerauLevenshtein("kitten", "sitting")).toBe(3);
       expect(damerauLevenshtein("abcdef", "abcfed")).toBe(2);
       expect(damerauLevenshtein("hello", "helo", 1)).toBe(1);
       expect(damerauLevenshtein("hello", "world", 2)).toBeGreaterThan(2);
+      expect(Number.isNaN(damerauLevenshtein("abc", "def", NaN))).toBe(true);
 
       // Previously allocated 2000x2000 = 4M JS array elements (~32 MB) even with maxDistance=2
       const s1 = "a".repeat(2000);
@@ -586,6 +740,11 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
       const elapsed = performance.now() - t0;
       expect(d).toBe(1);
       expect(elapsed).toBeLessThan(50);
+
+      // Unbounded huge strings throw RangeError immediately instead of freezing the event loop
+      expect(() =>
+        damerauLevenshtein("a".repeat(5000), "b".repeat(5000)),
+      ).toThrow(RangeError);
     });
 
     it("guards ngrams and wordNgrams against non-positive, fractional, or huge n", () => {
@@ -638,6 +797,142 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
         deepFilter = { type: "and", children: [deepFilter] };
       }
       expect(() => normalizeFilter(deepFilter)).toThrow(RangeError);
+    });
+  });
+
+  // 10. PR #2 Review Follow-Ups: Chained LEFT JOINs, Filter Mutation, Expr-String IN 3VL, INT64 > 2^53 UDFs
+  describe("PR #2 Review Hardening (Chained LEFT JOINs, Filter Mutation, IN 3VL, INT64 UDFs)", () => {
+    it("handles A LEFT JOIN B INNER JOIN C ON A.id = C.a_id and A LEFT JOIN B LEFT JOIN C ON A.id = C.a_id", async () => {
+      await db.createTable("a", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "aname", type: DataType.TEXT },
+      ]);
+      await db.createTable("b", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "a_id", type: DataType.INT32 },
+        { name: "bval", type: DataType.TEXT },
+      ]);
+      await db.createTable("c", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "a_id", type: DataType.INT32 },
+        { name: "b_id", type: DataType.INT32 },
+        { name: "cval", type: DataType.TEXT },
+      ]);
+
+      // a=1 matches b and c; a=2 has NO b, TWO c; a=3 has NO b, NO c
+      await db.insert("a", { id: 1, aname: "A1" });
+      await db.insert("a", { id: 2, aname: "A2" });
+      await db.insert("a", { id: 3, aname: "A3" });
+      await db.insert("b", { id: 10, a_id: 1, bval: "B10" });
+      await db.insert("c", { id: 100, a_id: 1, b_id: 10, cval: "C100" });
+      await db.insert("c", { id: 101, a_id: 2, b_id: 99, cval: "C101" });
+      await db.insert("c", { id: 102, a_id: 2, b_id: 99, cval: "C102" });
+
+      // 1. A LEFT JOIN B ON A.id = B.a_id INNER JOIN C ON A.id = C.a_id
+      const leftInnerOnA = await db
+        .from("a")
+        .leftJoin("b", "a.id", "=", "b.a_id")
+        .innerJoin("c", "a.id", "=", "c.a_id")
+        .withPlanner(new CustomOrderPlanner(["a", "b", "c"]))
+        .select("a.aname AS aname", "b.bval AS bval", "c.cval AS cval")
+        .toArray();
+
+      leftInnerOnA.sort((x, y) => String(x.cval).localeCompare(String(y.cval)));
+      // A3 excluded (no match in C); A2 emitted TWICE with bval=null and C101/C102!
+      expect(leftInnerOnA).toEqual([
+        { aname: "A1", bval: "B10", cval: "C100" },
+        { aname: "A2", bval: null, cval: "C101" },
+        { aname: "A2", bval: null, cval: "C102" },
+      ]);
+
+      // 2. A LEFT JOIN B ON A.id = B.a_id INNER JOIN C ON B.id = C.b_id
+      const leftInnerOnB = await db
+        .from("a")
+        .leftJoin("b", "a.id", "=", "b.a_id")
+        .innerJoin("c", "b.id", "=", "c.b_id")
+        .withPlanner(new CustomOrderPlanner(["a", "b", "c"]))
+        .select("a.aname AS aname", "b.bval AS bval", "c.cval AS cval")
+        .toArray();
+
+      // Only A1->B10->C100 matches; A2/A3 have B.id = NULL so INNER JOIN C emits nothing
+      expect(leftInnerOnB).toEqual([
+        { aname: "A1", bval: "B10", cval: "C100" },
+      ]);
+
+      // 3. A LEFT JOIN B ON A.id = B.a_id LEFT JOIN C ON A.id = C.a_id
+      const leftLeftOnA = await db
+        .from("a")
+        .leftJoin("b", "a.id", "=", "b.a_id")
+        .leftJoin("c", "a.id", "=", "c.a_id")
+        .withPlanner(new CustomOrderPlanner(["a", "b", "c"]))
+        .select("a.aname AS aname", "b.bval AS bval", "c.cval AS cval")
+        .toArray();
+
+      leftLeftOnA.sort((x, y) =>
+        `${x.aname}:${x.cval ?? ""}`.localeCompare(`${y.aname}:${y.cval ?? ""}`),
+      );
+      expect(leftLeftOnA).toEqual([
+        { aname: "A1", bval: "B10", cval: "C100" },
+        { aname: "A2", bval: null, cval: "C101" },
+        { aname: "A2", bval: null, cval: "C102" },
+        { aname: "A3", bval: null, cval: null },
+      ]);
+    });
+
+    it("does not return stale cached results when a reused QueryFilter is mutated", () => {
+      const filter: QueryFilter = {
+        type: "in",
+        colName: "id",
+        values: [1, 1],
+      };
+      const first = normalizeFilter(filter);
+      expect(first.values).toEqual([1]);
+
+      filter.values!.push(2);
+      const second = normalizeFilter(filter);
+      expect(second.values).toEqual([1, 2]);
+    });
+
+    it("enforces SQL 3VL NULL exclusion for NOT IN with expression-string colName", async () => {
+      await db.createTable("profiles", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "bio", type: DataType.TEXT },
+      ]);
+      await db.insert("profiles", { id: 1, bio: "coder" });
+      await db.insert("profiles", { id: 2, bio: "designer" });
+      await db.insert("profiles", { id: 3, bio: null });
+
+      const rows = await db
+        .from("profiles")
+        .whereNotIn("upper(bio)", ["CODER"])
+        .toArray();
+      // Row 3 has bio=NULL -> upper(NULL)=NULL -> NULL NOT IN ('CODER') is UNKNOWN (excluded)
+      expect(rows.map((r) => r.id)).toEqual([2]);
+    });
+
+    it("preserves INT64 precision > 2^53 when passing arguments to host JS UDFs", async () => {
+      const bigVal = 9007199254740993n; // 2^53 + 1 (loses precision if cast to Number)
+      db.registerFunction("echo_i64_str", {
+        returnType: DataType.TEXT,
+        call: (v: unknown) => `${typeof v}:${String(v)}`,
+      });
+
+      await db.createTable("bigs", [
+        { name: "id", type: DataType.INT32, primaryKey: true },
+        { name: "v", type: DataType.INT64 },
+      ]);
+      await db.insert("bigs", { id: 1, v: bigVal });
+      await db.insert("bigs", { id: 2, v: 42n });
+
+      const rows = await db
+        .from("bigs")
+        .select("id", "echo_i64_str(v) AS repr")
+        .toArray();
+      rows.sort((a, b) => Number(a.id) - Number(b.id));
+      expect(rows).toEqual([
+        { id: 1, repr: "bigint:9007199254740993" },
+        { id: 2, repr: "number:42" },
+      ]);
     });
   });
 });

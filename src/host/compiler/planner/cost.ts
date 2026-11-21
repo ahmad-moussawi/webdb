@@ -423,6 +423,7 @@ export class CostBasedPlanner implements QueryPlanner {
         isOrderSatisfied: finalOrderSatisfied,
       },
       orderedTables,
+      rootFilter,
       metrics: {
         totalCost: winningCost,
         estimatedRows: winningRows,

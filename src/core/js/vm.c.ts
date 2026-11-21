@@ -509,11 +509,16 @@ export function vm_step_raw(
         //   const cursor = ctx.cursors[cursor_idx];
         //   if (cell_count === 0) pc = jump_target;
         //   else { cursor.cellIdx = cell_count - 1; cursor.rowOffset = page_offset + rel_cell_offset; }
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const jump_target: u32 = read_u16(view, code_off + pc + 1);
         pc += 3;
 
-        if (jump_target > code_len) {
+        if (cursor_idx >= 16 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -557,11 +562,16 @@ export function vm_step_raw(
         //   const cursor = ctx.cursors[cursor_idx];
         //   if (cursor.cellIdx > 0) { cursor.cellIdx--; cursor.rowOffset = page_offset + rel_cell_offset; }
         //   else pc = jump_target;
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const jump_target: u32 = read_u16(view, code_off + pc + 1);
         pc += 3;
 
-        if (jump_target > code_len) {
+        if (cursor_idx >= 16 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -601,10 +611,20 @@ export function vm_step_raw(
         //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
         //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
         //   else ctx.registers[reg_idx] = view.getInt32(col_offset, true); // or getBigInt64
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_idx: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (cursor_idx >= 16 || reg_idx >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
 
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
@@ -640,10 +660,20 @@ export function vm_step_raw(
         //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
         //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
         //   else ctx.registers[reg_idx] = view.getFloat64(col_offset, true);
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_idx: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (cursor_idx >= 16 || reg_idx >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
 
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
@@ -675,10 +705,20 @@ export function vm_step_raw(
         //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
         //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
         //   else ctx.registers[reg_idx] = textDecoder.decode(rowSlice); // stored here as zero-copy (offset, len)
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_idx: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (cursor_idx >= 16 || reg_idx >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
 
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
@@ -790,10 +830,20 @@ export function vm_step_raw(
         //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
         //   if (isColNull(rowOffset, col_idx)) ctx.registers[reg_idx] = null;
         //   else ctx.registers[reg_idx] = new Uint8Array(buffer, rowOffset + rel_offset, len);
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_idx: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (cursor_idx >= 16 || reg_idx >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
 
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
@@ -876,7 +926,17 @@ export function vm_step_raw(
         //   cursor.rootPageId = root_page_id;
         //   cursor.cellIdx = 0;
         //   cursor.rowOffset = 0;
+        if (pc + 5 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
+        if (cursor_idx >= 16) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const root_page_id: u32 = read_u32(view, code_off + pc + 1);
         pc += 5;
 
@@ -905,6 +965,11 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_INDEX_SEEK_EQ: {
+        if (pc + 6 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const index_cursor_idx: u32 = read_u8(view, code_off + pc);
         const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_key: u32 = read_u8(view, code_off + pc + 2);
@@ -912,7 +977,12 @@ export function vm_step_raw(
         const jump_not_found: u32 = read_u16(view, code_off + pc + 4);
         pc += 6;
 
-        if (jump_not_found > code_len) {
+        if (
+          index_cursor_idx >= 16 ||
+          data_cursor_idx >= 16 ||
+          reg_key >= 64 ||
+          jump_not_found > code_len
+        ) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1036,6 +1106,11 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_INDEX_SEEK_GE: {
+        if (pc + 6 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const index_cursor_idx: u32 = read_u8(view, code_off + pc);
         const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
         const reg_key: u32 = read_u8(view, code_off + pc + 2);
@@ -1043,7 +1118,12 @@ export function vm_step_raw(
         const jump_eof: u32 = read_u16(view, code_off + pc + 4);
         pc += 6;
 
-        if (jump_eof > code_len) {
+        if (
+          index_cursor_idx >= 16 ||
+          data_cursor_idx >= 16 ||
+          reg_key >= 64 ||
+          jump_eof > code_len
+        ) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1167,12 +1247,21 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_INDEX_NEXT: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const index_cursor_idx: u32 = read_u8(view, code_off + pc);
         const data_cursor_idx: u32 = read_u8(view, code_off + pc + 1);
         const jump_eof: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_eof > code_len) {
+        if (
+          index_cursor_idx >= 16 ||
+          data_cursor_idx >= 16 ||
+          jump_eof > code_len
+        ) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1278,12 +1367,17 @@ export function vm_step_raw(
 
       case OpCode.OP_IS_NULL: {
         // JS: if (isColNull(ctx.cursors[cursor_idx].rowOffset, col_idx)) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (cursor_idx >= 16 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1299,12 +1393,17 @@ export function vm_step_raw(
 
       case OpCode.OP_IS_NOT_NULL: {
         // JS: if (!isColNull(ctx.cursors[cursor_idx].rowOffset, col_idx)) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         const col_idx: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (cursor_idx >= 16 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1320,12 +1419,17 @@ export function vm_step_raw(
 
       case OpCode.OP_EQ: {
         // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === 0) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1344,12 +1448,17 @@ export function vm_step_raw(
 
       case OpCode.OP_NE: {
         // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp !== UNKNOWN && cmp !== 0) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1368,12 +1477,17 @@ export function vm_step_raw(
 
       case OpCode.OP_GT: {
         // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === 1) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1392,12 +1506,17 @@ export function vm_step_raw(
 
       case OpCode.OP_GE: {
         // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp === 0 || cmp === 1) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1416,12 +1535,17 @@ export function vm_step_raw(
 
       case OpCode.OP_LT: {
         // JS: if (compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]) === -1) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1440,12 +1564,17 @@ export function vm_step_raw(
 
       case OpCode.OP_LE: {
         // JS: const cmp = compare3VL(ctx.registers[reg_a], ctx.registers[reg_b]); if (cmp === -1 || cmp === 0) pc = jump_target;
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
 
-        if (jump_target > code_len) {
+        if (reg_a >= 64 || reg_b >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1464,6 +1593,11 @@ export function vm_step_raw(
 
       case OpCode.OP_JUMP: {
         // JS: pc = bytecodeView.getUint16(pc, true);
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const jump_target: u32 = read_u16(view, code_off + pc);
         if (jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
@@ -1475,11 +1609,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_LIKE: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_pat: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1507,11 +1646,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_NOT_LIKE: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_pat: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1539,11 +1683,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_CONTAINS: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_sub: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_sub >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1571,11 +1720,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_STARTS_WITH: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_pfx: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_pfx >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1603,11 +1757,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_ENDS_WITH: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_sfx: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_sfx >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1635,11 +1794,16 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_FUZZY_MATCH: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str: u32 = read_u8(view, code_off + pc);
         const reg_pat: u32 = read_u8(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 2);
         pc += 4;
-        if (jump_target > code_len) {
+        if (reg_str >= 64 || reg_pat >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1669,12 +1833,17 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_IN: {
+        if (pc + 5 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_val: u32 = read_u8(view, code_off + pc);
         const set_idx: u32 = read_u16(view, code_off + pc + 1);
         const jump_target: u32 = read_u16(view, code_off + pc + 3);
         pc += 5;
 
-        if (jump_target > code_len) {
+        if (reg_val >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1821,8 +1990,18 @@ export function vm_step_raw(
         // JS:
         //   const rowOffset = ctx.cursors[cursor_idx].rowOffset;
         //   emitRawRowToResultBuffer(ctx, view, rowOffset, totalRowLength);
+        if (pc + 1 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const cursor_idx: u32 = read_u8(view, code_off + pc);
         pc += 1;
+        if (cursor_idx >= 16) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
 
         const cur_off: u32 = vm_cursor_off(ctx_off, cursor_idx);
         const row_offset: u32 = read_u32(view, cur_off + VM_CUR_ROW_OFFSET);
@@ -1848,11 +2027,16 @@ export function vm_step_raw(
         // JS:
         //   const offsetVal = Number(ctx.registers[offset_reg] ?? 0);
         //   if (offsetVal > 0) { ctx.registers[offset_reg] = offsetVal - 1; pc = jump_target; }
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const offset_reg: u32 = read_u8(view, code_off + pc);
         const jump_target: u32 = read_u16(view, code_off + pc + 1);
         pc += 3;
 
-        if (jump_target > code_len) {
+        if (offset_reg >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1875,11 +2059,16 @@ export function vm_step_raw(
         //   const limitVal = Number(ctx.registers[limit_reg] ?? 0);
         //   if (limitVal <= 1) { ctx.registers[limit_reg] = 0; pc = jump_target; }
         //   else { ctx.registers[limit_reg] = limitVal - 1; }
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const limit_reg: u32 = read_u8(view, code_off + pc);
         const jump_target: u32 = read_u16(view, code_off + pc + 1);
         pc += 3;
 
-        if (jump_target > code_len) {
+        if (limit_reg >= 64 || jump_target > code_len) {
           write_u32(view, ctx_off + VM_CTX_PC, pc);
           write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
           return VmStatus.INVALID_BYTECODE;
@@ -1929,9 +2118,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_LOWER: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         vm_str_lower(
           view,
           ctx_off,
@@ -1943,9 +2142,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_UPPER: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         vm_str_upper(
           view,
           ctx_off,
@@ -1957,9 +2166,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_LENGTH: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_off: u32 = vm_reg_off(ctx_off, src_reg);
         const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
         if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
@@ -1976,11 +2195,21 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_SUBSTR: {
+        if (pc + 4 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const start_reg: u32 = read_u8(view, code_off + pc + 1);
         const len_reg: u32 = read_u8(view, code_off + pc + 2);
         const dest_reg: u32 = read_u8(view, code_off + pc + 3);
         pc += 4;
+        if (src_reg >= 64 || start_reg >= 64 || len_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         vm_utf8_substr(
           view,
           vm_reg_off(ctx_off, src_reg),
@@ -1992,9 +2221,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_TRIM: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         vm_str_trim(
           view,
           vm_reg_off(ctx_off, src_reg),
@@ -2004,10 +2243,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_STR_LEVENSHTEIN: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_str1: u32 = read_u8(view, code_off + pc);
         const reg_str2: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_str1 >= 64 || reg_str2 >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const s1_off: u32 = vm_reg_off(ctx_off, reg_str1);
         const s2_off: u32 = vm_reg_off(ctx_off, reg_str2);
         const dest_off: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2031,9 +2280,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MATH_ABS: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_off: u32 = vm_reg_off(ctx_off, src_reg);
         const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
         if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
@@ -2049,9 +2308,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MATH_ROUND: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_off: u32 = vm_reg_off(ctx_off, src_reg);
         const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
         if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
@@ -2224,9 +2493,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MATH_FLOOR: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_off: u32 = vm_reg_off(ctx_off, src_reg);
         const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
         if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
@@ -2242,9 +2521,19 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MATH_CEIL: {
+        if (pc + 2 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_reg: u32 = read_u8(view, code_off + pc);
         const dest_reg: u32 = read_u8(view, code_off + pc + 1);
         pc += 2;
+        if (src_reg >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const src_off: u32 = vm_reg_off(ctx_off, src_reg);
         const dst_off: u32 = vm_reg_off(ctx_off, dest_reg);
         if (read_u8(view, src_off + VM_REG_IS_NULL) !== 0) {
@@ -2260,10 +2549,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_ADD: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const off_a: u32 = vm_reg_off(ctx_off, reg_a);
         const off_b: u32 = vm_reg_off(ctx_off, reg_b);
         const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2284,10 +2583,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_SUB: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const off_a: u32 = vm_reg_off(ctx_off, reg_a);
         const off_b: u32 = vm_reg_off(ctx_off, reg_b);
         const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2308,10 +2617,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MUL: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const off_a: u32 = vm_reg_off(ctx_off, reg_a);
         const off_b: u32 = vm_reg_off(ctx_off, reg_b);
         const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2332,10 +2651,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_DIV: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const off_a: u32 = vm_reg_off(ctx_off, reg_a);
         const off_b: u32 = vm_reg_off(ctx_off, reg_b);
         const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2360,10 +2689,20 @@ export function vm_step_raw(
       }
 
       case OpCode.OP_MOD: {
+        if (pc + 3 > code_len) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const reg_a: u32 = read_u8(view, code_off + pc);
         const reg_b: u32 = read_u8(view, code_off + pc + 1);
         const dest_reg: u32 = read_u8(view, code_off + pc + 2);
         pc += 3;
+        if (reg_a >= 64 || reg_b >= 64 || dest_reg >= 64) {
+          write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+          write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
+          return VmStatus.INVALID_BYTECODE;
+        }
         const off_a: u32 = vm_reg_off(ctx_off, reg_a);
         const off_b: u32 = vm_reg_off(ctx_off, reg_b);
         const off_d: u32 = vm_reg_off(ctx_off, dest_reg);
@@ -2723,7 +3062,11 @@ function readValueFromSlot(view: DataView, slot_off: number): any {
     return read_i32(view, slot_off + VM_REG_I32);
   }
   if (r_type === DataType.INT64) {
-    return Number(read_i64(view, slot_off + VM_REG_I64));
+    const v = read_i64(view, slot_off + VM_REG_I64);
+    if (v >= -9007199254740991n && v <= 9007199254740991n) {
+      return Number(v);
+    }
+    return v;
   }
   if (r_type === DataType.FLOAT64) {
     return read_f64(view, slot_off + VM_REG_F64);

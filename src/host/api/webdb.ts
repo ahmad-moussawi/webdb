@@ -5131,8 +5131,16 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
       }
 
-      // Pass 1b: Pre-validate catalog page chains (bounds, page types, cycles, column counts, and pool pin capacity)
-      // BEFORE mutating storage, WAL, or the live buffer pool.
+      // Pass 1b: Pre-validate header pointers, catalog page chains (bounds, page types, cycles, column counts, and pool pin capacity),
+      // table root/PK pages, and index root pages BEFORE mutating storage, WAL, or the live buffer pool.
+      if (
+        header.freePageHead !== 0 &&
+        (header.freePageHead < 2 || header.freePageHead > numPages)
+      ) {
+        throw new InvalidDatabaseError(
+          `Imported freePageHead ${header.freePageHead} out of bounds (totalPages=${numPages})`,
+        );
+      }
       const maxCatalogPins = Math.max(1, this.pool.slotCount - 1);
       const visitedCatalogPages = new Set<number>([1]);
       const validateCatalogPage = (pageId: number) => {
@@ -5203,9 +5211,32 @@ export class WebDB implements IDatabaseQueryExecutor {
             `Imported table "${desc.name}" has out-of-bounds rootPageId ${desc.rootPageId}`,
           );
         }
+        if (
+          desc.pkRootPageId &&
+          (desc.pkRootPageId < 2 || desc.pkRootPageId > numPages)
+        ) {
+          throw new InvalidDatabaseError(
+            `Imported table "${desc.name}" has out-of-bounds pkRootPageId ${desc.pkRootPageId}`,
+          );
+        }
         let colCatPid = desc.colCatalogPageId;
         while (colCatPid !== 0) {
           colCatPid = validateCatalogPage(colCatPid).nextColCatalogPageId;
+        }
+      }
+
+      const importedIndexDescs = catalog_list_all_indexes(
+        page1View,
+        rawImportPager,
+      );
+      for (const idxDesc of importedIndexDescs) {
+        if (
+          idxDesc.rootPageId !== 0 &&
+          (idxDesc.rootPageId < 2 || idxDesc.rootPageId > numPages)
+        ) {
+          throw new InvalidDatabaseError(
+            `Imported index "${idxDesc.name}" has out-of-bounds rootPageId ${idxDesc.rootPageId}`,
+          );
         }
       }
 

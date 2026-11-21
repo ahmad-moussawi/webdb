@@ -66,6 +66,7 @@ export class HeuristicPlanner implements QueryPlanner {
       return {
         plan,
         orderedTables: originalTables,
+        rootFilter,
         metrics: {
           totalCost: base.cost,
           estimatedRows: base.rows,
@@ -277,6 +278,7 @@ export class HeuristicPlanner implements QueryPlanner {
         isOrderSatisfied: finalOrderSatisfied,
       },
       orderedTables,
+      rootFilter,
       metrics: {
         totalCost,
         estimatedRows: currentRows,

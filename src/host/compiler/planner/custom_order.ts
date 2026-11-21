@@ -69,6 +69,7 @@ export class CustomOrderPlanner implements QueryPlanner {
       return {
         plan,
         orderedTables: originalTables,
+        rootFilter,
         metrics: {
           totalCost: base.cost,
           estimatedRows: base.rows,
@@ -166,6 +167,7 @@ export class CustomOrderPlanner implements QueryPlanner {
     return {
       plan: orderedPlan,
       orderedTables,
+      rootFilter,
       metrics: {
         totalCost,
         estimatedRows,

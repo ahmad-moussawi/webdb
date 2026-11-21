@@ -80,47 +80,47 @@ import {
 //   vm_cursor_off(ctx_off, c)                           <-> &ctx.cursors[c]   (24-byte struct)
 // ============================================================================
 
-export const VM_CTX_PC = 0;                  // u32: JS `ctx.pc` (Program Counter)
-export const VM_CTX_STATUS = 4;              // i32: JS `ctx.status` (VmStatus enum)
-export const VM_CTX_FAULT_PAGE_ID = 8;       // u32: JS `ctx.fault_page_id` (missing page ID on PAGE_FAULT)
-export const VM_CTX_RESULT_COUNT = 12;       // u32: JS `ctx.resultCount` (emitted rows in current chunk)
-export const VM_CTX_RESULT_OFFSET = 16;      // u32: JS `ctx.resultOffset` (byte cursor in RESULT_BUFFER)
-export const VM_CTX_ARENA_OFFSET = 20;       // u32: JS `ctx.arenaOffset` (logical query memory used)
-export const VM_CTX_MAX_QUERY_MEMORY = 24;   // u32: JS `ctx.maxQueryMemory` (arena byte limit)
-export const VM_CTX_HAS_BUFFER_POOL = 28;    // u32: JS `hasBufferPool ? 1 : 0`
-export const VM_CTX_NUM_TABLES = 32;         // u32: JS `ctx.tables.length`
-export const VM_CTX_NUM_OUTPUT_COLS = 36;    // u32: JS `ctx.outputColumns.length`
-export const VM_CTX_NUM_KEY_INFOS = 40;      // u32: JS `ctx.keyInfos.length`
-export const VM_CTX_NUM_IN_SETS = 44;        // u32: JS `ctx.inSets.length`
-export const VM_CTX_UDF_ID = 48;             // u32: Pending host UDF index when status == VM_STATUS_HOST_UDF
-export const VM_CTX_UDF_START_REG = 52;      // u32: First argument register for host UDF call
-export const VM_CTX_UDF_NUM_ARGS = 56;       // u32: Number of arguments for host UDF call
-export const VM_CTX_UDF_DEST_REG = 60;       // u32: Destination register for host UDF return value
-export const VM_CTX_PHYS_ARENA_USED = 64;    // u32: Bump-pointer offset inside TRANSIENT_ARENA_OFFSET
+export const VM_CTX_PC = 0; // u32: JS `ctx.pc` (Program Counter)
+export const VM_CTX_STATUS = 4; // i32: JS `ctx.status` (VmStatus enum)
+export const VM_CTX_FAULT_PAGE_ID = 8; // u32: JS `ctx.fault_page_id` (missing page ID on PAGE_FAULT)
+export const VM_CTX_RESULT_COUNT = 12; // u32: JS `ctx.resultCount` (emitted rows in current chunk)
+export const VM_CTX_RESULT_OFFSET = 16; // u32: JS `ctx.resultOffset` (byte cursor in RESULT_BUFFER)
+export const VM_CTX_ARENA_OFFSET = 20; // u32: JS `ctx.arenaOffset` (logical query memory used)
+export const VM_CTX_MAX_QUERY_MEMORY = 24; // u32: JS `ctx.maxQueryMemory` (arena byte limit)
+export const VM_CTX_HAS_BUFFER_POOL = 28; // u32: JS `hasBufferPool ? 1 : 0`
+export const VM_CTX_NUM_TABLES = 32; // u32: JS `ctx.tables.length`
+export const VM_CTX_NUM_OUTPUT_COLS = 36; // u32: JS `ctx.outputColumns.length`
+export const VM_CTX_NUM_KEY_INFOS = 40; // u32: JS `ctx.keyInfos.length`
+export const VM_CTX_NUM_IN_SETS = 44; // u32: JS `ctx.inSets.length`
+export const VM_CTX_UDF_ID = 48; // u32: Pending host UDF index when status == VM_STATUS_HOST_UDF
+export const VM_CTX_UDF_START_REG = 52; // u32: First argument register for host UDF call
+export const VM_CTX_UDF_NUM_ARGS = 56; // u32: Number of arguments for host UDF call
+export const VM_CTX_UDF_DEST_REG = 60; // u32: Destination register for host UDF return value
+export const VM_CTX_PHYS_ARENA_USED = 64; // u32: Bump-pointer offset inside TRANSIENT_ARENA_OFFSET
 export const VM_CTX_CURRENT_BUCKET_OFF = 68; // u32: JS `agg.currentBucket` pointer during OP_AGG_NEXT..OP_AGG_FINAL
 
 // 64 Registers * 32 bytes each (at ctx_off + 72 .. ctx_off + 2119)
 // Pure JS equivalent: `ctx.registers[reg_idx]` (tagged union holding number | bigint | string | Uint8Array | null)
 export const VM_CTX_REGISTERS_OFF = 72;
 export const VM_REG_SIZE = 32;
-export const VM_REG_IS_NULL = 0;  // u8:  1 if `ctx.registers[r] === null`, 0 otherwise
-export const VM_REG_TYPE = 1;     // u8:  DataType tag (INT32, INT64, FLOAT64, TEXT, BLOB, UUID, ULID)
-export const VM_REG_I32 = 4;      // i32: 32-bit integer value (`Number(ctx.registers[r]) | 0`)
-export const VM_REG_I64 = 8;      // i64: 64-bit BigInt value (`BigInt(ctx.registers[r])`)
-export const VM_REG_F64 = 16;     // f64: IEEE-754 float64 value (`Number(ctx.registers[r])`)
-export const VM_REG_DATA_OFF = 24;// u32: Linear memory byte offset for TEXT/BLOB/UUID/ULID slice
-export const VM_REG_DATA_LEN = 28;// u32: Byte length of TEXT/BLOB/UUID/ULID slice
+export const VM_REG_IS_NULL = 0; // u8:  1 if `ctx.registers[r] === null`, 0 otherwise
+export const VM_REG_TYPE = 1; // u8:  DataType tag (INT32, INT64, FLOAT64, TEXT, BLOB, UUID, ULID)
+export const VM_REG_I32 = 4; // i32: 32-bit integer value (`Number(ctx.registers[r]) | 0`)
+export const VM_REG_I64 = 8; // i64: 64-bit BigInt value (`BigInt(ctx.registers[r])`)
+export const VM_REG_F64 = 16; // f64: IEEE-754 float64 value (`Number(ctx.registers[r])`)
+export const VM_REG_DATA_OFF = 24; // u32: Linear memory byte offset for TEXT/BLOB/UUID/ULID slice
+export const VM_REG_DATA_LEN = 28; // u32: Byte length of TEXT/BLOB/UUID/ULID slice
 
 // 16 Cursors * 24 bytes each (at ctx_off + 2120 .. ctx_off + 2503)
 // Pure JS equivalent: `ctx.cursors[cursor_idx]`
 export const VM_CTX_CURSORS_OFF = 2120;
 export const VM_CURSOR_SIZE = 24;
-export const VM_CUR_PAGE_ID = 0;      // u32: JS `cursor.pageId`
+export const VM_CUR_PAGE_ID = 0; // u32: JS `cursor.pageId`
 export const VM_CUR_ROOT_PAGE_ID = 4; // u32: JS `cursor.rootPageId`
-export const VM_CUR_SLOT_IDX = 8;     // i32: JS `cursor.slotIdx` (BufferPool frame slot)
-export const VM_CUR_CELL_IDX = 12;    // i32: JS `cursor.cellIdx` (current row index in page)
-export const VM_CUR_ROW_OFFSET = 16;  // u32: JS `cursor.rowOffset` (absolute byte offset of row cell)
-export const VM_CUR_FLAGS = 20;       // u32: JS `cursor.flags`
+export const VM_CUR_SLOT_IDX = 8; // i32: JS `cursor.slotIdx` (BufferPool frame slot)
+export const VM_CUR_CELL_IDX = 12; // i32: JS `cursor.cellIdx` (current row index in page)
+export const VM_CUR_ROW_OFFSET = 16; // u32: JS `cursor.rowOffset` (absolute byte offset of row cell)
+export const VM_CUR_FLAGS = 20; // u32: JS `cursor.flags`
 
 // 16 Table Descriptors * 260 bytes each (at ctx_off + 2504 .. ctx_off + 6663)
 // Pure JS equivalent: `ctx.tables[cursor_idx].columns` (supports up to MAX_COLUMNS_PER_TABLE = 256)
@@ -137,48 +137,48 @@ export const VM_CTX_OUTPUT_COLS_OFF = 6664;
 // Pure JS equivalent: `ctx.keyInfos[key_info_idx]`
 export const VM_CTX_KEY_INFOS_OFF = 6928;
 export const VM_KEY_INFO_SIZE = 32;
-export const VM_KI_NUM_KEYS = 0;     // u8:  JS `keyInfo.numKeys`
-export const VM_KI_HAS_LIMIT = 1;    // u8:  JS `keyInfo.limit !== undefined ? 1 : 0`
-export const VM_KI_LIMIT = 4;        // u32: JS `keyInfo.limit ?? 0`
-export const VM_KI_OFFSET = 8;       // u32: JS `keyInfo.offset ?? 0`
-export const VM_KI_DIRECTIONS = 12;  // u8[8]: JS `keyInfo.directions[k]` (0 = ASC, 1 = DESC)
+export const VM_KI_NUM_KEYS = 0; // u8:  JS `keyInfo.numKeys`
+export const VM_KI_HAS_LIMIT = 1; // u8:  JS `keyInfo.limit !== undefined ? 1 : 0`
+export const VM_KI_LIMIT = 4; // u32: JS `keyInfo.limit ?? 0`
+export const VM_KI_OFFSET = 8; // u32: JS `keyInfo.offset ?? 0`
+export const VM_KI_DIRECTIONS = 12; // u8[8]: JS `keyInfo.directions[k]` (0 = ASC, 1 = DESC)
 export const VM_KI_NULL_ORDERS = 20; // u8[8]: JS `keyInfo.nullOrders[k]` (0 = NULLS FIRST, 1 = NULLS LAST)
 
 // 4 Sorter Descriptors * 32 bytes each (at ctx_off + 7184 .. ctx_off + 7311)
 // Pure JS equivalent: `ctx.sorters[sorter_id]`
 export const VM_CTX_SORTERS_OFF = 7184;
 export const VM_SORTER_SIZE = 32;
-export const VM_SRT_IS_OPEN = 0;      // u8:  JS `ctx.sorters[id] !== undefined`
-export const VM_SRT_IS_SORTED = 1;    // u8:  JS `sorter.isSorted`
+export const VM_SRT_IS_OPEN = 0; // u8:  JS `ctx.sorters[id] !== undefined`
+export const VM_SRT_IS_SORTED = 1; // u8:  JS `sorter.isSorted`
 export const VM_SRT_KEY_INFO_IDX = 2; // u8:  Index into `ctx.keyInfos`
-export const VM_SRT_ENTRY_COUNT = 4;  // u32: JS `sorter.entries.length`
-export const VM_SRT_CAPACITY = 8;     // u32: Allocated length of `ptrs_off` array in arena
-export const VM_SRT_READ_IDX = 12;    // u32: JS `sorter.readIdx`
-export const VM_SRT_MAX_K = 16;       // u32: JS `sorter.maxK` (Top-K bounded heap limit)
-export const VM_SRT_PTRS_OFF = 20;    // u32: Arena byte offset of `u32 entry_ptrs[capacity]`
+export const VM_SRT_ENTRY_COUNT = 4; // u32: JS `sorter.entries.length`
+export const VM_SRT_CAPACITY = 8; // u32: Allocated length of `ptrs_off` array in arena
+export const VM_SRT_READ_IDX = 12; // u32: JS `sorter.readIdx`
+export const VM_SRT_MAX_K = 16; // u32: JS `sorter.maxK` (Top-K bounded heap limit)
+export const VM_SRT_PTRS_OFF = 20; // u32: Arena byte offset of `u32 entry_ptrs[capacity]`
 export const VM_SRT_SCRATCH_OFF = 24; // u32: Arena byte offset of merge-sort scratch buffer
 
 // 4 Aggregator Descriptors * 32 bytes each (at ctx_off + 7312 .. ctx_off + 7439)
 // Pure JS equivalent: `ctx.aggregators[agg_id]`
 export const VM_CTX_AGGS_OFF = 7312;
 export const VM_AGG_SIZE = 32;
-export const VM_AGG_IS_OPEN = 0;         // u8:  JS `ctx.aggregators[id] !== undefined`
-export const VM_AGG_MODE = 1;            // u8:  JS `agg.mode` (0 = hash table, 1 = stream)
-export const VM_AGG_START_KEY_REG = 2;   // u8:  JS `agg.startKeyReg`
-export const VM_AGG_NUM_KEYS = 3;        // u8:  JS `agg.numKeys`
-export const VM_AGG_CAPACITY = 4;        // u32: JS `agg.capacity` (number of hash buckets)
-export const VM_AGG_OCCUPIED = 8;        // u32: JS `agg.occupiedCount`
-export const VM_AGG_READ_IDX = 12;       // u32: JS `agg.readIdx`
-export const VM_AGG_BUCKETS_OFF = 16;    // u32: Arena byte offset of `u32 bucket_ptrs[capacity]`
-export const VM_AGG_CURR_BUCKET_OFF = 20;// u32: Arena byte offset of active `VmAggBucket`
+export const VM_AGG_IS_OPEN = 0; // u8:  JS `ctx.aggregators[id] !== undefined`
+export const VM_AGG_MODE = 1; // u8:  JS `agg.mode` (0 = hash table, 1 = stream)
+export const VM_AGG_START_KEY_REG = 2; // u8:  JS `agg.startKeyReg`
+export const VM_AGG_NUM_KEYS = 3; // u8:  JS `agg.numKeys`
+export const VM_AGG_CAPACITY = 4; // u32: JS `agg.capacity` (number of hash buckets)
+export const VM_AGG_OCCUPIED = 8; // u32: JS `agg.occupiedCount`
+export const VM_AGG_READ_IDX = 12; // u32: JS `agg.readIdx`
+export const VM_AGG_BUCKETS_OFF = 16; // u32: Arena byte offset of `u32 bucket_ptrs[capacity]`
+export const VM_AGG_CURR_BUCKET_OFF = 20; // u32: Arena byte offset of active `VmAggBucket`
 
-export const VM_CTX_IN_SETS_OFF = 7440;  // 16 * 8B (`count: u32, items_off: u32`) -> JS `ctx.inSets[set_idx]`
-export const VM_CTX_SLOTS_BASE_OFF = 7568;       // u32: Base byte offset of buffer pool slot 0 (SLOTS_BASE_OFFSET or 0)
-export const VM_CTX_PAGE_TO_SLOT_OFF = 7572;     // u32: Byte offset of PAGE_TO_SLOT hash table
+export const VM_CTX_IN_SETS_OFF = 7440; // 16 * 8B (`count: u32, items_off: u32`) -> JS `ctx.inSets[set_idx]`
+export const VM_CTX_SLOTS_BASE_OFF = 7568; // u32: Base byte offset of buffer pool slot 0 (SLOTS_BASE_OFFSET or 0)
+export const VM_CTX_PAGE_TO_SLOT_OFF = 7572; // u32: Byte offset of PAGE_TO_SLOT hash table
 export const VM_CTX_PAGE_TO_SLOT_BUCKETS = 7576; // u32: Number of buckets in PAGE_TO_SLOT hash table
-export const VM_CTX_ARENA_BASE_OFF = 7580;       // u32: Byte offset of transient query arena base
-export const VM_CTX_SCRATCH_OFF = 7680;  // Scratch buffer inside `VM_CONTEXT_OFFSET`
-export const VM_STATUS_HOST_UDF = 99;    // Yield code asking host wrapper to invoke `ctx.udfs[udf_id]`
+export const VM_CTX_ARENA_BASE_OFF = 7580; // u32: Byte offset of transient query arena base
+export const VM_CTX_SCRATCH_OFF = 7680; // Scratch buffer inside `VM_CONTEXT_OFFSET`
+export const VM_STATUS_HOST_UDF = 99; // Yield code asking host wrapper to invoke `ctx.udfs[udf_id]`
 
 // ============================================================================
 // 1. Flat Linear-Memory Primitives (@export_c)
@@ -220,7 +220,11 @@ export function vm_cursor_off(ctx_off: u32, cursor_idx: u32): u32 {
  * @export_c
  * Pure JS equivalent: `ctx.tables?.[cursor_idx] ?? ctx.table`
  */
-export function vm_resolve_table_off(view: DataView, ctx_off: u32, cursor_idx: u32): u32 {
+export function vm_resolve_table_off(
+  view: DataView,
+  ctx_off: u32,
+  cursor_idx: u32,
+): u32 {
   const num_tables: u32 = read_u32(view, ctx_off + VM_CTX_NUM_TABLES);
   if (cursor_idx < num_tables) {
     return ctx_off + VM_CTX_TABLES_OFF + cursor_idx * VM_TABLE_DESC_SIZE;
@@ -258,13 +262,13 @@ export function vm_phys_alloc(
  * Pure JS equivalent: `ctx.registers[reg_idx] = null`
  */
 export function vm_reg_set_null(view: DataView, reg_off: u32): void {
-  write_u8(view, reg_off + VM_REG_IS_NULL, 1);          // JS: reg.isNull = true
+  write_u8(view, reg_off + VM_REG_IS_NULL, 1); // JS: reg.isNull = true
   write_u8(view, reg_off + VM_REG_TYPE, DataType.NULL); // JS: reg.type = DataType.NULL
-  write_i32(view, reg_off + VM_REG_I32, 0);             // JS: reg.i32 = 0
-  write_i64(view, reg_off + VM_REG_I64, 0n);            // JS: reg.i64 = 0n
-  write_f64(view, reg_off + VM_REG_F64, 0.0);           // JS: reg.f64 = 0.0
-  write_u32(view, reg_off + VM_REG_DATA_OFF, 0);        // JS: reg.dataOff = 0
-  write_u32(view, reg_off + VM_REG_DATA_LEN, 0);        // JS: reg.dataLen = 0
+  write_i32(view, reg_off + VM_REG_I32, 0); // JS: reg.i32 = 0
+  write_i64(view, reg_off + VM_REG_I64, 0n); // JS: reg.i64 = 0n
+  write_f64(view, reg_off + VM_REG_F64, 0.0); // JS: reg.f64 = 0.0
+  write_u32(view, reg_off + VM_REG_DATA_OFF, 0); // JS: reg.dataOff = 0
+  write_u32(view, reg_off + VM_REG_DATA_LEN, 0); // JS: reg.dataLen = 0
 }
 
 /**
@@ -272,11 +276,11 @@ export function vm_reg_set_null(view: DataView, reg_off: u32): void {
  * Pure JS equivalent: `ctx.registers[reg_idx] = val` (32-bit integer)
  */
 export function vm_reg_set_i32(view: DataView, reg_off: u32, val: i32): void {
-  write_u8(view, reg_off + VM_REG_IS_NULL, 0);           // JS: reg.isNull = false
+  write_u8(view, reg_off + VM_REG_IS_NULL, 0); // JS: reg.isNull = false
   write_u8(view, reg_off + VM_REG_TYPE, DataType.INT32); // JS: reg.type = DataType.INT32
-  write_i32(view, reg_off + VM_REG_I32, val);            // JS: reg.i32 = val
-  write_i64(view, reg_off + VM_REG_I64, f64_to_i64(val));// JS: reg.i64 = BigInt(val)
-  write_f64(view, reg_off + VM_REG_F64, val);            // JS: reg.f64 = Number(val)
+  write_i32(view, reg_off + VM_REG_I32, val); // JS: reg.i32 = val
+  write_i64(view, reg_off + VM_REG_I64, f64_to_i64(val)); // JS: reg.i64 = BigInt(val)
+  write_f64(view, reg_off + VM_REG_F64, val); // JS: reg.f64 = Number(val)
   write_u32(view, reg_off + VM_REG_DATA_OFF, 0);
   write_u32(view, reg_off + VM_REG_DATA_LEN, 0);
 }
@@ -287,11 +291,11 @@ export function vm_reg_set_i32(view: DataView, reg_off: u32, val: i32): void {
  */
 export function vm_reg_set_i64(view: DataView, reg_off: u32, val: i64): void {
   const as_f64: f64 = i64_to_f64(val);
-  write_u8(view, reg_off + VM_REG_IS_NULL, 0);           // JS: reg.isNull = false
+  write_u8(view, reg_off + VM_REG_IS_NULL, 0); // JS: reg.isNull = false
   write_u8(view, reg_off + VM_REG_TYPE, DataType.INT64); // JS: reg.type = DataType.INT64
-  write_i32(view, reg_off + VM_REG_I32, i64_to_i32(val));// JS: reg.i32 = Number(val) | 0
-  write_i64(view, reg_off + VM_REG_I64, val);            // JS: reg.i64 = val
-  write_f64(view, reg_off + VM_REG_F64, as_f64);         // JS: reg.f64 = Number(val)
+  write_i32(view, reg_off + VM_REG_I32, i64_to_i32(val)); // JS: reg.i32 = Number(val) | 0
+  write_i64(view, reg_off + VM_REG_I64, val); // JS: reg.i64 = val
+  write_f64(view, reg_off + VM_REG_F64, as_f64); // JS: reg.f64 = Number(val)
   write_u32(view, reg_off + VM_REG_DATA_OFF, 0);
   write_u32(view, reg_off + VM_REG_DATA_LEN, 0);
 }
@@ -301,11 +305,11 @@ export function vm_reg_set_i64(view: DataView, reg_off: u32, val: i64): void {
  * Pure JS equivalent: `ctx.registers[reg_idx] = val` (64-bit float)
  */
 export function vm_reg_set_f64(view: DataView, reg_off: u32, val: f64): void {
-  write_u8(view, reg_off + VM_REG_IS_NULL, 0);             // JS: reg.isNull = false
+  write_u8(view, reg_off + VM_REG_IS_NULL, 0); // JS: reg.isNull = false
   write_u8(view, reg_off + VM_REG_TYPE, DataType.FLOAT64); // JS: reg.type = DataType.FLOAT64
-  write_i32(view, reg_off + VM_REG_I32, f64_to_i32(val));  // JS: reg.i32 = Math.trunc(val)
-  write_i64(view, reg_off + VM_REG_I64, f64_to_i64(val));  // JS: reg.i64 = BigInt(Math.trunc(val))
-  write_f64(view, reg_off + VM_REG_F64, val);              // JS: reg.f64 = val
+  write_i32(view, reg_off + VM_REG_I32, f64_to_i32(val)); // JS: reg.i32 = Math.trunc(val)
+  write_i64(view, reg_off + VM_REG_I64, f64_to_i64(val)); // JS: reg.i64 = BigInt(Math.trunc(val))
+  write_f64(view, reg_off + VM_REG_F64, val); // JS: reg.f64 = val
   write_u32(view, reg_off + VM_REG_DATA_OFF, 0);
   write_u32(view, reg_off + VM_REG_DATA_LEN, 0);
 }
@@ -322,13 +326,13 @@ export function vm_reg_set_slice(
   data_off: u32,
   data_len: u32,
 ): void {
-  write_u8(view, reg_off + VM_REG_IS_NULL, 0);            // JS: reg.isNull = false
-  write_u8(view, reg_off + VM_REG_TYPE, col_type);        // JS: reg.type = col_type (TEXT/BLOB/UUID/ULID)
+  write_u8(view, reg_off + VM_REG_IS_NULL, 0); // JS: reg.isNull = false
+  write_u8(view, reg_off + VM_REG_TYPE, col_type); // JS: reg.type = col_type (TEXT/BLOB/UUID/ULID)
   write_i32(view, reg_off + VM_REG_I32, 0);
   write_i64(view, reg_off + VM_REG_I64, 0n);
   write_f64(view, reg_off + VM_REG_F64, 0.0);
-  write_u32(view, reg_off + VM_REG_DATA_OFF, data_off);   // JS: reg.dataOff = data_off
-  write_u32(view, reg_off + VM_REG_DATA_LEN, data_len);   // JS: reg.dataLen = data_len
+  write_u32(view, reg_off + VM_REG_DATA_OFF, data_off); // JS: reg.dataOff = data_off
+  write_u32(view, reg_off + VM_REG_DATA_LEN, data_len); // JS: reg.dataLen = data_len
 }
 
 /**
@@ -353,8 +357,14 @@ export function vm_load_overflow_column(
   }
 
   const slots_base: u32 = read_u32(view, ctx_off + VM_CTX_SLOTS_BASE_OFF);
-  const page_to_slot_off: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF);
-  const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
+  const page_to_slot_off: u32 = read_u32(
+    view,
+    ctx_off + VM_CTX_PAGE_TO_SLOT_OFF,
+  );
+  const page_to_slot_buckets: u32 = read_u32(
+    view,
+    ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS,
+  );
   const arena_base: u32 = read_u32(view, ctx_off + VM_CTX_ARENA_BASE_OFF);
 
   // Pass 1: Verify all overflow pages in the chain are resident and valid before allocating arena memory
@@ -388,8 +398,14 @@ export function vm_load_overflow_column(
     }
     const chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
-    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid === curr_pid) {
-      break;
+    if (
+      chunk_len === 0 ||
+      chunk_len > OVERFLOW_PAYLOAD_SIZE ||
+      next_pid === curr_pid
+    ) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
     }
     if (chunk_len >= remaining) {
       remaining = 0;
@@ -399,12 +415,13 @@ export function vm_load_overflow_column(
     curr_pid = next_pid;
   }
 
-  const dest_off: u32 = vm_phys_alloc(
-    view,
-    ctx_off,
-    arena_base,
-    total_len,
-  );
+  if (remaining > 0) {
+    write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+    write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+    return VmStatus.ERROR;
+  }
+
+  const dest_off: u32 = vm_phys_alloc(view, ctx_off, arena_base, total_len);
   if (dest_off === 0) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
     return VmStatus.ARENA_EXHAUSTED;
@@ -413,7 +430,14 @@ export function vm_load_overflow_column(
   // Pass 2: Copy chunks into contiguous arena slice
   curr_pid = first_page_id;
   let copied: u32 = 0;
+  let copy_hops: u32 = 0;
   while (curr_pid > 1 && copied < total_len) {
+    copy_hops++;
+    if (copy_hops > 65536) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
+    }
     const slot: i32 = buf_pool_get_resident_slot(
       view,
       page_to_slot_off,
@@ -421,13 +445,22 @@ export function vm_load_overflow_column(
       curr_pid,
     );
     if (slot < 0) {
-      break;
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
     }
     const page_off: u32 = slots_base + (slot as u32) * PAGE_SIZE;
+    if (read_u8(view, page_off) !== PAGE_TYPE_OVERFLOW) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
+    }
     let chunk_len: u32 = read_u16(view, page_off + 2);
     const next_pid: u32 = read_u32(view, page_off + 6);
-    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
-      break;
+    if (chunk_len === 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid === curr_pid) {
+      write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ERROR);
+      write_u32(view, ctx_off + VM_CTX_PC, instr_pc);
+      return VmStatus.ERROR;
     }
     if (copied + chunk_len > total_len) {
       chunk_len = total_len - copied;
@@ -679,8 +712,14 @@ export function vm_resolve_page_offset(
   if (page_id === 0) return 0;
   const slots_base: u32 = read_u32(view, ctx_off + VM_CTX_SLOTS_BASE_OFF);
   if (has_buffer_pool !== 0) {
-    const page_to_slot_off: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_OFF);
-    const page_to_slot_buckets: u32 = read_u32(view, ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS);
+    const page_to_slot_off: u32 = read_u32(
+      view,
+      ctx_off + VM_CTX_PAGE_TO_SLOT_OFF,
+    );
+    const page_to_slot_buckets: u32 = read_u32(
+      view,
+      ctx_off + VM_CTX_PAGE_TO_SLOT_BUCKETS,
+    );
     const slot: i32 = buf_pool_get_resident_slot(
       view,
       page_to_slot_off,
@@ -1088,8 +1127,10 @@ export function vm_str_levenshtein_view(
   s2_len: u32,
   max_dist: u32,
 ): i32 {
-  if (s1_len === 0) return s2_len <= max_dist ? (s2_len as i32) : ((max_dist + 1) as i32);
-  if (s2_len === 0) return s1_len <= max_dist ? (s1_len as i32) : ((max_dist + 1) as i32);
+  if (s1_len === 0)
+    return s2_len <= max_dist ? (s2_len as i32) : ((max_dist + 1) as i32);
+  if (s2_len === 0)
+    return s1_len <= max_dist ? (s1_len as i32) : ((max_dist + 1) as i32);
 
   const diff: i32 = (s1_len as i32) - (s2_len as i32);
   const abs_diff: u32 = (diff < 0 ? -diff : diff) as u32;
@@ -1168,7 +1209,14 @@ export function vm_str_fuzzy_match_view(
     return 1;
   }
 
-  const whole_dist: i32 = vm_str_levenshtein_view(view, str_off, str_len, pat_off, pat_len, max_dist);
+  const whole_dist: i32 = vm_str_levenshtein_view(
+    view,
+    str_off,
+    str_len,
+    pat_off,
+    pat_len,
+    max_dist,
+  );
   if (whole_dist <= (max_dist as i32)) {
     return 1;
   }
@@ -1178,9 +1226,20 @@ export function vm_str_fuzzy_match_view(
     while (word_start < str_len) {
       const b: i32 = read_u8(view, str_off + word_start);
       if (
-        b <= 32 || b === 44 || b === 46 || b === 58 || b === 59 ||
-        b === 45 || b === 95 || b === 47 || b === 39 || b === 34 ||
-        b === 40 || b === 41 || b === 91 || b === 93
+        b <= 32 ||
+        b === 44 ||
+        b === 46 ||
+        b === 58 ||
+        b === 59 ||
+        b === 45 ||
+        b === 95 ||
+        b === 47 ||
+        b === 39 ||
+        b === 34 ||
+        b === 40 ||
+        b === 41 ||
+        b === 91 ||
+        b === 93
       ) {
         word_start++;
       } else {
@@ -1193,9 +1252,20 @@ export function vm_str_fuzzy_match_view(
     while (word_end < str_len) {
       const b: i32 = read_u8(view, str_off + word_end);
       if (
-        b <= 32 || b === 44 || b === 46 || b === 58 || b === 59 ||
-        b === 45 || b === 95 || b === 47 || b === 39 || b === 34 ||
-        b === 40 || b === 41 || b === 91 || b === 93
+        b <= 32 ||
+        b === 44 ||
+        b === 46 ||
+        b === 58 ||
+        b === 59 ||
+        b === 45 ||
+        b === 95 ||
+        b === 47 ||
+        b === 39 ||
+        b === 34 ||
+        b === 40 ||
+        b === 41 ||
+        b === 91 ||
+        b === 93
       ) {
         break;
       }
@@ -1208,7 +1278,10 @@ export function vm_str_fuzzy_match_view(
     if (allow_prefix !== 0 && pat_len >= 2 && word_len >= pat_len) {
       let is_pfx: i32 = 1;
       for (let p: u32 = 0; p < pat_len; p++) {
-        if (to_lower_char(read_u8(view, w_off + p)) !== to_lower_char(read_u8(view, pat_off + p))) {
+        if (
+          to_lower_char(read_u8(view, w_off + p)) !==
+          to_lower_char(read_u8(view, pat_off + p))
+        ) {
           is_pfx = 0;
           break;
         }
@@ -1216,7 +1289,14 @@ export function vm_str_fuzzy_match_view(
       if (is_pfx !== 0) return 1;
     }
 
-    const w_dist: i32 = vm_str_levenshtein_view(view, w_off, word_len, pat_off, pat_len, max_dist);
+    const w_dist: i32 = vm_str_levenshtein_view(
+      view,
+      w_off,
+      word_len,
+      pat_off,
+      pat_len,
+      max_dist,
+    );
     if (w_dist <= (max_dist as i32)) {
       return 1;
     }
@@ -1279,7 +1359,11 @@ export function vm_str_lower(
     return;
   }
   for (let i: u32 = 0; i < len; i++) {
-    write_u8(view, out_off + i, to_lower_char(read_u8(view, src_off + i)) as u8);
+    write_u8(
+      view,
+      out_off + i,
+      to_lower_char(read_u8(view, src_off + i)) as u8,
+    );
   }
   vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, out_off, len);
 }
@@ -1310,7 +1394,11 @@ export function vm_str_upper(
     return;
   }
   for (let i: u32 = 0; i < len; i++) {
-    write_u8(view, out_off + i, to_upper_char(read_u8(view, src_off + i)) as u8);
+    write_u8(
+      view,
+      out_off + i,
+      to_upper_char(read_u8(view, src_off + i)) as u8,
+    );
   }
   vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, out_off, len);
 }
@@ -1347,7 +1435,13 @@ export function vm_str_trim(
       break;
     }
   }
-  vm_reg_set_slice(view, dest_reg_off, DataType.TEXT, src_off + start, end - start);
+  vm_reg_set_slice(
+    view,
+    dest_reg_off,
+    DataType.TEXT,
+    src_off + start,
+    end - start,
+  );
 }
 
 /**
@@ -1373,7 +1467,8 @@ export function vm_utf8_substr(
   const raw_start: i32 = read_i32(view, start_reg_off + VM_REG_I32) - 1;
   const start_char: i32 = raw_start < 0 ? 0 : raw_start;
 
-  const has_len: i32 = read_u8(view, len_reg_off + VM_REG_IS_NULL) === 0 ? 1 : 0;
+  const has_len: i32 =
+    read_u8(view, len_reg_off + VM_REG_IS_NULL) === 0 ? 1 : 0;
   let max_chars: i32 = 2147483647;
   if (has_len !== 0) {
     const rl: i32 = read_i32(view, len_reg_off + VM_REG_I32);
@@ -1445,7 +1540,11 @@ export function vm_format_i64_to_scratch(
     out_len++;
   }
   for (let i: u32 = 0; i < temp_len; i++) {
-    write_u8(view, scratch_off + out_len, read_u8(view, rev_off + temp_len - 1 - i));
+    write_u8(
+      view,
+      scratch_off + out_len,
+      read_u8(view, rev_off + temp_len - 1 - i),
+    );
     out_len++;
   }
   return out_len;
@@ -1666,11 +1765,7 @@ export function vm_infer_result_col_type(
   const r_type: u8 = read_u8(view, reg_off + VM_REG_TYPE);
   if (r_type === DataType.FLOAT64) {
     const fv: f64 = read_f64(view, reg_off + VM_REG_F64);
-    if (
-      fv >= -2147483648.0 &&
-      fv <= 2147483647.0 &&
-      fv === Math.trunc(fv)
-    ) {
+    if (fv >= -2147483648.0 && fv <= 2147483647.0 && fv === Math.trunc(fv)) {
       return DataType.INT32;
     }
     return DataType.FLOAT64;
@@ -1772,10 +1867,20 @@ export function vm_serialize_and_emit_result_row(
     } else if (col_type === DataType.TEXT || col_type === DataType.BLOB) {
       const d_off: u32 = read_u32(view, reg_off + VM_REG_DATA_OFF);
       const d_len: u32 = read_u32(view, reg_off + VM_REG_DATA_LEN);
-      write_u16(view, current_var_table_offset, current_payload_rel_offset as u16);
+      write_u16(
+        view,
+        current_var_table_offset,
+        current_payload_rel_offset as u16,
+      );
       write_u16(view, current_var_table_offset + 2, d_len as u16);
       if (d_len > 0) {
-        memcpy(view, row_start + current_payload_rel_offset, view, d_off, d_len);
+        memcpy(
+          view,
+          row_start + current_payload_rel_offset,
+          view,
+          d_off,
+          d_len,
+        );
         current_payload_rel_offset += d_len;
       }
       current_var_table_offset += 4;
@@ -1795,7 +1900,11 @@ export function vm_serialize_and_emit_result_row(
       write_i64(view, current_fixed_offset, iv);
       current_fixed_offset += 8;
     } else if (col_type === DataType.FLOAT64) {
-      write_f64(view, current_fixed_offset, read_f64(view, reg_off + VM_REG_F64));
+      write_f64(
+        view,
+        current_fixed_offset,
+        read_f64(view, reg_off + VM_REG_F64),
+      );
       current_fixed_offset += 8;
     } else if (col_type === DataType.UUID) {
       const d_off: u32 = read_u32(view, reg_off + VM_REG_DATA_OFF);
@@ -1931,8 +2040,10 @@ export function vm_sorter_open_raw(
   sorter_id: u32,
   key_info_idx: u32,
 ): i32 {
-  const srt_off: u32 = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
-  const ki_off: u32 = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  const srt_off: u32 =
+    ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  const ki_off: u32 =
+    ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
 
   const has_limit: u8 = read_u8(view, ki_off + VM_KI_HAS_LIMIT);
   const limit: u32 = read_u32(view, ki_off + VM_KI_LIMIT);
@@ -1976,14 +2087,16 @@ export function vm_sorter_insert_raw(
   num_keys: u32,
   cursor_idx: u32,
 ): i32 {
-  const srt_off: u32 = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  const srt_off: u32 =
+    ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
   if (read_u8(view, srt_off + VM_SRT_IS_OPEN) === 0) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
     return VmStatus.INVALID_BYTECODE;
   }
 
   const key_info_idx: u32 = read_u8(view, srt_off + VM_SRT_KEY_INFO_IDX);
-  const ki_off: u32 = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  const ki_off: u32 =
+    ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
   const entry_count: u32 = read_u32(view, srt_off + VM_SRT_ENTRY_COUNT);
   const max_k: u32 = read_u32(view, srt_off + VM_SRT_MAX_K);
   let ptrs_off: u32 = read_u32(view, srt_off + VM_SRT_PTRS_OFF);
@@ -2072,7 +2185,11 @@ export function vm_sorter_insert_raw(
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
     return VmStatus.ARENA_EXHAUSTED;
   }
-  write_u32(view, ctx_off + VM_CTX_ARENA_OFFSET, arena_off + logical_entry_size);
+  write_u32(
+    view,
+    ctx_off + VM_CTX_ARENA_OFFSET,
+    arena_off + logical_entry_size,
+  );
 
   let capacity: u32 = read_u32(view, srt_off + VM_SRT_CAPACITY);
   if (entry_count >= capacity) {
@@ -2141,7 +2258,8 @@ export function vm_sorter_sort_raw(
   arena_base: u32,
   sorter_id: u32,
 ): i32 {
-  const srt_off: u32 = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  const srt_off: u32 =
+    ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
   if (read_u8(view, srt_off + VM_SRT_IS_OPEN) === 0) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
     return VmStatus.INVALID_BYTECODE;
@@ -2149,7 +2267,8 @@ export function vm_sorter_sort_raw(
 
   const n: u32 = read_u32(view, srt_off + VM_SRT_ENTRY_COUNT);
   const key_info_idx: u32 = read_u8(view, srt_off + VM_SRT_KEY_INFO_IDX);
-  const ki_off: u32 = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  const ki_off: u32 =
+    ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
   const offset: u32 = read_u32(view, ki_off + VM_KI_OFFSET);
 
   if (n > 1) {
@@ -2221,7 +2340,8 @@ export function vm_sorter_next_raw(
   jump_target: u32,
   instr_pc: u32,
 ): i32 {
-  const srt_off: u32 = ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
+  const srt_off: u32 =
+    ctx_off + VM_CTX_SORTERS_OFF + sorter_id * VM_SORTER_SIZE;
   if (read_u8(view, srt_off + VM_SRT_IS_OPEN) === 0) {
     write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.INVALID_BYTECODE);
     return VmStatus.INVALID_BYTECODE;
@@ -2230,7 +2350,8 @@ export function vm_sorter_next_raw(
   const entry_count: u32 = read_u32(view, srt_off + VM_SRT_ENTRY_COUNT);
   const read_idx: u32 = read_u32(view, srt_off + VM_SRT_READ_IDX);
   const key_info_idx: u32 = read_u8(view, srt_off + VM_SRT_KEY_INFO_IDX);
-  const ki_off: u32 = ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
+  const ki_off: u32 =
+    ctx_off + VM_CTX_KEY_INFOS_OFF + key_info_idx * VM_KEY_INFO_SIZE;
 
   const has_limit: u8 = read_u8(view, ki_off + VM_KI_HAS_LIMIT);
   const limit: u32 = read_u32(view, ki_off + VM_KI_LIMIT);
@@ -2422,7 +2543,14 @@ export function vm_agg_init_raw(
     if (num_keys === 0) {
       const h: u32 = 0x811c9dc5;
       const slot: u32 = h % initial_capacity;
-      const b_off: u32 = vm_alloc_agg_bucket(view, ctx_off, arena_base, h, 0, 0);
+      const b_off: u32 = vm_alloc_agg_bucket(
+        view,
+        ctx_off,
+        arena_base,
+        h,
+        0,
+        0,
+      );
       if (b_off === 0) {
         write_i32(view, ctx_off + VM_CTX_STATUS, VmStatus.ARENA_EXHAUSTED);
         return VmStatus.ARENA_EXHAUSTED;
@@ -2548,7 +2676,11 @@ export function vm_agg_step_raw(
           view,
           vm_reg_off(ctx_off, val_reg) + VM_REG_F64,
         );
-        write_f64(view, agg_slot_off + 8, read_f64(view, agg_slot_off + 8) + num);
+        write_f64(
+          view,
+          agg_slot_off + 8,
+          read_f64(view, agg_slot_off + 8) + num,
+        );
         write_u32(view, agg_slot_off + 0, read_u32(view, agg_slot_off + 0) + 1);
         write_u32(view, agg_slot_off + 4, 1);
 
@@ -2777,7 +2909,11 @@ export function vm_agg_final_raw(
     vm_reg_set_i32(view, out_reg_off, count_val);
   } else if (func_id === 1) {
     if (count_val > 0) {
-      vm_reg_set_f64(view, out_reg_off, read_f64(view, sum_reg_off + VM_REG_F64));
+      vm_reg_set_f64(
+        view,
+        out_reg_off,
+        read_f64(view, sum_reg_off + VM_REG_F64),
+      );
     } else {
       vm_reg_set_null(view, out_reg_off);
     }
@@ -2811,7 +2947,7 @@ export function fnv1a_32_bytes(data: Uint8Array, len: u32): u32 {
     hash ^= data[i];
     hash = Math.imul(hash, 0x01000193);
   }
-  return hash !== 0 ? (hash >>> 0) : 1;
+  return hash !== 0 ? hash >>> 0 : 1;
 }
 
 /**
@@ -2831,7 +2967,10 @@ export function sql_like_match_raw(
   while (s < str_len) {
     const p_c: u32 = p < pat_len ? pattern.charCodeAt(p) : 0;
     const s_c: u32 = str.charCodeAt(s);
-    if (p < pat_len && (p_c === 95 || to_lower_char(p_c as i32) === to_lower_char(s_c as i32))) {
+    if (
+      p < pat_len &&
+      (p_c === 95 || to_lower_char(p_c as i32) === to_lower_char(s_c as i32))
+    ) {
       s++;
       p++;
     } else if (p < pat_len && p_c === 37) {
@@ -2949,7 +3088,10 @@ export function compare_3vl(
   if (typeof val_a === "boolean" || typeof val_b === "boolean") {
     const num_a = val_a ? 1 : 0;
     const num_b = val_b ? 1 : 0;
-    return { result: num_a === num_b ? 0 : num_a > num_b ? 1 : -1, is_unknown: false };
+    return {
+      result: num_a === num_b ? 0 : num_a > num_b ? 1 : -1,
+      is_unknown: false,
+    };
   }
   if (typeof val_a === "bigint" || typeof val_b === "bigint") {
     const a = BigInt(val_a);
@@ -2973,7 +3115,10 @@ export function compare_3vl(
       is_unknown: false,
     };
   }
-  return { result: val_a === val_b ? 0 : val_a > val_b ? 1 : -1, is_unknown: false };
+  return {
+    result: val_a === val_b ? 0 : val_a > val_b ? 1 : -1,
+    is_unknown: false,
+  };
 }
 
 export function sql_like_match(str: string, pattern: string): boolean {
@@ -3046,8 +3191,10 @@ export function group_keys_match(keys_a: any[], keys_b: any[]): boolean {
   for (let i = 0; i < keys_a.length; i++) {
     const a = keys_a[i];
     const b = keys_b[i];
-    if ((a === null || a === undefined) && (b === null || b === undefined)) continue;
-    if (a === null || a === undefined || b === null || b === undefined) return false;
+    if ((a === null || a === undefined) && (b === null || b === undefined))
+      continue;
+    if (a === null || a === undefined || b === null || b === undefined)
+      return false;
     if (compare_3vl(a, b).result !== 0) return false;
   }
   return true;
@@ -3066,7 +3213,9 @@ export function create_agg_buckets(capacity: number): VmAggBucket[] {
 }
 
 export function sort_sorter_entries(sorter: VmSorter): void {
-  sorter.entries.sort((a, b) => compare_sorter_keys(a.keys, b.keys, sorter.keyInfo));
+  sorter.entries.sort((a, b) =>
+    compare_sorter_keys(a.keys, b.keys, sorter.keyInfo),
+  );
   sorter.readIdx = sorter.keyInfo.offset ?? 0;
 }
 
@@ -3080,8 +3229,15 @@ export function sorter_insert_row(
   _max_k: number,
 ): VmStatus {
   const row_data = new Uint8Array(row_len);
-  row_data.set(new Uint8Array(view.buffer, view.byteOffset + cursor_row_offset, row_len));
-  sorter.entries.push({ keys, rowOffset: cursor_row_offset, rowLen: row_len, rowData: row_data });
+  row_data.set(
+    new Uint8Array(view.buffer, view.byteOffset + cursor_row_offset, row_len),
+  );
+  sorter.entries.push({
+    keys,
+    rowOffset: cursor_row_offset,
+    rowLen: row_len,
+    rowData: row_data,
+  });
   return ctx.status;
 }
 
@@ -3127,9 +3283,11 @@ export function emit_to_result_buffer(
   }
   const out_target = RESULT_BUFFER_OFFSET + ctx.resultOffset;
   view.setUint16(out_target, row_bytes.byteLength, true);
-  new Uint8Array(view.buffer, view.byteOffset + out_target + 2, row_bytes.byteLength).set(
-    row_bytes,
-  );
+  new Uint8Array(
+    view.buffer,
+    view.byteOffset + out_target + 2,
+    row_bytes.byteLength,
+  ).set(row_bytes);
   ctx.resultOffset += needed;
   ctx.resultCount++;
   return VmStatus.RUNNING;

@@ -42,6 +42,7 @@ export interface OptimizedPlanResult {
   plan: QueryPlan;
   orderedTables: TableMeta[];
   metrics: PlanCostMetrics | null;
+  rootFilter?: QueryFilter | null;
   isAlwaysFalse?: boolean;
   isAlwaysTrue?: boolean;
   whereMetrics?: WhereMetrics;

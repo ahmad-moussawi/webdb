@@ -432,7 +432,9 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
     if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid == curr_pid) {
-      break;
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
     }
     if (chunk_len >= remaining) {
       remaining = 0;
@@ -441,6 +443,11 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
     }
     curr_pid = next_pid;
   }
+  if (remaining > 0) {
+    store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+    store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+    return VM_STATUS_ERROR;
+  }
   uint32_t dest_off = vm_phys_alloc(ctx_off, arena_base, total_len);
   if (dest_off == 0) {
     store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ARENA_EXHAUSTED);
@@ -448,16 +455,32 @@ int32_t vm_load_overflow_column(uint32_t ctx_off, uint32_t reg_off, uint8_t col_
   }
   curr_pid = first_page_id;
   uint32_t copied = 0;
+  uint32_t copy_hops = 0;
   while (curr_pid > 1 && copied < total_len) {
+    copy_hops++;
+    if (copy_hops > 65536) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
+    }
     int32_t slot = buf_pool_get_resident_slot(page_to_slot_off, page_to_slot_buckets, curr_pid);
     if (slot < 0) {
-      break;
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
     }
     uint32_t page_off = slots_base + (slot) * PAGE_SIZE;
+    if (load_u8((const void *)(uintptr_t)(page_off)) != PAGE_TYPE_OVERFLOW) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
+    }
     uint32_t chunk_len = load_u16((const void *)(uintptr_t)(page_off + 2));
     uint32_t next_pid = load_u32((const void *)(uintptr_t)(page_off + 6));
-    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE) {
-      break;
+    if (chunk_len == 0 || chunk_len > OVERFLOW_PAYLOAD_SIZE || next_pid == curr_pid) {
+      store_i32((void *)(uintptr_t)(ctx_off + VM_CTX_STATUS), VM_STATUS_ERROR);
+      store_u32((void *)(uintptr_t)(ctx_off + VM_CTX_PC), instr_pc);
+      return VM_STATUS_ERROR;
     }
     if (copied + chunk_len > total_len) {
       chunk_len = total_len - copied;

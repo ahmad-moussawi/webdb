@@ -164,11 +164,14 @@ export function ngramSimilarity(
  * and adjacent character transpositions (e.g. "tehs" -> "thes" = 1 edit).
  * Supports bounded early exit if distance exceeds maxDistance.
  */
+const MAX_DL_WORK = 4_000_000;
+
 export function damerauLevenshtein(
   a: string,
   b: string,
   maxDistance: number = Infinity
 ): number {
+  if (Number.isNaN(maxDistance)) return NaN;
   if (a === b) return 0;
   if (maxDistance < 0) return maxDistance + 1;
   // Swap so `b` is the shorter string -> O(min(|a|, |b|)) memory
@@ -184,6 +187,12 @@ export function damerauLevenshtein(
 
   const isBounded = Number.isFinite(maxDistance);
   const bound = isBounded ? Math.floor(maxDistance) : la;
+  const estWork = la * (isBounded ? Math.min(lb, 2 * bound + 1) : lb);
+  if (estWork > MAX_DL_WORK) {
+    throw new RangeError(
+      `damerauLevenshtein input exceeds maximum computation budget (${estWork} > ${MAX_DL_WORK}); pass a smaller maxDistance`,
+    );
+  }
   const INF = bound + 1;
 
   // Three rolling 1D Int32Array rows (O(min(|a|, |b|)) space) + Ukkonen diagonal band
