@@ -129,6 +129,36 @@ export function getFilterReferencedTables(
 }
 
 /**
+ * Partitions top-level conjunction filters into single-table filters (keyed by
+ * table index in `tables`) and cross-table / unreferenced filters.
+ */
+export function partitionFiltersByTable(
+  filters: QueryFilter[],
+  tables: TableMeta[],
+): {
+  singleTableFilters: Map<number, QueryFilter[]>;
+  crossFilters: QueryFilter[];
+} {
+  const singleTableFilters = new Map<number, QueryFilter[]>();
+  const crossFilters: QueryFilter[] = [];
+  for (let i = 0; i < tables.length; i++) {
+    singleTableFilters.set(i, []);
+  }
+  for (const filter of filters) {
+    const refs = getFilterReferencedTables(filter, tables);
+    if (refs.size === 1) {
+      const tblIdx = refs.values().next().value;
+      if (tblIdx !== undefined) {
+        singleTableFilters.get(tblIdx)?.push(filter);
+      }
+    } else {
+      crossFilters.push(filter);
+    }
+  }
+  return { singleTableFilters, crossFilters };
+}
+
+/**
  * Estimates filter selectivity based on operation, column index presence, and table row count.
  */
 export function estimateFilterSelectivity(

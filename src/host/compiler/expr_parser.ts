@@ -1388,3 +1388,65 @@ export function evalExprNodeBatch(
   }
 }
 
+/**
+ * Evaluates a comparison operator (`=`, `!=`, `<`, `<=`, `>`, `>=`, `like`,
+ * `not like`, `contains`, `starts_with`, `ends_with`) between two already-evaluated values.
+ */
+export function evalComparisonOp(
+  left: any,
+  op: string | undefined,
+  right: any,
+  eqFn: (a: any, b: any) => boolean = (a, b) => a === b,
+  coerceNumericOrder: boolean = false,
+): boolean {
+  if (
+    left === null ||
+    left === undefined ||
+    right === null ||
+    right === undefined
+  ) {
+    return false;
+  }
+  const normOp = String(op ?? '=')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  const cmpLt = (a: any, b: any): boolean =>
+    coerceNumericOrder && !(typeof a === 'string' && typeof b === 'string')
+      ? Number(a) < Number(b)
+      : a < b;
+  const cmpLe = (a: any, b: any): boolean =>
+    coerceNumericOrder && !(typeof a === 'string' && typeof b === 'string')
+      ? Number(a) <= Number(b)
+      : a <= b;
+  switch (normOp) {
+    case '=':
+    case '==':
+      return eqFn(left, right);
+    case '!=':
+    case '<>':
+      return !eqFn(left, right);
+    case '<':
+      return cmpLt(left, right);
+    case '<=':
+      return cmpLe(left, right);
+    case '>':
+      return cmpLt(right, left);
+    case '>=':
+      return cmpLe(right, left);
+    case 'like':
+      return sql_like_match(String(left), String(right));
+    case 'not like':
+      return !sql_like_match(String(left), String(right));
+    case 'contains':
+      return String(left).includes(String(right));
+    case 'starts_with':
+      return String(left).startsWith(String(right));
+    case 'ends_with':
+      return String(left).endsWith(String(right));
+    default:
+      return eqFn(left, right);
+  }
+}
+
+

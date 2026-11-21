@@ -134,7 +134,6 @@ import {
   page_delete_index_leaf_cell,
   page_binary_search_index_leaf,
   serialize_composite_key,
-  sql_like_match,
 } from "../../core/index.ts";
 import {
   createVmContext,
@@ -159,6 +158,7 @@ import {
   deriveDefaultAlias,
   evalExprNode,
   evalExprNodeBatch,
+  evalComparisonOp,
   extractReferencedColumns,
   canonicalExpr,
   VECTOR_BATCH_SIZE,
@@ -2547,55 +2547,13 @@ export class WebDB implements IDatabaseQueryExecutor {
         const left = f.expr
           ? evalExprNode(f.expr, row, (name) => this.getUdf(name)?.def.call)
           : row[f.colName!];
-        const right = f.value;
-        if (
-          left === null ||
-          left === undefined ||
-          right === null ||
-          right === undefined
-        ) {
-          return false;
-        }
-        const op = String(f.op ?? "=")
-          .trim()
-          .toLowerCase()
-          .replace(/\s+/g, " ");
-        switch (op) {
-          case "=":
-          case "==":
-            return this.valuesEqual(left, right);
-          case "!=":
-          case "<>":
-            return !this.valuesEqual(left, right);
-          case "<":
-            return typeof left === "string" && typeof right === "string"
-              ? left < right
-              : Number(left) < Number(right);
-          case "<=":
-            return typeof left === "string" && typeof right === "string"
-              ? left <= right
-              : Number(left) <= Number(right);
-          case ">":
-            return typeof left === "string" && typeof right === "string"
-              ? left > right
-              : Number(left) > Number(right);
-          case ">=":
-            return typeof left === "string" && typeof right === "string"
-              ? left >= right
-              : Number(left) >= Number(right);
-          case "like":
-            return sql_like_match(String(left), String(right));
-          case "not like":
-            return !sql_like_match(String(left), String(right));
-          case "contains":
-            return String(left).includes(String(right));
-          case "starts_with":
-            return String(left).startsWith(String(right));
-          case "ends_with":
-            return String(left).endsWith(String(right));
-          default:
-            return this.valuesEqual(left, right);
-        }
+        return evalComparisonOp(
+          left,
+          f.op,
+          f.value,
+          (a, b) => this.valuesEqual(a, b),
+          true,
+        );
       }
       default:
         throw new Error(
