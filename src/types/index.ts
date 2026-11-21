@@ -120,6 +120,7 @@ export enum OpCode {
   // Fast Native Search
   OP_STR_FUZZY_MATCH = 0x44,
   OP_STR_LEVENSHTEIN = 0x45,
+  OP_LOAD_INT64 = 0x46,
 
   // Register Null Checks
   OP_REG_IS_NULL = 0x48,

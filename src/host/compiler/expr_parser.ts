@@ -245,6 +245,8 @@ function tokenize(input: string): Token[] {
 class ExpressionParser {
   private tokens: Token[];
   private cursor = 0;
+  private depth = 0;
+  private static readonly MAX_DEPTH = 64;
 
   constructor(tokens: Token[]) {
     this.tokens = tokens;
@@ -287,25 +289,34 @@ class ExpressionParser {
   }
 
   parse(minPrecedence = 0): ExprNode {
-    let left = this.parsePrimary();
-
-    while (true) {
-      const token = this.peek();
-      const prec = this.getPrecedence(token);
-      if (prec === 0 || prec <= minPrecedence) {
-        break;
-      }
-      this.consume();
-      const right = this.parse(prec);
-      left = {
-        type: 'binary',
-        op: token.value as BinaryOp,
-        left,
-        right,
-      };
+    if (++this.depth > ExpressionParser.MAX_DEPTH) {
+      throw new RangeError(
+        `Expression exceeds maximum nesting depth of ${ExpressionParser.MAX_DEPTH}`,
+      );
     }
+    try {
+      let left = this.parsePrimary();
 
-    return left;
+      while (true) {
+        const token = this.peek();
+        const prec = this.getPrecedence(token);
+        if (prec === 0 || prec <= minPrecedence) {
+          break;
+        }
+        this.consume();
+        const right = this.parse(prec);
+        left = {
+          type: 'binary',
+          op: token.value as BinaryOp,
+          left,
+          right,
+        };
+      }
+
+      return left;
+    } finally {
+      this.depth--;
+    }
   }
 
   private parsePrimary(): ExprNode {
@@ -969,7 +980,9 @@ export function evalExprNode(
       return expr.value;
     case 'col': {
       if (expr.name === '*') return null;
-      return row[expr.name] !== undefined ? row[expr.name] : null;
+      return Object.hasOwn(row, expr.name) && row[expr.name] !== undefined
+        ? row[expr.name]
+        : null;
     }
     case 'binary': {
       const left = evalExprNode(expr.left, row, udfs);
@@ -1037,11 +1050,11 @@ export function evalExprNode(
       const name = expr.name.toLowerCase();
       // Check built-in aggregates first (if already computed by aggregator, row has alias or func)
       if (isAggregateFunction(name)) {
-        if (row[name] !== undefined) return row[name];
+        if (Object.hasOwn(row, name) && row[name] !== undefined) return row[name];
         const arg0 = expr.args[0];
         if (arg0 && arg0.type === 'col') {
           const colKey = `${name}_${arg0.name}`;
-          if (row[colKey] !== undefined) return row[colKey];
+          if (Object.hasOwn(row, colKey) && row[colKey] !== undefined) return row[colKey];
         }
         return null;
       }
@@ -1057,7 +1070,7 @@ export function evalExprNode(
         const entry: any = udfs.get(name);
         fnCb = typeof entry === 'function' ? entry : entry?.call ?? (entry?.batchCall ? (...a: any[]) => entry.batchCall([a])[0] : undefined);
       } else if (udfs && typeof udfs === 'object') {
-        const entry: any = (udfs as any)[name];
+        const entry: any = Object.hasOwn(udfs, name) ? (udfs as any)[name] : undefined;
         fnCb = typeof entry === 'function' ? entry : entry?.call ?? (entry?.batchCall ? (...a: any[]) => entry.batchCall([a])[0] : undefined);
       }
       if (fnCb) {
@@ -1122,19 +1135,27 @@ export function evalExprNodeBatch(
       }
       if (!isArray) {
         const colMap = rows as Record<string, ArrayLike<any>>;
-        if (colMap[expr.name] !== undefined) return colMap[expr.name] as any[];
+        if (Object.hasOwn(colMap, expr.name) && colMap[expr.name] !== undefined) {
+          return colMap[expr.name] as any[];
+        }
         const shortName = expr.name.includes('.')
           ? expr.name.slice(expr.name.lastIndexOf('.') + 1)
           : undefined;
-        if (shortName && colMap[shortName] !== undefined) {
+        if (
+          shortName &&
+          Object.hasOwn(colMap, shortName) &&
+          colMap[shortName] !== undefined
+        ) {
           return colMap[shortName] as any[];
         }
+        return new Array(n).fill(null);
       }
       const out = new Array(n);
       const colName = expr.name;
       const rowList = rows as DbRow[];
       for (let i = 0; i < n; i++) {
-        const val = rowList[i][colName];
+        const r = rowList[i];
+        const val = r && Object.hasOwn(r, colName) ? r[colName] : undefined;
         out[i] = val !== undefined ? val : null;
       }
       return out;
@@ -1208,7 +1229,7 @@ export function evalExprNodeBatch(
       } else if (udfs instanceof Map) {
         udfEntry = udfs.get(name);
       } else if (udfs && typeof udfs === 'object') {
-        udfEntry = (udfs as any)[name];
+        udfEntry = Object.hasOwn(udfs, name) ? (udfs as any)[name] : undefined;
       }
 
       const isDeterministic =

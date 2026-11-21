@@ -4,7 +4,12 @@
  */
 
 import { getWebDbCoreWasmBytes } from "./embedded_wasm.ts";
-import { PAGE_TYPE_LEAF_DATA, BYTECODE_OFFSET, WASM_STACK_TOP } from "../../constants.ts";
+import {
+  PAGE_TYPE_LEAF_DATA,
+  BYTECODE_OFFSET,
+  BYTECODE_SIZE,
+  WASM_STACK_TOP,
+} from "../../constants.ts";
 import { DataType } from "../../types/index.ts";
 import { UuidCodec, UlidCodec } from "../js/codecs.c.ts";
 import * as jsCore from "../js/index.ts";
@@ -205,6 +210,9 @@ export function createWasmCore(
 
     page_insert_row: (view, page_offset, row_bytes, scratchpad_offset = 0) => {
       if (view.buffer === memory.buffer && exp.page_insert_row_raw) {
+        if (row_bytes.byteLength > BYTECODE_SIZE) {
+          return -1;
+        }
         const memU8 = getMemU8();
         memU8.set(row_bytes, BYTECODE_OFFSET);
         return exp.page_insert_row_raw(
@@ -250,9 +258,17 @@ export function createWasmCore(
           UlidCodec.encode(String(key_value), memU8, BYTECODE_OFFSET);
           keyLen = 16;
         } else if (key_type === DataType.TEXT) {
-          keyLen = wasmTextEncoder.encodeInto(String(key_value), memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + 8192)).written;
+          const str = String(key_value);
+          const encRes = wasmTextEncoder.encodeInto(str, memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + BYTECODE_SIZE));
+          if (encRes.read < str.length) {
+            return -1;
+          }
+          keyLen = encRes.written;
         } else {
           const bytes = key_value instanceof Uint8Array ? key_value : new Uint8Array(key_value);
+          if (bytes.byteLength > BYTECODE_SIZE) {
+            return -1;
+          }
           keyLen = bytes.byteLength;
           memU8.set(bytes, BYTECODE_OFFSET);
         }
@@ -297,9 +313,17 @@ export function createWasmCore(
           UlidCodec.encode(String(target_value), memU8, BYTECODE_OFFSET);
           keyLen = 16;
         } else if (effType === DataType.TEXT) {
-          keyLen = wasmTextEncoder.encodeInto(String(target_value), memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + 8192)).written;
+          const str = String(target_value);
+          const encRes = wasmTextEncoder.encodeInto(str, memU8.subarray(BYTECODE_OFFSET, BYTECODE_OFFSET + BYTECODE_SIZE));
+          if (encRes.read < str.length) {
+            return jsCore.page_binary_search_index_leaf(view, page_offset, target_type, target_value, target_row_id);
+          }
+          keyLen = encRes.written;
         } else {
           const bytes = target_value instanceof Uint8Array ? target_value : new Uint8Array(target_value);
+          if (bytes.byteLength > BYTECODE_SIZE) {
+            return jsCore.page_binary_search_index_leaf(view, page_offset, target_type, target_value, target_row_id);
+          }
           keyLen = bytes.byteLength;
           memU8.set(bytes, BYTECODE_OFFSET);
         }
@@ -453,23 +477,6 @@ export function createWasmCore(
 
     compare_sorter_keys: jsCore.compare_sorter_keys,
     vm_step: (ctx, view, bytecode) => {
-      let hasNativeSearchOp = false;
-      for (let i = 0; i < bytecode.length; i++) {
-        const op = bytecode[i];
-        if (op === 0x44 || op === 0x45) {
-          hasNativeSearchOp = true;
-          break;
-        }
-      }
-      if (hasNativeSearchOp) {
-        return jsCore.executeVmStepWithRunner(
-          ctx,
-          view,
-          bytecode,
-          jsCore.vm_step_raw,
-          memory.buffer,
-        );
-      }
       return jsCore.executeVmStepWithRunner(
         ctx,
         view,
