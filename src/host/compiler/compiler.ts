@@ -13,7 +13,7 @@ import {
   UnknownFunctionError,
   JoinType,
 } from "../../types/index.js";
-import { serialize_composite_key } from "../../core/index.js";
+import { serialize_composite_key } from "../../core/js/page.c.js";
 import { VmKeyInfo } from "../../shared/vm_context.js";
 import { MAX_IN_LIST_SIZE } from "../../constants.js";
 import {

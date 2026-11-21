@@ -73,9 +73,7 @@ import {
   TableSubscriptionCallback,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
-import { MemoryVfsAdapter } from "../storage/memory.ts";
-import { IndexedDbVfsAdapter, type IdbDurability } from "../storage/idb.ts";
-import { OpfsVfsAdapter } from "../storage/opfs.ts";
+import type { IdbDurability } from "../storage/idb.ts";
 import { Io } from "../storage/io.ts";
 import { computePageChecksum } from "../storage/crc32.ts";
 import {
@@ -111,6 +109,8 @@ import {
   catalog_increment_schema_version,
   catalog_increment_change_counter,
   catalog_update_page1_checksum,
+} from "../../core/js/catalog.c.ts";
+import {
   page_get_type,
   page_get_cell_count,
   page_get_cell_offset,
@@ -134,14 +134,19 @@ import {
   page_delete_index_leaf_cell,
   page_binary_search_index_leaf,
   serialize_composite_key,
-} from "../../core/index.ts";
+} from "../../core/js/page.c.ts";
 import {
   createVmContext,
   resetVmContext,
   VmContext,
   IPageProvider,
 } from "../../shared/index.ts";
-import { vm_step, VM_CTX_PHYS_ARENA_USED, UuidCodec, UlidCodec } from "../../core/index.ts";
+import {
+  VM_CTX_PHYS_ARENA_USED,
+  type VmStepFn,
+  type WebDbCoreEngine,
+} from "../../core/js/vm_host.ts";
+import { UuidCodec, UlidCodec } from "../../core/js/codecs.c.ts";
 import {
   compileQuery,
   QueryFilter,
@@ -196,7 +201,7 @@ export {
   type QueryExecutionOptions,
 };
 
-import { createWasmCore, type WasmCoreExports } from "../../core/index.ts";
+import type { WasmCoreExports } from "../../core/wasm/wasm_runtime.ts";
 
 export interface WebDbOptions {
   name: string;
@@ -205,7 +210,21 @@ export interface WebDbOptions {
   slotCount?: number;
   maxQueryMemory?: number;
   core?: "js" | "wasm";
+  /**
+   * Optional explicit core engine descriptor (e.g. `createWasmEngine()` from
+   * `@ahmadmoussawi/webdb/core/wasm` or `createJsEngine()` from
+   * `@ahmadmoussawi/webdb/core/js`). Avoids dynamic engine imports when provided.
+   * Takes precedence over `core`, `wasmBinary`, and `wasmUrl` (just as `vfs`
+   * takes precedence over `storage`).
+   */
+  engine?: WebDbCoreEngine;
   wasmBinary?: ArrayBuffer | Uint8Array;
+  /**
+   * Optional URL, Fetch Response, or Promise<Response> pointing to `webdb_core.wasm`.
+   * Streams and instantiates the `.wasm` binary directly without loading the
+   * embedded base64 chunk. Implies `core: 'wasm'` when `core` is omitted.
+   */
+  wasmUrl?: string | URL | Response | Promise<Response>;
   planner?: QueryPlanner;
   initialData?: Uint8Array | ArrayBuffer;
   /**
@@ -227,6 +246,8 @@ export class WebDB implements IDatabaseQueryExecutor {
   readonly driver: BufferPoolDriver;
   readonly coreMode: "js" | "wasm";
   readonly wasmCore?: WasmCoreExports;
+  private readonly initialWasmCore?: WasmCoreExports;
+  private readonly vmStepFn: VmStepFn;
   private planner?: QueryPlanner;
 
   /**
@@ -267,7 +288,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     io: Io,
     driver: BufferPoolDriver,
     coordinator: TransactionCoordinator,
-    coreMode: "js" | "wasm" = "js",
+    coreMode: "js" | "wasm",
+    vmStepFn: VmStepFn,
     wasmCore?: WasmCoreExports,
     planner?: QueryPlanner,
     dbName?: string,
@@ -278,7 +300,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.driver = driver;
     this.coordinator = coordinator;
     this.coreMode = coreMode;
+    this.vmStepFn = vmStepFn;
     this.wasmCore = wasmCore;
+    this.initialWasmCore = wasmCore;
     this.planner = planner;
     this.vmCtx = createVmContext();
     this.vmCtx._fastHostMode = true;
@@ -327,12 +351,15 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (options.vfs) {
       vfs = options.vfs;
     } else if (storageType === "idb") {
+      const { IndexedDbVfsAdapter } = await import("../storage/idb.ts");
       vfs = new IndexedDbVfsAdapter(options.name, {
         durability: options.idbDurability,
       });
     } else if (storageType === "opfs") {
+      const { OpfsVfsAdapter } = await import("../storage/opfs.ts");
       vfs = new OpfsVfsAdapter(options.name);
     } else {
+      const { MemoryVfsAdapter } = await import("../storage/memory.ts");
       vfs = new MemoryVfsAdapter();
     }
 
@@ -353,13 +380,52 @@ export class WebDB implements IDatabaseQueryExecutor {
       procEnv === "wasm" || procEnv === "js"
         ? procEnv
         : (globalThis as any).__WEBDB_DEFAULT_CORE__;
-    const coreMode = options.core ?? envCore ?? "js";
+
+    let coreMode: "js" | "wasm";
     let wasmCore: WasmCoreExports | undefined;
-    if (coreMode === "wasm") {
-      wasmCore = createWasmCore(
-        memory,
-        options.wasmBinary ? new Uint8Array(options.wasmBinary) : undefined,
-      );
+    let vmStepFn: VmStepFn;
+
+    if (options.engine) {
+      coreMode = options.engine.mode;
+      const initialized = await options.engine.init(memory);
+      vmStepFn = initialized.vm_step;
+      wasmCore = initialized.wasmCore;
+    } else {
+      coreMode =
+        options.core ??
+        (options.wasmBinary || options.wasmUrl ? "wasm" : undefined) ??
+        envCore ??
+        "js";
+      if (coreMode === "wasm") {
+        if (options.wasmBinary) {
+          const { instantiateWasmCoreAsync } = await import(
+            "../../core/wasm/wasm_runtime.ts"
+          );
+          wasmCore = await instantiateWasmCoreAsync(memory, options.wasmBinary);
+        } else if (options.wasmUrl) {
+          const { instantiateWasmCoreStreaming } = await import(
+            "../../core/wasm/wasm_runtime.ts"
+          );
+          wasmCore = await instantiateWasmCoreStreaming(
+            memory,
+            options.wasmUrl,
+          );
+        } else {
+          const [{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }] =
+            await Promise.all([
+              import("../../core/wasm/wasm_runtime.ts"),
+              import("../../core/wasm/embedded_wasm.ts"),
+            ]);
+          wasmCore = await instantiateWasmCoreAsync(
+            memory,
+            getWebDbCoreWasmBytes(),
+          );
+        }
+        vmStepFn = wasmCore.vm_step;
+      } else {
+        const { vm_step } = await import("../../core/js/vm.c.ts");
+        vmStepFn = vm_step;
+      }
     }
 
     const io = new Io({ vfs, memory });
@@ -415,6 +481,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       driver,
       coordinator,
       coreMode,
+      vmStepFn,
       wasmCore,
       options.planner,
       options.name,
@@ -4729,7 +4796,10 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     const rows: DbRow[] = [];
-    const stepFn = this.wasmCore ? this.wasmCore.vm_step : vm_step;
+    const stepFn =
+      this.wasmCore && this.wasmCore !== this.initialWasmCore
+        ? this.wasmCore.vm_step
+        : this.vmStepFn;
     let consecutiveStalls = 0;
     let lastPc = -1;
     let lastStatus = -1;

@@ -93,17 +93,23 @@ export {
 // ============================================================================
 // Virtual Machine Execution Loop (@export_c)
 // ============================================================================
+import { vm_step as js_vm_step } from "./js/vm.c.js";
 import {
-  vm_step as js_vm_step,
   sql_like_match,
   compare_sorter_keys,
   fnv1a_32,
-} from "./js/vm.c.js";
+  VM_CTX_PHYS_ARENA_USED,
+  type VmStepFn,
+  type WebDbCoreEngine,
+} from "./js/vm_host.js";
 import { TOTAL_MEMORY_BYTES } from "../constants.js";
 import type { VmContext } from "../shared/index.js";
 import type { VmStatus } from "../types/index.js";
 import {
   createWasmCore,
+  instantiateWasmCore,
+  instantiateWasmCoreAsync,
+  instantiateWasmCoreStreaming,
   type WasmCoreExports,
 } from "./wasm/wasm_core.js";
 
@@ -202,14 +208,19 @@ export {
 // ============================================================================
 export {
   createWasmCore,
+  instantiateWasmCore,
+  instantiateWasmCoreAsync,
+  instantiateWasmCoreStreaming,
   type WasmCoreExports,
-} from "./wasm/wasm_core.js";
+  type VmStepFn,
+  type WebDbCoreEngine,
+};
 
 export {
   getWebDbCoreWasmBytes,
   WEBDB_CORE_WASM_BASE64,
 } from "./wasm/embedded_wasm.js";
 
-export { VM_CTX_PHYS_ARENA_USED } from "./js/vm.helpers.c.js";
+export { VM_CTX_PHYS_ARENA_USED };
 export { UuidCodec, UlidCodec } from "./js/codecs.c.js";
 
