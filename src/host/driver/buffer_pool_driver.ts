@@ -93,6 +93,12 @@ export class BufferPoolDriver {
   readonly view: DataView;
   readonly uint8: Uint8Array;
   readonly slotCount: number;
+  private cachedJsVmStepPromise?: Promise<
+    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
+  >;
+  private cachedWasmVmStepPromise?: Promise<
+    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
+  >;
   readonly maxQueryMemory: number;
   readonly offsets: BufferPoolOffsets;
 
@@ -751,19 +757,34 @@ export class BufferPoolDriver {
           ? procEnv
           : (globalThis as any).__WEBDB_DEFAULT_CORE__;
       if (envCore === "wasm") {
-        const [{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }] =
-          await Promise.all([
+        if (!this.cachedWasmVmStepPromise) {
+          this.cachedWasmVmStepPromise = Promise.all([
             import("../../core/wasm/wasm_runtime.ts"),
             import("../../core/wasm/embedded_wasm.ts"),
-          ]);
-        const wasmCore = await instantiateWasmCoreAsync(
-          this.wasmMemory,
-          getWebDbCoreWasmBytes(),
-        );
-        runStep = wasmCore.vm_step;
+          ])
+            .then(([{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }]) =>
+              instantiateWasmCoreAsync(
+                this.wasmMemory,
+                getWebDbCoreWasmBytes(),
+              ),
+            )
+            .then((wasmCore) => wasmCore.vm_step)
+            .catch((err) => {
+              this.cachedWasmVmStepPromise = undefined;
+              throw err;
+            });
+        }
+        runStep = await this.cachedWasmVmStepPromise;
       } else {
-        const { vm_step } = await import("../../core/js/vm.c.ts");
-        runStep = vm_step;
+        if (!this.cachedJsVmStepPromise) {
+          this.cachedJsVmStepPromise = import("../../core/js/vm.c.ts")
+            .then(({ vm_step }) => vm_step)
+            .catch((err) => {
+              this.cachedJsVmStepPromise = undefined;
+              throw err;
+            });
+        }
+        runStep = await this.cachedJsVmStepPromise;
       }
     }
     let status = runStep(ctx, this.view, bytecode);

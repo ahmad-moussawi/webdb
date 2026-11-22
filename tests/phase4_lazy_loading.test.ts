@@ -1,7 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { WebDB as SlimWebDB } from "@ahmadmoussawi/webdb/slim";
+import {
+  WebDB as SlimWebDB,
+  BufferPoolDriver,
+  createWasmMemory,
+  createVmContext,
+  resetVmContext,
+  OpCode,
+  VmStatus,
+} from "@ahmadmoussawi/webdb/slim";
 import { createJsEngine } from "@ahmadmoussawi/webdb/core/js";
 import { createWasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
 import { MemoryVfsAdapter } from "@ahmadmoussawi/webdb/storage/memory";
@@ -149,6 +157,43 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     expect(await db.from("t").toArray()).toEqual([{ id: 1 }]);
     expect(stepCalls).toBeGreaterThan(0);
     await db.close();
+  });
+
+  it("caches the lazy-loaded WASM runner across repeated BufferPoolDriver.stepVm calls", async () => {
+    const driver = new BufferPoolDriver({
+      vfs: new MemoryVfsAdapter(),
+      memory: createWasmMemory(),
+    });
+    const haltBytecode = new Uint8Array([OpCode.OP_HALT]);
+    const prevEnv = process.env.WEBDB_CORE;
+    const prevGlobal = (globalThis as any).__WEBDB_DEFAULT_CORE__;
+    const instantiateSpy = vi.spyOn(WebAssembly, "instantiate");
+
+    try {
+      process.env.WEBDB_CORE = "wasm";
+      const ctx = createVmContext();
+
+      // Concurrent + sequential calls must share a single WASM instantiation
+      const [s1, s2] = await Promise.all([
+        driver.stepVm(ctx, haltBytecode),
+        driver.stepVm(createVmContext(), haltBytecode),
+      ]);
+      resetVmContext(ctx);
+      const s3 = await driver.stepVm(ctx, haltBytecode);
+
+      expect(s1).toBe(VmStatus.DONE);
+      expect(s2).toBe(VmStatus.DONE);
+      expect(s3).toBe(VmStatus.DONE);
+      expect(instantiateSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      instantiateSpy.mockRestore();
+      if (prevEnv === undefined) {
+        delete process.env.WEBDB_CORE;
+      } else {
+        process.env.WEBDB_CORE = prevEnv;
+      }
+      (globalThis as any).__WEBDB_DEFAULT_CORE__ = prevGlobal;
+    }
   });
 
   it("exposes all VFS adapter subpath classes cleanly", () => {
