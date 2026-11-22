@@ -3,7 +3,7 @@ import {
   UnknownFunctionError,
   DbRow,
 } from '../../types/index.js';
-import { sql_like_match } from '../../core/js/vm.helpers.c.js';
+import { sql_like_match } from '../../core/js/vm_host.js';
 
 export type BinaryOp =
   | '+'

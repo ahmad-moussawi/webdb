@@ -40,7 +40,6 @@ import {
   f64_to_i64,
   f64_to_i32,
 } from "../../shared/c_runtime.ts";
-import { type VmKeyInfo } from "../../shared/index.ts";
 
 // ============================================================================
 // Flat Linear-Memory VmContext Layout Constants (at VM_CONTEXT_OFFSET)
@@ -2989,102 +2988,9 @@ export function sql_like_match_raw(
   return p === pat_len ? 1 : 0;
 }
 
-export function compare_3vl(
-  val_a: any,
-  val_b: any,
-): { result: number; is_unknown: boolean } {
-  if (
-    val_a === null ||
-    val_a === undefined ||
-    val_b === null ||
-    val_b === undefined
-  ) {
-    return { result: 0, is_unknown: true };
-  }
-  if (typeof val_a === "boolean" || typeof val_b === "boolean") {
-    const num_a = val_a ? 1 : 0;
-    const num_b = val_b ? 1 : 0;
-    return {
-      result: num_a === num_b ? 0 : num_a > num_b ? 1 : -1,
-      is_unknown: false,
-    };
-  }
-  if (typeof val_a === "bigint" || typeof val_b === "bigint") {
-    const a = BigInt(val_a);
-    const b = BigInt(val_b);
-    return { result: a === b ? 0 : a > b ? 1 : -1, is_unknown: false };
-  }
-  if (val_a instanceof Uint8Array && val_b instanceof Uint8Array) {
-    const min_len = Math.min(val_a.byteLength, val_b.byteLength);
-    for (let i = 0; i < min_len; i++) {
-      if (val_a[i] !== val_b[i]) {
-        return { result: val_a[i] > val_b[i] ? 1 : -1, is_unknown: false };
-      }
-    }
-    return {
-      result:
-        val_a.byteLength === val_b.byteLength
-          ? 0
-          : val_a.byteLength > val_b.byteLength
-            ? 1
-            : -1,
-      is_unknown: false,
-    };
-  }
-  return {
-    result: val_a === val_b ? 0 : val_a > val_b ? 1 : -1,
-    is_unknown: false,
-  };
-}
-
-export function sql_like_match(str: string, pattern: string): boolean {
-  return sql_like_match_raw(str, str.length, pattern, pattern.length) === 1;
-}
-
-export function compare_sorter_keys(
-  keys_a: any[],
-  keys_b: any[],
-  key_info: VmKeyInfo,
-): number {
-  const num_keys = key_info.numKeys;
-  for (let k = 0; k < num_keys; k++) {
-    const a = keys_a[k];
-    const b = keys_b[k];
-    const direction = key_info.directions[k] ?? 0;
-    const null_order = key_info.nullOrders[k] ?? (direction === 1 ? 1 : 0);
-
-    const a_is_null = a === null || a === undefined;
-    const b_is_null = b === null || b === undefined;
-    if (a_is_null && b_is_null) continue;
-    if (a_is_null || b_is_null) {
-      return null_order === 0 ? (a_is_null ? -1 : 1) : a_is_null ? 1 : -1;
-    }
-    const cmp = compare_3vl(a, b).result;
-    if (cmp !== 0) {
-      return direction === 1 ? -cmp : cmp;
-    }
-  }
-  return 0;
-}
-
-export function fnv1a_32(values: any[]): number {
-  let hash = 0x811c9dc5;
-  for (let k = 0; k < values.length; k++) {
-    const v = values[k];
-    if (v === null || v === undefined) {
-      hash ^= 0xff;
-      hash = Math.imul(hash, 0x01000193);
-    } else if (typeof v === "string") {
-      for (let i = 0; i < v.length; i++) {
-        hash ^= v.charCodeAt(i) & 0xff;
-        hash = Math.imul(hash, 0x01000193);
-      }
-    } else {
-      const n = Number(v) | 0;
-      hash ^= n & 0xff;
-      hash = Math.imul(hash, 0x01000193);
-    }
-  }
-  hash = hash >>> 0;
-  return hash === 0 ? 1 : hash;
-}
+export {
+  sql_like_match,
+  compare_3vl,
+  compare_sorter_keys,
+  fnv1a_32,
+} from "./vm_host.ts";

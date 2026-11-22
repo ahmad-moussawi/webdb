@@ -3,6 +3,7 @@
   "version": "0.7.3",
   "homepage": "https://webdb.dev",
   "type": "module",
+  "sideEffects": false,
   "description": "Ultra-lean browser-native relational database engine",
   "license": "MIT",
   "repository": {
@@ -32,6 +33,31 @@
       "import": "./dist/webdb.js",
       "require": "./dist/webdb.umd.cjs"
     },
+    "./slim": {
+      "types": "./dist/slim.d.ts",
+      "import": "./dist/slim.js"
+    },
+    "./core/js": {
+      "types": "./dist/core/js/entry.d.ts",
+      "import": "./dist/core-js.js"
+    },
+    "./core/wasm": {
+      "types": "./dist/core/wasm/entry.d.ts",
+      "import": "./dist/core-wasm.js"
+    },
+    "./storage/memory": {
+      "types": "./dist/host/storage/memory.d.ts",
+      "import": "./dist/storage-memory.js"
+    },
+    "./storage/idb": {
+      "types": "./dist/host/storage/idb.d.ts",
+      "import": "./dist/storage-idb.js"
+    },
+    "./storage/opfs": {
+      "types": "./dist/host/storage/opfs.d.ts",
+      "import": "./dist/storage-opfs.js"
+    },
+    "./wasm": "./dist/webdb_core.wasm",
     "./migrations": {
       "types": "./dist/migrations.d.ts",
       "import": "./dist/migrations.js",
@@ -92,7 +118,7 @@
     "transpile:c": "vite-node scripts/transpiler/index.ts --all --write",
     "build:wasm": "node scripts/build_wasm.js",
     "prebuild": "node scripts/generate_layouts.js",
-    "build": "vite build && vite build --config vite.adapters.config.ts",
+    "build": "vite build && vite build --config vite.umd.config.ts && vite build --config vite.adapters.config.ts && node -e \"import('node:fs').then(fs => fs.copyFileSync('src/core/wasm/webdb_core.wasm', 'dist/webdb_core.wasm'))\"",
     "prepack": "npm run build",
     "pretest": "node scripts/generate_layouts.js",
     "test": "vitest run",

@@ -29,7 +29,8 @@ import {
   page_init,
   page_init_free,
   page_get_type,
-  vm_step,
+} from "../../core/js/page.c.ts";
+import {
   buf_pool_read_slot_to_page,
   buf_pool_get_resident_slot,
   buf_pool_assign_slot,
@@ -41,7 +42,7 @@ import {
   buf_pool_unpin_slot,
   buf_pool_is_pinned,
   buf_pool_select_eviction_victim,
-} from "../../core/index.ts";
+} from "../../core/js/buffer_pool.c.ts";
 
 // ============================================================================
 // Helper to create Wasm Memory
@@ -92,6 +93,12 @@ export class BufferPoolDriver {
   readonly view: DataView;
   readonly uint8: Uint8Array;
   readonly slotCount: number;
+  private cachedJsVmStepPromise?: Promise<
+    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
+  >;
+  private cachedWasmVmStepPromise?: Promise<
+    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
+  >;
   readonly maxQueryMemory: number;
   readonly offsets: BufferPoolOffsets;
 
@@ -735,14 +742,57 @@ export class BufferPoolDriver {
 
   /**
    * Drives the VDBE VM step loop, handling STATUS_PAGE_FAULT until completion.
+   * Lazily loads only the active core engine if `stepFn` is not provided.
    */
-  async stepVm(ctx: VmContext, bytecode: Uint8Array): Promise<VmStatus> {
-    let status = vm_step(ctx, this.view, bytecode);
+  async stepVm(
+    ctx: VmContext,
+    bytecode: Uint8Array,
+    stepFn?: (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus,
+  ): Promise<VmStatus> {
+    let runStep = stepFn;
+    if (!runStep) {
+      const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
+      const envCore: "js" | "wasm" | undefined =
+        procEnv === "wasm" || procEnv === "js"
+          ? procEnv
+          : (globalThis as any).__WEBDB_DEFAULT_CORE__;
+      if (envCore === "wasm") {
+        if (!this.cachedWasmVmStepPromise) {
+          this.cachedWasmVmStepPromise = Promise.all([
+            import("../../core/wasm/wasm_runtime.ts"),
+            import("../../core/wasm/embedded_wasm.ts"),
+          ])
+            .then(([{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }]) =>
+              instantiateWasmCoreAsync(
+                this.wasmMemory,
+                getWebDbCoreWasmBytes(),
+              ),
+            )
+            .then((wasmCore) => wasmCore.vm_step)
+            .catch((err) => {
+              this.cachedWasmVmStepPromise = undefined;
+              throw err;
+            });
+        }
+        runStep = await this.cachedWasmVmStepPromise;
+      } else {
+        if (!this.cachedJsVmStepPromise) {
+          this.cachedJsVmStepPromise = import("../../core/js/vm.c.ts")
+            .then(({ vm_step }) => vm_step)
+            .catch((err) => {
+              this.cachedJsVmStepPromise = undefined;
+              throw err;
+            });
+        }
+        runStep = await this.cachedJsVmStepPromise;
+      }
+    }
+    let status = runStep(ctx, this.view, bytecode);
     while (status === VmStatus.PAGE_FAULT) {
       const faultPageId = ctx.cursor.pageId;
       await this.acquirePage(faultPageId);
       ctx.status = VmStatus.RUNNING;
-      status = vm_step(ctx, this.view, bytecode);
+      status = runStep(ctx, this.view, bytecode);
     }
     return status;
   }
