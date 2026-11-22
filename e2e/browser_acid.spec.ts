@@ -26,7 +26,7 @@ async function attachVirtualOriginServer(
 <body>
   <script type="module">
     import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } from '/dist/webdb.js';
-        window.WebDB = WebDB;
+    window.WebDB = WebDB;
     window.WasmEngine = WasmEngine;
     window.JsEngine = JsEngine;
     window.IdbStorage = IdbStorage;

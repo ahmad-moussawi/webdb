@@ -26,7 +26,7 @@ async function attachVirtualOriginServer(
 <body>
   <script type="module">
     import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage, col, fn } from '/dist/webdb.js';
-        window.WebDB = WebDB;
+    window.WebDB = WebDB;
     window.WasmEngine = WasmEngine;
     window.JsEngine = JsEngine;
     window.IdbStorage = IdbStorage;
@@ -171,7 +171,7 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await context.close();
   });
 
-  test("2. Real Chromium IDB batches autocommit writes, atomic checkpoints, and respects idbDurability", async ({
+  test("2. Real Chromium IDB batches autocommit writes, atomic checkpoints, and respects IdbStorage durability", async ({
     browser,
   }) => {
     const context = await browser.newContext();
@@ -240,7 +240,7 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
       await db.close();
 
-      // Verify idbDurability: 'strict' passes durability: 'strict'
+      // Verify IdbStorage durability: 'strict' passes durability: 'strict'
       const strictDb = await WebDB.open({
         engine: new WasmEngine(),
         storage: new IdbStorage(`${name}_strict`, { durability: "strict" }),

@@ -9,14 +9,13 @@ import {
   resetVmContext,
   OpCode,
   VmStatus,
-  getWebDbCoreWasmBytes,
 } from "@ahmadmoussawi/webdb/slim";
 import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
-import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
+import { JsEngine, vm_step as jsVmStep } from "@ahmadmoussawi/webdb/core/js";
 import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 import { OpfsStorage } from "@ahmadmoussawi/webdb/storage/opfs";
-import { getWebDbCoreWasmBytes as rootGetWasmBytes } from "@ahmadmoussawi/webdb";
+import { getWebDbCoreWasmBytes } from "@ahmadmoussawi/webdb";
 import * as vmHost from "../src/core/js/vm_host.ts";
 import * as vmHelpers from "../src/core/js/vm.helpers.c.ts";
 
@@ -55,7 +54,7 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
   });
 
   it("runs queries with explicit WasmEngine (zero-arg embedded, wasmBinary, and wasmUrl Response)", async () => {
-    const rawBytes = rootGetWasmBytes();
+    const rawBytes = getWebDbCoreWasmBytes();
 
     const engines = [
       new WasmEngine(),
@@ -101,31 +100,100 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
     }
   });
 
-  it("supports Promise<Response> in WasmEngine({ wasmUrl })", async () => {
-    const rawBytes = rootGetWasmBytes();
-    const db = await WebDB.open({
-      storage: new MemoryStorage(),
-      engine: new WasmEngine({
+  it("caches compiled WebAssembly.Module across sequential & concurrent WasmEngine reuse with Response wasmUrl", async () => {
+    const rawBytes = getWebDbCoreWasmBytes();
+    const compileSpy = vi.spyOn(WebAssembly, "compile");
+
+    try {
+      // 1. Mixed-case MIME header (`Application/WASM`) + sequential & concurrent reuse of Response
+      const sharedMixedMimeEngine = new WasmEngine({
+        wasmUrl: new Response(rawBytes as unknown as BodyInit, {
+          status: 200,
+          headers: { "Content-Type": "Application/WASM" },
+        }),
+      });
+
+      const [dbA, dbB] = await Promise.all([
+        WebDB.open({ storage: new MemoryStorage(), engine: sharedMixedMimeEngine, crossTabSync: false }),
+        WebDB.open({ storage: new MemoryStorage(), engine: sharedMixedMimeEngine, crossTabSync: false }),
+      ]);
+      const dbC = await WebDB.open({
+        storage: new MemoryStorage(),
+        engine: sharedMixedMimeEngine,
+        crossTabSync: false,
+      });
+
+      await dbA.createTable("t", [{ name: "id", type: "INT32", primaryKey: true }]);
+      await dbA.insert("t", { id: 11 });
+      await dbB.createTable("t", [{ name: "id", type: "INT32", primaryKey: true }]);
+      await dbB.insert("t", { id: 22 });
+      await dbC.createTable("t", [{ name: "id", type: "INT32", primaryKey: true }]);
+      await dbC.insert("t", { id: 33 });
+
+      expect(await dbA.from("t").toArray()).toEqual([{ id: 11 }]);
+      expect(await dbB.from("t").toArray()).toEqual([{ id: 22 }]);
+      expect(await dbC.from("t").toArray()).toEqual([{ id: 33 }]);
+
+      await Promise.all([dbA.close(), dbB.close(), dbC.close()]);
+
+      // 2. Non-WASM MIME type (`application/octet-stream`) + Promise<Response> concurrent reuse
+      const octetEngine = new WasmEngine({
         wasmUrl: Promise.resolve(
           new Response(rawBytes as unknown as BodyInit, {
             status: 200,
-            headers: { "Content-Type": "application/wasm" },
+            headers: { "Content-Type": "application/octet-stream" },
           }),
         ),
-      }),
-      crossTabSync: false,
-    });
-    expect(db.coreMode).toBe("wasm");
-    expect(db.wasmCore).toBeDefined();
+      });
 
-    await db.createTable("t", [{ name: "id", type: "INT32", primaryKey: true }]);
-    await db.insert("t", { id: 7 });
-    expect(await db.from("t").toArray()).toEqual([{ id: 7 }]);
-    await db.close();
+      const [dbD, dbE] = await Promise.all([
+        WebDB.open({ storage: new MemoryStorage(), engine: octetEngine, crossTabSync: false }),
+        WebDB.open({ storage: new MemoryStorage(), engine: octetEngine, crossTabSync: false }),
+      ]);
+      await dbD.createTable("t", [{ name: "id", type: "INT32", primaryKey: true }]);
+      await dbD.insert("t", { id: 7 });
+      expect(await dbD.from("t").toArray()).toEqual([{ id: 7 }]);
+      expect(await dbE.hasTable("t")).toBe(false);
+      await Promise.all([dbD.close(), dbE.close()]);
+
+      // compile() called once per engine (or 0 if compileStreaming handled Application/WASM)
+      expect(compileSpy.mock.calls.length).toBeLessThanOrEqual(2);
+    } finally {
+      compileSpy.mockRestore();
+    }
+
+    // 3. Failed wasmUrl fetch clears cached rejection so a retry can succeed
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 503, statusText: "Unavailable" }))
+      .mockResolvedValueOnce(
+        new Response(rawBytes as unknown as BodyInit, {
+          status: 200,
+          headers: { "Content-Type": "application/wasm" },
+        }),
+      );
+    try {
+      const retryEngine = new WasmEngine({ wasmUrl: "https://example.invalid/webdb_core.wasm" });
+      await expect(
+        WebDB.open({ storage: new MemoryStorage(), engine: retryEngine, crossTabSync: false }),
+      ).rejects.toThrow(/503/);
+      const dbOk = await WebDB.open({
+        storage: new MemoryStorage(),
+        engine: retryEngine,
+        crossTabSync: false,
+      });
+      await dbOk.createTable("ok", [{ name: "id", type: "INT32", primaryKey: true }]);
+      await dbOk.insert("ok", { id: 1 });
+      expect(await dbOk.from("ok").toArray()).toEqual([{ id: 1 }]);
+      await dbOk.close();
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("invokes custom engine.init().vm_step even when wasmCore is also returned", async () => {
-    const baseEngine = new WasmEngine({ wasmBinary: rootGetWasmBytes() });
+    const baseEngine = new WasmEngine({ wasmBinary: getWebDbCoreWasmBytes() });
     let stepCalls = 0;
     const db = await WebDB.open({
       storage: new MemoryStorage(),
@@ -152,41 +220,20 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
     await db.close();
   });
 
-  it("caches the lazy-loaded WASM runner across repeated BufferPoolDriver.stepVm calls", async () => {
+  it("drives BufferPoolDriver.stepVm with an explicit stepFn and rejects omitted runners", async () => {
     const driver = new BufferPoolDriver({
       vfs: new MemoryStorage(),
       memory: createWasmMemory(),
     });
     const haltBytecode = new Uint8Array([OpCode.OP_HALT]);
-    const prevEnv = process.env.WEBDB_CORE;
-    const prevGlobal = (globalThis as any).__WEBDB_DEFAULT_CORE__;
-    const instantiateSpy = vi.spyOn(WebAssembly, "instantiate");
+    const ctx = createVmContext();
 
-    try {
-      process.env.WEBDB_CORE = "wasm";
-      const ctx = createVmContext();
+    const status = await driver.stepVm(ctx, haltBytecode, jsVmStep);
+    expect(status).toBe(VmStatus.DONE);
 
-      // Concurrent + sequential calls must share a single WASM instantiation
-      const [s1, s2] = await Promise.all([
-        driver.stepVm(ctx, haltBytecode),
-        driver.stepVm(createVmContext(), haltBytecode),
-      ]);
-      resetVmContext(ctx);
-      const s3 = await driver.stepVm(ctx, haltBytecode);
-
-      expect(s1).toBe(VmStatus.DONE);
-      expect(s2).toBe(VmStatus.DONE);
-      expect(s3).toBe(VmStatus.DONE);
-      expect(instantiateSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      instantiateSpy.mockRestore();
-      if (prevEnv === undefined) {
-        delete process.env.WEBDB_CORE;
-      } else {
-        process.env.WEBDB_CORE = prevEnv;
-      }
-      (globalThis as any).__WEBDB_DEFAULT_CORE__ = prevGlobal;
-    }
+    await expect(
+      (driver as any).stepVm(createVmContext(), haltBytecode),
+    ).rejects.toThrow(TypeError);
   });
 
   it("exposes storage subpath classes cleanly, derives cross-tab ids from databaseName, and validates required options", async () => {
@@ -238,13 +285,19 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
     );
     await overrideDb.close();
 
-    // 3. Omitting `storage` or `engine` at runtime throws TypeError
+    // 3. Omitting `storage`/`engine` or passing string shorthands throws TypeError
     await expect(
       WebDB.open({ engine: new JsEngine() } as any),
     ).rejects.toThrow(TypeError);
     await expect(
       WebDB.open({ storage: new MemoryStorage() } as any),
     ).rejects.toThrow(TypeError);
+    await expect(
+      WebDB.open({ storage: "idb", engine: new JsEngine() } as any),
+    ).rejects.toThrow(/requires a 'storage' instance/);
+    await expect(
+      WebDB.open({ storage: new MemoryStorage(), engine: "wasm" } as any),
+    ).rejects.toThrow(/requires an 'engine' instance/);
   });
 
   it("keeps all VM_* layout constants in sync between vm_host.ts and vm.helpers.c.ts", () => {
@@ -255,7 +308,7 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
     }
   });
 
-  it("keeps dist/slim.js, dist/core-wasm.js, dist/core-js.js, and dist/**/*.d.ts clean when built", () => {
+  it("keeps dist/slim.js, dist/core-wasm.js, dist/core-js.js, adapter ESMs, and dist/**/*.d.ts clean when built", () => {
     const distDir = path.resolve(process.cwd(), "dist");
     const slimPath = path.join(distDir, "slim.js");
     const coreWasmPath = path.join(distDir, "core-wasm.js");
@@ -275,6 +328,8 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
     for (const specifier of slimStatic) {
       expect(specifier).not.toMatch(/vm\.c|embedded_wasm|wasm_runtime|wasm_core|storage-(idb|opfs|memory)/);
     }
+    // slim.js must have zero dynamic imports of engines or storage adapters as well
+    expect(slimCode).not.toMatch(/import\s*\([^)]*(vm\.c|embedded_wasm|wasm_runtime|wasm_core|storage-(idb|opfs|memory))/);
     expect(slimCode).not.toMatch(/chunks\/index-[A-Za-z0-9_-]+\.js/);
 
     if (fs.existsSync(coreWasmPath)) {
@@ -288,6 +343,16 @@ describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking
       const jsStatic = extractStaticImports(fs.readFileSync(coreJsPath, "utf-8"));
       for (const specifier of jsStatic) {
         expect(specifier).not.toMatch(/wasm|storage-(idb|opfs|memory)/);
+      }
+    }
+
+    // Adapter ESM entrypoints must import runtime helpers from @ahmadmoussawi/webdb/slim (not root)
+    for (const adapter of ["react.js", "vue.js", "angular.js", "search.js", "intl.js"]) {
+      const adapterPath = path.join(distDir, adapter);
+      if (fs.existsSync(adapterPath)) {
+        const adapterCode = fs.readFileSync(adapterPath, "utf-8");
+        expect(adapterCode).toMatch(/from\s*["']@ahmadmoussawi\/webdb\/slim["']/);
+        expect(adapterCode).not.toMatch(/from\s*["']@ahmadmoussawi\/webdb["']/);
       }
     }
 

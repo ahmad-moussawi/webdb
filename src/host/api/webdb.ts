@@ -327,12 +327,12 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   static async open(options: WebDbOptions): Promise<WebDB> {
-    if (!options?.storage) {
+    if (!options?.storage || typeof options.storage.readPages !== "function") {
       throw new TypeError(
         "WebDB.open requires a 'storage' instance (e.g. new IdbStorage('my_db'), new OpfsStorage('my_db'), or new MemoryStorage())",
       );
     }
-    if (!options?.engine) {
+    if (!options?.engine || typeof options.engine.init !== "function") {
       throw new TypeError(
         "WebDB.open requires an 'engine' instance (e.g. new WasmEngine() or new JsEngine())",
       );

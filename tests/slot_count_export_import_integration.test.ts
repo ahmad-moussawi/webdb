@@ -171,7 +171,6 @@ async function verifyRichDatabase(
 describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)', () => {
   it('Small -> Large: exports 22-table DB (> 1,100 pages) from slotCount: 64 and imports into slotCount: 8192', async () => {
     const src = await WebDB.open({
-      name: uniqueName('exp_small_64'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('exp_small_64')),
       slotCount: 64,
@@ -236,7 +235,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
   it('Large -> Small: exports 22-table DB (> 1,100 pages) from slotCount: 8192 and imports into slotCount: 64', async () => {
     const src = await WebDB.open({
-      name: uniqueName('exp_large_8192'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('exp_large_8192')),
       slotCount: 8192,
@@ -359,7 +357,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
   it('pins overflow-catalog table colCatalogPageId chains and truncates leftover IDB pages on importBinary()', async () => {
     // 1. Create a large source DB (20 tables -> tables 17..20 in overflow catalog, > 100 pages)
     const largeSrc = await WebDB.open({
-      name: uniqueName('large_for_truncate'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('large_for_truncate')),
       slotCount: 128,
@@ -378,7 +375,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
     // 2. Create a tiny DB (just 1 table, ~5 pages)
     const tinySrc = await WebDB.open({
-      name: uniqueName('tiny_for_truncate'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('tiny_for_truncate')),
       slotCount: 32,
@@ -396,7 +392,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
     // 3. Import large 20-table DB into a target IDB instance
     const target = await WebDB.open({
-      name: uniqueName('target_truncate_and_pin'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('target_truncate_and_pin')),
       slotCount: 128,
@@ -501,7 +496,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     const snap = await src.exportBinary();
 
     const dst = await WebDB.open({
-      name: uniqueName('tie_sort_dst'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('tie_sort_dst')),
       crossTabSync: false,
@@ -526,7 +520,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
   it('keeps overflow-catalog table & index metadata pinned under tight eviction pressure and notifies subscribers on importBinary()', async () => {
     const src = await WebDB.open({
-      name: uniqueName('evict_overflow_src'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('evict_overflow_src')),
       slotCount: 128,
@@ -545,7 +538,6 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
     // Open target with tight pool (48 slots: ~24 permanently pinned catalog pages + ~24 evictable slots)
     const dst = await WebDB.open({
-      name: uniqueName('evict_overflow_dst'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('evict_overflow_dst')),
       slotCount: 48,

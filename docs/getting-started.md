@@ -165,7 +165,7 @@ Want to experiment with queries and inspect how WebDB stores data before writing
 
 Follow the guides below to explore WebDB's capabilities:
 
-- [**Storage Backends & Configuration**](/guides/storage-and-configuration) — Choose between IndexedDB (`idb`), Origin Private File System (`opfs`), and In-Memory (`memory`) storage.
+- [**Storage Backends & Configuration**](/guides/storage-and-configuration) — Choose between `IdbStorage` (IndexedDB), `OpfsStorage` (Origin Private File System), and `MemoryStorage` (In-Memory), plus `WasmEngine` vs `JsEngine`.
 - [**Tables, Columns & Data Types**](/guides/schema-and-types) — Learn about supported column types (`UUID`, `ULID`, `INT32`, `INT64`, `FLOAT64`, `TEXT`, `BLOB`), auto-incrementing keys, and constraints.
 - [**Inserting, Updating & Deleting Data**](/guides/mutations) — Perform single and bulk inserts, updates, deletes, and conflict-aware `upsert` operations.
 - [**Querying Data**](/guides/querying) — Filter, search text, sort, and paginate your data with the fluent Query Builder.

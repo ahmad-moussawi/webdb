@@ -48,7 +48,6 @@ function spyIdbTransactions(): { calls: TxCall[]; clear: () => void } {
 describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', () => {
   it('batches multi-page autocommit writes into a single readwrite IDB transaction', async () => {
     const db = await WebDB.open({
-      name: uniqueName('idb_batch_autocommit'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_batch_autocommit')),
       crossTabSync: false,
@@ -121,7 +120,6 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
 
   it('defers WAL header write into commit and avoids extra getWalFrameCount transactions', async () => {
     const db = await WebDB.open({
-      name: uniqueName('idb_wal_combined'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_wal_combined')),
       crossTabSync: false,
@@ -182,10 +180,9 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     await vfs.close();
   });
 
-  it('respects idbDurability option ("relaxed", "strict", "default") and falls back on unsupported 3rd arg', async () => {
+  it('respects IdbStorage durability option ("relaxed", "strict", "default") and falls back on unsupported 3rd arg', async () => {
     // 1. strict
     const strictDb = await WebDB.open({
-      name: uniqueName('idb_dur_strict'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_dur_strict'), { durability: 'strict' }),
       crossTabSync: false,
@@ -202,7 +199,6 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
 
     // 2. default (omits 3rd argument)
     const defaultDb = await WebDB.open({
-      name: uniqueName('idb_dur_default'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_dur_default'), { durability: 'default' }),
       crossTabSync: false,
@@ -272,7 +268,6 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
 
   it('disables cross-tab Web Locks when crossTabSync is false', async () => {
     const db = await WebDB.open({
-      name: uniqueName('idb_single_tab'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_single_tab')),
       crossTabSync: false,
@@ -296,7 +291,6 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     const binary = await src.exportBinary();
 
     const dst = await WebDB.open({
-      name: uniqueName('idb_atomic_imp_dst'),
       engine: testEngine(),
       storage: new IdbStorage(uniqueName('idb_atomic_imp_dst')),
       crossTabSync: false,

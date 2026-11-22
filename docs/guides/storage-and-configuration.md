@@ -223,15 +223,16 @@ const db = await WebDB.open({
 
 ## 6. Custom Storage Adapters (`IVfsAdapter`)
 
-If you want to store 4 KB database pages and Write-Ahead Log (WAL) frames in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote storage service), implement a class conforming to [`IVfsAdapter`](./src/host/storage/vfs.ts).
+If you want to store 4 KB database pages and Write-Ahead Log (WAL) frames in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote storage service), implement a class conforming to [`IVfsAdapter`](https://github.com/ahmad-moussawi/webdb/blob/main/src/host/storage/vfs.ts).
 
 `IVfsAdapter` uses batch page/frame methods (`readPages`, `writePages`, `readWalFrames`, `appendWalFrames`) so implementations only need to handle arrays of pages and frames—avoiding duplicate single-item methods—while lifecycle/fsync hooks (`flush`, `flushWal`, `close`, `isSynchronous`) are optional:
 
 ```typescript
-import { WebDB, type IVfsAdapter } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, type IVfsAdapter } from "@ahmadmoussawi/webdb";
 
 class CustomVfsAdapter implements IVfsAdapter {
-  readonly name = "memory" as const; // 'memory' | 'opfs' | 'idb'
+  readonly name = "custom" as const; // Unique backend identifier (avoid "memory" for persistent adapters so Web Locks stay enabled)
+  readonly databaseName = "custom_db";
   readonly isSynchronous = false;
 
   // --- Main Database Pages (4,096 bytes each, 1-indexed pageId) ---

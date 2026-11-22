@@ -18,7 +18,7 @@ To guarantee fast startup, predictable memory usage on mobile browsers, and a co
 | **Where `IN` List Size**     | `10,000 values`      | Maximum array length or subquery result set passed to `.whereIn()` or `.whereNotIn()`.                                                                               |
 | **Subquery Nesting Depth**   | `7 levels`           | Maximum nesting depth for subqueries in `from()`, `where()`, `having()`, and `select()`.                                                                             |
 | **Joined Tables per Query**  | `16 cursors`         | Supports up to 16 concurrent table/index cursors in a single query.                                                                                                  |
-| **Query Memory Ceiling**     | `16 MB` _(default)_  | Used for unindexed `ORDER BY` sorts and `GROUP BY` hash tables. Increase via `WebDB.open({ maxQueryMemory: 64 * 1024 * 1024 })` if needed.                           |
+| **Query Memory Ceiling**     | `16 MB` _(default)_  | Used for unindexed `ORDER BY` sorts and `GROUP BY` hash tables. Increase via `WebDB.open({ engine, storage, maxQueryMemory: 64 * 1024 * 1024 })` if needed. |
 | **Idle Transaction Timeout** | `30 seconds`         | Open transactions that remain idle for 30s automatically roll back so they cannot deadlock other tabs.                                                               |
 
 ---

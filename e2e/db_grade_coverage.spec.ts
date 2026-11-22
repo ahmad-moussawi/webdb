@@ -27,7 +27,7 @@ async function attachVirtualOriginServer(
   <script type="module">
     import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } from '/dist/webdb.js';
     import { Migrator } from '/dist/migrations.js';
-        window.WebDB = WebDB;
+    window.WebDB = WebDB;
     window.WasmEngine = WasmEngine;
     window.JsEngine = JsEngine;
     window.IdbStorage = IdbStorage;
@@ -130,7 +130,7 @@ self.onmessage = async (ev) => {
 }
 
 test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Overflow, Migrations & Fault Injection", () => {
-  test("1. Wasm Core (core: 'wasm'): Full CRUD, Joins, Overflow TOAST & WAL Crash Recovery in Real Browser (IDB)", async ({
+  test("1. WasmEngine: Full CRUD, Joins, Overflow TOAST & WAL Crash Recovery in Real Browser (IDB)", async ({
     browser,
   }) => {
     const context = await browser.newContext();
@@ -145,7 +145,7 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
       const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({ engine: new WasmEngine(), storage: new IdbStorage(name), slotCount: 16 });
       if (!(db as any).wasmCore) {
-        throw new Error("Expected wasmCore to be initialized when core: 'wasm'");
+        throw new Error("Expected wasmCore to be initialized when using WasmEngine");
       }
 
       await db.createTable("authors", [

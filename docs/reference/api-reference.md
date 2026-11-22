@@ -5,6 +5,11 @@ This page provides a concise reference for all public classes, methods, and help
 ```typescript
 import {
   WebDB,
+  WasmEngine,
+  JsEngine,
+  IdbStorage,
+  OpfsStorage,
+  MemoryStorage,
   QueryBuilder,
   DataType,
   col,
@@ -231,7 +236,7 @@ See the [**Reactive Live Queries Guide**](/guides/live-queries-and-frameworks) f
 
 ---
 
-## Add-on Packages
+## 5. Add-on Packages
 
 ### Database Migrations (`@ahmadmoussawi/webdb/migrations`)
 

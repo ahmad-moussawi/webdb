@@ -197,7 +197,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
     });
   });
 
-  describe("5. End-to-End WebDB with core: 'wasm'", () => {
+  describe("5. End-to-End WebDB with WasmEngine", () => {
     it("opens WebDB with C/WASM core and executes queries", async () => {
       const db = await WebDB.open({
         name: "wasm_test_db",
@@ -233,7 +233,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       expect(bytes[3]).toBe(0x6d);
     });
 
-    it("does not overwrite Buffer Pool Slot 16 (0x10000 / Page 17) on reopen with core: 'wasm'", async () => {
+    it("does not overwrite Buffer Pool Slot 16 (0x10000 / Page 17) on reopen with WasmEngine", async () => {
       const vfs = new MemoryStorage();
 
       // 1. Open DB and create 8 tables so Table 8 ("currency_rates") has colCatalogPageId = 17 (Slot 16 at 0x10000)
@@ -257,7 +257,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
 
       await db1.close();
 
-      // 2. Reopen the same VFS with core: 'wasm' (simulating page reload)
+      // 2. Reopen the same VFS with WasmEngine (simulating page reload)
       const db2 = await WebDB.open({ name: "repro", engine: new WasmEngine(), storage: vfs });
 
       const meta = await db2.getTable("currency_rates");
@@ -373,7 +373,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       expect(ctx.aggregators[0].occupiedCount).toBe(717);
     });
 
-    it("executes complex end-to-end queries (filters, LIKE, ORDER BY, GROUP BY, multiple aggregates, indexes) with core: 'wasm'", async () => {
+    it("executes complex end-to-end queries (filters, LIKE, ORDER BY, GROUP BY, multiple aggregates, indexes) with WasmEngine", async () => {
       const db = await WebDB.open({
         name: "wasm_full_vm_e2e",
         engine: new WasmEngine(),
@@ -495,7 +495,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       for (const engine of ["js", "wasm"] as const) {
         const db = await WebDB.open({
           name: `canary_overlap_${engine}`,
-          engine: (engine) === "wasm" ? new WasmEngine() : new JsEngine(),
+          engine: engine === "wasm" ? new WasmEngine() : new JsEngine(),
           storage: new MemoryStorage(),
         });
 
@@ -602,7 +602,7 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       for (const engine of ["js", "wasm"] as const) {
         const db = await WebDB.open({
           name: `ulid_crockford_${engine}`,
-          engine: (engine) === "wasm" ? new WasmEngine() : new JsEngine(),
+          engine: engine === "wasm" ? new WasmEngine() : new JsEngine(),
           storage: new MemoryStorage(),
         });
 

@@ -422,6 +422,66 @@ function toWasmBufferSource(bytes: Uint8Array | ArrayBuffer): BufferSource {
 }
 
 /**
+ * Asynchronously compiles a `.wasm` buffer into a reusable `WebAssembly.Module`.
+ */
+export async function compileWasmModuleAsync(
+  bytes: Uint8Array | ArrayBuffer,
+): Promise<WebAssembly.Module> {
+  return WebAssembly.compile(toWasmBufferSource(bytes));
+}
+
+/**
+ * Streams and compiles the WebAssembly core from a URL or Fetch `Response` into
+ * a reusable `WebAssembly.Module`, falling back to `arrayBuffer()` +
+ * `WebAssembly.compile()` when streaming is unavailable or MIME type mismatches.
+ */
+export async function compileWasmModuleStreaming(
+  source: string | URL | Response | Promise<Response>,
+): Promise<WebAssembly.Module> {
+  const responsePromise =
+    typeof source === "string" || source instanceof URL
+      ? fetch(source)
+      : Promise.resolve(source);
+
+  const response = await responsePromise;
+  if (!response.ok) {
+    throw new Error(
+      `WebDB: Failed to fetch WebAssembly binary (${response.status} ${response.statusText})`,
+    );
+  }
+
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  if (
+    typeof WebAssembly.compileStreaming === "function" &&
+    (!contentType || contentType.includes("application/wasm"))
+  ) {
+    try {
+      const wasmModule = await WebAssembly.compileStreaming(response.clone());
+      void response.body?.cancel().catch(() => {});
+      return wasmModule;
+    } catch {
+      // Fallback when server omits `Content-Type: application/wasm` or streaming fails
+    }
+  }
+
+  const bytes = await response.arrayBuffer();
+  return compileWasmModuleAsync(bytes);
+}
+
+/**
+ * Instantiates a compiled `WebAssembly.Module` bound to a specific database's linear `memory`.
+ */
+export async function instantiateCompiledWasmModule(
+  memory: WebAssembly.Memory,
+  wasmModule: WebAssembly.Module,
+): Promise<WasmCoreExports> {
+  const instance = await WebAssembly.instantiate(wasmModule, {
+    env: { memory },
+  });
+  return wrapWasmInstance(instance, memory);
+}
+
+/**
  * Synchronously instantiates the WebAssembly core from pre-loaded `.wasm` bytes.
  * Does NOT import `embedded_wasm.ts`.
  */
@@ -453,42 +513,13 @@ export async function instantiateWasmCoreAsync(
 
 /**
  * Streams and instantiates the WebAssembly core from a URL or Fetch `Response`.
- * Falls back to `arrayBuffer()` + `WebAssembly.instantiate()` if streaming is
+ * Falls back to `arrayBuffer()` + `WebAssembly.compile()` if streaming is
  * unavailable or the server sends a non-`application/wasm` MIME type.
  */
 export async function instantiateWasmCoreStreaming(
   memory: WebAssembly.Memory,
   source: string | URL | Response | Promise<Response>,
 ): Promise<WasmCoreExports> {
-  const responsePromise =
-    typeof source === "string" || source instanceof URL
-      ? fetch(source)
-      : Promise.resolve(source);
-
-  const response = await responsePromise;
-  if (!response.ok) {
-    throw new Error(
-      `WebDB: Failed to fetch WebAssembly binary (${response.status} ${response.statusText})`,
-    );
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (
-    typeof WebAssembly.instantiateStreaming === "function" &&
-    (!contentType || contentType.includes("application/wasm"))
-  ) {
-    try {
-      const { instance } = await WebAssembly.instantiateStreaming(
-        response.clone(),
-        { env: { memory } },
-      );
-      void response.body?.cancel().catch(() => {});
-      return wrapWasmInstance(instance, memory);
-    } catch {
-      // Fallback when server omits `Content-Type: application/wasm` or streaming fails
-    }
-  }
-
-  const bytes = await response.arrayBuffer();
-  return instantiateWasmCoreAsync(memory, bytes);
+  const wasmModule = await compileWasmModuleStreaming(source);
+  return instantiateCompiledWasmModule(memory, wasmModule);
 }

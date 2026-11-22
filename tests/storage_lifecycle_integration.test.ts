@@ -8,10 +8,10 @@ let openedDbs: WebDB[] = [];
 let dbSeq = 0;
 
 async function openIdb(options: { name?: string; slotCount?: number } = {}): Promise<WebDB> {
+  const dbName = options.name ?? `idb_integration_${Date.now()}_${dbSeq++}`;
   const db = await WebDB.open({
-    name: options.name ?? `idb_integration_${Date.now()}_${dbSeq++}`,
     engine: testEngine(),
-    storage: new IdbStorage(options.name ?? `idb_integration_${Date.now()}_${dbSeq++}`),
+    storage: new IdbStorage(dbName),
     slotCount: options.slotCount,
   });
   openedDbs.push(db);

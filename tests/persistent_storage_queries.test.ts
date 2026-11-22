@@ -9,7 +9,6 @@ let dbCounter = 0;
 
 async function createIdbDb(): Promise<WebDB> {
   const db = await WebDB.open({
-    name: `test_idb_matrix_${Date.now()}_${dbCounter++}`,
     engine: testEngine(),
     storage: new IdbStorage(`test_idb_matrix_${Date.now()}_${dbCounter++}`),
   });

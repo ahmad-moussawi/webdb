@@ -270,7 +270,7 @@ function highlightCode(code: string, tab: string): string {
 
   // 5. Types
   html = html.replace(
-    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|HttpVfsAdapter|Promise|Uint8Array|Error|string|number|boolean)\b/g,
+    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|WasmEngine|JsEngine|IdbStorage|OpfsStorage|MemoryStorage|HttpVfsAdapter|Promise|Uint8Array|Error|string|number|boolean)\b/g,
     (m) => saveToken(`<span class="hl-type">${m}</span>`),
   );
 

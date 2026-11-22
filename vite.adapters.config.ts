@@ -48,6 +48,18 @@ export default defineConfig({
         return false;
       },
     }),
+    {
+      name: 'webdb-adapters-esm-slim',
+      renderChunk(code: string, _chunk: unknown, outputOptions: { format?: string }) {
+        if (outputOptions.format === 'es') {
+          return code.replace(
+            /(['"])@ahmadmoussawi\/webdb\1/g,
+            '$1@ahmadmoussawi/webdb/slim$1',
+          );
+        }
+        return null;
+      },
+    },
   ],
   build: {
     emptyOutDir: false,
