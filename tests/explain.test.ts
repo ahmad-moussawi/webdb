@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Query Plan & Bytecode Disassembly (EXPLAIN)', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'test_explain', storage: 'memory' });
+    db = await WebDB.open({ name: 'test_explain', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('users', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
       { name: 'name', type: 'TEXT', flags: { notNull: true } },

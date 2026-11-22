@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import 'fake-indexeddb/auto';
 import { WebDB, DataType, col, fn, QueryExecutionStalledError, RowSizeLimitExceededError } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 let dbCounter = 0;
@@ -8,7 +10,8 @@ let dbCounter = 0;
 async function createIdbDb(): Promise<WebDB> {
   const db = await WebDB.open({
     name: `test_idb_matrix_${Date.now()}_${dbCounter++}`,
-    storage: 'idb',
+    engine: testEngine(),
+    storage: new IdbStorage(`test_idb_matrix_${Date.now()}_${dbCounter++}`),
   });
   openedDbs.push(db);
   return db;

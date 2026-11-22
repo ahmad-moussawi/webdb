@@ -23,10 +23,13 @@ Formatting dates, currencies, and numbers directly inside your database queries 
 Call `registerIntlFunctions(db)` after opening your database:
 
 ```typescript
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, MemoryStorage } from '@ahmadmoussawi/webdb';
 import { registerIntlFunctions } from '@ahmadmoussawi/webdb/intl';
 
-const db = await WebDB.open({ name: 'store.db' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new MemoryStorage(),
+});
 
 // Registers date, number, currency, and string UDFs on the database
 registerIntlFunctions(db);

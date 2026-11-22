@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, JsEngine, IdbStorage, MemoryStorage } from '@ahmadmoussawi/webdb';
 import type {
   EditorTab,
   TableMeta,
@@ -33,6 +33,14 @@ import {
   deriveDbNameFromSource,
   buildShareablePlaygroundUrl,
 } from '../utils/binaryLoader';
+
+function createStudioEngine(mode: CoreEngineMode) {
+  return mode === 'wasm' ? new WasmEngine() : new JsEngine();
+}
+
+function createStudioStorage(type: VfsType, name: string) {
+  return type === 'idb' ? new IdbStorage(name) : new MemoryStorage();
+}
 
 export type ImportModalSourceMode = 'file' | 'url';
 
@@ -555,8 +563,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     try {
       const instance = await WebDB.open({
         name,
-        storage,
-        core: activeCore,
+        storage: createStudioStorage(storage, name),
+        engine: createStudioEngine(activeCore),
         initialData,
       });
       (window as any).db = instance;
@@ -598,7 +606,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setActiveRemoteUrl(null);
       updateBrowserUrlParams({ core: activeCore, remoteUrl: null });
 
-      const fallbackInstance = await WebDB.open({ name: 'ecommerce_db', storage: 'memory', core: activeCore });
+      const fallbackInstance = await WebDB.open({
+        name: 'ecommerce_db',
+        storage: new MemoryStorage(),
+        engine: createStudioEngine(activeCore),
+      });
       (window as any).db = fallbackInstance;
       setDb(fallbackInstance);
       const meta = await fallbackInstance.listTables();
@@ -692,8 +704,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         const newInst = await WebDB.open({
           name: cleanName,
-          storage,
-          core: activeCore,
+          storage: createStudioStorage(storage, cleanName),
+          engine: createStudioEngine(activeCore),
           initialData: loaded.bytes,
         });
 
@@ -818,8 +830,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           }
           const newInst = await WebDB.open({
             name,
-            storage,
-            core: coreMode,
+            storage: createStudioStorage(storage, name),
+            engine: createStudioEngine(coreMode),
             initialData,
           });
           addRegisteredDb(storage, name);
@@ -853,7 +865,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         if (templateKey !== 'empty') {
           // openDb sets db asynchronously, so let's open explicitly
-          const newInst = await WebDB.open({ name, storage, core: coreMode });
+          const newInst = await WebDB.open({
+            name,
+            storage: createStudioStorage(storage, name),
+            engine: createStudioEngine(coreMode),
+          });
           (window as any).db = newInst;
           setDb(newInst);
           await seedDatabaseTemplate(newInst, name, templateKey, (p) => {
@@ -887,7 +903,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     let currentDb = db;
     if (!currentDb) {
-      currentDb = await WebDB.open({ name: activeDbName, storage: activeStorage, core: coreMode });
+      currentDb = await WebDB.open({
+        name: activeDbName,
+        storage: createStudioStorage(activeStorage, activeDbName),
+        engine: createStudioEngine(coreMode),
+      });
       setDb(currentDb);
       (window as any).db = currentDb;
     }

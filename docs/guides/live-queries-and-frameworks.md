@@ -38,9 +38,12 @@ No framework is required to use live queries. Every `QueryBuilder` chain support
 ### Chainable `QueryBuilder.live()`
 
 ```typescript
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage } from '@ahmadmoussawi/webdb';
 
-const db = await WebDB.open({ name: 'tasks_db', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('tasks_db'),
+});
 
 // Automatically watches 'tasks' and re-runs whenever 'tasks' changes
 const liveTasks = db

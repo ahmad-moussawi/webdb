@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB, DataType, col, fn } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Vectorized UDF Batching & ORDER BY Workflows', () => {
   let db: WebDB;
 
   beforeEach(async () => {
     db = await WebDB.open({
-      storage: 'memory',
       name: `test_udf_batch_${Math.random().toString(36).slice(2)}`,
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
   });
 

@@ -9,9 +9,12 @@ WebDB is a schema-enforced relational database. Before inserting records, you de
 Pass the table name and an array of column definitions to `db.createTable()`:
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
-const db = await WebDB.open({ name: "shop_db", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("shop_db"),
+});
 
 await db.createTable("users", [
   { name: "id", type: "UUID", primaryKey: true },

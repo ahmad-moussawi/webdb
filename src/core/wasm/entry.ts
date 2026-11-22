@@ -1,7 +1,7 @@
 /**
  * Subpath entry: `@ahmadmoussawi/webdb/core/wasm`
  *
- * Allows explicit WASM engine injection into `WebDB.open({ engine: createWasmEngine(...) })`
+ * Allows explicit WASM engine injection into `WebDB.open({ engine: new WasmEngine(...), storage })`
  * without pulling in either the JS VM interpreter (`vm.c.ts` / `vm.helpers.c.ts`)
  * or the embedded 70 KB base64 WASM chunk (which is only lazy-loaded when
  * neither `wasmBinary` nor `wasmUrl` is provided).
@@ -31,27 +31,26 @@ export interface WasmEngineOptions {
 }
 
 /**
- * Creates a pluggable WASM core engine descriptor for `WebDB.open({ engine })`.
+ * Pluggable WebAssembly core engine for `WebDB.open({ engine: new WasmEngine(...), storage })`.
  */
-export function createWasmEngine(
-  options?: WasmEngineOptions,
-): WebDbCoreEngine {
-  return {
-    mode: "wasm",
-    async init(memory: WebAssembly.Memory) {
-      let wasmCore: WasmCoreExports;
-      if (options?.wasmBinary) {
-        wasmCore = await instantiateWasmCoreAsync(memory, options.wasmBinary);
-      } else if (options?.wasmUrl) {
-        wasmCore = await instantiateWasmCoreStreaming(memory, options.wasmUrl);
-      } else {
-        const { getWebDbCoreWasmBytes } = await import("./embedded_wasm.ts");
-        wasmCore = await instantiateWasmCoreAsync(
-          memory,
-          getWebDbCoreWasmBytes(),
-        );
-      }
-      return { vm_step: wasmCore.vm_step, wasmCore };
-    },
-  };
+export class WasmEngine implements WebDbCoreEngine {
+  readonly mode = "wasm" as const;
+
+  constructor(private readonly options?: WasmEngineOptions) {}
+
+  async init(memory: WebAssembly.Memory) {
+    let wasmCore: WasmCoreExports;
+    if (this.options?.wasmBinary) {
+      wasmCore = await instantiateWasmCoreAsync(memory, this.options.wasmBinary);
+    } else if (this.options?.wasmUrl) {
+      wasmCore = await instantiateWasmCoreStreaming(memory, this.options.wasmUrl);
+    } else {
+      const { getWebDbCoreWasmBytes } = await import("./embedded_wasm.ts");
+      wasmCore = await instantiateWasmCoreAsync(
+        memory,
+        getWebDbCoreWasmBytes(),
+      );
+    }
+    return { vm_step: wasmCore.vm_step, wasmCore };
+  }
 }

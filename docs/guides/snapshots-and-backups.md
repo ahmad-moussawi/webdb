@@ -50,8 +50,8 @@ const response = await fetch('/assets/starter-catalog.webdb');
 const snapshotBuffer = await response.arrayBuffer();
 
 const db = await WebDB.open({
-  name: 'catalog_db',
-  storage: 'idb',
+  engine: new WasmEngine(),
+  storage: new IdbStorage('catalog_db'),
   initialData: snapshotBuffer, // Accepts Uint8Array or ArrayBuffer
 });
 

@@ -49,12 +49,14 @@ import {
   computeBM25ScoreRow,
 } from "../src/search/index.js";
 import { padLeft, padRight, regexpMatch } from "../src/intl/index.js";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: "test_phase2_db", storage: "memory" });
+    db = await WebDB.open({ name: "test_phase2_db", engine: testEngine(), storage: new MemoryStorage() });
   });
 
   // 1. OP_LOAD_BLOB extra u32 & multi_point driving-table join fixes
@@ -620,7 +622,7 @@ describe("Phase 2: Compiler, Planner, VM & Security Hardening", () => {
       }
       expect(foundOverflowPid).toBeGreaterThanOrEqual(2);
 
-      const db2 = await WebDB.open({ name: "test_cyclic_overflow", storage: "memory" });
+      const db2 = await WebDB.open({ name: "test_cyclic_overflow", engine: testEngine(), storage: new MemoryStorage() });
       await db2.importBinary(img);
 
       // Querying the column in WHERE triggers vm_load_overflow_column inside VM

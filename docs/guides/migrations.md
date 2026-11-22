@@ -96,10 +96,13 @@ export const MIGRATIONS: Migration[] = [
 Use the `Migrator` class or the convenient `runMigrations()` helper function during your application's bootstrap phase:
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 import { Migrator, runMigrations } from "@ahmadmoussawi/webdb/migrations";
 
-const db = await WebDB.open({ name: "my_app_db", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("my_app_db"),
+});
 
 // Option A: Quick one-liner
 const result = await runMigrations(db, MIGRATIONS);

@@ -1,6 +1,6 @@
 import { IVfsAdapter } from './vfs.js';
 
-export class MemoryVfsAdapter implements IVfsAdapter {
+export class MemoryStorage implements IVfsAdapter {
   readonly name = 'memory' as const;
   readonly isSynchronous = true;
 

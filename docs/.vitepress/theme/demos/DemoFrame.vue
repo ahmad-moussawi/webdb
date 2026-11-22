@@ -5,7 +5,7 @@
  */
 import { computed, markRaw, onMounted, onUnmounted, ref, shallowRef, type Component } from 'vue';
 import { withBase } from 'vitepress';
-import { WebDB, type TableChangeEvent } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage, type TableChangeEvent } from '@ahmadmoussawi/webdb';
 import { DEMOS, sourceUrl, type DemoId } from './registry';
 import './demo.css';
 
@@ -44,7 +44,10 @@ onMounted(async () => {
     // Two tabs (or frames) may load at the same instant on a brand-new database: serialise
     // "open + create tables + seed" across them so the seed data is only inserted once.
     const instance = await withSetupLock(meta.dbName, async () => {
-      const db = await WebDB.open({ name: meta.dbName, storage: 'idb' });
+      const db = await WebDB.open({
+        engine: new WasmEngine(),
+        storage: new IdbStorage(meta.dbName),
+      });
       await mod.setup(db);
       return db;
     });

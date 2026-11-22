@@ -30,11 +30,12 @@ import {
 } from "../src/constants.js";
 import { WebDB } from "../src/host/api/webdb.js";
 import { Io } from "../src/host/storage/io.js";
-import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
+import { MemoryStorage } from "../src/host/storage/memory.js";
 import {
   BufferPoolDriver,
   createWasmMemory,
 } from "../src/host/driver/buffer_pool_driver.js";
+import { testEngine } from "./helpers/test_engine.js";
 
 describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", () => {
   const testTable: TableMeta = attachTableMetaHelpers({
@@ -246,7 +247,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
 
   describe("Milestone 3: Buffer Pool Integration & Page Faults", () => {
     it("yields STATUS_PAGE_FAULT when next page is not resident, and resumes cleanly after acquirePage", async () => {
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const memory = createWasmMemory();
       const view = new DataView(memory.buffer);
       const io = new Io({ vfs, memory });
@@ -323,7 +324,7 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
 
   describe("Milestone 4: Chunked Pull Iterator & Result Buffer Streaming", () => {
     it("yields STATUS_BUFFER_FULL on 64KB boundary and correctly drains all rows in chunks", async () => {
-      const db = await WebDB.open({ name: "chunking_test", storage: "memory" });
+      const db = await WebDB.open({ name: "chunking_test", engine: testEngine(), storage: new MemoryStorage() });
 
       await db.createTable("records", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
@@ -768,7 +769,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("filters end-to-end with WebDB using LIKE, NOT LIKE, STARTS_WITH, ENDS_WITH, CONTAINS", async () => {
       const db = await WebDB.open({
         name: "string_e2e_test",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("gadgets", [
@@ -1265,7 +1267,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("executes end-to-end multi-column sort and aggregations via WebDB & QueryBuilder", async () => {
       const db = await WebDB.open({
         name: "milestone5_e2e_db",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("products", [
@@ -1355,7 +1358,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("emits OP_OFFSET and OP_LIMIT opcodes in table scan queries", async () => {
       const db = await WebDB.open({
         name: "test_limit_offset_explain",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("items", [
@@ -1372,7 +1376,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("evaluates unsorted table scan with OFFSET and LIMIT correctly", async () => {
       const db = await WebDB.open({
         name: "test_limit_offset_scan",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("numbers", [
@@ -1404,7 +1409,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("optimizes ORDER BY with Top-K bounded max-heap and respects LIMIT/OFFSET", async () => {
       const db = await WebDB.open({
         name: "test_topk_sorter",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("scores", [
@@ -1452,7 +1458,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("falls back to full in-arena sorting when limit exceeds MAX_TOPK_HEAP_LIMIT (4096)", async () => {
       const db = await WebDB.open({
         name: "test_topk_fallback",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("items", [
@@ -1484,7 +1491,8 @@ describe("VDBE Execution Engine - Milestones 1-4 (tests/vdbe_engine.test.ts)", (
     it("evaluates GROUP BY aggregations with OFFSET and LIMIT", async () => {
       const db = await WebDB.open({
         name: "test_agg_limit_offset",
-        storage: "memory",
+        engine: testEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("sales", [

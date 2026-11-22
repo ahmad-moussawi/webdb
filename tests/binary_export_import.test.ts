@@ -15,10 +15,12 @@ import {
   isRemoteDbParam,
   buildShareablePlaygroundUrl,
 } from '../playground/src/utils/binaryLoader.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Binary Database Export & Import (tests/binary_export_import.test.ts)', () => {
   it('1. Round-trip exportBinary() and importBinary() preserves tables, all data types, indexes, and autoInc sequences', async () => {
-    const srcDb = await WebDB.open({ name: 'src_export_db', storage: 'memory' });
+    const srcDb = await WebDB.open({ name: 'src_export_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await srcDb.createTable('users', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -75,7 +77,8 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
     // Import into a brand new database via WebDB.open({ initialData })
     const destDb = await WebDB.open({
       name: 'dest_import_db',
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       initialData: binaryImage,
     });
 
@@ -135,7 +138,7 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
   });
 
   it('2. importBinary() cleanly replaces an already-populated database with active tables and WAL frames', async () => {
-    const sourceDb = await WebDB.open({ name: 'source_clean', storage: 'memory' });
+    const sourceDb = await WebDB.open({ name: 'source_clean', engine: testEngine(), storage: new MemoryStorage() });
     await sourceDb.createTable('countries', [
       { name: 'code', type: 'TEXT', primaryKey: true },
       { name: 'name', type: 'TEXT' },
@@ -148,7 +151,7 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
     await sourceDb.close();
 
     // Target DB has completely different tables, pinned catalog pages, and uncommitted/committed WAL state
-    const targetDb = await WebDB.open({ name: 'target_dirty', storage: 'memory' });
+    const targetDb = await WebDB.open({ name: 'target_dirty', engine: testEngine(), storage: new MemoryStorage() });
     await targetDb.createTable('legacy_items', [
       { name: 'id', type: 'INT32', primaryKey: true },
       { name: 'title', type: 'TEXT' },
@@ -179,7 +182,7 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
   });
 
   it('3. Rejects malformed, truncated, or CRC32-corrupted binary images without mutating existing database state', async () => {
-    const db = await WebDB.open({ name: 'test_import_validation', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_import_validation', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('safe_data', [
       { name: 'id', type: 'INT32', primaryKey: true },
       { name: 'val', type: 'TEXT' },
@@ -237,7 +240,7 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
   });
 
   it('4. Gzip compression (.webdb.gz) round-trip and Studio remote URL helpers', async () => {
-    const srcDb = await WebDB.open({ name: 'gz_source', storage: 'memory' });
+    const srcDb = await WebDB.open({ name: 'gz_source', engine: testEngine(), storage: new MemoryStorage() });
     await srcDb.createTable('products', [
       { name: 'id', type: 'INT32', primaryKey: true },
       { name: 'title', type: 'TEXT' },
@@ -267,7 +270,8 @@ describe('Binary Database Export & Import (tests/binary_export_import.test.ts)',
 
     const importedDb = await WebDB.open({
       name: 'gz_restored',
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       initialData: decompressed.bytes,
     });
     const rows = await importedDb.from('products').orderBy('id', 'asc').toArray();

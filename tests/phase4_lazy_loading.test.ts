@@ -2,29 +2,29 @@ import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  WebDB as SlimWebDB,
+  WebDB,
   BufferPoolDriver,
   createWasmMemory,
   createVmContext,
   resetVmContext,
   OpCode,
   VmStatus,
+  getWebDbCoreWasmBytes,
 } from "@ahmadmoussawi/webdb/slim";
-import { createJsEngine } from "@ahmadmoussawi/webdb/core/js";
-import { createWasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
-import { MemoryVfsAdapter } from "@ahmadmoussawi/webdb/storage/memory";
-import { IndexedDbVfsAdapter } from "@ahmadmoussawi/webdb/storage/idb";
-import { OpfsVfsAdapter } from "@ahmadmoussawi/webdb/storage/opfs";
-import { getWebDbCoreWasmBytes } from "@ahmadmoussawi/webdb";
+import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+import { OpfsStorage } from "@ahmadmoussawi/webdb/storage/opfs";
+import { getWebDbCoreWasmBytes as rootGetWasmBytes } from "@ahmadmoussawi/webdb";
 import * as vmHost from "../src/core/js/vm_host.ts";
 import * as vmHelpers from "../src/core/js/vm.helpers.c.ts";
 
-describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
-  it("runs queries via @ahmadmoussawi/webdb/slim with explicit JS engine + MemoryVfsAdapter", async () => {
-    const db = await SlimWebDB.open({
-      name: "phase4_explicit_js",
-      vfs: new MemoryVfsAdapter(),
-      engine: createJsEngine(),
+describe("Phase 4 — Explicit Engine & Storage Classes and Subpath Tree-Shaking", () => {
+  it("runs queries with explicit JsEngine + MemoryStorage without needing options.name", async () => {
+    const db = await WebDB.open({
+      storage: new MemoryStorage(),
+      engine: new JsEngine(),
       crossTabSync: false,
     });
     expect(db.coreMode).toBe("js");
@@ -54,31 +54,24 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     await db.close();
   });
 
-  it("runs queries via @ahmadmoussawi/webdb/slim with explicit WASM engine (embedded, wasmBinary, and wasmUrl Response)", async () => {
-    const rawBytes = getWebDbCoreWasmBytes();
+  it("runs queries with explicit WasmEngine (zero-arg embedded, wasmBinary, and wasmUrl Response)", async () => {
+    const rawBytes = rootGetWasmBytes();
 
-    const configs = [
-      { name: "phase4_wasm_default", engine: createWasmEngine() },
-      {
-        name: "phase4_wasm_binary",
-        engine: createWasmEngine({ wasmBinary: rawBytes }),
-      },
-      {
-        name: "phase4_wasm_response",
-        engine: createWasmEngine({
-          wasmUrl: new Response(rawBytes as unknown as BodyInit, {
-            status: 200,
-            headers: { "Content-Type": "application/wasm" },
-          }),
+    const engines = [
+      new WasmEngine(),
+      new WasmEngine({ wasmBinary: rawBytes }),
+      new WasmEngine({
+        wasmUrl: new Response(rawBytes as unknown as BodyInit, {
+          status: 200,
+          headers: { "Content-Type": "application/wasm" },
         }),
-      },
+      }),
     ];
 
-    for (const cfg of configs) {
-      const db = await SlimWebDB.open({
-        name: cfg.name,
-        vfs: new MemoryVfsAdapter(),
-        engine: cfg.engine,
+    for (const engine of engines) {
+      const db = await WebDB.open({
+        storage: new MemoryStorage(),
+        engine,
         crossTabSync: false,
       });
       expect(db.coreMode).toBe("wasm");
@@ -108,17 +101,18 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     }
   });
 
-  it("supports WebDB.open({ wasmUrl }) inferring WASM mode without explicit core: 'wasm'", async () => {
-    const rawBytes = getWebDbCoreWasmBytes();
-    const db = await SlimWebDB.open({
-      name: "phase4_open_wasm_url",
-      storage: "memory",
-      wasmUrl: Promise.resolve(
-        new Response(rawBytes as unknown as BodyInit, {
-          status: 200,
-          headers: { "Content-Type": "application/wasm" },
-        }),
-      ),
+  it("supports Promise<Response> in WasmEngine({ wasmUrl })", async () => {
+    const rawBytes = rootGetWasmBytes();
+    const db = await WebDB.open({
+      storage: new MemoryStorage(),
+      engine: new WasmEngine({
+        wasmUrl: Promise.resolve(
+          new Response(rawBytes as unknown as BodyInit, {
+            status: 200,
+            headers: { "Content-Type": "application/wasm" },
+          }),
+        ),
+      }),
       crossTabSync: false,
     });
     expect(db.coreMode).toBe("wasm");
@@ -131,11 +125,10 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
   });
 
   it("invokes custom engine.init().vm_step even when wasmCore is also returned", async () => {
-    const baseEngine = createWasmEngine({ wasmBinary: getWebDbCoreWasmBytes() });
+    const baseEngine = new WasmEngine({ wasmBinary: rootGetWasmBytes() });
     let stepCalls = 0;
-    const db = await SlimWebDB.open({
-      name: "phase4_custom_wrapped_wasm",
-      vfs: new MemoryVfsAdapter(),
+    const db = await WebDB.open({
+      storage: new MemoryStorage(),
       engine: {
         mode: "wasm",
         async init(memory) {
@@ -161,7 +154,7 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
 
   it("caches the lazy-loaded WASM runner across repeated BufferPoolDriver.stepVm calls", async () => {
     const driver = new BufferPoolDriver({
-      vfs: new MemoryVfsAdapter(),
+      vfs: new MemoryStorage(),
       memory: createWasmMemory(),
     });
     const haltBytecode = new Uint8Array([OpCode.OP_HALT]);
@@ -196,10 +189,62 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     }
   });
 
-  it("exposes all VFS adapter subpath classes cleanly", () => {
-    expect(typeof MemoryVfsAdapter).toBe("function");
-    expect(typeof IndexedDbVfsAdapter).toBe("function");
-    expect(typeof OpfsVfsAdapter).toBe("function");
+  it("exposes storage subpath classes cleanly, derives cross-tab ids from databaseName, and validates required options", async () => {
+    expect(typeof MemoryStorage).toBe("function");
+    expect(typeof IdbStorage).toBe("function");
+    expect(typeof OpfsStorage).toBe("function");
+    expect(new IdbStorage("crm_app").databaseName).toBe("crm_app");
+    expect(new OpfsStorage("analytics_db").databaseName).toBe("analytics_db");
+
+    // 1. Named persistent-like storage derives crossTabLockName and BroadcastChannel from databaseName
+    const backing = new MemoryStorage();
+    const namedIdbLikeStorage = {
+      name: "idb",
+      databaseName: "shared_crm",
+      isSynchronous: false,
+      readPages: backing.readPages.bind(backing),
+      writePages: backing.writePages.bind(backing),
+      truncate: backing.truncate.bind(backing),
+      readWalHeader: backing.readWalHeader.bind(backing),
+      writeWalHeader: backing.writeWalHeader.bind(backing),
+      readWalFrames: backing.readWalFrames.bind(backing),
+      appendWalFrames: backing.appendWalFrames.bind(backing),
+      truncateWal: backing.truncateWal.bind(backing),
+      getWalFrameCount: backing.getWalFrameCount.bind(backing),
+    };
+
+    const derivedDb = await WebDB.open({
+      storage: namedIdbLikeStorage,
+      engine: new JsEngine(),
+    });
+    expect((derivedDb.coordinator.leaseQueue as any).crossTabLockName).toBe(
+      "webdb_lock_idb_shared_crm",
+    );
+    if (typeof BroadcastChannel !== "undefined") {
+      expect((derivedDb as any).broadcastChannel?.name).toBe(
+        "webdb_sync_idb_shared_crm",
+      );
+    }
+    await derivedDb.close();
+
+    // 2. Explicit `options.name` overrides `storage.databaseName` when provided
+    const overrideDb = await WebDB.open({
+      name: "custom_lock_id",
+      storage: namedIdbLikeStorage,
+      engine: new JsEngine(),
+    });
+    expect((overrideDb.coordinator.leaseQueue as any).crossTabLockName).toBe(
+      "webdb_lock_idb_custom_lock_id",
+    );
+    await overrideDb.close();
+
+    // 3. Omitting `storage` or `engine` at runtime throws TypeError
+    await expect(
+      WebDB.open({ engine: new JsEngine() } as any),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      WebDB.open({ storage: new MemoryStorage() } as any),
+    ).rejects.toThrow(TypeError);
   });
 
   it("keeps all VM_* layout constants in sync between vm_host.ts and vm.helpers.c.ts", () => {
@@ -210,7 +255,7 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     }
   });
 
-  it("keeps dist/slim.js, dist/core-wasm.js, and dist/**/*.d.ts clean when built", () => {
+  it("keeps dist/slim.js, dist/core-wasm.js, dist/core-js.js, and dist/**/*.d.ts clean when built", () => {
     const distDir = path.resolve(process.cwd(), "dist");
     const slimPath = path.join(distDir, "slim.js");
     const coreWasmPath = path.join(distDir, "core-wasm.js");
@@ -230,7 +275,6 @@ describe("Phase 4 — On-Demand Lazy Engines & VFS Adapters", () => {
     for (const specifier of slimStatic) {
       expect(specifier).not.toMatch(/vm\.c|embedded_wasm|wasm_runtime|wasm_core|storage-(idb|opfs|memory)/);
     }
-    // slim.js must not dynamically reference the monolithic core/index barrel either
     expect(slimCode).not.toMatch(/chunks\/index-[A-Za-z0-9_-]+\.js/);
 
     if (fs.existsSync(coreWasmPath)) {

@@ -15,11 +15,13 @@ import {
   createWasmMemory,
   BufferPoolDriver,
   Io,
-  MemoryVfsAdapter,
+  MemoryStorage,
   col,
   fn,
 } from '../src/index.js';
 import { BufferPool } from '../src/core/js/buffer_pool.c.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
@@ -68,7 +70,7 @@ describe('Dynamic slotCount (> 1024) Support & Memory Safety', () => {
 
   it('BufferPool and BufferPoolDriver safely address high slots (1024, 2047, 4095) without touching WASM_REGION or VM_CONTEXT', () => {
     const slotCount = 4096;
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(slotCount, 1024 * 1024);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({
@@ -125,7 +127,8 @@ describe('Dynamic slotCount (> 1024) Support & Memory Safety', () => {
     const dbName = uniqueName('dynamic_slots_8192');
     const db = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 8192,
       crossTabSync: false,
     });
@@ -187,7 +190,8 @@ describe('Dynamic slotCount (> 1024) Support & Memory Safety', () => {
     // Reopen with a different slotCount (e.g. 2048) to confirm on-disk format is slotCount-independent
     const reopened = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 2048,
       crossTabSync: false,
     });
@@ -207,7 +211,8 @@ describe('Dynamic slotCount (> 1024) Support & Memory Safety', () => {
   it('executes overflow reads, GROUP BY, ORDER BY, JOIN, and IN queries cleanly with slotCount: 4096 and > 1,100 pages', async () => {
     const db = await WebDB.open({
       name: uniqueName('dynamic_slots_sql_4096'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       slotCount: 4096,
     });
     openedDbs.push(db);
@@ -281,12 +286,12 @@ describe('Dynamic slotCount (> 1024) Support & Memory Safety', () => {
   it('rejects invalid slotCount values (< 2, non-integer, or > MAX_SLOT_COUNT) in WebDB.open, BufferPoolDriver, and BufferPool', async () => {
     for (const bad of [0, 1, -4, 16.5, NaN, MAX_SLOT_COUNT + 1]) {
       await expect(
-        WebDB.open({ name: uniqueName('bad_slot'), slotCount: bad }),
+        WebDB.open({ name: uniqueName('bad_slot'), engine: testEngine(), storage: new MemoryStorage(), slotCount: bad }),
       ).rejects.toThrow(RangeError);
 
       expect(() => new BufferPool({ slotCount: bad })).toThrow(RangeError);
 
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const mem = createWasmMemory(16);
       expect(
         () => new BufferPoolDriver({ vfs, memory: mem, slotCount: bad }),

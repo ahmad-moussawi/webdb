@@ -7,12 +7,13 @@ import {
   ColumnNotFoundError,
   Changeset,
   TableChangeEvent,
-  MemoryVfsAdapter,
+  MemoryStorage,
 } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
 
 describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, hooks, subscribe)', () => {
   it('1. executes in-place and page-overflow updates while keeping secondary indexes exact', async () => {
-    const db = await WebDB.open({ name: 'dml_update_db' });
+    const db = await WebDB.open({ name: 'dml_update_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('items', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -100,7 +101,7 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
   });
 
   it('2. deletes rows and shifts surviving cell index rowids on the same page accurately', async () => {
-    const db = await WebDB.open({ name: 'dml_delete_db' });
+    const db = await WebDB.open({ name: 'dml_delete_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('users', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -165,7 +166,7 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
   });
 
   it('3. supports upsert and upsertMany with merge, replace, ignore, custom conflictTarget, and LWW where guard', async () => {
-    const db = await WebDB.open({ name: 'dml_upsert_db' });
+    const db = await WebDB.open({ name: 'dml_upsert_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('docs', [
       { name: 'id', type: DataType.TEXT, primaryKey: true },
@@ -297,7 +298,7 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
   });
 
   it('4. captures Changesets, coalesces intra-transaction mutations, and respects nested savepoints', async () => {
-    const db = await WebDB.open({ name: 'sync_coalesce_db' });
+    const db = await WebDB.open({ name: 'sync_coalesce_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('tasks', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -384,7 +385,7 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
   });
 
   it('5. supports atomic outbox pattern via onBeforeCommit with origin filtering and rollback safety', async () => {
-    const db = await WebDB.open({ name: 'sync_outbox_db' });
+    const db = await WebDB.open({ name: 'sync_outbox_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('notes', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -451,10 +452,11 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
   });
 
   it('6. notifies db.subscribe() locally and across instances in real time via BroadcastChannel', async () => {
-    const sharedVfs = new MemoryVfsAdapter();
+    const sharedVfs = new MemoryStorage();
     const dbTab1 = await WebDB.open({
       name: 'shared_realtime_db',
-      vfs: sharedVfs,
+      engine: testEngine(),
+      storage: sharedVfs,
     });
 
     await dbTab1.createTable('messages', [
@@ -465,7 +467,8 @@ describe('Low-Level Sync Primitives & High-Level DML (update, delete, upsert, ho
 
     const dbTab2 = await WebDB.open({
       name: 'shared_realtime_db',
-      vfs: sharedVfs,
+      engine: testEngine(),
+      storage: sharedVfs,
     });
 
     const tab1Events: TableChangeEvent[] = [];

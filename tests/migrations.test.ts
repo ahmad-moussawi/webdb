@@ -5,12 +5,15 @@ import {
   runMigrations,
   type Migration,
 } from "../src/migrations/index.ts";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("executes pending migrations sequentially in version order", async () => {
     const db = await WebDB.open({
       name: "test_migrator_basic",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const executionOrder: string[] = [];
@@ -81,7 +84,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("handles batches and down() rollbacks correctly", async () => {
     const db = await WebDB.open({
       name: "test_migrator_rollback",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const m1: Migration = {
@@ -162,7 +166,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("supports step rollback and full reset", async () => {
     const db = await WebDB.open({
       name: "test_migrator_step_reset",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const migrations: Migration[] = [
@@ -223,7 +228,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("rolls back atomically if a migration fails in atomic mode", async () => {
     const db = await WebDB.open({
       name: "test_migrator_atomic_failure",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const migrations: Migration[] = [
@@ -269,7 +275,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("supports standalone runMigrations helper function", async () => {
     const db = await WebDB.open({
       name: "test_run_migrations_helper",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const migrations: Migration[] = [
@@ -295,7 +302,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("invokes migration lifecycle callbacks (start, success, error)", async () => {
     const db = await WebDB.open({
       name: "test_migrator_callbacks",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const onStart = vi.fn();
@@ -327,7 +335,8 @@ describe("Database Migrations Runner (@ahmadmoussawi/webdb/migrations)", () => {
   it("supports custom tracking table name", async () => {
     const db = await WebDB.open({
       name: "test_custom_table_name",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const migrator = new Migrator(db, {

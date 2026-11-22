@@ -5,12 +5,14 @@ import {
   NotNullConstraintError,
   IndexFlag,
 } from '../src/types/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Primary Key & Unique Constraint Enforcement (Phase 1)', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'pk_enforcement_test', storage: 'memory' });
+    db = await WebDB.open({ name: 'pk_enforcement_test', engine: testEngine(), storage: new MemoryStorage() });
   });
 
   it('automatically registers primary key IndexDescriptor on createTable', async () => {

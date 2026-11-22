@@ -124,11 +124,11 @@ const rows = await db
 Set the default planner when opening the database or change it at runtime with `db.setPlanner()`:
 
 ```typescript
-import { WebDB, HeuristicPlanner, CostBasedPlanner } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage, HeuristicPlanner, CostBasedPlanner } from '@ahmadmoussawi/webdb';
 
 const db = await WebDB.open({
-  name: 'analytics_db',
-  storage: 'idb',
+  engine: new WasmEngine(),
+  storage: new IdbStorage('analytics_db'),
   planner: new HeuristicPlanner(),
 });
 

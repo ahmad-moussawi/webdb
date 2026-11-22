@@ -94,12 +94,12 @@ function TodoList({ db, filterStatus }: { db: WebDB; filterStatus: number }) {
 For e-commerce storefronts, documentation portals, or B2B inventory tools with thousands of items, querying a local WebDB catalog delivers `< 1 ms` filtering, multi-column sorting, and category counts without hitting your backend on every keystroke.
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
 // 1. Open and seed from a pre-built binary snapshot (or create schema)
 const db = await WebDB.open({
-  name: "storefront_catalog",
-  storage: "idb",
+  engine: new WasmEngine(),
+  storage: new IdbStorage("storefront_catalog"),
 });
 
 await db.createTable("products", [
@@ -169,9 +169,12 @@ export async function searchCatalog(filters: {
 Mobile and desktop web apps often lose analytics or audit events when users go offline or navigate away. With WebDB, you can buffer events reliably in IndexedDB, query local metrics, and flush them in batches when online.
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
-const db = await WebDB.open({ name: "telemetry_buffer", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("telemetry_buffer"),
+});
 
 await db.createTable("events", [
   { name: "id", type: "ULID", primaryKey: true }, // Chronologically sortable 16-byte ID
@@ -217,20 +220,19 @@ export async function getLocalPerformanceSummary() {
 
 ## Recipe 4: Running WebDB Inside a Dedicated Web Worker (`OPFS`)
 
-For applications that import tens of thousands of rows or run heavy background syncs, running WebDB inside a Dedicated Web Worker with `storage: 'opfs'` keeps the main UI thread 100% free for 60 FPS animations.
+For applications that import tens of thousands of rows or run heavy background syncs, running WebDB inside a Dedicated Web Worker with `OpfsStorage` keeps the main UI thread 100% free for 60 FPS animations.
 
 ```typescript
 // db.worker.ts
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, OpfsStorage } from "@ahmadmoussawi/webdb";
 
 let dbPromise: Promise<WebDB> | null = null;
 
 function getDb(): Promise<WebDB> {
   if (!dbPromise) {
     dbPromise = WebDB.open({
-      name: "worker_warehouse",
-      storage: "opfs", // High-speed Origin Private File System inside Worker
-      core: "wasm",
+      engine: new WasmEngine(),
+      storage: new OpfsStorage("worker_warehouse"), // High-speed Origin Private File System inside Worker
     });
   }
   return dbPromise;

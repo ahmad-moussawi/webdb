@@ -10,7 +10,7 @@ import {
   TooManyTablesError,
   TableNotFoundError,
 } from "../src/types/index.js";
-import { MemoryVfsAdapter } from "../src/host/storage/memory.js";
+import { MemoryStorage } from "../src/host/storage/memory.js";
 import {
   HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
   HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
@@ -25,10 +25,11 @@ import {
   catalog_write_table_descriptor,
   catalog_write_index_descriptor,
 } from "../src/core/index.js";
+import { testEngine } from "./helpers/test_engine.js";
 
 describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("creates single-column and composite secondary indexes with default and custom names", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_1", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_1", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("users", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -61,7 +62,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("enforces uniqueness on secondary unique indexes during insert", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_2", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_2", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("users", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -83,7 +84,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("enforces uniqueness on composite secondary indexes", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_3", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_3", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("memberships", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -122,7 +123,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("backfills existing table records into newly created indexes", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_4", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_4", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("products", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -150,7 +151,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("rejects createIndex with unique: true when existing records have duplicates", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_5", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_5", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("users", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -171,7 +172,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("drops indexes via dropIndex and reclaims uniqueness constraints", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_6", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_6", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("accounts", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -206,7 +207,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("cascades index cleanup when dropping a table with dropTable", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_7", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_7", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("items", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -227,7 +228,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("validates invalid column names, duplicate index names, and seamless index overflow beyond 8 slots", async () => {
-    const db = await WebDB.open({ name: "test_idx_ddl_8", storage: "memory" });
+    const db = await WebDB.open({ name: "test_idx_ddl_8", engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable("t", [
       { name: "id", type: "INT32", primaryKey: true, flags: { autoInc: true } },
@@ -277,7 +278,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("covers basic index creation: validates descriptor fields, rootPageId, column indices and flags", async () => {
     const db = await WebDB.open({
       name: "test_basic_index_creation",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const table = await db.createTable("articles", [
@@ -330,7 +332,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("validates that deleting a table deletes all associated indexes and allows name reuse", async () => {
     const db = await WebDB.open({
       name: "test_drop_table_cascades_indexes",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // Create table with 3 indexes: pk + 2 secondary
@@ -380,7 +383,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("prevents creating the same index twice (same columns on the same table)", async () => {
     const db = await WebDB.open({
       name: "test_prevent_same_index_twice",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("customers", [
@@ -443,7 +447,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("prevents creating two indexes with the same name across tables or within a table", async () => {
     const db = await WebDB.open({
       name: "test_prevent_duplicate_name_across_tables",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("orders", [
@@ -478,7 +483,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("frees and unpins all data, index, and column catalog pages to the free-page list on dropTable", async () => {
     const db = await WebDB.open({
       name: "test_drop_unpin_and_free_all",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const table = await db.createTable("products", [
@@ -546,7 +552,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("handles dropping indexes manually before dropping the parent table without double-free", async () => {
     const db = await WebDB.open({
       name: "test_manual_idx_drop_then_table_drop",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("items", [
@@ -568,7 +575,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("embeds primaryKey indexes in TableDescriptor so PKs never consume secondary index slots or get silently dropped", async () => {
     const db = await WebDB.open({
       name: "test_pk_embedded_no_silent_drop",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // 1. Fill all 8 secondary index slots on Page 1 first
@@ -627,8 +635,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("chains multiple Index Catalog Overflow Pages (NEXT_INDEX_CATALOG_PAGE_ID) for 50+ secondary indexes with persistence, rename, drop & binary import/export", async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: "test_50_indexes_overflow", vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: "test_50_indexes_overflow", engine: testEngine(), storage: vfs });
 
     // Create 5 tables, each with 12 columns (id + c1..c10 + extra)
     for (let t = 1; t <= 5; t++) {
@@ -700,7 +708,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
     const binary = await db.exportBinary();
     const dbImported = await WebDB.open({
       name: "test_50_indexes_imported",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       initialData: binary,
     });
     expect(await dbImported.listIndexes()).toHaveLength(55);
@@ -711,7 +720,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
 
     // Close and reopen from VFS
     await db.close();
-    const dbReopened = await WebDB.open({ name: "test_50_indexes_overflow", vfs });
+    const dbReopened = await WebDB.open({ name: "test_50_indexes_overflow", engine: testEngine(), storage: vfs });
     expect(await dbReopened.listIndexes()).toHaveLength(55);
     const row = await dbReopened.from("t5").where("c9", "=", 90).first();
     expect(row?.id).toBe(1);
@@ -723,8 +732,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   });
 
   it("chains multiple Table Catalog Overflow Pages (NEXT_CATALOG_PAGE_ID) for 55+ tables with full DDL, DML, persistence & binary export/import", async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: "test_55_tables_overflow", vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: "test_55_tables_overflow", engine: testEngine(), storage: vfs });
 
     // Create 55 tables (16 on Page 1 + 31 on Overflow Page 1 + 8 on Overflow Page 2), each with a PK and secondary index
     for (let i = 1; i <= 55; i++) {
@@ -770,7 +779,7 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
 
     // Close and reopen from VFS
     await db.close();
-    const db2 = await WebDB.open({ name: "test_55_tables_overflow", vfs });
+    const db2 = await WebDB.open({ name: "test_55_tables_overflow", engine: testEngine(), storage: vfs });
     expect(await db2.listTables()).toHaveLength(55);
     const row50 = await db2.from("table_50").where("id", "=", 1).first();
     expect(row50).toEqual({ id: 1, code: "CODE_50", amount: 500 });
@@ -835,7 +844,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("cleanly rolls back overflow table and index catalog page allocations when a transaction aborts", async () => {
     const db = await WebDB.open({
       name: "test_tx_rollback_overflow_catalog",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // Create 16 tables and 8 secondary indexes to fill Page 1 exactly
@@ -898,7 +908,8 @@ describe("Index DDL, Backfill & Composite Keys (Phase 2)", () => {
   it("maintains backward compatibility with legacy databases that stored pk_<table> in IndexDescriptor slots", async () => {
     const db = await WebDB.open({
       name: "test_legacy_pk_slot_compat",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const tbl = await db.createTable("legacy_items", [

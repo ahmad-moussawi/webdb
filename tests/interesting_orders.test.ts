@@ -2,12 +2,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { CostBasedPlanner } from '../src/host/compiler/planner/cost.js';
 import { NoOpPlanner } from '../src/host/compiler/planner/noop.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Interesting Orders & Sort Order Optimization', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'test_interesting_orders', storage: 'memory' });
+    db = await WebDB.open({ name: 'test_interesting_orders', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('scores', [
       { name: 'id', type: 'INT32', primaryKey: true, flags: { autoInc: true } },
@@ -165,7 +167,7 @@ describe('Interesting Orders & Sort Order Optimization', () => {
     let joinDb: WebDB;
 
     beforeEach(async () => {
-      joinDb = await WebDB.open({ name: 'test_join_order_preservation', storage: 'memory' });
+      joinDb = await WebDB.open({ name: 'test_join_order_preservation', engine: testEngine(), storage: new MemoryStorage() });
 
       await joinDb.createTable('users', [
         { name: 'id', type: 'INT32', primaryKey: true },

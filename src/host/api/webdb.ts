@@ -73,7 +73,6 @@ import {
   TableSubscriptionCallback,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
-import type { IdbDurability } from "../storage/idb.ts";
 import { Io } from "../storage/io.ts";
 import { computePageChecksum } from "../storage/crc32.ts";
 import {
@@ -204,34 +203,16 @@ export {
 import type { WasmCoreExports } from "../../core/wasm/wasm_runtime.ts";
 
 export interface WebDbOptions {
-  name: string;
-  storage?: "memory" | "idb" | "opfs";
-  vfs?: IVfsAdapter;
+  /** Execution engine instance (`new WasmEngine(...)` or `new JsEngine()`). */
+  engine: WebDbCoreEngine;
+  /** Storage backend instance (`new IdbStorage(...)`, `new OpfsStorage(...)`, `new MemoryStorage()`, or a custom `IVfsAdapter`). */
+  storage: IVfsAdapter;
+  /** Optional cross-tab Web Locks / `BroadcastChannel` identifier override. Defaults to `storage.databaseName`. */
+  name?: string;
   slotCount?: number;
   maxQueryMemory?: number;
-  core?: "js" | "wasm";
-  /**
-   * Optional explicit core engine descriptor (e.g. `createWasmEngine()` from
-   * `@ahmadmoussawi/webdb/core/wasm` or `createJsEngine()` from
-   * `@ahmadmoussawi/webdb/core/js`). Avoids dynamic engine imports when provided.
-   * Takes precedence over `core`, `wasmBinary`, and `wasmUrl` (just as `vfs`
-   * takes precedence over `storage`).
-   */
-  engine?: WebDbCoreEngine;
-  wasmBinary?: ArrayBuffer | Uint8Array;
-  /**
-   * Optional URL, Fetch Response, or Promise<Response> pointing to `webdb_core.wasm`.
-   * Streams and instantiates the `.wasm` binary directly without loading the
-   * embedded base64 chunk. Implies `core: 'wasm'` when `core` is omitted.
-   */
-  wasmUrl?: string | URL | Response | Promise<Response>;
   planner?: QueryPlanner;
   initialData?: Uint8Array | ArrayBuffer;
-  /**
-   * IndexedDB transaction durability mode when `storage === 'idb'`.
-   * Defaults to `'relaxed'` for lower write latency on Windows/Chromium.
-   */
-  idbDurability?: IdbDurability;
   /**
    * Enable cross-tab synchronization via Web Locks and BroadcastChannel.
    * Defaults to `true`. Set to `false` for single-tab apps (e.g. POS kiosks)
@@ -346,22 +327,18 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   static async open(options: WebDbOptions): Promise<WebDB> {
-    const storageType = options.storage || "memory";
-    let vfs: IVfsAdapter;
-    if (options.vfs) {
-      vfs = options.vfs;
-    } else if (storageType === "idb") {
-      const { IndexedDbVfsAdapter } = await import("../storage/idb.ts");
-      vfs = new IndexedDbVfsAdapter(options.name, {
-        durability: options.idbDurability,
-      });
-    } else if (storageType === "opfs") {
-      const { OpfsVfsAdapter } = await import("../storage/opfs.ts");
-      vfs = new OpfsVfsAdapter(options.name);
-    } else {
-      const { MemoryVfsAdapter } = await import("../storage/memory.ts");
-      vfs = new MemoryVfsAdapter();
+    if (!options?.storage) {
+      throw new TypeError(
+        "WebDB.open requires a 'storage' instance (e.g. new IdbStorage('my_db'), new OpfsStorage('my_db'), or new MemoryStorage())",
+      );
     }
+    if (!options?.engine) {
+      throw new TypeError(
+        "WebDB.open requires an 'engine' instance (e.g. new WasmEngine() or new JsEngine())",
+      );
+    }
+
+    const vfs = options.storage;
 
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
     if (
@@ -375,58 +352,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
     const maxQueryMemory = options.maxQueryMemory ?? DEFAULT_MAX_QUERY_MEMORY;
     const memory = createWasmMemory(slotCount, maxQueryMemory);
-    const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
-    const envCore: "js" | "wasm" | undefined =
-      procEnv === "wasm" || procEnv === "js"
-        ? procEnv
-        : (globalThis as any).__WEBDB_DEFAULT_CORE__;
 
-    let coreMode: "js" | "wasm";
-    let wasmCore: WasmCoreExports | undefined;
-    let vmStepFn: VmStepFn;
-
-    if (options.engine) {
-      coreMode = options.engine.mode;
-      const initialized = await options.engine.init(memory);
-      vmStepFn = initialized.vm_step;
-      wasmCore = initialized.wasmCore;
-    } else {
-      coreMode =
-        options.core ??
-        (options.wasmBinary || options.wasmUrl ? "wasm" : undefined) ??
-        envCore ??
-        "js";
-      if (coreMode === "wasm") {
-        if (options.wasmBinary) {
-          const { instantiateWasmCoreAsync } = await import(
-            "../../core/wasm/wasm_runtime.ts"
-          );
-          wasmCore = await instantiateWasmCoreAsync(memory, options.wasmBinary);
-        } else if (options.wasmUrl) {
-          const { instantiateWasmCoreStreaming } = await import(
-            "../../core/wasm/wasm_runtime.ts"
-          );
-          wasmCore = await instantiateWasmCoreStreaming(
-            memory,
-            options.wasmUrl,
-          );
-        } else {
-          const [{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }] =
-            await Promise.all([
-              import("../../core/wasm/wasm_runtime.ts"),
-              import("../../core/wasm/embedded_wasm.ts"),
-            ]);
-          wasmCore = await instantiateWasmCoreAsync(
-            memory,
-            getWebDbCoreWasmBytes(),
-          );
-        }
-        vmStepFn = wasmCore.vm_step;
-      } else {
-        const { vm_step } = await import("../../core/js/vm.c.ts");
-        vmStepFn = vm_step;
-      }
-    }
+    const coreMode = options.engine.mode;
+    const { vm_step: vmStepFn, wasmCore } = await options.engine.init(memory);
 
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({
@@ -436,10 +364,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       maxQueryMemory,
     });
 
+    const dbName = options.name ?? vfs.databaseName;
     const crossTabSync = options.crossTabSync ?? true;
     const crossTabLockName =
-      crossTabSync && options.name && vfs.name !== "memory"
-        ? `webdb_lock_${vfs.name}_${options.name}`
+      crossTabSync && dbName && vfs.name !== "memory"
+        ? `webdb_lock_${vfs.name}_${dbName}`
         : undefined;
 
     const coordinator = new TransactionCoordinator(
@@ -484,7 +413,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       vmStepFn,
       wasmCore,
       options.planner,
-      options.name,
+      dbName,
       crossTabSync,
     );
 

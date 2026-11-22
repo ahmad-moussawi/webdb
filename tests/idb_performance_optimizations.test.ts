@@ -1,6 +1,8 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { WebDB, DataType, IndexedDbVfsAdapter } from '../src/index.js';
+import { WebDB, DataType, IdbStorage } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
@@ -47,7 +49,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   it('batches multi-page autocommit writes into a single readwrite IDB transaction', async () => {
     const db = await WebDB.open({
       name: uniqueName('idb_batch_autocommit'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_batch_autocommit')),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -77,8 +80,9 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   it('executes checkpoint in a single atomic multi-store readwrite IDB transaction', async () => {
     const name = uniqueName('idb_atomic_checkpoint');
     const db = await WebDB.open({
-      name,
-      storage: 'idb',
+      name: name,
+      engine: testEngine(),
+      storage: new IdbStorage(name),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -109,7 +113,7 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     await db.close();
     openedDbs = openedDbs.filter((d) => d !== db);
 
-    const reopened = await WebDB.open({ name, storage: 'idb', crossTabSync: false });
+    const reopened = await WebDB.open({ name: name, engine: testEngine(), storage: new IdbStorage(name), crossTabSync: false });
     openedDbs.push(reopened);
     const rows = await reopened.from('items').orderBy('id', 'asc').toArray();
     expect(rows.map((r) => r.label)).toEqual(['Espresso', 'Croissant']);
@@ -118,7 +122,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   it('defers WAL header write into commit and avoids extra getWalFrameCount transactions', async () => {
     const db = await WebDB.open({
       name: uniqueName('idb_wal_combined'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_wal_combined')),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -159,7 +164,7 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   });
 
   it('reads cross-tab sync snapshot in a single multi-store readonly transaction', async () => {
-    const vfs = new IndexedDbVfsAdapter(uniqueName('idb_sync_snapshot'));
+    const vfs = new IdbStorage(uniqueName('idb_sync_snapshot'));
     const page1 = new Uint8Array(4096);
     page1[0] = 0x42;
     await vfs.writePages([{ pageId: 1, data: page1 }]);
@@ -181,12 +186,12 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     // 1. strict
     const strictDb = await WebDB.open({
       name: uniqueName('idb_dur_strict'),
-      storage: 'idb',
-      idbDurability: 'strict',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_dur_strict'), { durability: 'strict' }),
       crossTabSync: false,
     });
     openedDbs.push(strictDb);
-    expect((strictDb.vfs as IndexedDbVfsAdapter).durability).toBe('strict');
+    expect((strictDb.vfs as IdbStorage).durability).toBe('strict');
 
     const strictSpy = spyIdbTransactions();
     await strictDb.createTable('t', [{ name: 'id', type: DataType.INT32, primaryKey: true }]);
@@ -198,8 +203,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     // 2. default (omits 3rd argument)
     const defaultDb = await WebDB.open({
       name: uniqueName('idb_dur_default'),
-      storage: 'idb',
-      idbDurability: 'default',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_dur_default'), { durability: 'default' }),
       crossTabSync: false,
     });
     openedDbs.push(defaultDb);
@@ -211,7 +216,7 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     vi.restoreAllMocks();
 
     // 3. fallback when browser throws on 3-arg db.transaction
-    const vfs = new IndexedDbVfsAdapter(uniqueName('idb_dur_fallback'), {
+    const vfs = new IdbStorage(uniqueName('idb_dur_fallback'), {
       durability: 'relaxed',
     });
     const orig = IDBDatabase.prototype.transaction;
@@ -239,7 +244,7 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   });
 
   it('safely copies subarray views without cloning the entire backing buffer and waits for truncate completion', async () => {
-    const vfs = new IndexedDbVfsAdapter(uniqueName('idb_subarray_truncate'));
+    const vfs = new IdbStorage(uniqueName('idb_subarray_truncate'));
     const largeBuffer = new ArrayBuffer(65536);
     const view1 = new Uint8Array(largeBuffer, 4096, 4096);
     view1.fill(0xab);
@@ -268,7 +273,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   it('disables cross-tab Web Locks when crossTabSync is false', async () => {
     const db = await WebDB.open({
       name: uniqueName('idb_single_tab'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_single_tab')),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -278,7 +284,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
   it('executes importBinary() in a single atomic readwrite IDB transaction (replaceDatabaseAtomic) and supports sparse contiguous readPages()', async () => {
     const src = await WebDB.open({
       name: uniqueName('idb_atomic_imp_src'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
     openedDbs.push(src);
     await src.createTable('t', [
@@ -290,7 +297,8 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
 
     const dst = await WebDB.open({
       name: uniqueName('idb_atomic_imp_dst'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('idb_atomic_imp_dst')),
       crossTabSync: false,
     });
     openedDbs.push(dst);
@@ -303,7 +311,7 @@ describe('IndexedDB VFS & Transaction Coordinator Performance Optimizations', ()
     expect(writeTxs[0].stores).toEqual(['pages', 'wal_frames', 'wal_meta']);
 
     // Verify contiguous readPages() fast-path handles sparse missing pages accurately
-    const vfs = new IndexedDbVfsAdapter(uniqueName('idb_sparse_contiguous'));
+    const vfs = new IdbStorage(uniqueName('idb_sparse_contiguous'));
     const p1 = new Uint8Array(4096).fill(1);
     const p3 = new Uint8Array(4096).fill(3);
     const p5 = new Uint8Array(4096).fill(5);

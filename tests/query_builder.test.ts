@@ -10,6 +10,8 @@ import {
   UnknownFunctionError,
   TooManyCursorsError,
 } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('QueryBuilder Unit & Integration Tests', () => {
   describe('AST Construction & Boolean Precedence', () => {
@@ -125,7 +127,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'test_qb_nested', storage: 'memory' });
+      db = await WebDB.open({ name: 'test_qb_nested', engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable('members', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
         { name: 'name', type: 'TEXT', flags: { notNull: true } },
@@ -240,7 +242,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'test_qb_select', storage: 'memory' });
+      db = await WebDB.open({ name: 'test_qb_select', engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable('users', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
         { name: 'name', type: 'TEXT', flags: { notNull: true } },
@@ -765,7 +767,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'test_qb_groupby_having', storage: 'memory' });
+      db = await WebDB.open({ name: 'test_qb_groupby_having', engine: testEngine(), storage: new MemoryStorage() });
 
       await db.createTable('employees', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -958,7 +960,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'test_qb_joins', storage: 'memory' });
+      db = await WebDB.open({ name: 'test_qb_joins', engine: testEngine(), storage: new MemoryStorage() });
 
       // Table 1: customers
       await db.createTable('customers', [
@@ -1195,7 +1197,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'patterns_test', storage: 'memory' });
+      db = await WebDB.open({ name: 'patterns_test', engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable('items', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true } },
         { name: 'name', type: 'TEXT' },
@@ -1286,7 +1288,7 @@ describe('QueryBuilder Unit & Integration Tests', () => {
     let db: WebDB;
 
     beforeEach(async () => {
-      db = await WebDB.open({ name: 'multi_agg_bug3_db', storage: 'memory' });
+      db = await WebDB.open({ name: 'multi_agg_bug3_db', engine: testEngine(), storage: new MemoryStorage() });
     });
 
     afterEach(async () => {

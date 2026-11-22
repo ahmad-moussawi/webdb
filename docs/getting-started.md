@@ -40,13 +40,21 @@ yarn add @ahmadmoussawi/webdb
 Here is a complete, runnable example showing how to open a database, define a schema, insert data, run queries, and use transactions:
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import {
+  WebDB,
+  WasmEngine,
+  IdbStorage,
+  MemoryStorage,
+} from "@ahmadmoussawi/webdb";
 
 async function main() {
   // 1. Open a persistent database (uses IndexedDB in the browser, or memory in Node/tests)
   const db = await WebDB.open({
-    name: "my_task_app",
-    storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
+    engine: new WasmEngine(),
+    storage:
+      typeof indexedDB !== "undefined"
+        ? new IdbStorage("my_task_app")
+        : new MemoryStorage(),
   });
 
   // 2. Create a table with typed columns
@@ -118,6 +126,24 @@ async function main() {
 
 main();
 ```
+
+> [!TIP]
+> **Minimal Bundles & Streaming `.wasm`:** Import directly from the modular subpaths and pass `{ wasmUrl }` to `WasmEngine` to stream the raw `.wasm` binary externally (skipping the ~70 KB embedded base64 chunk completely):
+>
+> ```typescript
+> import { WebDB } from "@ahmadmoussawi/webdb/slim";
+> import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+> import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+>
+> const db = await WebDB.open({
+>   engine: new WasmEngine({
+>     wasmUrl: new URL("@ahmadmoussawi/webdb/wasm", import.meta.url),
+>   }),
+>   storage: new IdbStorage("my_task_app"),
+> });
+> ```
+>
+> See [**Modular Loading, Tree-Shaking & Subpath Exports**](/guides/storage-and-configuration#_4-modular-loading-tree-shaking-subpath-exports) for all engine (`WasmEngine` / `JsEngine`) and storage (`IdbStorage` / `OpfsStorage` / `MemoryStorage`) subpath options.
 
 ---
 

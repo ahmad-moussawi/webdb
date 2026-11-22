@@ -1,7 +1,9 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebDB, DataType } from '../src/index.js';
-import { OpfsVfsAdapter } from '../src/host/storage/opfs.js';
+import { OpfsStorage } from '../src/host/storage/opfs.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 
@@ -111,7 +113,7 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
     'IndexedDB: inserts, queries, updates, deletes, and recovers 2,000 multi-TEXT rows with overflow pages',
     async () => {
       const dbName = `idb_scale_overflow_${Date.now()}_${Math.random()}`;
-      const db1 = await WebDB.open({ name: dbName, storage: 'idb' });
+      const db1 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
       openedDbs.push(db1);
 
       await db1.createTable('articles', [
@@ -234,7 +236,7 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
       await db1.close();
 
       // 6. Reopen from IndexedDB and verify persistence & recovery
-      const db2 = await WebDB.open({ name: dbName, storage: 'idb' });
+      const db2 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
       openedDbs.push(db2);
 
       const postCount = await db2.from('articles').count('id', 'total').toArray();
@@ -266,8 +268,8 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
       const opfsName = `opfs_scale_overflow_${Date.now()}_${Math.random()}`;
 
       try {
-        const vfs1 = new OpfsVfsAdapter(opfsName);
-        const db1 = await WebDB.open({ vfs: vfs1 });
+        const vfs1 = new OpfsStorage(opfsName);
+        const db1 = await WebDB.open({ engine: testEngine(), storage: vfs1 });
 
         await db1.createTable('documents', [
           { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -336,9 +338,10 @@ describe('Extensive Scale Integration: Thousands of Multi-TEXT Rows on IndexedDB
           }
         });
 
-        // Simulate abrupt crash (open new OpfsVfsAdapter without calling db1.close())
+        // Simulate abrupt crash (open new OpfsStorage without calling db1.close())
         const db2 = await WebDB.open({
-          vfs: new OpfsVfsAdapter(opfsName),
+          engine: testEngine(),
+          storage: new OpfsStorage(opfsName),
         });
         openedDbs.push(db2);
 

@@ -1,6 +1,8 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
-import { WebDB, MemoryVfsAdapter, type IVfsAdapter } from '../src/index.ts';
+import { WebDB, MemoryStorage, type IVfsAdapter } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 /**
  * Regression: after an explicit transaction, a later AUTOCOMMIT write of the same page used to go
@@ -16,13 +18,13 @@ type Reopen = (name: string) => { make: () => Promise<WebDB> };
 
 const backends: Array<[string, () => Reopen]> = [
   [
-    'MemoryVfsAdapter',
+    'MemoryStorage',
     () => {
-      const vfs: IVfsAdapter = new MemoryVfsAdapter();
-      return () => ({ make: () => WebDB.open({ name: 'w', vfs }) });
+      const vfs: IVfsAdapter = new MemoryStorage();
+      return () => ({ make: () => WebDB.open({ name: 'w', engine: testEngine(), storage: vfs }) });
     },
   ],
-  ['IndexedDB', () => (name) => ({ make: () => WebDB.open({ name, storage: 'idb' }) })],
+  ['IndexedDB', () => (name) => ({ make: () => WebDB.open({ name: name, engine: testEngine(), storage: new IdbStorage(name) }) })],
 ];
 
 describe.each(backends)('autocommit after a transaction survives an unclean shutdown – %s', (label, factory) => {

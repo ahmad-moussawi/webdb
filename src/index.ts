@@ -5,4 +5,6 @@ export * from './host/driver/index.js';
 export * from './host/compiler/index.js';
 export * from './host/api/index.js';
 export * from './core/index.js';
+export { WasmEngine, type WasmEngineOptions } from './core/wasm/entry.js';
+export { JsEngine } from './core/js/entry.js';
 export * from './shared/index.js';

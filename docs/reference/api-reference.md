@@ -174,7 +174,23 @@ Every `TableMeta` returned by `getTable`, `createTable`, `listTables`, or `alter
 
 ---
 
-## 3. Reactive Live Queries & Framework Subpath Exports
+## 3. Modular Engine, Storage & Slim Subpath Exports
+
+See the [**Storage Backends & Configuration Guide**](/guides/storage-and-configuration#_4-modular-loading-tree-shaking-subpath-exports) for tree-shaking and streaming `.wasm` examples.
+
+| Subpath | Key Exports | Description |
+| :-- | :-- | :-- |
+| **`@ahmadmoussawi/webdb/slim`** | `WebDB`, `QueryBuilder`, `liveQuery`, planners, compiler, types | Zero-adapter core runtime with zero static imports of engines or storage backends. |
+| **`@ahmadmoussawi/webdb/core/wasm`** | `WasmEngine`, `instantiateWasmCore`, `instantiateWasmCoreAsync`, `instantiateWasmCoreStreaming` | WebAssembly engine class for `WebDB.open({ engine: new WasmEngine(opts?), storage })`. Skips loading the embedded base64 chunk when `wasmBinary` or `wasmUrl` is provided. |
+| **`@ahmadmoussawi/webdb/core/js`** | `JsEngine`, `vm_step`, `vm_step_raw` | Pure-JS VM engine class for `WebDB.open({ engine: new JsEngine(), storage })` with zero WASM imports. |
+| **`@ahmadmoussawi/webdb/storage/idb`** | `IdbStorage`, `IdbStorageOptions`, `IdbDurability` | Standalone IndexedDB storage class for `WebDB.open({ engine, storage: new IdbStorage(name, opts?) })`. |
+| **`@ahmadmoussawi/webdb/storage/opfs`** | `OpfsStorage` | Standalone Origin Private File System storage class for `WebDB.open({ engine, storage: new OpfsStorage(name) })`. |
+| **`@ahmadmoussawi/webdb/storage/memory`** | `MemoryStorage` | Standalone in-memory storage class for `WebDB.open({ engine, storage: new MemoryStorage() })`. |
+| **`@ahmadmoussawi/webdb/wasm`** | `dist/webdb_core.wasm` | Raw WebAssembly binary asset for streaming via `new WasmEngine({ wasmUrl })`. |
+
+---
+
+## 4. Reactive Live Queries & Framework Subpath Exports
 
 See the [**Reactive Live Queries Guide**](/guides/live-queries-and-frameworks) for complete usage examples.
 

@@ -1,6 +1,9 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebDB, DataType, col, fn, isIndexAlignedWithOrderBy } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
@@ -169,7 +172,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
   it('Small -> Large: exports 22-table DB (> 1,100 pages) from slotCount: 64 and imports into slotCount: 8192', async () => {
     const src = await WebDB.open({
       name: uniqueName('exp_small_64'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('exp_small_64')),
       slotCount: 64,
       crossTabSync: false,
     });
@@ -191,7 +195,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     const dstName = uniqueName('imp_large_8192');
     const dst = await WebDB.open({
       name: dstName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dstName),
       slotCount: 8192,
       crossTabSync: false,
     });
@@ -214,7 +219,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
     const reopened = await WebDB.open({
       name: dstName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dstName),
       slotCount: 4096,
       crossTabSync: false,
     });
@@ -231,7 +237,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
   it('Large -> Small: exports 22-table DB (> 1,100 pages) from slotCount: 8192 and imports into slotCount: 64', async () => {
     const src = await WebDB.open({
       name: uniqueName('exp_large_8192'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('exp_large_8192')),
       slotCount: 8192,
       crossTabSync: false,
     });
@@ -252,7 +259,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     const dstName = uniqueName('imp_small_64');
     const dst = await WebDB.open({
       name: dstName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dstName),
       slotCount: 64,
       crossTabSync: false,
       initialData: binary,
@@ -281,7 +289,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // Stage 1: seed at default slotCount: 1024
     const db1 = await WebDB.open({
       name: uniqueName('hop_1024'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       slotCount: 1024,
     });
     openedDbs.push(db1);
@@ -296,7 +305,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // Stage 2: import into slotCount: 4096 and add a new table + rows
     const db2 = await WebDB.open({
       name: uniqueName('hop_4096'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       slotCount: 4096,
       initialData: snap1,
     });
@@ -313,7 +323,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // Stage 3: import into constrained slotCount: 64 and append another audit row
     const db3 = await WebDB.open({
       name: uniqueName('hop_64'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       slotCount: 64,
       initialData: snap2,
     });
@@ -326,7 +337,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // Stage 4: import into slotCount: 2048 and verify everything survived all 4 hops intact
     const db4 = await WebDB.open({
       name: uniqueName('hop_2048'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
       slotCount: 2048,
       initialData: snap3,
     });
@@ -348,7 +360,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 1. Create a large source DB (20 tables -> tables 17..20 in overflow catalog, > 100 pages)
     const largeSrc = await WebDB.open({
       name: uniqueName('large_for_truncate'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('large_for_truncate')),
       slotCount: 128,
       crossTabSync: false,
     });
@@ -366,7 +379,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 2. Create a tiny DB (just 1 table, ~5 pages)
     const tinySrc = await WebDB.open({
       name: uniqueName('tiny_for_truncate'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('tiny_for_truncate')),
       slotCount: 32,
       crossTabSync: false,
     });
@@ -383,7 +397,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 3. Import large 20-table DB into a target IDB instance
     const target = await WebDB.open({
       name: uniqueName('target_truncate_and_pin'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('target_truncate_and_pin')),
       slotCount: 128,
       crossTabSync: false,
     });
@@ -464,7 +479,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
   it('does not skip sorting on tie-breaker columns due to padded columnIndices after importBinary()', async () => {
     const src = await WebDB.open({
       name: uniqueName('tie_sort_src'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
     openedDbs.push(src);
 
@@ -486,7 +502,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
 
     const dst = await WebDB.open({
       name: uniqueName('tie_sort_dst'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('tie_sort_dst')),
       crossTabSync: false,
       initialData: snap,
     });
@@ -510,7 +527,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
   it('keeps overflow-catalog table & index metadata pinned under tight eviction pressure and notifies subscribers on importBinary()', async () => {
     const src = await WebDB.open({
       name: uniqueName('evict_overflow_src'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('evict_overflow_src')),
       slotCount: 128,
       crossTabSync: false,
     });
@@ -528,7 +546,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // Open target with tight pool (48 slots: ~24 permanently pinned catalog pages + ~24 evictable slots)
     const dst = await WebDB.open({
       name: uniqueName('evict_overflow_dst'),
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(uniqueName('evict_overflow_dst')),
       slotCount: 48,
       crossTabSync: false,
     });
@@ -566,7 +585,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 1. Seed a large DB (> 100 pages) on IDB
     const db = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 128,
       crossTabSync: false,
     });
@@ -583,7 +603,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 2. Build a tiny 1-table DB (~4 pages) and import it over the large IDB DB
     const tinySrc = await WebDB.open({
       name: uniqueName('tiny_shrink_src'),
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
     openedDbs.push(tinySrc);
     await tinySrc.createTable('fresh', [
@@ -609,7 +630,8 @@ describe('Cross-slotCount Export/Import Integration Tests (Large Multi-Table DB)
     // 4. Reopen and verify zero checksum errors or stale data from the old DB
     const reopened = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 128,
       crossTabSync: false,
     });

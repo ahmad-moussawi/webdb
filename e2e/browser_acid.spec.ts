@@ -25,8 +25,13 @@ async function attachVirtualOriginServer(
 <head><meta charset="utf-8"><title>WebDB E2E Harness</title></head>
 <body>
   <script type="module">
-    import { WebDB } from '/dist/webdb.js';
-    window.WebDB = WebDB;
+    import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } from '/dist/webdb.js';
+        window.WebDB = WebDB;
+    window.WasmEngine = WasmEngine;
+    window.JsEngine = JsEngine;
+    window.IdbStorage = IdbStorage;
+    window.OpfsStorage = OpfsStorage;
+    window.MemoryStorage = MemoryStorage;
     window.__harnessReady = true;
   </script>
 </body>
@@ -81,8 +86,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // Seed base committed row and start an uncommitted transaction that spills to WAL and hangs
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", slotCount: 8 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name), slotCount: 8 });
       await db.createTable("accounts", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "holder", type: "TEXT" },
@@ -119,8 +124,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const rowsAfterCrash = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       const rows = await db.from("accounts").orderBy("id", "asc").toArray();
       await db.close();
       return rows;
@@ -146,8 +151,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", slotCount: 8 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name), slotCount: 8 });
       await db.createTable("orders", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "sku", type: "TEXT" },
@@ -178,8 +183,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const result = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       const all = await db.from("orders").orderBy("id", "asc").toArray();
       const single = await db
         .from("orders")
@@ -209,8 +214,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "opfs" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new OpfsStorage(name) });
       await db.createTable("devices", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "serial", type: "TEXT" },
@@ -231,8 +236,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const rows = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "opfs" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new OpfsStorage(name) });
       const res = await db.from("devices").orderBy("id", "asc").toArray();
       await db.close();
       return res;
@@ -262,8 +267,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     ]);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       await db.createTable("ledger", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "tab", type: "INT32" },
@@ -275,8 +280,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // Step 2: Open the SAME IndexedDB database in Tab 2 while Tab 1 keeps its connection open
     await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      (window as any).__db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      (window as any).__db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
     }, dbName);
 
     // Step 3: Both tabs concurrently execute 5 transactions (each inserting 4 rows) simultaneously!
@@ -329,8 +334,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab3.goto(baseUrl);
     await tab3.waitForFunction(() => (window as any).__harnessReady === true);
     const tab3Rows = await tab3.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       const rows = await db.from("ledger").orderBy("id", "asc").toArray();
       await db.close();
       return rows;
@@ -357,8 +362,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // Initialize table in Tab 1
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", slotCount: 8 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name), slotCount: 8 });
       await db.createTable("transfers", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "source", type: "TEXT" },
@@ -370,8 +375,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // Open same DB in Tab 2
     await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      (window as any).__db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      (window as any).__db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
     }, dbName);
 
     // Tab 1 starts a transaction, spills 30 uncommitted rows to WAL, and hangs while holding the cross-tab lock
@@ -437,8 +442,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", slotCount: 32 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name), slotCount: 32 });
       await db.createTable("telemetry", [
         { name: "id", type: "INT32", flags: { primaryKey: true } },
         { name: "device", type: "TEXT" },
@@ -470,8 +475,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const verification = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", slotCount: 32 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name), slotCount: 32 });
       const all = await db.from("telemetry").orderBy("id", "asc").toArray();
       const lookup = await db
         .from("telemetry")
@@ -519,8 +524,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     // 1. In Tab 1: Create IndexedDB database, run ALTER TABLE mutations, export binary image, and import into native OPFS
     const opfsVerification = await tab1.evaluate(
       async ({ srcName, opfsName }) => {
-        const WebDB = (window as any).WebDB;
-        const srcDb = await WebDB.open({ name: srcName, storage: "idb" });
+        const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+        const srcDb = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(srcName) });
 
         await srcDb.createTable("inventory", [
           { name: "id", type: "INT32", primaryKey: true, autoInc: true },
@@ -548,14 +553,14 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
         await srcDb.close();
 
         // Import into a real browser OPFS database and verify persistence across close/reopen
-        const opfsDb = await WebDB.open({ name: opfsName, storage: "opfs" });
+        const opfsDb = await WebDB.open({ engine: new JsEngine(), storage: new OpfsStorage(opfsName) });
         await opfsDb.importBinary(exportedBytes);
         await opfsDb.insert("inventory", { sku: "ITEM-303", stock: 120 });
         await opfsDb.close();
 
         const opfsReopened = await WebDB.open({
-          name: opfsName,
-          storage: "opfs",
+          engine: new JsEngine(),
+          storage: new OpfsStorage(opfsName),
         });
         const rows = await opfsReopened
           .from("inventory")
@@ -579,8 +584,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // 2. Open a shared IndexedDB database in both Tab 1 and Tab 2 with initial seed schema
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       await db.createTable("old_table", [
         { name: "id", type: "INT32", primaryKey: true },
       ]);
@@ -589,8 +594,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     }, multiTabIdbName);
 
     const tab2BeforeImport = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       (window as any).__sharedDb = db;
       return await db.from("old_table").toArray();
     }, multiTabIdbName);
@@ -634,8 +639,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // 1. Tab 1 initializes schema and registers an atomic outbox hook via onBeforeCommit
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
 
       await db.createTable("todos", [
         { name: "id", type: "INT32", primaryKey: true },
@@ -666,8 +671,8 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // 2. Tab 2 opens the same IndexedDB database and subscribes to 'todos'
     await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new JsEngine(), storage: new IdbStorage(name) });
       (window as any).__syncDb2 = db;
       (window as any).__tab2WakeupPromise = new Promise((resolve) => {
         db.subscribe("todos", async (ev: any) => {
@@ -777,19 +782,19 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
 
     // 1. Open the database in both tabs BEFORE overflowing Page 1 catalog limits
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       (window as any).__overflowDb1 = await WebDB.open({
-        name,
-        storage: "idb",
+        engine: new JsEngine(),
+        storage: new IdbStorage(name),
         bufferPoolPages: 256,
       });
     }, dbName);
 
     await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       (window as any).__overflowDb2 = await WebDB.open({
-        name,
-        storage: "idb",
+        engine: new JsEngine(),
+        storage: new IdbStorage(name),
         bufferPoolPages: 256,
       });
     }, dbName);
@@ -883,10 +888,10 @@ test.describe("Real Browser E2E: IndexedDB & OPFS ACID, Crash Recovery & Multi-T
     await tab3.waitForFunction(() => (window as any).__harnessReady === true);
 
     const recoveryVerification = await tab3.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
+        engine: new JsEngine(),
+        storage: new IdbStorage(name),
         bufferPoolPages: 256,
       });
 

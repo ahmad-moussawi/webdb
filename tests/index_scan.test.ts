@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Index Search & Query Acceleration (Phase 3)', () => {
   it('accelerates primary key point lookup using OP_INDEX_SEEK_EQ instead of TableScan', async () => {
-    const db = await WebDB.open({ name: 'test_pk_seek', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_pk_seek', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('users', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -38,7 +40,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('accelerates secondary unique index point lookup', async () => {
-    const db = await WebDB.open({ name: 'test_secondary_unique_seek', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_secondary_unique_seek', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('accounts', [
       { name: 'id', type: 'INT32', primaryKey: true, flags: { autoInc: true } },
@@ -72,7 +74,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('accelerates composite index exact point lookup', async () => {
-    const db = await WebDB.open({ name: 'test_composite_seek', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_composite_seek', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('memberships', [
       { name: 'id', type: 'INT32', primaryKey: true, flags: { autoInc: true } },
@@ -115,7 +117,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('accelerates range scan queries via OP_INDEX_SEEK_GE and OP_INDEX_NEXT', async () => {
-    const db = await WebDB.open({ name: 'test_index_range_scan', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_index_range_scan', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('scores', [
       { name: 'id', type: 'INT32', primaryKey: true, flags: { autoInc: true } },
@@ -149,7 +151,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('evaluates additional non-indexed filters on index point lookups', async () => {
-    const db = await WebDB.open({ name: 'test_point_seek_extra_filter', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_point_seek_extra_filter', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('tasks', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -179,7 +181,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('falls back to TableScan when no indexed column is queried', async () => {
-    const db = await WebDB.open({ name: 'test_fallback_tablescan', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_fallback_tablescan', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('items', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -206,7 +208,7 @@ describe('Index Search & Query Acceleration (Phase 3)', () => {
   });
 
   it('supports projected select fields with point seek', async () => {
-    const db = await WebDB.open({ name: 'test_point_seek_projection', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_point_seek_projection', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('products', [
       { name: 'id', type: 'INT32', primaryKey: true },

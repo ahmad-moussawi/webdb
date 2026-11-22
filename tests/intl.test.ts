@@ -32,6 +32,8 @@ import {
   regexpMatchExpr,
   slugifyExpr,
 } from "../src/intl";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Intl Formatting & Standard Library (@ahmadmoussawi/webdb/intl)", () => {
   let db: WebDB;
@@ -39,7 +41,8 @@ describe("Intl Formatting & Standard Library (@ahmadmoussawi/webdb/intl)", () =>
   beforeEach(async () => {
     db = await WebDB.open({
       name: `intl_test_${Date.now()}_${Math.random()}`,
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
   });
 

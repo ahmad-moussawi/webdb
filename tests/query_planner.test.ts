@@ -9,6 +9,8 @@ import {
   QueryPlanner,
   CustomOrderPlanner,
 } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Unified Top-Level QueryPlanner Architecture', () => {
   let db: WebDB;
@@ -16,7 +18,8 @@ describe('Unified Top-Level QueryPlanner Architecture', () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: 'unified_query_planner_test',
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable('users', [
@@ -138,7 +141,8 @@ describe('Unified Top-Level QueryPlanner Architecture', () => {
     it('supports database-level planner configuration via WebDB.open({ planner })', async () => {
       const customDb = await WebDB.open({
         name: 'custom_planner_db',
-        storage: 'memory',
+        engine: testEngine(),
+        storage: new MemoryStorage(),
         planner: new HeuristicQueryPlanner(),
       });
 

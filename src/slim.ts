@@ -3,16 +3,15 @@
  *
  * Exports the full `WebDB` API, `QueryBuilder`, `liveQuery`, compiler, planners,
  * types, and constants with ZERO static imports of the WASM engine, JS VM
- * interpreter, or VFS storage adapters (`MemoryVfsAdapter`, `IndexedDbVfsAdapter`,
- * `OpfsVfsAdapter`).
+ * interpreter, or VFS storage adapters (`MemoryStorage`, `IdbStorage`,
+ * `OpfsStorage`).
  *
- * `WebDB.open()` dynamically loads only the selected engine and VFS adapter on
- * demand — or accepts explicit `engine` / `vfs` instances from subpath exports:
- * - `@ahmadmoussawi/webdb/core/wasm`
- * - `@ahmadmoussawi/webdb/core/js`
- * - `@ahmadmoussawi/webdb/storage/memory`
- * - `@ahmadmoussawi/webdb/storage/idb`
- * - `@ahmadmoussawi/webdb/storage/opfs`
+ * Pass explicit `engine` and `storage` instances from subpath exports:
+ * - `@ahmadmoussawi/webdb/core/wasm` (`WasmEngine`)
+ * - `@ahmadmoussawi/webdb/core/js` (`JsEngine`)
+ * - `@ahmadmoussawi/webdb/storage/memory` (`MemoryStorage`)
+ * - `@ahmadmoussawi/webdb/storage/idb` (`IdbStorage`)
+ * - `@ahmadmoussawi/webdb/storage/opfs` (`OpfsStorage`)
  */
 
 export * from "./types/index.js";
