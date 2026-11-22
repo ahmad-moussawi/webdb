@@ -118,16 +118,23 @@ yarn add @ahmadmoussawi/webdb
 The snippet below is a complete, runnable example you can paste into any TypeScript or JavaScript project (Vite, Next.js, Node 20+, or Vitest):
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import {
+  WebDB,
+  WasmEngine,
+  IdbStorage,
+  MemoryStorage,
+} from "@ahmadmoussawi/webdb";
 
 async function main() {
-  // 1. Open a database
-  //    storage: 'idb' (IndexedDB) | 'opfs' (Origin Private File System) | 'memory' (In-Memory)
-  //    core:    'wasm' (default ~19 KB gzipped Wasm engine) | 'js' (pure JS fallback)
+  // 1. Open a database with explicit engine & storage instances
+  //    storage: new IdbStorage(name) | new OpfsStorage(name) | new MemoryStorage()
+  //    engine:  new WasmEngine(opts?) (~19 KB gzipped Wasm core) | new JsEngine() (pure JS core)
   const db = await WebDB.open({
-    name: "app_data",
-    storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
-    core: "wasm",
+    engine: new WasmEngine(),
+    storage:
+      typeof indexedDB !== "undefined"
+        ? new IdbStorage("app_data")
+        : new MemoryStorage(),
   });
 
   // 2. Define a table schema stored in Page 1 (Binary Master Catalog)
@@ -211,6 +218,47 @@ async function main() {
 
 main();
 ```
+
+---
+
+## 🪶 Modular Loading & Tree-Shaking (Core Engines & Storage)
+
+`WebDB.open({ engine, storage })` has zero hardcoded coupling to any specific execution engine or storage backend—only the classes you import enter your bundle. You can import directly from `@ahmadmoussawi/webdb` (tree-shakeable ESM with `"sideEffects": false`) or import standalone subpath modules for minimal bundles and direct browser ESM:
+
+```typescript
+import { WebDB } from "@ahmadmoussawi/webdb/slim";
+import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+
+// Option A: Stream the raw .wasm binary externally (skips the ~70 KB base64 chunk completely)
+const wasmUrl = new URL("@ahmadmoussawi/webdb/wasm", import.meta.url);
+
+const db = await WebDB.open({
+  engine: new WasmEngine({ wasmUrl }),
+  storage: new IdbStorage("app_data"),
+});
+
+// Option B: Pure JS engine + OPFS (zero WASM code loaded)
+// import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
+// import { OpfsStorage } from "@ahmadmoussawi/webdb/storage/opfs";
+// const db = await WebDB.open({
+//   engine: new JsEngine(),
+//   storage: new OpfsStorage("app_data"),
+// });
+```
+
+| Subpath Export | Contents |
+| :-- | :-- |
+| `@ahmadmoussawi/webdb` | Full root entrypoint (`WebDB`, `WasmEngine`, `JsEngine`, `IdbStorage`, `OpfsStorage`, `MemoryStorage`, query & live-query APIs) |
+| `@ahmadmoussawi/webdb/slim` | Core `WebDB`, `QueryBuilder`, `liveQuery`, compiler, planners & types with **zero** static engine/storage imports |
+| `@ahmadmoussawi/webdb/core/wasm` | `WasmEngine`, `instantiateWasmCore*()` (embedded chunk lazy-loaded only when `wasmUrl` / `wasmBinary` is omitted) |
+| `@ahmadmoussawi/webdb/core/js` | `JsEngine`, `vm_step` (pure JS VM interpreter; zero WASM code) |
+| `@ahmadmoussawi/webdb/storage/idb` | `IdbStorage`, `IdbStorageOptions`, `IdbDurability` |
+| `@ahmadmoussawi/webdb/storage/opfs` | `OpfsStorage` |
+| `@ahmadmoussawi/webdb/storage/memory` | `MemoryStorage` |
+| `@ahmadmoussawi/webdb/wasm` | Raw `webdb_core.wasm` binary asset for streaming via `new WasmEngine({ wasmUrl })` |
+
+See the [Storage Backends & Configuration Guide](https://ahmad-moussawi.github.io/webdb/guides/storage-and-configuration) for full details.
 
 ---
 

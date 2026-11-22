@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
-import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
-import { OpfsVfsAdapter } from '../src/host/storage/opfs.js';
+import { MemoryStorage } from '../src/host/storage/memory.js';
+import { OpfsStorage } from '../src/host/storage/opfs.js';
 import {
   encodeWalFileHeader,
   encodeWalFrame,
@@ -12,14 +12,15 @@ import {
   WAL_PAGE_SIZE,
 } from '../src/constants.js';
 import { computePageChecksum, computePage1Checksum } from '../src/host/storage/crc32.js';
+import { testEngine } from "./helpers/test_engine.js";
 
 describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
-  let vfs: MemoryVfsAdapter;
+  let vfs: MemoryStorage;
   let db: WebDB;
 
   beforeEach(async () => {
-    vfs = new MemoryVfsAdapter();
-    db = await WebDB.open({ vfs });
+    vfs = new MemoryStorage();
+    db = await WebDB.open({ engine: testEngine(), storage: vfs });
   });
 
   describe('1. Atomic Rollback & Isolation', () => {
@@ -222,7 +223,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       expect(await vfs.getWalFrameCount()).toBe(3);
 
       // Re-open WebDB -> triggers recoverFromWal()
-      const recoveredDb = await WebDB.open({ vfs });
+      const recoveredDb = await WebDB.open({ engine: testEngine(), storage: vfs });
 
       // Assert WAL was replayed and truncated to 0
       expect(await vfs.getWalFrameCount()).toBe(0);
@@ -283,7 +284,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.appendWalFrames([framePage1, frameCommit]);
 
       // Re-open database -> startup recovery must heal Page 1 before validating it
-      const recoveredDb = await WebDB.open({ vfs });
+      const recoveredDb = await WebDB.open({ engine: testEngine(), storage: vfs });
 
       // Assert database opened successfully and table is queryable
       const rows = await recoveredDb.from('secrets').toArray();
@@ -327,7 +328,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.appendWalFrames([frameCommit, partialFrame]);
 
       // Re-open DB: should not crash, must recover committed Tx 1 and discard partial frame
-      const recoveredDb = await WebDB.open({ vfs });
+      const recoveredDb = await WebDB.open({ engine: testEngine(), storage: vfs });
       const rows = await recoveredDb.from('logs').toArray();
       expect(rows).toHaveLength(1);
 
@@ -377,7 +378,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.appendWalFrames([frame, commitFrame]);
 
       // Recovery should stop before the torn frame and avoid corrupting the database
-      const recoveredDb = await WebDB.open({ vfs });
+      const recoveredDb = await WebDB.open({ engine: testEngine(), storage: vfs });
       const rows = await recoveredDb.from('items').toArray();
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ id: 1, val: 'Original' });
@@ -401,7 +402,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await db.close();
 
       // Reopen from VFS and read both table and index pages from disk (validating CRC32 checksums)
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       const rows = await reopened.from('orders').where('customer', '=', 'InTx_2').toArray();
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ id: 3, customer: 'InTx_2' });
@@ -415,8 +416,8 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await db.close();
 
       // Open with a very small buffer pool (8 slots) so inserting many large rows forces evictions mid-transaction
-      const smallVfs = new MemoryVfsAdapter();
-      const smallDb = await WebDB.open({ vfs: smallVfs, slotCount: 8 });
+      const smallVfs = new MemoryStorage();
+      const smallDb = await WebDB.open({ engine: testEngine(), storage: smallVfs, slotCount: 8 });
       await smallDb.createTable('big_logs', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true } },
         { name: 'payload', type: 'TEXT' },
@@ -450,7 +451,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       // Close (triggers checkpoint) and reopen from disk
       await smallDb.close();
-      const reopened = await WebDB.open({ vfs: smallVfs, slotCount: 16 });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: smallVfs, slotCount: 16 });
       const afterReopen = await reopened.from('big_logs').toArray();
       expect(afterReopen).toHaveLength(80);
       await reopened.close();
@@ -481,7 +482,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       // And must remain intact on disk after close & reopen
       await db.close();
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       const diskRows = await reopened.from('preserved').orderBy('id', 'asc').toArray();
       expect(diskRows).toHaveLength(2);
       await reopened.close();
@@ -540,8 +541,8 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
     it('recovers from an abrupt uncheckpointed crash (no db.close / no checkpoint) across multiple transactions and cache spills', async () => {
       await db.close();
 
-      const crashVfs = new MemoryVfsAdapter();
-      const activeDb = await WebDB.open({ vfs: crashVfs, slotCount: 8 });
+      const crashVfs = new MemoryStorage();
+      const activeDb = await WebDB.open({ engine: testEngine(), storage: crashVfs, slotCount: 8 });
 
       await activeDb.createTable('events', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -593,7 +594,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       // Simulate abrupt power loss: DO NOT call activeDb.close() or activeDb.checkpoint()!
       // Directly open a new WebDB instance against crashVfs to trigger recoverFromWal().
-      const recoveredDb = await WebDB.open({ vfs: crashVfs, slotCount: 16 });
+      const recoveredDb = await WebDB.open({ engine: testEngine(), storage: crashVfs, slotCount: 16 });
 
       // WAL must be replayed and truncated to 0
       expect(await crashVfs.getWalFrameCount()).toBe(0);
@@ -752,7 +753,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await vfs.writeWalHeader(badHeader);
       await vfs.appendWalFrames([new Uint8Array(WAL_PAGE_SIZE + 32)]);
 
-      const dbAfterBadHeader = await WebDB.open({ vfs });
+      const dbAfterBadHeader = await WebDB.open({ engine: testEngine(), storage: vfs });
       expect(await vfs.getWalFrameCount()).toBe(0);
       expect(await dbAfterBadHeader.from('audit').toArray()).toEqual([
         { id: 1, status: 'intact_base' },
@@ -814,14 +815,14 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
 
       await vfs.appendWalFrames([f1, f2, fStaleData, fStaleCommit]);
 
-      const dbAfterStaleSeq = await WebDB.open({ vfs });
+      const dbAfterStaleSeq = await WebDB.open({ engine: testEngine(), storage: vfs });
       const [recoveredPage] = await vfs.readPages([rootPageId]);
       // Must have replayed Tx 1 (0x11) and halted before out-of-sequence Tx 2 (0x99)
       expect(recoveredPage![100]).toBe(0x11);
       await dbAfterStaleSeq.close();
     });
 
-    it('verifies OpfsVfsAdapter WAL operations, partial truncation (frameIndex > 0), and crash recovery', async () => {
+    it('verifies OpfsStorage WAL operations, partial truncation (frameIndex > 0), and crash recovery', async () => {
       // Create an in-memory mock of OPFS FileSystemDirectoryHandle / FileSystemFileHandle
       const files = new Map<string, Uint8Array>();
       const makeFileHandle = (name: string) => ({
@@ -896,8 +897,8 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       });
 
       try {
-        const opfs = new OpfsVfsAdapter('test_opfs_wal');
-        const opfsDb = await WebDB.open({ vfs: opfs });
+        const opfs = new OpfsStorage('test_opfs_wal');
+        const opfsDb = await WebDB.open({ engine: testEngine(), storage: opfs });
 
         await opfsDb.createTable('opfs_items', [
           { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -919,7 +920,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
         expect(await opfs.getWalFrameCount()).toBe(framesAfterTx1);
 
         // Simulate abrupt crash on OPFS (reopen without closing opfsDb)
-        const opfsRecovered = await WebDB.open({ vfs: new OpfsVfsAdapter('test_opfs_wal') });
+        const opfsRecovered = await WebDB.open({ engine: testEngine(), storage: new OpfsStorage('test_opfs_wal') });
         const rows = await opfsRecovered.from('opfs_items').toArray();
         expect(rows).toEqual([{ id: 1, name: 'Committed_1' }]);
         await opfsRecovered.close();
@@ -937,8 +938,8 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
     it('handles large bulk insertMany (500+ large rows, ~150+ pages) and mid-transaction createIndex backfill under tight 16-slot buffer pool', async () => {
       await db.close();
 
-      const largeVfs = new MemoryVfsAdapter();
-      const constrainedDb = await WebDB.open({ vfs: largeVfs, slotCount: 16 });
+      const largeVfs = new MemoryStorage();
+      const constrainedDb = await WebDB.open({ engine: testEngine(), storage: largeVfs, slotCount: 16 });
 
       await constrainedDb.createTable('documents', [
         { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -985,7 +986,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       });
 
       // Simulate hard crash right after commit (before checkpoint) and reopen
-      const recovered = await WebDB.open({ vfs: largeVfs, slotCount: 32 });
+      const recovered = await WebDB.open({ engine: testEngine(), storage: largeVfs, slotCount: 32 });
 
       const allDocs = await recovered.from('documents').orderBy('id', 'asc').toArray();
       expect(allDocs).toHaveLength(500);
@@ -1059,7 +1060,7 @@ describe('Phase 4: Transactions, ACID Rollback & WAL Checkpointing', () => {
       await db.checkpoint();
       await db.close();
 
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       const resA = await reopened.from('blobs_a').orderBy('id', 'asc').toArray();
       const resB = await reopened.from('blobs_b').orderBy('id', 'asc').toArray();
 

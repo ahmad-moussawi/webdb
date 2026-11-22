@@ -1,10 +1,13 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 describe('WebDB End-to-End & Storage Persistence', () => {
-  it('creates tables, inserts rows, and queries data with MemoryVfsAdapter', async () => {
-    const db = await WebDB.open({ name: 'memory_test', storage: 'memory' });
+  it('creates tables, inserts rows, and queries data with MemoryStorage', async () => {
+    const db = await WebDB.open({ name: 'memory_test', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('users', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
@@ -33,7 +36,7 @@ describe('WebDB End-to-End & Storage Persistence', () => {
   });
 
   it('handles multi-page table expansion when page fills', async () => {
-    const db = await WebDB.open({ name: 'multipage_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'multipage_test', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('logs', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -59,11 +62,11 @@ describe('WebDB End-to-End & Storage Persistence', () => {
     expect(filtered.map((l) => l.id)).toEqual([91, 92, 93, 94, 95, 96, 97, 98, 99, 100]);
   });
 
-  it('persists data across database re-opens using IndexedDbVfsAdapter', async () => {
+  it('persists data across database re-opens using IdbStorage', async () => {
     const dbName = 'persisted_idb_test';
 
     // 1. Open database and write data
-    const db1 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db1 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
     await db1.createTable('tasks', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },
       { name: 'title', type: 'TEXT', flags: { notNull: true } },
@@ -76,7 +79,7 @@ describe('WebDB End-to-End & Storage Persistence', () => {
     await db1.close();
 
     // 2. Re-open database from IndexedDB
-    const db2 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db2 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
     const pendingTasks = await db2.from('tasks').where('done', '=', 0).toArray();
 
     expect(pendingTasks).toHaveLength(1);
@@ -88,7 +91,7 @@ describe('WebDB End-to-End & Storage Persistence', () => {
   });
 
   it('efficiently bulk inserts rows using insertMany and maintains indexes', async () => {
-    const db = await WebDB.open({ name: 'insert_many_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'insert_many_test', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('metrics', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },

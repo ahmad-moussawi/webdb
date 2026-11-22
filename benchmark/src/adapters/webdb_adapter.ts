@@ -1,4 +1,10 @@
-import { WebDB } from "@ahmadmoussawi/webdb";
+import {
+  WebDB,
+  WasmEngine,
+  JsEngine,
+  IdbStorage,
+  MemoryStorage,
+} from "@ahmadmoussawi/webdb";
 import {
   BenchmarkAdapter,
   BenchmarkRecord,
@@ -42,9 +48,11 @@ export class WebDbAdapter implements BenchmarkAdapter {
     this.dbName = `bench_wdb_${this.coreMode}_${this.storageMode}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     this.db = await WebDB.open({
-      name: this.dbName,
-      storage: this.storageMode,
-      core: this.coreMode,
+      engine: this.coreMode === "wasm" ? new WasmEngine() : new JsEngine(),
+      storage:
+        this.storageMode === "idb"
+          ? new IdbStorage(this.dbName)
+          : new MemoryStorage(),
     });
 
     // Safeguard: drop tables if they exist

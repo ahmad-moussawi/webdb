@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { WebDB } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 /**
  * Regression: after every row of a multi-page table was deleted, the first data page is empty but
@@ -14,7 +16,7 @@ const rows = (n: number, tag = '') => Array.from({ length: n }, (_, i) => ({ v: 
 
 describe('table scans skip empty pages in the chain', () => {
   const open = async () => {
-    const db = await WebDB.open({ name: `scan_${Math.random()}`, storage: 'memory' });
+    const db = await WebDB.open({ name: `scan_${Math.random()}`, engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('t', [...cols]);
     return db;
   };

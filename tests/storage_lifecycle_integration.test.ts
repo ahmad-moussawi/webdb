@@ -1,14 +1,17 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebDB, DataType, col, fn } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
 
 async function openIdb(options: { name?: string; slotCount?: number } = {}): Promise<WebDB> {
+  const dbName = options.name ?? `idb_integration_${Date.now()}_${dbSeq++}`;
   const db = await WebDB.open({
-    name: options.name ?? `idb_integration_${Date.now()}_${dbSeq++}`,
-    storage: 'idb',
+    engine: testEngine(),
+    storage: new IdbStorage(dbName),
     slotCount: options.slotCount,
   });
   openedDbs.push(db);
@@ -163,7 +166,7 @@ describe('Full Storage Lifecycle & Buffer Pool Thrashing Integration Tests', () 
     const dbName = `idb_persist_e2e_${Date.now()}_${dbSeq++}`;
 
     // Session 1: Create, insert, update
-    const db1 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db1 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
     openedDbs.push(db1);
 
     await db1.createTable('projects', [
@@ -185,7 +188,7 @@ describe('Full Storage Lifecycle & Buffer Pool Thrashing Integration Tests', () 
     await db1.close();
 
     // Session 2: Re-open the database from IndexedDB
-    const db2 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db2 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
     openedDbs.push(db2);
 
     const activeProjects = await db2

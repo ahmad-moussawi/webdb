@@ -5,13 +5,13 @@ import {
   BufferPoolDriver,
   createWasmMemory,
 } from "../src/host/driver/buffer_pool_driver.ts";
-import { MemoryVfsAdapter } from "../src/host/storage/memory.ts";
+import { MemoryStorage } from "../src/host/storage/memory.ts";
 import { page_init } from "../src/core/index.ts";
 import { PAGE_TYPE_CATALOG_PAGE } from "../src/constants.ts";
 
 describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pinning.test.ts)", () => {
   it("1. Pinning Immunity: Pinned slots are never evicted under heavy eviction load", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Create a small cache of 32 slots for quick saturation and eviction testing
     const memory = createWasmMemory(32);
     const io = new Io({ vfs, memory });
@@ -46,7 +46,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("2. Dirty Mask Synchronization: Sets bit on modification and clears bit on flush", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(64);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 64 });
@@ -78,7 +78,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("3. Clock (Second-Chance) Eviction: Recently accessed pages survive sweep via ref_bit second chance", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
@@ -121,7 +121,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("4. Boundary & Security Guards: Validates slot indices and page IDs against corruption", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
@@ -175,7 +175,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("6. FreePage Safety: Prevents reserved page freeing, double-freeing, and pinned page corruption", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
@@ -244,7 +244,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("8. System Catalog Immunity: Unpinned PAGE_TYPE_CATALOG_PAGE (0x0C) is never evicted", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with 4 slots: slot 0 (Page 1), slots 1..3 for pages 2, 3, 4
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
@@ -287,7 +287,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("10. Atomic Pin on Acquire: acquireAndPinPage prevents use-after-evict race conditions", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
@@ -310,7 +310,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("11. Atomic Pin on Allocate: allocateAndPinPage protects newly allocated slots from eviction", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
@@ -337,7 +337,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("12. Clean FreePage Eviction: Freed page is immediately flushed clean, preventing stale writes on eviction", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(4);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
@@ -371,7 +371,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("13. Stale FreePage Eviction Guard: Eviction never flushes free-page header over recycled page", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with 3 slots: slot 0 (Page 1), slots 1..2
     const memory = createWasmMemory(3);
     const io = new Io({ vfs, memory });
@@ -421,7 +421,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("14. Concurrent Acquire Coalescing: Concurrent acquirePage calls for same pageId coalesce without duplicate reads", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
@@ -454,7 +454,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("15. Concurrent Eviction Safety: In-flight candidate slot is pinned during VFS read so concurrent eviction cannot steal it", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     // Cache with only 2 slots: slot 0 (Page 1) and slot 1 for data
     const memory = createWasmMemory(2);
     const io = new Io({ vfs, memory });
@@ -497,7 +497,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("16. Concurrent Allocate Serialization: Concurrent allocatePage calls never return duplicate page IDs", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(16);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 16 });
@@ -536,7 +536,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("17. Concurrent Free Serialization: Concurrent freePage calls properly maintain free list integrity", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(16);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 16 });
@@ -568,7 +568,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("18. System Catalog Page Protection: freePage rejects catalog pages and Page 1", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
@@ -592,7 +592,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("19. Concurrent Mutation During Flush: Preserves dirty bit if page is modified during async write", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });
@@ -632,7 +632,7 @@ describe("Test Suite 3: Buffer Pinning & LRU Eviction Simulation (tests/cache_pi
   });
 
   it("20. Snapshot Isolation on Flush: In-flight buffer mutations do not mutate data sent to storage", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(8);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 8 });

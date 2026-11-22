@@ -25,9 +25,14 @@ async function attachVirtualOriginServer(
 <head><meta charset="utf-8"><title>WebDB DB-Grade E2E Harness</title></head>
 <body>
   <script type="module">
-    import { WebDB } from '/dist/webdb.js';
+    import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } from '/dist/webdb.js';
     import { Migrator } from '/dist/migrations.js';
     window.WebDB = WebDB;
+    window.WasmEngine = WasmEngine;
+    window.JsEngine = JsEngine;
+    window.IdbStorage = IdbStorage;
+    window.OpfsStorage = OpfsStorage;
+    window.MemoryStorage = MemoryStorage;
     window.Migrator = Migrator;
     window.__harnessReady = true;
   </script>
@@ -42,13 +47,13 @@ async function attachVirtualOriginServer(
         status: 200,
         contentType: "application/javascript",
         body: `
-import { WebDB } from '/dist/webdb.js';
+import { WebDB, WasmEngine, OpfsStorage } from '/dist/webdb.js';
 
 self.onmessage = async (ev) => {
   const { id, action, dbName, payload } = ev.data;
   try {
     if (action === 'write_and_hang') {
-      const db = await WebDB.open({ name: dbName, storage: 'opfs', core: 'wasm' });
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(dbName) });
       const isSync = Boolean(db.vfs?.isSynchronous);
       await db.createTable('events', [
         { name: 'id', type: 'INT32', primaryKey: true },
@@ -77,7 +82,7 @@ self.onmessage = async (ev) => {
         await db.close();
       }
     } else if (action === 'read_all') {
-      const db = await WebDB.open({ name: dbName, storage: 'opfs', core: 'wasm' });
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(dbName) });
       const isSync = Boolean(db.vfs?.isSynchronous);
       const rows = await db.from('events').orderBy('id', 'asc').toArray();
       const byIndex = await db.from('events').where('kind', '=', 'audit').orderBy('id', 'asc').toArray();
@@ -125,7 +130,7 @@ self.onmessage = async (ev) => {
 }
 
 test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Overflow, Migrations & Fault Injection", () => {
-  test("1. Wasm Core (core: 'wasm'): Full CRUD, Joins, Overflow TOAST & WAL Crash Recovery in Real Browser (IDB)", async ({
+  test("1. WasmEngine: Full CRUD, Joins, Overflow TOAST & WAL Crash Recovery in Real Browser (IDB)", async ({
     browser,
   }) => {
     const context = await browser.newContext();
@@ -137,10 +142,10 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", core: "wasm", slotCount: 16 });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new IdbStorage(name), slotCount: 16 });
       if (!(db as any).wasmCore) {
-        throw new Error("Expected wasmCore to be initialized when core: 'wasm'");
+        throw new Error("Expected wasmCore to be initialized when using WasmEngine");
       }
 
       await db.createTable("authors", [
@@ -181,8 +186,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const res = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new IdbStorage(name) });
 
       const joined = await db
         .from("articles")
@@ -317,8 +322,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     ]);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "opfs", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(name) });
       await db.createTable("opfs_ledger", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "note", type: "TEXT" },
@@ -329,8 +334,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     }, dbName);
 
     await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      (window as any).__opfsDb = await WebDB.open({ name, storage: "opfs", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      (window as any).__opfsDb = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(name) });
     }, dbName);
 
     // Concurrent transactions from both tabs on real OPFS
@@ -394,9 +399,9 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
 
     // Tab 1 runs v1 migration
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const Migrator = (window as any).Migrator;
-      const db = await WebDB.open({ name, storage: "idb", core: "wasm" });
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new IdbStorage(name) });
       const runner = new Migrator(db, {
         migrations: [
           {
@@ -421,8 +426,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
 
     // Tab 2 opens on v1 schema and caches it
     const tab2V1 = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "idb", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new IdbStorage(name) });
       (window as any).__migDb2 = db;
       return await db.from("users").toArray();
     }, dbName);
@@ -488,8 +493,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "opfs", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(name) });
       await db.createTable("kv", [
         { name: "k", type: "TEXT", primaryKey: true },
         { name: "v", type: "TEXT" },
@@ -533,8 +538,8 @@ test.describe("DB-Grade E2E: Wasm Core, OPFS SyncAccessHandle Workers, TOAST Ove
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const recovered = await tab2.evaluate(async (name) => {
-      const WebDB = (window as any).WebDB;
-      const db = await WebDB.open({ name, storage: "opfs", core: "wasm" });
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
+      const db = await WebDB.open({ engine: new WasmEngine(), storage: new OpfsStorage(name) });
       const rows = await db.from("kv").toArray();
       await db.close();
       return rows;

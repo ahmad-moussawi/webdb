@@ -93,12 +93,6 @@ export class BufferPoolDriver {
   readonly view: DataView;
   readonly uint8: Uint8Array;
   readonly slotCount: number;
-  private cachedJsVmStepPromise?: Promise<
-    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
-  >;
-  private cachedWasmVmStepPromise?: Promise<
-    (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus
-  >;
   readonly maxQueryMemory: number;
   readonly offsets: BufferPoolOffsets;
 
@@ -741,58 +735,23 @@ export class BufferPoolDriver {
   }
 
   /**
-   * Drives the VDBE VM step loop, handling STATUS_PAGE_FAULT until completion.
-   * Lazily loads only the active core engine if `stepFn` is not provided.
+   * Drives the VDBE VM step loop with an explicit `stepFn` runner, handling
+   * `VmStatus.PAGE_FAULT` until completion.
    */
   async stepVm(
     ctx: VmContext,
     bytecode: Uint8Array,
-    stepFn?: (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus,
+    stepFn: (ctx: VmContext, view: DataView, bytecode: Uint8Array) => VmStatus,
   ): Promise<VmStatus> {
-    let runStep = stepFn;
-    if (!runStep) {
-      const procEnv = (globalThis as any).process?.env?.WEBDB_CORE;
-      const envCore: "js" | "wasm" | undefined =
-        procEnv === "wasm" || procEnv === "js"
-          ? procEnv
-          : (globalThis as any).__WEBDB_DEFAULT_CORE__;
-      if (envCore === "wasm") {
-        if (!this.cachedWasmVmStepPromise) {
-          this.cachedWasmVmStepPromise = Promise.all([
-            import("../../core/wasm/wasm_runtime.ts"),
-            import("../../core/wasm/embedded_wasm.ts"),
-          ])
-            .then(([{ instantiateWasmCoreAsync }, { getWebDbCoreWasmBytes }]) =>
-              instantiateWasmCoreAsync(
-                this.wasmMemory,
-                getWebDbCoreWasmBytes(),
-              ),
-            )
-            .then((wasmCore) => wasmCore.vm_step)
-            .catch((err) => {
-              this.cachedWasmVmStepPromise = undefined;
-              throw err;
-            });
-        }
-        runStep = await this.cachedWasmVmStepPromise;
-      } else {
-        if (!this.cachedJsVmStepPromise) {
-          this.cachedJsVmStepPromise = import("../../core/js/vm.c.ts")
-            .then(({ vm_step }) => vm_step)
-            .catch((err) => {
-              this.cachedJsVmStepPromise = undefined;
-              throw err;
-            });
-        }
-        runStep = await this.cachedJsVmStepPromise;
-      }
+    if (typeof stepFn !== "function") {
+      throw new TypeError("BufferPoolDriver.stepVm requires a stepFn runner");
     }
-    let status = runStep(ctx, this.view, bytecode);
+    let status = stepFn(ctx, this.view, bytecode);
     while (status === VmStatus.PAGE_FAULT) {
       const faultPageId = ctx.cursor.pageId;
       await this.acquirePage(faultPageId);
       ctx.status = VmStatus.RUNNING;
-      status = runStep(ctx, this.view, bytecode);
+      status = stepFn(ctx, this.view, bytecode);
     }
     return status;
   }

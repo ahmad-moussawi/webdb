@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
-import { WebDB, createLiveQuery, liveQuery, MemoryVfsAdapter } from '../src/index.js';
+import { WebDB, createLiveQuery, liveQuery, MemoryStorage } from '../src/index.js';
 import {
   WebDBProvider,
   useWebDB,
@@ -30,6 +30,7 @@ import {
   ref,
   runInVueScope,
 } from './helpers/framework_test_harness.js';
+import { testEngine } from "./helpers/test_engine.js";
 
 function waitForCondition(
   predicate: () => boolean,
@@ -52,7 +53,7 @@ function waitForCondition(
 
 describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_query.test.ts)', () => {
   it('1. QueryBuilder.getReferencedTables() extracts base tables, joins, and nested subqueries', async () => {
-    const db = await WebDB.open({ name: 'ref_tables_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'ref_tables_test', engine: testEngine(), storage: new MemoryStorage() });
 
     const q = db
       .from('orders')
@@ -80,7 +81,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('2. createLiveQuery automatically tracks tables from QueryBuilder and updates only when watched tables change', async () => {
-    const db = await WebDB.open({ name: 'live_query_basic', storage: 'memory' });
+    const db = await WebDB.open({ name: 'live_query_basic', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('todos', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'title', type: 'TEXT' },
@@ -141,7 +142,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('3. createLiveQuery tracks joined tables and custom async multi-query functions', async () => {
-    const db = await WebDB.open({ name: 'live_query_joins', storage: 'memory' });
+    const db = await WebDB.open({ name: 'live_query_joins', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('authors', [
       { name: 'id', type: 'INT32', primaryKey: true },
       { name: 'name', type: 'TEXT' },
@@ -186,7 +187,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('4. React adapter (@ahmadmoussawi/webdb/react): useLiveQuery, useLiveQueryData, WebDBProvider & useWebDB', async () => {
-    const db = await WebDB.open({ name: 'react_live_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'react_live_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('tasks', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'title', type: 'TEXT' },
@@ -276,7 +277,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('5. Angular adapter (@ahmadmoussawi/webdb/angular): liveQuerySignal, liveQuery$, liveQueryState$, provideWebDB & injectWebDB', async () => {
-    const db = await WebDB.open({ name: 'angular_live_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'angular_live_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('items', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'name', type: 'TEXT' },
@@ -372,7 +373,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('6. Plain JavaScript helpers: QueryBuilder.live(), db.liveQuery(), liveQuery() & AsyncIterable (for await...of)', async () => {
-    const db = await WebDB.open({ name: 'plain_js_live_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'plain_js_live_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('notes', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'text', type: 'TEXT' },
@@ -442,7 +443,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('7. Vue.js adapter (@ahmadmoussawi/webdb/vue): useLiveQuery, useLiveQueryData, provideWebDB & useWebDB', async () => {
-    const db = await WebDB.open({ name: 'vue_live_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'vue_live_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('products', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'title', type: 'TEXT' },
@@ -525,8 +526,8 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('8. Bug 1 regression: createLiveQuery & liveQuerySignal re-subscribe when switching WebDB instances with identical schemas', async () => {
-    const db1 = await WebDB.open({ name: 'multi_company_1', storage: 'memory' });
-    const db2 = await WebDB.open({ name: 'multi_company_2', storage: 'memory' });
+    const db1 = await WebDB.open({ name: 'multi_company_1', engine: testEngine(), storage: new MemoryStorage() });
+    const db2 = await WebDB.open({ name: 'multi_company_2', engine: testEngine(), storage: new MemoryStorage() });
 
     for (const db of [db1, db2]) {
       await db.createTable('categories', [
@@ -625,7 +626,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('9. Bug 2a regression: concurrent liveQuerySignals and background queries do NOT cross-contaminate table subscriptions', async () => {
-    const db = await WebDB.open({ name: 'concurrent_trackers_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'concurrent_trackers_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('categories', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'name', type: 'TEXT' },
@@ -728,7 +729,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('10. Bug 2b & 2c regression: explicit options.tables is authoritative, and explicit refresh() after mutation never resolves early with stale data', async () => {
-    const db = await WebDB.open({ name: 'authoritative_tables_and_refresh', storage: 'memory' });
+    const db = await WebDB.open({ name: 'authoritative_tables_and_refresh', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('categories', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'name', type: 'TEXT' },
@@ -798,7 +799,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('11. Ticket 2 regression: trackLiveQueryPromise preserves active tracker across Promise.all, .then() chains, and direct WebDB read methods', async () => {
-    const db = await WebDB.open({ name: 'promise_all_continuation_test', storage: 'memory' });
+    const db = await WebDB.open({ name: 'promise_all_continuation_test', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('table_a', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'val', type: 'TEXT' },
@@ -906,11 +907,11 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
   });
 
   it('12. Ticket 3 regression: WebDB.importBinary() notifies active local & cross-tab subscriptions (including empty DB reset)', async () => {
-    const sharedVfs = new MemoryVfsAdapter();
+    const sharedVfs = new MemoryStorage();
     Object.defineProperty(sharedVfs, 'name', { value: 'idb_shared_sim' });
 
-    const dbA = await WebDB.open({ name: 'import_live_db', vfs: sharedVfs });
-    const dbB = await WebDB.open({ name: 'import_live_db', vfs: sharedVfs });
+    const dbA = await WebDB.open({ name: 'import_live_db', engine: testEngine(), storage: sharedVfs });
+    const dbB = await WebDB.open({ name: 'import_live_db', engine: testEngine(), storage: sharedVfs });
 
     await dbA.createTable('users', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -919,7 +920,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
     await dbA.insert('users', { name: 'Initial Alice' });
 
     // Prepare a second database snapshot to import (with updated users + a new table)
-    const stagingDb = await WebDB.open({ name: 'staging_import', storage: 'memory' });
+    const stagingDb = await WebDB.open({ name: 'staging_import', engine: testEngine(), storage: new MemoryStorage() });
     await stagingDb.createTable('users', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'name', type: 'TEXT' },
@@ -932,7 +933,7 @@ describe('Reactive Live Queries, React Hooks & Angular Signals/RxJS (tests/live_
     await stagingDb.close();
 
     // Also prepare a completely empty database binary snapshot (0 tables)
-    const emptyStagingDb = await WebDB.open({ name: 'empty_staging', storage: 'memory' });
+    const emptyStagingDb = await WebDB.open({ name: 'empty_staging', engine: testEngine(), storage: new MemoryStorage() });
     const emptyBinary = await emptyStagingDb.exportBinary();
     await emptyStagingDb.close();
 

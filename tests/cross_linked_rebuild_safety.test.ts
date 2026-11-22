@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   WebDB,
-  MemoryVfsAdapter,
+  MemoryStorage,
   PAGE_SIZE,
   MAX_ROW_SIZE,
   PAGE_TYPE_LEAF_DATA,
@@ -24,12 +24,14 @@ import {
   page_get_type,
   page_get_next_page_id,
 } from "../src/core/index.ts";
+import { testEngine } from "./helpers/test_engine.js";
 
 describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild safety", () => {
   it("1. reproduces RangeError in _rebuildTableSchemaInternal when two tables share a tail leaf page", async () => {
     const db = await WebDB.open({
       name: "repro_cross_link",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // 1. Create Table A (with FLOAT64 + TEXT columns, like inventory_transactions)
@@ -139,10 +141,11 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   });
 
   it('2. serializes concurrent autocommit writes triggered from subscribe("*") and Promise.all without cross-linking pages', async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const db = await WebDB.open({
       name: "concurrent_autocommit_sub",
-      vfs,
+      engine: testEngine(),
+      storage: vfs,
     });
 
     await db.createTable("orders", [
@@ -263,7 +266,8 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   it("3. prevents freeTableTreePages / dropTable from freeing a cross-linked PAGE_TYPE_CATALOG_PAGE or looping on cycles", async () => {
     const db = await WebDB.open({
       name: "drop_table_catalog_guard",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("keep_table", [
@@ -320,7 +324,8 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   it("4. handles cyclic nextPageId chains gracefully across query, update, delete, createIndex, and addColumn", async () => {
     const db = await WebDB.open({
       name: "cyclic_page_chain_guard",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("cyclic_tbl", [
@@ -452,7 +457,8 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   it("6. VM OP_COLUMN_TEXT and OP_COLUMN_BLOB guard against out-of-bounds slices on corrupt cells in both JS and WASM", async () => {
     const db = await WebDB.open({
       name: "vm_corrupt_var_slice_guard",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("docs", [
@@ -494,10 +500,11 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   });
 
   it("7. preserves WAL-committed Page 1 totalPages across syncCrossTabState and subsequent autocommit allocations", async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const db = await WebDB.open({
       name: "wal_page1_total_pages_sync",
-      vfs,
+      engine: testEngine(),
+      storage: vfs,
     });
 
     await db.createTable("table_a", [
@@ -551,7 +558,8 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   it("8. VM OP_REWIND, OP_NEXT_ROW, and OP_LAST stop cleanly when encountering a non-leaf page in both JS and WASM", async () => {
     const db = await WebDB.open({
       name: "vm_non_leaf_page_guard",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("events", [
@@ -597,7 +605,8 @@ describe("Cross-linked leaf data pages, bounds validation & addColumn rebuild sa
   it("9. dropColumn and alterTable safely unlink cross-linked foreign pages and preserve rows", async () => {
     const db = await WebDB.open({
       name: "drop_column_cross_link_guard",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("tbl_one", [

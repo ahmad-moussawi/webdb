@@ -5,12 +5,14 @@ import {
   getCellEditability,
   parseCellInput,
 } from '../playground/src/utils/resultEditing.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Playground result grid editability', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'grid_edit', storage: 'memory' });
+    db = await WebDB.open({ name: 'grid_edit', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('customers', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },
       { name: 'name', type: 'TEXT', flags: { notNull: true } },

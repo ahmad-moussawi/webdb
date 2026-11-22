@@ -2,12 +2,13 @@ import { IVfsAdapter } from './vfs.js';
 
 export type IdbDurability = 'default' | 'strict' | 'relaxed';
 
-export interface IndexedDbVfsOptions {
+export interface IdbStorageOptions {
   durability?: IdbDurability;
 }
 
-export class IndexedDbVfsAdapter implements IVfsAdapter {
+export class IdbStorage implements IVfsAdapter {
   readonly name = 'idb' as const;
+  readonly databaseName: string;
   readonly isSynchronous = false;
   readonly durability: IdbDurability;
 
@@ -15,7 +16,8 @@ export class IndexedDbVfsAdapter implements IVfsAdapter {
   private dbPromise: Promise<IDBDatabase> | null = null;
   private cachedWalFrameCount: number | null = null;
 
-  constructor(dbName: string, options?: IndexedDbVfsOptions) {
+  constructor(dbName: string, options?: IdbStorageOptions) {
+    this.databaseName = dbName;
     this.dbName = `webdb_${dbName}`;
     this.durability = options?.durability ?? 'relaxed';
   }

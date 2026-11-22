@@ -1,6 +1,8 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { WebDB } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 const g = globalThis as any;
 
@@ -132,7 +134,7 @@ describe.each([
 
 describe('QueryBuilder.toCanonicalString', () => {
   it('is identical for equivalent queries and differs when values differ', async () => {
-    const db = await WebDB.open({ name: 'canon', storage: 'memory' });
+    const db = await WebDB.open({ name: 'canon', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('t', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },
       { name: 'n', type: 'INT32' },

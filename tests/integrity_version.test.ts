@@ -4,14 +4,15 @@ import {
   CorruptPageError,
   UnsupportedFormatVersionError,
 } from '../src/types/index.js';
-import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
+import { MemoryStorage } from '../src/host/storage/memory.js';
 import { Io } from '../src/host/storage/io.js';
 import { BufferPoolDriver, createWasmMemory } from '../src/host/driver/buffer_pool_driver.js';
 import { computePage1Checksum } from '../src/host/storage/crc32.js';
+import { testEngine } from "./helpers/test_engine.js";
 
 describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integrity_version.test.ts)', () => {
   it('1. CRC32 Checksum Validation on Read: Bit flip in storage throws CorruptPageError', async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const memory = createWasmMemory(32);
     const io = new Io({ vfs, memory });
     const driver = new BufferPoolDriver({ io, memory, slotCount: 32 });
@@ -40,8 +41,8 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
   });
 
   it('2. Page 1 Checksum Verification: Tampering with metadata throws CorruptPageError', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_p1_integrity', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_p1_integrity', engine: testEngine(), storage: vfs });
     await db.createTable('users', [{ name: 'id', type: 'INT32' }]);
     await db.close();
 
@@ -53,13 +54,13 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
 
     // Reopen with corrupted Page 1 must throw CorruptPageError
     await expect(
-      WebDB.open({ name: 'test_p1_integrity', vfs })
+      WebDB.open({ name: 'test_p1_integrity', engine: testEngine(), storage: vfs })
     ).rejects.toThrow(CorruptPageError);
   });
 
   it('3. Engine Version Rejection: min_read_version = 99 throws UnsupportedFormatVersionError', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_future_version', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_future_version', engine: testEngine(), storage: vfs });
     await db.close();
 
     // Modify Page 1 header in VFS: min_read_version = 99 (bytes 10..11)
@@ -74,13 +75,13 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
 
     // Reopen must throw UnsupportedFormatVersionError
     await expect(
-      WebDB.open({ name: 'test_future_version', vfs })
+      WebDB.open({ name: 'test_future_version', engine: testEngine(), storage: vfs })
     ).rejects.toThrow(UnsupportedFormatVersionError);
   });
 
   it('4. Backward-Compatible Version Acceptance: file_format_version = 2 with min_read_version = 1 opens successfully', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_compat_version', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_compat_version', engine: testEngine(), storage: vfs });
     await db.createTable('posts', [{ name: 'id', type: 'INT32' }]);
     await db.close();
 
@@ -96,7 +97,7 @@ describe('Test Suite 5: Checksum Verification & Version Handshake (tests/integri
     await vfs.writePages([{ pageId: 1, data: page1Bytes! }]);
 
     // Reopen must succeed
-    const db2 = await WebDB.open({ name: 'test_compat_version', vfs });
+    const db2 = await WebDB.open({ name: 'test_compat_version', engine: testEngine(), storage: vfs });
     const posts = await db2.getTable('posts');
     expect(posts.name).toBe('posts');
     await db2.close();

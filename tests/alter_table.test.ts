@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
-import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
+import { MemoryStorage } from '../src/host/storage/memory.js';
 import {
   TableNotFoundError,
   TableAlreadyExistsError,
@@ -13,11 +13,12 @@ import {
   RowSizeLimitExceededError,
   ColumnDefinition,
 } from '../src/types/index.js';
+import { testEngine } from "./helpers/test_engine.js";
 
 describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   it('1. renameTable: O(1) metadata rename, preserves data, indexes, and persists across reopen', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_rename_table', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_rename_table', engine: testEngine(), storage: vfs });
 
     const created = await db.createTable('accounts', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -71,7 +72,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
     await db.close();
 
     // Reopen and verify persistence
-    const db2 = await WebDB.open({ name: 'test_rename_table', vfs });
+    const db2 = await WebDB.open({ name: 'test_rename_table', engine: testEngine(), storage: vfs });
     const rowsAfterReopen = await db2.from('customers').orderBy('id', 'asc').toArray();
     expect(rowsAfterReopen).toHaveLength(3);
     expect(rowsAfterReopen[2]).toEqual({ id: 3, email: 'c@example.com', balance: 500 });
@@ -79,8 +80,8 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('2. renameColumn: O(1) metadata rename across single and multi-page catalogs, preserving indexes', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_rename_col', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_rename_col', engine: testEngine(), storage: vfs });
 
     // Create a 65-column table (spans 2 column catalog pages: 56 + 9)
     const cols = [
@@ -127,7 +128,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
     await db.close();
 
     // Reopen and verify CRC32 checksums and column names on both catalog pages
-    const db2 = await WebDB.open({ name: 'test_rename_col', vfs });
+    const db2 = await WebDB.open({ name: 'test_rename_col', engine: testEngine(), storage: vfs });
     const alice = await db2.from('wide_users').where('handle', '=', 'alice').first();
     expect(alice?.id).toBe(1);
     expect(alice?.score_60).toBe(42);
@@ -135,8 +136,8 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('3. addColumn: migrates existing rows with defaultValue, preserves autoInc and secondary indexes', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_add_col', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_add_col', engine: testEngine(), storage: vfs });
 
     await db.createTable('employees', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -200,7 +201,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('4. dropColumn: removes column data, cascade-drops dependent indexes, and remaps surviving indexes', async () => {
-    const db = await WebDB.open({ name: 'test_drop_col', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_drop_col', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('products', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -266,7 +267,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('5. Unified db.alterTable() API and transactional ACID rollback of schema mutations', async () => {
-    const db = await WebDB.open({ name: 'test_alter_tx', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_alter_tx', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('orders', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
@@ -362,8 +363,8 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('6. Binary layout & catalog page boundary transitions (8 <-> 9 Null-Bitmap bytes and 56 <-> 57 catalog pages)', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_boundary_transitions', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_boundary_transitions', engine: testEngine(), storage: vfs });
 
     // Start with 8 columns (1-byte Null-Bitmap: ceil(8/8) = 1)
     const initialCols: ColumnDefinition[] = [
@@ -434,7 +435,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
 
     // Reopen database to verify catalog page chain and CRC32 integrity on disk
     await db.close();
-    const db2 = await WebDB.open({ name: 'test_boundary_transitions', vfs });
+    const db2 = await WebDB.open({ name: 'test_boundary_transitions', engine: testEngine(), storage: vfs });
     const reopenedRows = await db2.from('boundary_tbl').orderBy('id', 'asc').toArray();
     expect(reopenedRows).toHaveLength(2);
     expect(reopenedRows[0].c8).toBe('eighth');
@@ -443,10 +444,11 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('7. Multi-page table rebuild (200 rows) under tight 16-slot buffer pool + WAL crash recovery', async () => {
-    const vfs = new MemoryVfsAdapter();
+    const vfs = new MemoryStorage();
     const db = await WebDB.open({
       name: 'test_large_alter_crash',
-      vfs,
+      engine: testEngine(),
+      storage: vfs,
       slotCount: 16,
     });
 
@@ -496,7 +498,8 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
     // Reopen from VFS -> recoverFromWal replays the committed schema rebuild and discards the uncommitted one
     const dbRecovered = await WebDB.open({
       name: 'test_large_alter_crash',
-      vfs,
+      engine: testEngine(),
+      storage: vfs,
       slotCount: 16,
     });
 
@@ -534,7 +537,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('8. addColumn succeeds when rows exceed 2048B by spilling to overflow pages', async () => {
-    const db = await WebDB.open({ name: 'test_alter_row_overflow', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_alter_row_overflow', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('documents', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -572,7 +575,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('9. Dropping a middle fixed-width column shifts colOffset and remaps composite indexes for JOIN and GROUP BY', async () => {
-    const db = await WebDB.open({ name: 'test_middle_col_drop', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_middle_col_drop', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('departments', [
       { name: 'dept_id', type: 'INT32', primaryKey: true },
@@ -652,7 +655,7 @@ describe('Schema Mutations & ALTER TABLE (tests/alter_table.test.ts)', () => {
   });
 
   it('10. Nested savepoint (tx.transaction) partial schema rollback inside an outer transaction', async () => {
-    const db = await WebDB.open({ name: 'test_nested_savepoint_alter', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_nested_savepoint_alter', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('projects', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },

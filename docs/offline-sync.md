@@ -191,9 +191,12 @@ Below is a complete, copy-pasteable pattern for syncing a local WebDB database w
 ### Step 1: Create Domain & Sync Outbox Tables
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
-const db = await WebDB.open({ name: "notes_app", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("notes_app"),
+});
 
 // 1. Application table
 await db.createTable("notes", [

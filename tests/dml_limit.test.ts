@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { WebDB, DataType, Changeset } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('DELETE and UPDATE with LIMIT', () => {
   it('QueryBuilder .limit(n).delete() respects limit across repeated calls and edge cases', async () => {
-    const db = await WebDB.open({ name: 'qb_delete_limit_db' });
+    const db = await WebDB.open({ name: 'qb_delete_limit_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('tasks', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -51,7 +53,7 @@ describe('DELETE and UPDATE with LIMIT', () => {
   });
 
   it('QueryBuilder .limit(n).update() respects limit including page-overflow updates', async () => {
-    const db = await WebDB.open({ name: 'qb_update_limit_db' });
+    const db = await WebDB.open({ name: 'qb_update_limit_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('items', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -128,7 +130,7 @@ describe('DELETE and UPDATE with LIMIT', () => {
   });
 
   it('Direct db.delete() and db.update() options.limit respect limit', async () => {
-    const db = await WebDB.open({ name: 'direct_dml_limit_db' });
+    const db = await WebDB.open({ name: 'direct_dml_limit_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('logs', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -175,7 +177,7 @@ describe('DELETE and UPDATE with LIMIT', () => {
   });
 
   it('respects limit accurately when spanning multiple leaf data pages', async () => {
-    const db = await WebDB.open({ name: 'multipage_dml_limit_db' });
+    const db = await WebDB.open({ name: 'multipage_dml_limit_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('docs', [
       { name: 'id', type: DataType.INT32, primaryKey: true },
@@ -224,7 +226,7 @@ describe('DELETE and UPDATE with LIMIT', () => {
   });
 
   it('records at most limit mutations in changesets, hooks, and transactions with rollback', async () => {
-    const db = await WebDB.open({ name: 'tx_hooks_dml_limit_db' });
+    const db = await WebDB.open({ name: 'tx_hooks_dml_limit_db', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('accounts', [
       { name: 'id', type: DataType.INT32, primaryKey: true },

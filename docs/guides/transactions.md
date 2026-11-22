@@ -84,7 +84,7 @@ await db.transaction(async (tx) => {
 
 Web users frequently open multiple browser tabs of the same application or run background sync inside a Web Worker. WebDB handles multi-tab safety automatically:
 
-1. **Cross-Tab Serialization (`navigator.locks`):** When using persistent storage (`'idb'` or `'opfs'`), WebDB coordinates transactions across all open tabs and workers using the browser's native **Web Locks API**. If Tab A is committing a transaction, Tab B waits in a FIFO queue and automatically refreshes any modified pages in its local cache before running.
+1. **Cross-Tab Serialization (`navigator.locks`):** When using persistent storage (`IdbStorage` or `OpfsStorage`), WebDB coordinates transactions across all open tabs and workers using the browser's native **Web Locks API**. If Tab A is committing a transaction, Tab B waits in a FIFO queue and automatically refreshes any modified pages in its local cache before running.
 2. **Crash Recovery on Startup:** If a user closes their laptop, force-quits the browser, or a tab crashes mid-transaction, WebDB automatically replays committed WAL frames and discards incomplete frames the next time `WebDB.open()` is called.
 3. **Abandoned Transaction Timeout (30s):** To prevent a hung promise (such as a stalled network call inside a transaction block) from locking the database forever, WebDB automatically aborts and rolls back any transaction that remains completely idle for more than **30 seconds**.
 

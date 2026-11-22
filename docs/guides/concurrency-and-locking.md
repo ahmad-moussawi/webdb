@@ -274,7 +274,10 @@ In real-world web apps, a user may have Tab B open on an older release while Tab
 You can listen to cross-tab schema sync events on the `WebDB` instance to prompt the user to refresh the older tab:
 
 ```ts
-const db = await WebDB.open({ name: 'myapp', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('myapp'),
+});
 
 // Track the schema version when this tab loaded
 const initialSchemaVersion = db.getSyncState().schemaVersion;

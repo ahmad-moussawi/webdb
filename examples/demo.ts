@@ -1,9 +1,9 @@
-import { CostBasedPlanner, HeuristicPlanner, WebDB } from "../src/index.ts";
+import { CostBasedPlanner, HeuristicPlanner, JsEngine, MemoryStorage, WebDB } from "../src/index.ts";
 
 async function main() {
   const db = await WebDB.open({
-    name: "demo_db",
-    storage: "memory",
+    engine: new JsEngine(),
+    storage: new MemoryStorage(),
     planner: new CostBasedPlanner(),
   });
 

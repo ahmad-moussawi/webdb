@@ -4,12 +4,14 @@ import {
   UniqueConstraintViolationError,
   NotNullConstraintError,
 } from '../src/types/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Phase 4: Indexed Joins & Verification', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'phase4_test', storage: 'memory' });
+    db = await WebDB.open({ name: 'phase4_test', engine: testEngine(), storage: new MemoryStorage() });
   });
 
   describe('1. Indexed Nested-Loop Join Acceleration', () => {

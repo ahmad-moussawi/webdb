@@ -1,69 +1,82 @@
 # Storage Backends & Configuration
 
-When opening a database with `WebDB.open(options)`, you can choose how and where WebDB persists your data, which execution core to use, and how much memory to allocate for cache and analytical queries.
+When opening a database with `WebDB.open(options)`, you pass explicit `engine` and `storage` class instances along with optional memory and coordinator settings:
 
 ```typescript
-import { WebDB } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
 const db = await WebDB.open({
-  name: "app_production",
-  storage: "idb",
-  core: "wasm",
+  engine: new WasmEngine(),
+  storage: new IdbStorage("app_production"),
 });
 ```
 
 ---
 
-## 1. Choosing a Storage Backend (`storage`)
+## 1. Choosing a Storage Class (`storage`)
 
-WebDB provides three built-in storage backends that share the exact same query, indexing, and transaction APIs:
+WebDB provides three built-in storage classes that share the exact same query, indexing, and transaction APIs:
 
-| Storage Option              | Persistence          | Best Used For                                                                    | Browser / Runtime Support                                         |
-| :-------------------------- | :------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
-| **`'idb'`** _(Recommended)_ | Persistent on disk   | Main-thread web apps, PWAs, mobile browsers, and cross-tab apps                  | All modern browsers (Chrome, Safari, Firefox, Edge, iOS WebViews) |
-| **`'opfs'`**                | Persistent on disk   | Heavy write workloads, large datasets, and dedicated Web Workers                 | Modern Chromium, Firefox, and Safari 15.2+                        |
-| **`'memory'`** _(Default)_  | Ephemeral (RAM only) | Unit/integration tests (Vitest, Jest, Node.js), SSR, or temporary scratch tables | Universal (Browsers, Node.js, Bun, Deno, Edge Workers)            |
+| Storage Class                       | Persistence          | Best Used For                                                                    | Browser / Runtime Support                                         |
+| :---------------------------------- | :------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| **`IdbStorage`** _(Recommended)_    | Persistent on disk   | Main-thread web apps, PWAs, mobile browsers, and cross-tab apps                  | All modern browsers (Chrome, Safari, Firefox, Edge, iOS WebViews) |
+| **`OpfsStorage`**                   | Persistent on disk   | Heavy write workloads, large datasets, and dedicated Web Workers                 | Modern Chromium, Firefox, and Safari 15.2+                        |
+| **`MemoryStorage`**                 | Ephemeral (RAM only) | Unit/integration tests (Vitest, Jest, Node.js), SSR, or temporary scratch tables | Universal (Browsers, Node.js, Bun, Deno, Edge Workers)            |
 
-### IndexedDB (`storage: 'idb'`)
+### IndexedDB (`IdbStorage`)
 
-Stores 4 KB database pages and write-ahead log (WAL) frames inside browser IndexedDB object stores. It works reliably on the main UI thread as well as inside Web Workers without blocking frame rendering.
+Stores 4 KB database pages and write-ahead log (WAL) frames inside browser IndexedDB object stores. It works reliably on the main UI thread as well as inside Web Workers without blocking frame rendering:
 
 ```typescript
+import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
+
 const db = await WebDB.open({
-  name: "crm_client",
-  storage: "idb",
+  engine: new WasmEngine(),
+  storage: new IdbStorage("crm_client", {
+    // IndexedDB transaction durability: 'relaxed' (default) | 'default' | 'strict'
+    durability: "relaxed",
+  }),
 });
 ```
 
-### Origin Private File System (`storage: 'opfs'`)
+### Origin Private File System (`OpfsStorage`)
 
-Stores your database directly as native binary files (`.db` and `.wal`) inside the browser's private sandboxed file system (`navigator.storage.getDirectory()`).
+Stores your database directly as native binary files (`.db` and `.wal`) inside the browser's private sandboxed file system (`navigator.storage.getDirectory()`):
 
 ```typescript
+import { WebDB, WasmEngine, OpfsStorage } from "@ahmadmoussawi/webdb";
+
 const db = await WebDB.open({
-  name: "analytics_warehouse",
-  storage: "opfs",
+  engine: new WasmEngine(),
+  storage: new OpfsStorage("analytics_warehouse"),
 });
 ```
 
-### In-Memory (`storage: 'memory'`)
+### In-Memory (`MemoryStorage`)
 
-Runs entirely in memory with zero disk I/O overhead. All data is discarded when `db.close()` is called or the page refreshes.
+Runs entirely in memory with zero disk I/O overhead. All data is discarded when `db.close()` is called or the page refreshes:
 
 ```typescript
+import { WebDB, WasmEngine, MemoryStorage } from "@ahmadmoussawi/webdb";
+
 const db = await WebDB.open({
-  name: "unit_test_db",
-  storage: "memory",
+  engine: new WasmEngine(),
+  storage: new MemoryStorage(),
 });
 ```
 
 > [!TIP]
-> **Automatic Environment Fallback for Tests:** When sharing code between browser production and Node.js unit tests (like Vitest), you can select `'idb'` when `indexedDB` is present and fall back to `'memory'` in Node:
+> **Cross-Environment Selection for Tests:** When sharing code between browser production and Node.js unit tests (like Vitest), you can pick `IdbStorage` when `indexedDB` is present and `MemoryStorage` in Node:
 >
 > ```typescript
+> import { WebDB, WasmEngine, IdbStorage, MemoryStorage } from "@ahmadmoussawi/webdb";
+>
 > const db = await WebDB.open({
->   name: "my_app",
->   storage: typeof indexedDB !== "undefined" ? "idb" : "memory",
+>   engine: new WasmEngine(),
+>   storage:
+>     typeof indexedDB !== "undefined"
+>       ? new IdbStorage("my_app")
+>       : new MemoryStorage(),
 > });
 > ```
 
@@ -73,14 +86,17 @@ const db = await WebDB.open({
 
 ```typescript
 export interface WebDbOptions {
-  /** Unique database name (used to namespace IndexedDB stores, OPFS files, and multi-tab locks). */
-  name: string;
+  /** Execution engine instance (`new WasmEngine(opts?)` or `new JsEngine()`). */
+  engine: WebDbCoreEngine;
 
-  /** Built-in storage adapter: 'memory' (default) | 'idb' | 'opfs'. */
-  storage?: "memory" | "idb" | "opfs";
+  /** Storage backend instance (`new IdbStorage(name, opts?)`, `new OpfsStorage(name)`, `new MemoryStorage()`, or custom `IVfsAdapter`). */
+  storage: IVfsAdapter;
 
-  /** Execution core: 'wasm' (~19 KB gzipped / ~51 KB raw WebAssembly binary) | 'js' (pure JS fallback). */
-  core?: "wasm" | "js";
+  /**
+   * Optional cross-tab Web Locks / `BroadcastChannel` identifier override.
+   * Defaults to `storage.databaseName` when provided by `IdbStorage` or `OpfsStorage`.
+   */
+  name?: string;
 
   /** Pre-built binary snapshot (.webdb Uint8Array or ArrayBuffer) to seed the database on open. */
   initialData?: Uint8Array | ArrayBuffer;
@@ -94,34 +110,88 @@ export interface WebDbOptions {
   /** Default query planner strategy (defaults to CostBasedPlanner). */
   planner?: QueryPlanner;
 
-  /** Custom Virtual File System adapter implementing IVfsAdapter (overrides `storage`). */
-  vfs?: IVfsAdapter;
-
-  /** Optional custom WebAssembly binary buffer if hosting the .wasm file externally. */
-  wasmBinary?: ArrayBuffer | Uint8Array;
+  /** Enable cross-tab synchronization via Web Locks and BroadcastChannel (default: `true`). */
+  crossTabSync?: boolean;
 }
 ```
 
 ---
 
-## 3. Execution Core (`core: 'wasm' | 'js'`)
+## 3. Execution Engines (`WasmEngine` & `JsEngine`)
 
-WebDB includes two identical execution engines:
+WebDB includes two identical execution engine classes implementing `WebDbCoreEngine`:
 
-- **`'wasm'`:** Executes page scans, B+Tree searches, sorting, and aggregations inside a compiled WebAssembly binary ({{ $sizes.wasmGzip }} gzipped / {{ $sizes.wasmRaw }} raw embedded directly in the package—no external `.wasm` fetch or Vite asset plugin needed).
-- **`'js'`:** Runs the exact same engine logic in pure JavaScript/TypeScript. Useful for environments with strict Content Security Policies (`CSP`) that disallow `wasm-unsafe-eval` or when stepping through engine execution in a JS debugger.
+- **`WasmEngine` (`@ahmadmoussawi/webdb/core/wasm`):** Executes page scans, B+Tree searches, sorting, and aggregations inside a compiled WebAssembly binary ({{ $sizes.wasmGzip }} gzipped / {{ $sizes.wasmRaw }} raw). Calling `new WasmEngine()` with zero arguments lazily loads the embedded base64 chunk so no external asset config is required.
+- **`JsEngine` (`@ahmadmoussawi/webdb/core/js`):** Runs the exact same engine logic in pure JavaScript/TypeScript. Useful for environments with strict Content Security Policies (`CSP`) that disallow `wasm-unsafe-eval` or when stepping through engine execution in a JS debugger.
+
+### Streaming an External `.wasm` File (`wasmUrl`)
+
+If your bundler or CDN serves static `.wasm` assets, pass `wasmUrl` (or a pre-fetched `wasmBinary`) to `new WasmEngine(...)`. WebDB uses `WebAssembly.instantiateStreaming()` and **never loads the embedded ~70 KB base64 chunk**:
 
 ```typescript
+import { WebDB, WasmEngine, OpfsStorage } from "@ahmadmoussawi/webdb";
+
 const db = await WebDB.open({
-  name: "my_app",
-  storage: "idb",
-  core: "wasm",
+  engine: new WasmEngine({
+    wasmUrl: new URL("@ahmadmoussawi/webdb/wasm", import.meta.url),
+  }),
+  storage: new OpfsStorage("my_app"),
 });
 ```
 
 ---
 
-## 4. Tuning Memory Limits (`slotCount` & `maxQueryMemory`)
+## 4. Modular Loading, Tree-Shaking & Subpath Exports
+
+WebDB has zero hardcoded imports between `WebDB` and any specific engine or storage class, and ships as tree-shakeable ESM (`"sideEffects": false`). An app importing `WasmEngine` + `OpfsStorage` never pulls in the JS VM interpreter (`~62 KB`) or `IdbStorage` (`~11 KB`), and a `JsEngine` app never pulls in the WebAssembly runtime or embedded binary (`~79 KB`).
+
+For **minimal static bundles**, strict CSP/no-dynamic-import environments, or direct browser ESM without a bundler, import from the granular subpath entrypoints:
+
+```typescript
+import { WebDB } from "@ahmadmoussawi/webdb/slim";
+import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+
+const db = await WebDB.open({
+  engine: new WasmEngine({
+    wasmUrl: new URL("@ahmadmoussawi/webdb/wasm", import.meta.url),
+  }),
+  storage: new IdbStorage("app_production"),
+});
+```
+
+Or for a **pure-JS + OPFS** worker bundle (zero WASM runtime or binary bundled):
+
+```typescript
+import { WebDB } from "@ahmadmoussawi/webdb/slim";
+import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
+import { OpfsStorage } from "@ahmadmoussawi/webdb/storage/opfs";
+
+const db = await WebDB.open({
+  engine: new JsEngine(),
+  storage: new OpfsStorage("worker_db"),
+});
+```
+
+### Subpath Export Reference
+
+| Subpath | Exports | Notes |
+| :-- | :-- | :-- |
+| `@ahmadmoussawi/webdb` | Full API, engine classes & storage classes | Tree-shakeable ESM (`"sideEffects": false`) + single-file UMD/CJS bundle |
+| `@ahmadmoussawi/webdb/slim` | `WebDB`, `QueryBuilder`, `liveQuery`, compiler, planners, types | Zero static imports of WASM, JS VM, or storage classes (ESM) |
+| `@ahmadmoussawi/webdb/core/wasm` | `WasmEngine`, `instantiateWasmCore`, `instantiateWasmCoreAsync`, `instantiateWasmCoreStreaming` | Embedded chunk lazy-loaded only when `wasmBinary` / `wasmUrl` is omitted (ESM) |
+| `@ahmadmoussawi/webdb/core/js` | `JsEngine`, `vm_step`, `vm_step_raw` | Pure JS VM interpreter; zero WASM code (ESM) |
+| `@ahmadmoussawi/webdb/storage/idb` | `IdbStorage`, `IdbStorageOptions`, `IdbDurability` | IndexedDB storage only (ESM) |
+| `@ahmadmoussawi/webdb/storage/opfs` | `OpfsStorage` | OPFS storage only (ESM) |
+| `@ahmadmoussawi/webdb/storage/memory` | `MemoryStorage` | In-memory storage only (ESM) |
+| `@ahmadmoussawi/webdb/wasm` | `dist/webdb_core.wasm` | Raw WebAssembly binary for `new WasmEngine({ wasmUrl })` streaming |
+
+> [!NOTE]
+> The granular subpath entrypoints (`/slim`, `/core/*`, `/storage/*`) target ESM / modern bundler environments (and Node 22+). CommonJS (`require('@ahmadmoussawi/webdb')`) and `<script>` UMD consumers use the self-contained root bundle.
+
+---
+
+## 5. Tuning Memory Limits (`slotCount` & `maxQueryMemory`)
 
 WebDB uses bounded, predictable memory buffers so a heavy query never crashes a mobile browser tab:
 
@@ -142,8 +212,8 @@ Controls the maximum transient memory available for unindexed `ORDER BY` sorting
 
 ```typescript
 const db = await WebDB.open({
-  name: "analytics_db",
-  storage: "opfs",
+  engine: new WasmEngine(),
+  storage: new OpfsStorage("analytics_db"),
   slotCount: 2048, // 8 MB page cache
   maxQueryMemory: 64 * 1024 * 1024, // 64 MB query arena for large sorts/groupings
 });
@@ -151,17 +221,18 @@ const db = await WebDB.open({
 
 ---
 
-## 5. Custom VFS Adapters (`vfs`)
+## 6. Custom Storage Adapters (`IVfsAdapter`)
 
-If you want to store 4 KB database pages and Write-Ahead Log (WAL) frames in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote storage service), implement a class conforming to [`IVfsAdapter`](./src/host/storage/vfs.ts).
+If you want to store 4 KB database pages and Write-Ahead Log (WAL) frames in a custom backend (such as Electron's native Node `fs`, React Native storage, Cloudflare KV, or a remote storage service), implement a class conforming to [`IVfsAdapter`](https://github.com/ahmad-moussawi/webdb/blob/main/src/host/storage/vfs.ts).
 
 `IVfsAdapter` uses batch page/frame methods (`readPages`, `writePages`, `readWalFrames`, `appendWalFrames`) so implementations only need to handle arrays of pages and frames—avoiding duplicate single-item methods—while lifecycle/fsync hooks (`flush`, `flushWal`, `close`, `isSynchronous`) are optional:
 
 ```typescript
-import { WebDB, type IVfsAdapter } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, type IVfsAdapter } from "@ahmadmoussawi/webdb";
 
 class CustomVfsAdapter implements IVfsAdapter {
-  readonly name = "memory" as const; // 'memory' | 'opfs' | 'idb'
+  readonly name = "custom" as const; // Unique backend identifier (avoid "memory" for persistent adapters so Web Locks stay enabled)
+  readonly databaseName = "custom_db";
   readonly isSynchronous = false;
 
   // --- Main Database Pages (4,096 bytes each, 1-indexed pageId) ---
@@ -226,17 +297,18 @@ class CustomVfsAdapter implements IVfsAdapter {
 }
 
 const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new CustomVfsAdapter(),
   name: "custom_db",
-  vfs: new CustomVfsAdapter(),
 });
 ```
 
 > [!TIP]
-> **Extending `MemoryVfsAdapter`:** If you are building a read-only adapter or an in-memory adapter that periodically syncs pages to a remote backend, you can subclass `MemoryVfsAdapter` (exported from `@ahmadmoussawi/webdb`) so all WAL and page methods work out of the box, and only override the methods you need.
+> **Extending `MemoryStorage`:** If you are building a read-only adapter or an in-memory adapter that periodically syncs pages to a remote backend, you can subclass `MemoryStorage` (exported from `@ahmadmoussawi/webdb` and `@ahmadmoussawi/webdb/storage/memory`) so all WAL and page methods work out of the box, and only override the methods you need.
 
 ---
 
-## 6. Example: HTTP Range VFS (`HttpVfsAdapter`)
+## 7. Example: HTTP Range Storage (`HttpVfsAdapter`)
 
 Because WebDB's B+Tree engine suspends asynchronously on 4 KB page faults (`PAGE_SIZE = 4096`), you can query a large `.webdb` database hosted on **Amazon S3, Cloudflare R2, GitHub Pages, or any static CDN** using standard HTTP `Range: bytes=start-end` (`206 Partial Content`) requests—without downloading the entire database file.
 
@@ -244,14 +316,14 @@ When an indexed query runs, WebDB only fetches Page 1 (the system catalog), the 
 
 ### Implementing `HttpVfsAdapter`
 
-By extending `MemoryVfsAdapter`, your `HttpVfsAdapter` automatically caches every fetched 4 KB page in memory and even supports temporary local copy-on-write mutations in the browser session:
+By extending `MemoryStorage`, your `HttpVfsAdapter` automatically caches every fetched 4 KB page in memory and even supports temporary local copy-on-write mutations in the browser session:
 
 ```typescript
-import { WebDB, MemoryVfsAdapter } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, MemoryStorage } from "@ahmadmoussawi/webdb";
 
 const PAGE_SIZE = 4096;
 
-export class HttpVfsAdapter extends MemoryVfsAdapter {
+export class HttpVfsAdapter extends MemoryStorage {
   /** Tracks 1-based pageIds already requested from the remote server */
   private fetchedPages = new Set<number>();
 
@@ -338,7 +410,7 @@ export class HttpVfsAdapter extends MemoryVfsAdapter {
       }),
     );
 
-    // 4. Cache the fetched 4 KB pages in MemoryVfsAdapter for future reads
+    // 4. Cache the fetched 4 KB pages in MemoryStorage for future reads
     if (newlyLoaded.length > 0) {
       await super.writePages(newlyLoaded);
     }
@@ -355,8 +427,9 @@ export class HttpVfsAdapter extends MemoryVfsAdapter {
 
 ```typescript
 const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new HttpVfsAdapter("https://cdn.example.com/catalog.webdb"),
   name: "remote_catalog",
-  vfs: new HttpVfsAdapter("https://cdn.example.com/catalog.webdb"),
 });
 
 // Traverses the B+Tree index over 4 KB HTTP Range requests
@@ -381,7 +454,7 @@ const products = await db
 
 ---
 
-## 7. Closing the Database (`db.close()`)
+## 8. Closing the Database (`db.close()`)
 
 When shutting down a component, test, or worker, call `await db.close()` to flush any dirty pages, close `BroadcastChannel` listeners, and release underlying storage handles:
 

@@ -50,10 +50,11 @@ await db.transaction(async (tx) => {
 });`,
 
   http: `// Stream a multi-GB database on S3 / Cloudflare R2 via 4KB HTTP Range Requests
-import { WebDB, HttpVfsAdapter } from "@ahmadmoussawi/webdb";
+import { WebDB, WasmEngine, HttpVfsAdapter } from "@ahmadmoussawi/webdb";
 
 const db = await WebDB.open({
-  vfs: new HttpVfsAdapter("https://cdn.example.com/catalog.webdb"),
+  engine: new WasmEngine(),
+  storage: new HttpVfsAdapter("https://cdn.example.com/catalog.webdb"),
 });
 
 // Traverses B+Tree index pages over HTTP Range: bytes=X-Y
@@ -269,7 +270,7 @@ function highlightCode(code: string, tab: string): string {
 
   // 5. Types
   html = html.replace(
-    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|HttpVfsAdapter|Promise|Uint8Array|Error|string|number|boolean)\b/g,
+    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|WasmEngine|JsEngine|IdbStorage|OpfsStorage|MemoryStorage|HttpVfsAdapter|Promise|Uint8Array|Error|string|number|boolean)\b/g,
     (m) => saveToken(`<span class="hl-type">${m}</span>`),
   );
 
@@ -315,11 +316,14 @@ const copyFrameworkCode = () => {
   setTimeout(() => (copyFrameworkStatus.value = false), 2000);
 };
 
-const searchSnippet = `import { WebDB } from "@ahmadmoussawi/webdb";
+const searchSnippet = `import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 import { createSearchIndex } from "@ahmadmoussawi/webdb/search";
 import { useLiveQuery } from "@ahmadmoussawi/webdb/react"; // or vue, angular
 
-const db = await WebDB.open({ name: "docs_app", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("docs_app"),
+});
 
 // 1. Create a zero-overhead search index over your table (0 shadow tables!)
 const articleSearch = createSearchIndex(db, {
@@ -355,9 +359,12 @@ const copySearchCode = () => {
   setTimeout(() => (copySearchStatus.value = false), 2000);
 };
 
-const udfSnippet = `import { WebDB, DataType } from "@ahmadmoussawi/webdb";
+const udfSnippet = `import { WebDB, WasmEngine, IdbStorage, DataType } from "@ahmadmoussawi/webdb";
 
-const db = await WebDB.open({ name: "app_db", storage: "idb" });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("app_db"),
+});
 
 // 1. Leverage native Browser Web APIs as SQL functions (zero binary bloat!)
 db.registerFunction("format_money", (amount, currency = "USD") => {

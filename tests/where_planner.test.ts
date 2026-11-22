@@ -5,6 +5,8 @@ import {
   NoOpPlanner,
   CustomPlanner,
 } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Dedicated WherePlanner Architecture', () => {
   let db: WebDB;
@@ -12,7 +14,8 @@ describe('Dedicated WherePlanner Architecture', () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: 'where_planner_test',
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable('products', [
@@ -270,7 +273,8 @@ describe('Dedicated WherePlanner Architecture', () => {
     it('supports database-level default Planner', async () => {
       const customDb = await WebDB.open({
         name: 'custom_where_db',
-        storage: 'memory',
+        engine: testEngine(),
+        storage: new MemoryStorage(),
         planner: new CostBasedPlanner(),
       });
 

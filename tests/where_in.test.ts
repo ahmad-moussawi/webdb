@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { MAX_IN_LIST_SIZE } from '../src/constants.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('QueryBuilder & VDBE: whereIn / whereNotIn (Specification & Implementation)', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'test_where_in_db', storage: 'memory' });
+    db = await WebDB.open({ name: 'test_where_in_db', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('users', [
       { name: 'id', type: 'INT32', primaryKey: true },
       { name: 'name', type: 'TEXT' },

@@ -4,6 +4,8 @@ import {
   UniqueConstraintViolationError,
   ColumnNotFoundError,
 } from "../src/index.ts";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 async function countRows(db: WebDB, tableName: string): Promise<number> {
   const row = await db.from(tableName).count("*", "c").first();
@@ -16,7 +18,8 @@ describe("Stress & Edge Case Lifecycle Tests (JS & WASM)", () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: `stress-edge-${Date.now()}-${Math.random()}`,
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
   });
 
@@ -413,7 +416,8 @@ describe("Stress & Edge Case Lifecycle Tests (JS & WASM)", () => {
     const binarySnapshot = await db.exportBinary();
     const restoredDb = await WebDB.open({
       name: `restored-${Date.now()}-${Math.random()}`,
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     try {

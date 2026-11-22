@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { exportDatabaseToSql } from '../playground/src/utils/sqlExporter.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('SQLite SQL Exporter', () => {
   it('exports tables and records to a valid SQLite .sql dump', async () => {
-    const db = await WebDB.open({ name: 'test_export_db', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_export_db', engine: testEngine(), storage: new MemoryStorage() });
 
     // 1. Create tables
     await db.createTable('users', [

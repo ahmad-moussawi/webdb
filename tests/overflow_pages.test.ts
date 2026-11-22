@@ -5,11 +5,13 @@ import {
   IndexKeySizeExceededError,
   MAX_INDEX_KEY_SIZE,
 } from '../src/index.js';
-import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
+import { MemoryStorage } from '../src/host/storage/memory.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
   it('1. Inserts and queries large TEXT (10 KB, 50 KB) and BLOB (120 KB) rows seamlessly', async () => {
-    const db = await WebDB.open({ name: 'test_overflow_basic', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_overflow_basic', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('articles', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -51,7 +53,7 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
   });
 
   it('2. Evaluates WHERE filters (LIKE / equality) on overflow TEXT columns inside VDBE VM', async () => {
-    const db = await WebDB.open({ name: 'test_overflow_where', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_overflow_where', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('docs', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -78,8 +80,8 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
   });
 
   it('3. Frees and recycles overflow pages on UPDATE and DELETE without leaking pages', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_overflow_reclaim', storage: vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_overflow_reclaim', engine: testEngine(), storage: vfs });
 
     await db.createTable('blobs', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -120,7 +122,7 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
   });
 
   it('4. Enforces MAX_INDEX_KEY_SIZE (1024B) on indexed columns while allowing overflow on non-indexed columns', async () => {
-    const db = await WebDB.open({ name: 'test_overflow_index_limit', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_overflow_index_limit', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('posts', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -158,7 +160,7 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
   });
 
   it('5. Preserves overflow rows across ALTER TABLE (addColumn / dropColumn)', async () => {
-    const db = await WebDB.open({ name: 'test_overflow_alter', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_overflow_alter', engine: testEngine(), storage: new MemoryStorage() });
 
     await db.createTable('notes', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -185,7 +187,7 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
 
   it('6. Persists and recovers overflow pages across close/reopen with IndexedDB VFS & WAL', async () => {
     const dbName = `test_overflow_idb_wal_${Date.now()}_${Math.random()}`;
-    const db1 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db1 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
 
     await db1.createTable('assets', [
       { name: 'id', type: 'INT32', primaryKey: true },
@@ -197,7 +199,7 @@ describe('Phase 2: Row Overflow Pages (TOAST) & Relaxed Row Limits', () => {
     await db1.close();
 
     // Reopen fresh instance from the same IndexedDB store
-    const db2 = await WebDB.open({ name: dbName, storage: 'idb' });
+    const db2 = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName) });
     const rows = await db2.from('assets').toArray();
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(101);

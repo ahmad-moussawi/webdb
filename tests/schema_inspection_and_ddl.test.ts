@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { WebDB } from "../src/host/api/webdb.ts";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("tableMeta helper methods (hasColumn, getColumn, hasIndex, getIndex)", async () => {
     const db = await WebDB.open({
       name: "test_meta_helpers",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     const meta = await db.createTable("users", [
@@ -53,7 +56,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("hasTable & getTableNames inspection", async () => {
     const db = await WebDB.open({
       name: "test_has_table",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     expect(await db.hasTable("orders")).toBe(false);
@@ -84,7 +88,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("hasColumn & hasIndex inspection on WebDB", async () => {
     const db = await WebDB.open({
       name: "test_webdb_has_col_idx",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // When table does not exist
@@ -113,7 +118,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("createTableIfNotExists & dropTableIfExists", async () => {
     const db = await WebDB.open({
       name: "test_idempotent_tables",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     // 1. Initial create
@@ -148,7 +154,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("addColumnIfNotExists & dropColumnIfExists", async () => {
     const db = await WebDB.open({
       name: "test_idempotent_columns",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("products", [
@@ -191,7 +198,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("createIndexIfNotExists & dropIndexIfExists", async () => {
     const db = await WebDB.open({
       name: "test_idempotent_indexes",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("logs", [
@@ -223,7 +231,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("alterTable supports addColumnIfNotExists and dropColumnIfExists", async () => {
     const db = await WebDB.open({
       name: "test_alter_idempotent",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("tasks", [
@@ -266,7 +275,8 @@ describe("Schema Inspection & Idempotent DDL Methods", () => {
   it("works seamlessly inside db.transaction()", async () => {
     const db = await WebDB.open({
       name: "test_tx_idempotent",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.transaction(async (tx) => {

@@ -6,14 +6,17 @@ import {
   fn,
   SubqueryNestingTooDeepError,
 } from "../src/index.js";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Subqueries & Nested Queries (FROM, WHERE, SELECT)", () => {
   let db: WebDB;
 
   beforeEach(async () => {
     db = await WebDB.open({
-      storage: "memory",
       name: `test_subqueries_${Math.random().toString(36).slice(2)}`,
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable("employees", [

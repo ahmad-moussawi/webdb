@@ -1,5 +1,12 @@
 export interface IVfsAdapter {
   readonly name: string;
+  /**
+   * Optional database identifier exposed by named storage adapters (such as
+   * `IdbStorage` and `OpfsStorage`). Used by `WebDB.open({ storage })`
+   * for cross-tab Web Locks and `BroadcastChannel` synchronization when
+   * `options.name` is omitted.
+   */
+  readonly databaseName?: string;
   readonly isSynchronous?: boolean;
 
   /** Reads one or more 4KB pages from storage by 1-indexed pageId */

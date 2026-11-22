@@ -1,6 +1,8 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebDB, DataType, col } from '../src/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 
 let openedDbs: WebDB[] = [];
 let dbSeq = 0;
@@ -18,7 +20,7 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
   it('maintains cross-tab consistency with readSyncSnapshot, cachedWalFrameCount, and checkpointAtomic', async () => {
     const dbName = uniqueName('idb_crosstab_regression');
 
-    const tabA = await WebDB.open({ name: dbName, storage: 'idb', crossTabSync: true });
+    const tabA = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName), crossTabSync: true });
     openedDbs.push(tabA);
 
     await tabA.createTable('tickets', [
@@ -29,7 +31,7 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     await tabA.createIndex('tickets', ['status'], { name: 'idx_tickets_status' });
     await tabA.checkpoint();
 
-    const tabB = await WebDB.open({ name: dbName, storage: 'idb', crossTabSync: true });
+    const tabB = await WebDB.open({ name: dbName, engine: testEngine(), storage: new IdbStorage(dbName), crossTabSync: true });
     openedDbs.push(tabB);
 
     // Tab A writes via explicit tx (frames live in WAL, not yet checkpointed)
@@ -79,7 +81,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
 
     const db1 = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       crossTabSync: false,
     });
     // Intentionally do NOT add db1 to openedDbs (we simulate a crash without db1.close() checkpoint)
@@ -111,7 +114,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     // Reopen fresh instance -> recoverFromWal replays via checkpointAtomic
     const db2 = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       crossTabSync: false,
     });
     openedDbs.push(db2);
@@ -131,7 +135,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     // Small buffer pool to force uncommitted WAL spills during a large transaction
     const db = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 16,
       crossTabSync: false,
     });
@@ -176,7 +181,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
 
     const reopened = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       slotCount: 16,
       crossTabSync: false,
     });
@@ -193,7 +199,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     const dbName = uniqueName('idb_batched_dml_overflow');
     const db = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -229,7 +236,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
 
     const reopened = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       crossTabSync: false,
     });
     openedDbs.push(reopened);
@@ -253,7 +261,7 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     const srcName = uniqueName('idb_export_src');
     const dstName = uniqueName('idb_import_dst');
 
-    const src = await WebDB.open({ name: srcName, storage: 'idb', crossTabSync: false });
+    const src = await WebDB.open({ name: srcName, engine: testEngine(), storage: new IdbStorage(srcName), crossTabSync: false });
     openedDbs.push(src);
 
     await src.createTable('products', [
@@ -268,7 +276,7 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     const snapshot = await src.exportBinary();
 
     // Target DB already has uncheckpointed WAL frames before importBinary()
-    const dst = await WebDB.open({ name: dstName, storage: 'idb', crossTabSync: false });
+    const dst = await WebDB.open({ name: dstName, engine: testEngine(), storage: new IdbStorage(dstName), crossTabSync: false });
     openedDbs.push(dst);
     await dst.createTable('stale', [{ name: 'id', type: DataType.INT32, primaryKey: true }]);
     await dst.transaction(async (tx) => {
@@ -287,7 +295,7 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     await dst.close();
     openedDbs = openedDbs.filter((d) => d !== dst);
 
-    const reopenedDst = await WebDB.open({ name: dstName, storage: 'idb', crossTabSync: false });
+    const reopenedDst = await WebDB.open({ name: dstName, engine: testEngine(), storage: new IdbStorage(dstName), crossTabSync: false });
     openedDbs.push(reopenedDst);
 
     const rows = await reopenedDst.from('products').orderBy('id', 'asc').toArray();
@@ -302,8 +310,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
     const dbName = uniqueName('idb_concurrent_interleave');
     const db = await WebDB.open({
       name: dbName,
-      storage: 'idb',
-      idbDurability: 'relaxed',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName, { durability: 'relaxed' }),
       crossTabSync: false,
     });
     openedDbs.push(db);
@@ -339,7 +347,8 @@ describe('IndexedDB Optimizations — End-to-End Regression & Integration Tests'
 
     const reopened = await WebDB.open({
       name: dbName,
-      storage: 'idb',
+      engine: testEngine(),
+      storage: new IdbStorage(dbName),
       crossTabSync: false,
     });
     openedDbs.push(reopened);

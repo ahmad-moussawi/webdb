@@ -1,13 +1,16 @@
 /**
  * Subpath entry: `@ahmadmoussawi/webdb/core/wasm`
  *
- * Allows explicit WASM engine injection into `WebDB.open({ engine: createWasmEngine(...) })`
+ * Allows explicit WASM engine injection into `WebDB.open({ engine: new WasmEngine(...), storage })`
  * without pulling in either the JS VM interpreter (`vm.c.ts` / `vm.helpers.c.ts`)
  * or the embedded 70 KB base64 WASM chunk (which is only lazy-loaded when
  * neither `wasmBinary` nor `wasmUrl` is provided).
  */
 
 import {
+  compileWasmModuleAsync,
+  compileWasmModuleStreaming,
+  instantiateCompiledWasmModule,
   instantiateWasmCore,
   instantiateWasmCoreAsync,
   instantiateWasmCoreStreaming,
@@ -16,6 +19,9 @@ import {
 import type { WebDbCoreEngine } from "../js/vm_host.ts";
 
 export {
+  compileWasmModuleAsync,
+  compileWasmModuleStreaming,
+  instantiateCompiledWasmModule,
   instantiateWasmCore,
   instantiateWasmCoreAsync,
   instantiateWasmCoreStreaming,
@@ -31,27 +37,39 @@ export interface WasmEngineOptions {
 }
 
 /**
- * Creates a pluggable WASM core engine descriptor for `WebDB.open({ engine })`.
+ * Pluggable WebAssembly core engine for `WebDB.open({ engine: new WasmEngine(...), storage })`.
+ * Compiles the WASM binary once and caches the compiled `WebAssembly.Module` across instances.
  */
-export function createWasmEngine(
-  options?: WasmEngineOptions,
-): WebDbCoreEngine {
-  return {
-    mode: "wasm",
-    async init(memory: WebAssembly.Memory) {
-      let wasmCore: WasmCoreExports;
-      if (options?.wasmBinary) {
-        wasmCore = await instantiateWasmCoreAsync(memory, options.wasmBinary);
-      } else if (options?.wasmUrl) {
-        wasmCore = await instantiateWasmCoreStreaming(memory, options.wasmUrl);
+export class WasmEngine implements WebDbCoreEngine {
+  readonly mode = "wasm" as const;
+  private modulePromise?: Promise<WebAssembly.Module>;
+
+  constructor(private readonly options?: WasmEngineOptions) {}
+
+  private loadModule(): Promise<WebAssembly.Module> {
+    if (!this.modulePromise) {
+      let promise: Promise<WebAssembly.Module>;
+      if (this.options?.wasmBinary) {
+        promise = compileWasmModuleAsync(this.options.wasmBinary);
+      } else if (this.options?.wasmUrl) {
+        promise = compileWasmModuleStreaming(this.options.wasmUrl);
       } else {
-        const { getWebDbCoreWasmBytes } = await import("./embedded_wasm.ts");
-        wasmCore = await instantiateWasmCoreAsync(
-          memory,
-          getWebDbCoreWasmBytes(),
+        promise = import("./embedded_wasm.ts").then(
+          ({ getWebDbCoreWasmBytes }) =>
+            compileWasmModuleAsync(getWebDbCoreWasmBytes()),
         );
       }
-      return { vm_step: wasmCore.vm_step, wasmCore };
-    },
-  };
+      this.modulePromise = promise.catch((err) => {
+        this.modulePromise = undefined;
+        throw err;
+      });
+    }
+    return this.modulePromise;
+  }
+
+  async init(memory: WebAssembly.Memory) {
+    const wasmModule = await this.loadModule();
+    const wasmCore = await instantiateCompiledWasmModule(memory, wasmModule);
+    return { vm_step: wasmCore.vm_step, wasmCore };
+  }
 }

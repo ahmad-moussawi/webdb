@@ -7,12 +7,14 @@ import {
   CustomOrderPlanner,
   QueryPlanner,
 } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Join Cost Planner & Optimization', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'join_planner_test', storage: 'memory' });
+    db = await WebDB.open({ name: 'join_planner_test', engine: testEngine(), storage: new MemoryStorage() });
   });
 
   describe('1. Join Reordering to avoid Cartesian scans', () => {
@@ -314,7 +316,8 @@ describe('Join Cost Planner & Optimization', () => {
     it('allows passing planner instance to WebDB.open()', async () => {
       const heuristicDb = await WebDB.open({
         name: 'heuristic_db',
-        storage: 'memory',
+        engine: testEngine(),
+        storage: new MemoryStorage(),
         planner: new HeuristicPlanner(),
       });
 

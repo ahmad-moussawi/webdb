@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WebDB } from '../src/host/api/webdb.js';
 import { NotNullConstraintError } from '../src/types/index.js';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('SQLite-Compatible NULL Semantics & 3VL', () => {
   let db: WebDB;
 
   beforeEach(async () => {
-    db = await WebDB.open({ name: 'test_nulls', storage: 'memory' });
+    db = await WebDB.open({ name: 'test_nulls', engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('employees', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true, notNull: true } },
       { name: 'name', type: 'TEXT', flags: { notNull: true } },

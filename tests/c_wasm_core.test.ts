@@ -23,7 +23,7 @@ import {
   ALIGNMENT_PADDING_OFFSET,
   TRANSIENT_ARENA_OFFSET,
   createWasmMemory,
-  MemoryVfsAdapter,
+  MemoryStorage,
   WebDB,
   DataType,
   OpCode,
@@ -52,6 +52,8 @@ import {
   VM_CTX_IN_SETS_OFF,
   VM_CTX_SCRATCH_OFF,
 } from "../src/core/js/vm.helpers.c.ts";
+import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
 
 describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
   let memory: WebAssembly.Memory;
@@ -195,12 +197,12 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
     });
   });
 
-  describe("5. End-to-End WebDB with core: 'wasm'", () => {
+  describe("5. End-to-End WebDB with WasmEngine", () => {
     it("opens WebDB with C/WASM core and executes queries", async () => {
       const db = await WebDB.open({
         name: "wasm_test_db",
-        storage: "memory",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new MemoryStorage(),
       });
 
       expect(db.coreMode).toBe("wasm");
@@ -231,11 +233,11 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       expect(bytes[3]).toBe(0x6d);
     });
 
-    it("does not overwrite Buffer Pool Slot 16 (0x10000 / Page 17) on reopen with core: 'wasm'", async () => {
-      const vfs = new MemoryVfsAdapter();
+    it("does not overwrite Buffer Pool Slot 16 (0x10000 / Page 17) on reopen with WasmEngine", async () => {
+      const vfs = new MemoryStorage();
 
       // 1. Open DB and create 8 tables so Table 8 ("currency_rates") has colCatalogPageId = 17 (Slot 16 at 0x10000)
-      const db1 = await WebDB.open({ name: "repro", vfs, core: "wasm" });
+      const db1 = await WebDB.open({ name: "repro", engine: new WasmEngine(), storage: vfs });
 
       for (let i = 1; i <= 7; i++) {
         await db1.createTable(`t_${i}`, [
@@ -255,8 +257,8 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
 
       await db1.close();
 
-      // 2. Reopen the same VFS with core: 'wasm' (simulating page reload)
-      const db2 = await WebDB.open({ name: "repro", vfs, core: "wasm" });
+      // 2. Reopen the same VFS with WasmEngine (simulating page reload)
+      const db2 = await WebDB.open({ name: "repro", engine: new WasmEngine(), storage: vfs });
 
       const meta = await db2.getTable("currency_rates");
       expect(meta.colCatalogPageId).toBe(17);
@@ -371,11 +373,11 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       expect(ctx.aggregators[0].occupiedCount).toBe(717);
     });
 
-    it("executes complex end-to-end queries (filters, LIKE, ORDER BY, GROUP BY, multiple aggregates, indexes) with core: 'wasm'", async () => {
+    it("executes complex end-to-end queries (filters, LIKE, ORDER BY, GROUP BY, multiple aggregates, indexes) with WasmEngine", async () => {
       const db = await WebDB.open({
         name: "wasm_full_vm_e2e",
-        storage: "memory",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new MemoryStorage(),
       });
 
       await db.createTable("orders", [
@@ -493,8 +495,8 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       for (const engine of ["js", "wasm"] as const) {
         const db = await WebDB.open({
           name: `canary_overlap_${engine}`,
-          storage: "memory",
-          core: engine,
+          engine: engine === "wasm" ? new WasmEngine() : new JsEngine(),
+          storage: new MemoryStorage(),
         });
 
         const cols = [
@@ -600,8 +602,8 @@ describe("C Core (Compiled WebAssembly) Parity & Execution", () => {
       for (const engine of ["js", "wasm"] as const) {
         const db = await WebDB.open({
           name: `ulid_crockford_${engine}`,
-          storage: "memory",
-          core: engine,
+          engine: engine === "wasm" ? new WasmEngine() : new JsEngine(),
+          storage: new MemoryStorage(),
         });
 
         await db.createTable("events", [

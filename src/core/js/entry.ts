@@ -1,7 +1,7 @@
 /**
  * Subpath entry: `@ahmadmoussawi/webdb/core/js`
  *
- * Allows explicit JS VM engine injection into `WebDB.open({ engine: createJsEngine() })`
+ * Allows explicit JS VM engine injection into `WebDB.open({ engine: new JsEngine(), storage })`
  * without pulling in any WebAssembly runtime or embedded WASM bytes.
  */
 
@@ -27,13 +27,12 @@ export {
 };
 
 /**
- * Creates a pluggable JS VM core engine descriptor for `WebDB.open({ engine })`.
+ * Pluggable pure-JavaScript VM core engine for `WebDB.open({ engine: new JsEngine(), storage })`.
  */
-export function createJsEngine(): WebDbCoreEngine {
-  return {
-    mode: "js",
-    init() {
-      return { vm_step };
-    },
-  };
+export class JsEngine implements WebDbCoreEngine {
+  readonly mode = "js" as const;
+
+  init() {
+    return { vm_step };
+  }
 }

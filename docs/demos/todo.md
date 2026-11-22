@@ -52,7 +52,10 @@ Nothing re-fetches after a write. The live queries above see the change and upda
 ### 4. Schema and storage
 
 ```ts
-const db = await WebDB.open({ name: 'demo_todo', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('demo_todo'),
+});
 
 await db.createTable('todos', [
   { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },

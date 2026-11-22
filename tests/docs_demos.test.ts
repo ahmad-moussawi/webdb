@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import 'fake-indexeddb/auto';
 import { WebDB } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
 import * as todo from '../docs/.vitepress/theme/demos/todo/db.ts';
 import * as kanban from '../docs/.vitepress/theme/demos/kanban/db.ts';
 import * as cal from '../docs/.vitepress/theme/demos/calendar/db.ts';
@@ -11,7 +14,7 @@ import * as dates from '../docs/.vitepress/theme/demos/calendar/dates.ts';
 let opened: WebDB[] = [];
 let seq = 0;
 const open = async (name: string) => {
-  const db = await WebDB.open({ name: `${name}_${seq++}`, storage: 'memory' });
+  const db = await WebDB.open({ name: `${name}_${seq++}`, engine: testEngine(), storage: new MemoryStorage() });
   opened.push(db);
   return db;
 };
@@ -296,8 +299,8 @@ describe('docs demo: search UDFs', () => {
 });
 
 describe('docs demos on indexeddb storage (page fault + sorter regression)', () => {
-  it('runs todo, calendar, kanban, and search demos smoothly with storage: idb', async () => {
-    const todoDb = await WebDB.open({ name: `idb_demo_todo_${seq++}`, storage: 'idb' });
+  it('runs todo, calendar, kanban, and search demos smoothly with IdbStorage', async () => {
+    const todoDb = await WebDB.open({ engine: testEngine(), storage: new IdbStorage(`idb_demo_todo_${seq++}`) });
     opened.push(todoDb);
     await todo.setupTodoDb(todoDb);
     const todoRows = await todo.todosQuery(todoDb, 'all', '').toArray();
@@ -305,13 +308,13 @@ describe('docs demos on indexeddb storage (page fault + sorter regression)', () 
     const todoStats = await todo.todoStatsQuery(todoDb).toArray();
     expect(todoStats.length).toBeGreaterThan(0);
 
-    const calDb = await WebDB.open({ name: `idb_demo_cal_${seq++}`, storage: 'idb' });
+    const calDb = await WebDB.open({ engine: testEngine(), storage: new IdbStorage(`idb_demo_cal_${seq++}`) });
     opened.push(calDb);
     await cal.setupCalendarDb(calDb);
     const calUpcoming = await cal.upcomingQuery(calDb, new Date().toISOString()).toArray();
     expect(calUpcoming.length).toBeGreaterThan(0);
 
-    const kanbanDb = await WebDB.open({ name: `idb_demo_kanban_${seq++}`, storage: 'idb' });
+    const kanbanDb = await WebDB.open({ engine: testEngine(), storage: new IdbStorage(`idb_demo_kanban_${seq++}`) });
     opened.push(kanbanDb);
     await kanban.setupKanbanDb(kanbanDb);
     const lists = await kanban.listsQuery(kanbanDb).toArray();
@@ -319,7 +322,7 @@ describe('docs demos on indexeddb storage (page fault + sorter regression)', () 
     expect(lists).toHaveLength(3);
     expect(cards).toHaveLength(6);
 
-    const searchDb = await WebDB.open({ name: `idb_demo_search_${seq++}`, storage: 'idb' });
+    const searchDb = await WebDB.open({ engine: testEngine(), storage: new IdbStorage(`idb_demo_search_${seq++}`) });
     opened.push(searchDb);
     await search.setupSearchDb(searchDb);
     const searchCount = await search.articleCountQuery(searchDb).toArray();

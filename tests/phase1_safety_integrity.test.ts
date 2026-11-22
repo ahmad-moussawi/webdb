@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   WebDB,
   col,
-  MemoryVfsAdapter,
+  MemoryStorage,
   Io,
   BufferPoolDriver,
   TransactionCoordinator,
@@ -27,6 +27,7 @@ import { highlight, snippet } from "../src/search/index.ts";
 import { Migrator } from "../src/migrations/index.ts";
 import { regexpMatch, regexpReplace } from "../src/intl/index.ts";
 import { TsToCTranspiler } from "../scripts/transpiler/transpiler.ts";
+import { testEngine } from "./helpers/test_engine.js";
 
 describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
   describe("1. C/WASM Codecs, Interior B-Tree, memmove & Non-Trapping Float64", () => {
@@ -143,7 +144,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("handles large FLOAT64 (>2^31), Infinity, and NaN in SQL queries without WASM traps or JS RangeError", async () => {
-      const db = await WebDB.open({ storage: "memory" });
+      const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable("metrics", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "ts", type: "FLOAT64" },
@@ -198,7 +199,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
 
   describe("2. WAL & Io Durability", () => {
     it("Io.writeSlot does not drop concurrent modifications while a prior flush is in flight", async () => {
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const memory = createWasmMemory(4);
       const io = new Io({ vfs, memory });
       const driver = new BufferPoolDriver({ io, memory, slotCount: 4 });
@@ -241,7 +242,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("Io.readSlot copies coalesced in-flight read data into every distinct requesting slot", async () => {
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const seed = new Uint8Array(PAGE_SIZE);
       seed[42] = 0xab;
       await vfs.writePages([{ pageId: 2, data: seed }]);
@@ -263,8 +264,8 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("failed commit() does not clear dirty flags or leak uncommitted pages into committedWalPages", async () => {
-      const vfs = new MemoryVfsAdapter();
-      const db = await WebDB.open({ vfs });
+      const vfs = new MemoryStorage();
+      const db = await WebDB.open({ engine: testEngine(), storage: vfs });
       await db.createTable("items", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "name", type: "TEXT" },
@@ -293,7 +294,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
       expect(rows).toEqual([{ id: 1, name: "committed" }]);
 
       await db.close();
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       expect(await reopened.from("items").toArray()).toEqual([
         { id: 1, name: "committed" },
       ]);
@@ -301,8 +302,8 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("failed executeCheckpoint() preserves dirty flags so subsequent checkpoint persists pages", async () => {
-      const vfs = new MemoryVfsAdapter();
-      const db = await WebDB.open({ vfs });
+      const vfs = new MemoryStorage();
+      const db = await WebDB.open({ engine: testEngine(), storage: vfs });
       await db.createTable("logs", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "msg", type: "TEXT" },
@@ -330,7 +331,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
       await db.checkpoint();
       await db.close();
 
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       const rows = await reopened.from("logs").orderBy("id", "asc").toArray();
       expect(rows).toEqual([
         { id: 1, msg: "hello" },
@@ -342,7 +343,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
 
   describe("3. dropTable Prefix-Match Safety", () => {
     it("dropping table 'user' does NOT drop secondary indexes belonging to 'user_roles'", async () => {
-      const db = await WebDB.open({ storage: "memory" });
+      const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable("user", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "name", type: "TEXT" },
@@ -373,7 +374,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
 
   describe("4. whereExists / whereNotExists DML Safety", () => {
     it("correlated whereExists/whereNotExists delete and update affect ONLY matching rows", async () => {
-      const db = await WebDB.open({ storage: "memory" });
+      const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable("users", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "name", type: "TEXT" },
@@ -487,7 +488,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
   describe("6. Migrator step: 0 & Negative Step Validation", () => {
     it("up({ step: 0 }) and down({ step: 0 }) are strict no-ops; negative step throws RangeError", async () => {
       for (const mode of ["atomic", "per-migration"] as const) {
-        const db = await WebDB.open({ storage: "memory" });
+        const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
         const migrator = new Migrator(db, {
           mode,
           migrations: [
@@ -561,7 +562,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
 
   describe("8. PR Review Regressions (Correlated DML Isolation/groupKeys, WAL Serialization, Atomic Import, Batch Flush)", () => {
     it("correlated update/delete with groupBy() clears groupKeys and updates row-granularity matches", async () => {
-      const db = await WebDB.open({ storage: "memory" });
+      const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable("users", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "status", type: "TEXT" },
@@ -599,7 +600,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("correlated update/delete executes selection and mutation under a single exclusive lease", async () => {
-      const db = await WebDB.open({ storage: "memory" });
+      const db = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await db.createTable("users", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "name", type: "TEXT" },
@@ -655,7 +656,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("concurrent commitDirectPagesViaWal calls on different pages produce strictly monotonic WAL frameSeq", async () => {
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const origAppend = vfs.appendWalFrames.bind(vfs);
       vfs.appendWalFrames = async (frames) => {
         await new Promise((r) => setTimeout(r, 10));
@@ -685,8 +686,8 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("failed importBinary() preserves live buffer pool and committed WAL state when replaceDatabaseAtomic rejects", async () => {
-      const vfs = new MemoryVfsAdapter();
-      const sourceDb = await WebDB.open({ storage: "memory" });
+      const vfs = new MemoryStorage();
+      const sourceDb = await WebDB.open({ engine: testEngine(), storage: new MemoryStorage() });
       await sourceDb.createTable("imported_tbl", [
         { name: "id", type: "INT32", primaryKey: true },
       ]);
@@ -694,7 +695,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
       const importBytes = await sourceDb.exportBinary();
       await sourceDb.close();
 
-      const db = await WebDB.open({ vfs });
+      const db = await WebDB.open({ engine: testEngine(), storage: vfs });
       await db.createTable("live_tbl", [
         { name: "id", type: "INT32", primaryKey: true },
         { name: "val", type: "TEXT" },
@@ -724,7 +725,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
       await db.checkpoint();
       await db.close();
 
-      const reopened = await WebDB.open({ vfs });
+      const reopened = await WebDB.open({ engine: testEngine(), storage: vfs });
       expect(await reopened.from("live_tbl").toArray()).toEqual([
         { id: 1, val: "still_alive" },
       ]);
@@ -732,7 +733,7 @@ describe("Phase 1: Safety, C/WASM UB, WAL Durability & Data Integrity", () => {
     });
 
     it("Io.writeSlots rechecks earlier batch pages if a new flush starts while waiting on a later page", async () => {
-      const vfs = new MemoryVfsAdapter();
+      const vfs = new MemoryStorage();
       const memory = createWasmMemory(6);
       const io = new Io({ vfs, memory });
       const driver = new BufferPoolDriver({ io, memory, slotCount: 6 });

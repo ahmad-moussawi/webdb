@@ -25,8 +25,13 @@ async function attachVirtualOriginServer(
 <head><meta charset="utf-8"><title>WebDB E2E Harness</title></head>
 <body>
   <script type="module">
-    import { WebDB, col, fn } from '/dist/webdb.js';
+    import { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage, col, fn } from '/dist/webdb.js';
     window.WebDB = WebDB;
+    window.WasmEngine = WasmEngine;
+    window.JsEngine = JsEngine;
+    window.IdbStorage = IdbStorage;
+    window.OpfsStorage = OpfsStorage;
+    window.MemoryStorage = MemoryStorage;
     window.col = col;
     window.fn = fn;
     window.__harnessReady = true;
@@ -81,12 +86,11 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await page.waitForFunction(() => (window as any).__harnessReady === true);
 
     const result = await page.evaluate(async (name) => {
-      const { WebDB, col, fn } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage, col, fn } = window as any;
 
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 8192,
         crossTabSync: false,
       });
@@ -129,9 +133,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
       // Reopen with slotCount: 2048 to verify slotCount-independent persistence
       const reopened = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 2048,
         crossTabSync: false,
       });
@@ -168,7 +171,7 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await context.close();
   });
 
-  test("2. Real Chromium IDB batches autocommit writes, atomic checkpoints, and respects idbDurability", async ({
+  test("2. Real Chromium IDB batches autocommit writes, atomic checkpoints, and respects IdbStorage durability", async ({
     browser,
   }) => {
     const context = await browser.newContext();
@@ -180,7 +183,7 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await page.waitForFunction(() => (window as any).__harnessReady === true);
 
     const metrics = await page.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
 
       const recorded: Array<{
         stores: string[];
@@ -206,10 +209,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
       };
 
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
-        idbDurability: "relaxed",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name, { durability: "relaxed" }),
         crossTabSync: false,
       });
 
@@ -239,12 +240,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
       await db.close();
 
-      // Verify idbDurability: 'strict' passes durability: 'strict'
+      // Verify IdbStorage durability: 'strict' passes durability: 'strict'
       const strictDb = await WebDB.open({
-        name: `${name}_strict`,
-        storage: "idb",
-        core: "wasm",
-        idbDurability: "strict",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(`${name}_strict`, { durability: "strict" }),
         crossTabSync: false,
       });
       recorded.length = 0;
@@ -308,11 +307,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     // Tab 1 initializes schema with slotCount: 4096 (WASM)
     await tab1.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 4096,
       });
       await db.createTable("ledger", [
@@ -327,11 +325,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     // Tab 2 opens the same DB with slotCount: 2048 (WASM), reads Tab 1's WAL commit, and writes its own tx
     const tab2Result = await tab2.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 2048,
       });
       const initial = await db.from("ledger").orderBy("id", "asc").toArray();
@@ -377,11 +374,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     await tab1.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 4096,
         crossTabSync: false,
       });
@@ -408,11 +404,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const recovered = await tab2.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 4096,
         crossTabSync: false,
       });
@@ -444,13 +439,12 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await page.waitForFunction(() => (window as any).__harnessReady === true);
 
     const res = await page.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
 
       // 1. Seed a 20-table (>16) DB with >100 pages + single-col index with tie-breakers
       const src = await WebDB.open({
-        name: `${name}_src`,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(`${name}_src`),
         slotCount: 4096,
         crossTabSync: false,
       });
@@ -492,9 +486,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
       // 2. Build a tiny 1-table DB
       const tinySrc = await WebDB.open({
-        name: `${name}_tiny`,
-        storage: "memory",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new MemoryStorage(),
       });
       await tinySrc.createTable("fresh", [
         { name: "id", type: "INT32", primaryKey: true },
@@ -522,9 +515,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
       };
 
       const dst = await WebDB.open({
-        name: `${name}_dst`,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(`${name}_dst`),
         slotCount: 64,
         crossTabSync: false,
       });
@@ -568,9 +560,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
       await dst.close();
 
       const reopened = await WebDB.open({
-        name: `${name}_dst`,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(`${name}_dst`),
         slotCount: 64,
         crossTabSync: false,
       });
@@ -621,11 +612,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await tab1.waitForFunction(() => (window as any).__harnessReady === true);
 
     const cpMetrics = await tab1.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         crossTabSync: false,
       });
       await db.createTable("kv", [
@@ -681,11 +671,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
     await tab2.waitForFunction(() => (window as any).__harnessReady === true);
 
     const recovered = await tab2.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         crossTabSync: false,
       });
       const rows = await db.from("kv").orderBy("id", "asc").toArray();
@@ -714,15 +703,14 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     const workerResult = await page.evaluate(async (name) => {
       const workerCode = `
-        import { WebDB, col } from 'http://localhost/dist/webdb.js';
+        import { WebDB, WasmEngine, OpfsStorage, col } from 'http://localhost/dist/webdb.js';
 
         self.onmessage = async (e) => {
           try {
             const dbName = e.data;
             const db1 = await WebDB.open({
-              name: dbName + '_src',
-              storage: 'opfs',
-              core: 'wasm',
+              engine: new WasmEngine(),
+              storage: new OpfsStorage(dbName + '_src'),
               slotCount: 4096,
               crossTabSync: false,
             });
@@ -754,9 +742,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
             // Import into constrained OPFS pool (slotCount: 64)
             const db2 = await WebDB.open({
-              name: dbName + '_dst',
-              storage: 'opfs',
-              core: 'wasm',
+              engine: new WasmEngine(),
+              storage: new OpfsStorage(dbName + '_dst'),
               slotCount: 64,
               crossTabSync: false,
               initialData: exported,
@@ -770,9 +757,8 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
             await db2.close();
 
             const db3 = await WebDB.open({
-              name: dbName + '_dst',
-              storage: 'opfs',
-              core: 'wasm',
+              engine: new WasmEngine(),
+              storage: new OpfsStorage(dbName + '_dst'),
               slotCount: 64,
               crossTabSync: false,
             });
@@ -840,21 +826,19 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     // Tab 1 & Tab 2 both open the shared IDB database
     await tab1.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       (window as any).__db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 256,
       });
     }, dbName);
 
     await tab2.evaluate(async (name) => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const db = await WebDB.open({
-        name,
-        storage: "idb",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new IdbStorage(name),
         slotCount: 256,
       });
       (window as any).__db = db;
@@ -869,11 +853,10 @@ test.describe("Real Browser E2E: Dynamic slotCount (> 1024) & IDB Optimizations"
 
     // Tab 1 builds a 20-table snapshot in memory and imports it into the shared IDB DB
     await tab1.evaluate(async () => {
-      const { WebDB } = window as any;
+      const { WebDB, WasmEngine, JsEngine, IdbStorage, OpfsStorage, MemoryStorage } = window as any;
       const tmp = await WebDB.open({
-        name: "tmp_20_tables",
-        storage: "memory",
-        core: "wasm",
+        engine: new WasmEngine(),
+        storage: new MemoryStorage(),
       });
       for (let t = 0; t < 20; t++) {
         const tName = `entity_${String(t).padStart(2, "0")}`;

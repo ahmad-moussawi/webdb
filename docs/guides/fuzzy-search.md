@@ -30,10 +30,13 @@ WebDB gives you multiple search strategies depending on your performance require
 The `SearchIndex` class provides an out-of-the-box search engine that coordinates field weighting, ranking, and highlighting across multiple columns.
 
 ```ts
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage } from '@ahmadmoussawi/webdb';
 import { createSearchIndex } from '@ahmadmoussawi/webdb/search';
 
-const db = await WebDB.open({ name: 'docs_app', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('docs_app'),
+});
 
 // 1. Create a search index for your table
 const searchIndex = createSearchIndex(db, {
@@ -125,10 +128,13 @@ If you prefer building your own queries using WebDB's expression builder, you ca
 Call `registerFuzzySearch(db)` once after opening your database:
 
 ```ts
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage } from '@ahmadmoussawi/webdb';
 import { registerFuzzySearch } from '@ahmadmoussawi/webdb/search';
 
-const db = await WebDB.open({ name: 'my_app', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('my_app'),
+});
 registerFuzzySearch(db);
 ```
 

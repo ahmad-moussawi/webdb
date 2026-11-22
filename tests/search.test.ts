@@ -28,6 +28,8 @@ import {
   BM25Index,
   bm25Score,
 } from '@ahmadmoussawi/webdb/search';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe('Search Add-on: Text Primitives', () => {
   it('normalizes text by lowercasing and stripping diacritics', () => {
@@ -224,7 +226,8 @@ describe('Search Add-on: Low-Level UDFs and Expression Helpers', () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: `test_search_udfs_${Math.random()}`,
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     registerFuzzySearch(db);
@@ -330,7 +333,8 @@ describe('Search Add-on: High-Level SearchIndex', () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: `test_search_index_${Math.random()}`,
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable('articles', [
@@ -463,7 +467,8 @@ describe('Native VDBE Opcodes & UDF Batching', () => {
   beforeEach(async () => {
     db = await WebDB.open({
       name: `test-native-search-${Math.random()}`,
-      storage: 'memory',
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
 
     await db.createTable('products', [

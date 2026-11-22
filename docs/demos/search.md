@@ -27,10 +27,13 @@ This demo demonstrates **multi-field relevance ranking, typo tolerance, accent-i
 Define a `SearchIndex` coordinator pointing to your existing table:
 
 ```ts
-import { WebDB } from '@ahmadmoussawi/webdb';
+import { WebDB, WasmEngine, IdbStorage } from '@ahmadmoussawi/webdb';
 import { createSearchIndex } from '@ahmadmoussawi/webdb/search';
 
-const db = await WebDB.open({ name: 'demo_search', storage: 'idb' });
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage('demo_search'),
+});
 
 // Create a search index over the articles table
 export const articleSearch = createSearchIndex(db, {

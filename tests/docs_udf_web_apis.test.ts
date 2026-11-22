@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebDB } from '../src/index.ts';
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 /** Verifies the snippets shown in docs/guides/expressions-and-functions.md ("Embrace the browser"). */
 describe('UDFs built on Web platform APIs', () => {
@@ -8,7 +10,7 @@ describe('UDFs built on Web platform APIs', () => {
   beforeEach(async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-11-06T12:00:00Z'));
-    db = await WebDB.open({ name: `webapi_${Math.random()}`, storage: 'memory' });
+    db = await WebDB.open({ name: `webapi_${Math.random()}`, engine: testEngine(), storage: new MemoryStorage() });
     await db.createTable('orders', [
       { name: 'id', type: 'INT32', primaryKey: true, autoInc: true },
       { name: 'customer', type: 'TEXT', notNull: true },

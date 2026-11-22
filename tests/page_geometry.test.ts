@@ -28,6 +28,8 @@ import {
   attachTableMetaHelpers,
 } from "../src/types/index.ts";
 import { WebDB } from "../src/host/api/webdb.ts";
+import { testEngine } from "./helpers/test_engine.js";
+import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
 
 describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test.ts)", () => {
   const table: TableMeta = attachTableMetaHelpers({
@@ -223,7 +225,8 @@ describe("Test Suite 1: Slotted Page & Memory Geometry (tests/page_geometry.test
   it("5. Empty Page Free List Cycle", async () => {
     const db = await WebDB.open({
       name: "test_freelist_cycle",
-      storage: "memory",
+      engine: testEngine(),
+      storage: new MemoryStorage(),
     });
     await db.createTable("t1", [
       { name: "id", type: "INT32", flags: { primaryKey: true } },

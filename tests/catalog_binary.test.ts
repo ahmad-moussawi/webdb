@@ -5,12 +5,13 @@ import {
   DataType,
   ColumnDefinition,
 } from '../src/types/index.js';
-import { MemoryVfsAdapter } from '../src/host/storage/memory.js';
+import { MemoryStorage } from '../src/host/storage/memory.js';
+import { testEngine } from "./helpers/test_engine.js";
 
 describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_binary.test.ts)', () => {
   it('1. Magic Bytes Validation (corrupt byte 0 -> InvalidDatabaseError)', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_corrupt_magic', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_corrupt_magic', engine: testEngine(), storage: vfs });
     await db.createTable('t1', [{ name: 'id', type: 'INT32' }]);
     await db.close();
 
@@ -22,13 +23,13 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
 
     // Reopen must throw InvalidDatabaseError
     await expect(
-      WebDB.open({ name: 'test_corrupt_magic', vfs })
+      WebDB.open({ name: 'test_corrupt_magic', engine: testEngine(), storage: vfs })
     ).rejects.toThrow(InvalidDatabaseError);
   });
 
   it('2. Schema Persistence across close and reopen with 5 tables', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_schema_persistence', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_schema_persistence', engine: testEngine(), storage: vfs });
 
     await db.createTable('users', [
       { name: 'id', type: 'INT32', flags: { primaryKey: true } },
@@ -61,7 +62,7 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
     await db.close();
 
     // Re-open and verify bit-level reconstruction
-    const db2 = await WebDB.open({ name: 'test_schema_persistence', vfs });
+    const db2 = await WebDB.open({ name: 'test_schema_persistence', engine: testEngine(), storage: vfs });
 
     const users = await db2.getTable('users');
     expect(users.columns).toHaveLength(3);
@@ -90,7 +91,7 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
   });
 
   it('3. Schema Version Increment on every table creation', async () => {
-    const db = await WebDB.open({ name: 'test_schema_version_inc', storage: 'memory' });
+    const db = await WebDB.open({ name: 'test_schema_version_inc', engine: testEngine(), storage: new MemoryStorage() });
     const initialVersion = db.pool.getSlotDataView(0).getUint32(20, true);
     expect(initialVersion).toBe(1);
 
@@ -107,8 +108,8 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
   });
 
   it('4. Dedicated Column Catalog Pages & 100-Column Table Support', async () => {
-    const vfs = new MemoryVfsAdapter();
-    const db = await WebDB.open({ name: 'test_100_cols', vfs });
+    const vfs = new MemoryStorage();
+    const db = await WebDB.open({ name: 'test_100_cols', engine: testEngine(), storage: vfs });
 
     // Build 100 column definitions (spans 2 dedicated catalog pages, since 56 cols/page)
     const columns: ColumnDefinition[] = [];
@@ -124,7 +125,7 @@ describe('Test Suite 2: Schema Catalog & Page 1 Binary Structs (tests/catalog_bi
     // Close and reopen
     await db.close();
 
-    const db2 = await WebDB.open({ name: 'test_100_cols', vfs });
+    const db2 = await WebDB.open({ name: 'test_100_cols', engine: testEngine(), storage: vfs });
     const reopened = await db2.getTable('wide_table');
 
     expect(reopened.columnCount).toBe(100);

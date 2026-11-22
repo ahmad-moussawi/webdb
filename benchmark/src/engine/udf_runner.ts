@@ -3,7 +3,7 @@
  * Compares Scalar execution (row-by-row dispatch) vs Vector execution (128-row batchCall).
  */
 
-import { WebDB, DataType, col, fn, ExpressionBuilder } from '@ahmadmoussawi/webdb';
+import { WebDB, JsEngine, MemoryStorage, DataType, col, fn, ExpressionBuilder } from '@ahmadmoussawi/webdb';
 import { formatDate, formatCurrency, slugify, regexpMatch } from '@ahmadmoussawi/webdb/intl';
 
 const lit = (v: any) => new ExpressionBuilder({ type: 'literal', value: v } as any);
@@ -195,7 +195,11 @@ export async function runUdfBenchmarkSuite(
 ): Promise<UdfComparisonResult[]> {
   const results: UdfComparisonResult[] = [];
   const dbName = `webdb_bench_udf_${Date.now()}`;
-  const db = await WebDB.open({ name: dbName });
+  const db = await WebDB.open({
+    name: dbName,
+    engine: new JsEngine(),
+    storage: new MemoryStorage(),
+  });
 
   try {
     // 1. Create table

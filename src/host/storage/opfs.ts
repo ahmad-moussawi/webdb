@@ -1,7 +1,8 @@
 import { IVfsAdapter } from './vfs.js';
 
-export class OpfsVfsAdapter implements IVfsAdapter {
+export class OpfsStorage implements IVfsAdapter {
   readonly name = 'opfs' as const;
+  readonly databaseName: string;
   readonly isSynchronous: boolean;
 
   private dbName: string;
@@ -14,6 +15,7 @@ export class OpfsVfsAdapter implements IVfsAdapter {
   private walSyncHandle: any = null;
 
   constructor(dbName: string) {
+    this.databaseName = dbName;
     this.dbName = dbName;
     this.isSynchronous = typeof (globalThis as any).FileSystemSyncAccessHandle !== 'undefined';
   }
