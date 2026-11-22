@@ -128,12 +128,10 @@ main();
 ```
 
 > [!TIP]
-> **Minimal Bundles & Streaming `.wasm`:** Import directly from the modular subpaths and pass `{ wasmUrl }` to `WasmEngine` to stream the raw `.wasm` binary externally (skipping the ~70 KB embedded base64 chunk completely):
+> **Embedded by Default, Streamed When Ready (`wasmUrl`):** For zero-config developer experience, `new WasmEngine()` lazy-loads an embedded copy of the `.wasm` binary out of the box—no static asset copying or bundler rules required. In production, you can pass `{ wasmUrl }` to stream the raw binary directly and skip the ~70 KB embedded base64 chunk:
 >
 > ```typescript
-> import { WebDB } from "@ahmadmoussawi/webdb/slim";
-> import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
-> import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+> import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 >
 > const db = await WebDB.open({
 >   engine: new WasmEngine({
@@ -143,7 +141,14 @@ main();
 > });
 > ```
 >
-> See [**Modular Loading, Tree-Shaking & Subpath Exports**](/guides/storage-and-configuration#_4-modular-loading-tree-shaking-subpath-exports) for all engine (`WasmEngine` / `JsEngine`) and storage (`IdbStorage` / `OpfsStorage` / `MemoryStorage`) subpath options.
+> See [**Modular Loading, Tree-Shaking & Subpath Exports**](/guides/storage-and-configuration#_4-modular-loading-tree-shaking-subpath-exports) for direct browser ESM subpath imports (`WasmEngine`, `JsEngine`, `IdbStorage`, `OpfsStorage`, `MemoryStorage`).
+
+### Choosing an Execution Engine (`WasmEngine` vs `JsEngine`)
+
+> [!NOTE]
+> Use **`WasmEngine`** by default for production workloads. Switch to **`JsEngine`** when debugging an issue—so you get clean JavaScript stack traces and source-level stepping in DevTools—or when running in environments with limited WebAssembly support (such as strict Content Security Policies without `wasm-unsafe-eval`).
+>
+> `JsEngine` executes the same zero-allocation engine logic over a typed `ArrayBuffer` memory layout and is already fast enough for most client-side workloads, so swapping `new WasmEngine()` for `new JsEngine()` requires no other code changes.
 
 ---
 
