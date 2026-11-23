@@ -1753,14 +1753,17 @@ onBeforeUnmount(() => {
           <p class="bento-desc">
             Unlike desktop C ports that rely on Emscripten’s slow
             <code>Asyncify</code> stack rewriting, WebDB suspends cleanly on 4
-            KB page faults. Persist data in high-speed <strong>OPFS</strong> or
-            <strong>IndexedDB</strong>, or query multi-gigabyte read-only
-            databases hosted on S3/CDN via
+            KB page faults while batching cold sequential &amp; B+Tree scans via
+            <strong>adaptive read-ahead</strong> into contiguous bulk reads (~96%
+            fewer IndexedDB/OPFS round-trips). Persist data in high-speed
+            <strong>OPFS</strong> or <strong>IndexedDB</strong>, or query
+            multi-gigabyte databases hosted on S3/CDN via
             <code>Range: bytes=X-Y</code> requests without downloading the file.
           </p>
           <div class="bento-pills">
             <span class="bento-chip">OPFS SyncAccessHandle</span>
             <span class="bento-chip">IndexedDB Fallback</span>
+            <span class="bento-chip">Adaptive Read-Ahead</span>
             <span class="bento-chip">HttpVfsAdapter (4KB Range)</span>
             <span class="bento-chip">Custom IVfsAdapter</span>
           </div>

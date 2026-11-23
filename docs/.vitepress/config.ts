@@ -223,6 +223,10 @@ export default defineConfig({
         text: "Performance & Recipes",
         items: [
           {
+            text: "How WebDB Stays Fast",
+            link: "/guides/performance-architecture",
+          },
+          {
             text: "Query Performance & .explain()",
             link: "/query-planner",
           },

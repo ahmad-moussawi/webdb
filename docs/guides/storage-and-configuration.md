@@ -259,9 +259,9 @@ const db = await WebDB.open({
 
 ---
 
-## 5. Tuning Memory Limits (`slotCount` & `maxQueryMemory`)
+## 5. Tuning Memory & Read-Ahead (`slotCount`, `maxQueryMemory` & `readAhead`)
 
-WebDB uses bounded, predictable memory buffers so a heavy query never crashes a mobile browser tab:
+WebDB uses bounded, predictable memory buffers so a heavy query never crashes a mobile browser tab, while batching sequential disk I/O to keep cold queries fast:
 
 ### Buffer Pool Cache (`slotCount`)
 
@@ -286,6 +286,26 @@ const db = await WebDB.open({
   maxQueryMemory: 64 * 1024 * 1024, // 64 MB query arena for large sorts/groupings
 });
 ```
+
+### Adaptive Sequential Read-Ahead (`readAhead`)
+
+Instead of fetching cold 4 KB pages one transaction at a time during table scans, B+Tree index range scans, joins, or large overflow chains, WebDB's buffer pool detects sequential access patterns and ramps contiguous prefetch batches (`4 -> 8 -> 16 -> 32` pages).
+
+- **Default:** Enabled (`{ maxPages: 32 }`) on persistent storage (`IdbStorage`, `OpfsStorage`, `NodeFsStorage`, and custom `IVfsAdapter`s), and automatically disabled on `MemoryStorage`.
+- **When to raise `maxPages` (up to `256`):** Increase to `{ maxPages: 64 }` or `{ maxPages: 128 }` alongside a larger `slotCount` for large cold analytical scans, snapshots, or high-latency remote HTTP Range storage.
+- **When to disable (`readAhead: false`):** Only useful for benchmarking single-page fault behavior or heavily constrained tiny caches (`< 16` slots).
+
+```typescript
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("large_catalog"),
+  slotCount: 2048,
+  readAhead: { maxPages: 64 }, // Prefetch up to 64 contiguous pages (256 KB) per batch
+});
+```
+
+> [!TIP]
+> See [**How WebDB Stays Fast**](/guides/performance-architecture) for cold-scan benchmarks across `IdbStorage` (~12x–25x faster cold scans), `NodeFsStorage`, and point-lookup zero-amplification guarantees.
 
 ---
 

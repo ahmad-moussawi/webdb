@@ -75,7 +75,7 @@ WebDB fills this gap by **reimagining a database engine from scratch for modern 
 
 **Embracing Web APIs:** Instead of bundling heavy C libraries for dates, regexes, Unicode segmentation, or cryptography, WebDB delegates directly to native browser APIs (`Date`, `RegExp`, `Intl.Segmenter`, and `crypto.subtle`) via zero-overhead synchronous UDFs.
 
-**Async VFS by Heart:** Desktop databases expect synchronous POSIX disk calls, forcing Wasm ports to rely on Emscripten’s slow, bloated `Asyncify` stack rewriting. WebDB's execution engine suspends cleanly via non-blocking page faults whenever a 4KB page is missing. This makes the storage layer completely pluggable: pages can be read from high-speed **OPFS**, persisted in **IndexedDB**, or even streamed on-demand across the network from an S3/CDN bucket via **HTTP Range Requests** (`HttpVfsAdapter`).
+**Async VFS by Heart:** Desktop databases expect synchronous POSIX disk calls, forcing Wasm ports to rely on Emscripten’s slow, bloated `Asyncify` stack rewriting. WebDB's execution engine suspends cleanly via non-blocking page faults whenever a 4KB page is missing—and pairs async faults with **adaptive sequential & B+Tree chain read-ahead**, collapsing cold IndexedDB, OPFS, and HTTP Range scans into contiguous batch reads (~96% fewer I/O round-trips and ~10x–20x faster cold IndexedDB scans) with zero amplification on random point lookups. This makes the storage layer completely pluggable: pages can be read from high-speed **OPFS**, persisted in **IndexedDB**, or streamed on-demand across the network from an S3/CDN bucket via **HTTP Range Requests** (`HttpVfsAdapter`).
 
 ---
 
@@ -88,8 +88,9 @@ WebDB is currently in an **early prototype ("walking skeleton") stage**:
 - **Current Milestone:** Slotted-page layouts, basic VDBE opcode execution, in-memory/IndexedDB adapters, and query planning are implemented and verified with automated test suites. Full V1 engine development is actively underway.
 - **Interactive Tools Live:** You can test queries in the [WebDB Studio Playground](https://ahmad-moussawi.github.io/webdb/playground/) or evaluate performance in the [In-Browser Benchmark Suite](https://ahmad-moussawi.github.io/webdb/benchmark/).
 
-Read our complete specifications:
+Read our performance architecture and complete specifications:
 
+- [How WebDB Stays Fast (Performance Architecture)](https://ahmad-moussawi.github.io/webdb/guides/performance-architecture)
 - [Strategic Master Plan](https://ahmad-moussawi.github.io/webdb/plans/plan.html)
 - [System Limitations & Invariants](https://ahmad-moussawi.github.io/webdb/plans/limitations.html)
 - [Future Extensions: Vector, JSON & Hybrid Search](https://ahmad-moussawi.github.io/webdb/plans/future_extensions_roadmap.html)

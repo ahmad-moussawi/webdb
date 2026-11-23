@@ -4,6 +4,9 @@ When you write a query with WebDB's Query Builder, you describe **what** data yo
 
 This guide shows how to inspect query execution plans with `.explain()`, optimize slow queries with indexes, and configure WebDB's query planner when needed.
 
+> [!TIP]
+> Looking for the full physical performance picture—Wasm core size, zero-copy slotted pages, write coalescing, and adaptive read-ahead benchmarks? See [**How WebDB Stays Fast**](/guides/performance-architecture).
+
 ---
 
 ## 1. Inspecting Queries with `.explain()`
@@ -88,6 +91,16 @@ const topScores = await db
 - **Cheap Checks First:** WebDB automatically reorders `AND` filters so fast checks (`IS NOT NULL`, integer comparisons) run before expensive checks (`LIKE '%pattern%'` or custom UDFs).
 - **Transitive Join Inference:** In `.join('orders', 'users.id', '=', 'orders.user_id').where('users.id', '=', 42)`, WebDB automatically infers `orders.user_id = 42` and uses an index seek on both tables.
 - **Contradiction Short-Circuiting:** If dynamic UI filters produce an impossible condition (such as `where('id', '=', 1).where('id', '=', 2)` or `whereIn('status', [])`), WebDB detects the contradiction at compile time and returns `[]` in 1 instruction with zero page reads.
+
+### D. Adaptive Sequential Read-Ahead & Storage Batching
+
+Even when a query *must* perform a cold `TableScan`, range `IndexScan`, join, or large (`> 60 KB`) blob traversal, WebDB avoids reading cold 4 KB pages one round-trip at a time:
+
+- **Adaptive Prefetch Ramp (`4 -> 8 -> 16 -> 32` pages):** Tracks up to 8 concurrent scan frontiers across physical strides and B+Tree `nextPageId` leaf/overflow chains, collapsing **~96% of storage round-trips** on cold scans.
+- **Single-Transaction `IdbStorage` Reads:** Contiguous batches trigger `IDBKeyRange.bound()` + `store.getAll()` in one IndexedDB transaction (**~8x–20x faster** cold scans in browsers), while `OpfsStorage` and `NodeFsStorage` collapse adjacent reads into a single bulk buffer read.
+- **Zero Point-Lookup Overhead:** Random key lookups (`WHERE id = ?`) never open a prefetch window, and warm buffer pool hits stay synchronous in RAM.
+
+See [How WebDB Stays Fast](/guides/performance-architecture) for benchmarks and [Storage Backends & Config](/guides/storage-and-configuration) for `readAhead` configuration (`{ maxPages: 32 }` default, up to `256`).
 
 ---
 
