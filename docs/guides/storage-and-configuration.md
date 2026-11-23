@@ -15,13 +15,14 @@ const db = await WebDB.open({
 
 ## 1. Choosing a Storage Class (`storage`)
 
-WebDB provides three built-in storage classes that share the exact same query, indexing, and transaction APIs:
+WebDB provides four built-in storage classes that share the exact same query, indexing, and transaction APIs:
 
-| Storage Class                       | Persistence          | Best Used For                                                                    | Browser / Runtime Support                                         |
-| :---------------------------------- | :------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
-| **`IdbStorage`** _(Recommended)_    | Persistent on disk   | Main-thread web apps, PWAs, mobile browsers, and cross-tab apps                  | All modern browsers (Chrome, Safari, Firefox, Edge, iOS WebViews) |
-| **`OpfsStorage`**                   | Persistent on disk   | Heavy write workloads, large datasets, and dedicated Web Workers                 | Modern Chromium, Firefox, and Safari 15.2+                        |
-| **`MemoryStorage`**                 | Ephemeral (RAM only) | Unit/integration tests (Vitest, Jest, Node.js), SSR, or temporary scratch tables | Universal (Browsers, Node.js, Bun, Deno, Edge Workers)            |
+| Storage Class                        | Persistence          | Best Used For                                                                    | Browser / Runtime Support                                         |
+| :----------------------------------- | :------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| **`IdbStorage`** _(Recommended)_     | Persistent on disk   | Main-thread web apps, PWAs, mobile browsers, and cross-tab apps                  | All modern browsers (Chrome, Safari, Firefox, Edge, iOS WebViews) |
+| **`OpfsStorage`**                    | Persistent on disk   | Heavy write workloads, large datasets, and dedicated Web Workers                 | Modern Chromium, Firefox, and Safari 15.2+                        |
+| **`MemoryStorage`**                  | Ephemeral (RAM only) | Unit/integration tests (Vitest, Jest, Node.js), SSR, or temporary scratch tables | Universal (Browsers, Node.js 20+, Bun, Deno, Edge Workers)        |
+| **`NodeFsStorage`** _(Experimental)_ | Persistent on disk   | Build-time `.db` snapshot seeding, CLI inspection, and single-process Node tools | Node.js 20+ (`@ahmadmoussawi/webdb/storage/node`)                 |
 
 ### IndexedDB (`IdbStorage`)
 
@@ -69,7 +70,12 @@ const db = await WebDB.open({
 > **Cross-Environment Selection for Tests:** When sharing code between browser production and Node.js unit tests (like Vitest), you can pick `IdbStorage` when `indexedDB` is present and `MemoryStorage` in Node:
 >
 > ```typescript
-> import { WebDB, WasmEngine, IdbStorage, MemoryStorage } from "@ahmadmoussawi/webdb";
+> import {
+>   WebDB,
+>   WasmEngine,
+>   IdbStorage,
+>   MemoryStorage,
+> } from "@ahmadmoussawi/webdb";
 >
 > const db = await WebDB.open({
 >   engine: new WasmEngine(),
@@ -79,6 +85,39 @@ const db = await WebDB.open({
 >       : new MemoryStorage(),
 > });
 > ```
+
+### Node.js Filesystem (`NodeFsStorage` — Experimental)
+
+WebDB's core engine (`WasmEngine` and `JsEngine`), `MemoryStorage`, and the [`webdb` CLI](/guides/cli) run natively on **Node.js 20+**. For workflows that need to read or write `.db` / `.wal` files directly on disk, import `NodeFsStorage` from the Node-only subpath `@ahmadmoussawi/webdb/storage/node`:
+
+```typescript
+import { WebDB } from "@ahmadmoussawi/webdb/slim";
+import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
+import { NodeFsStorage } from "@ahmadmoussawi/webdb/storage/node";
+
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new NodeFsStorage("./data/catalog.db"),
+});
+
+await db.createTableIfNotExists("products", [
+  { name: "id", type: "INT32", primaryKey: true },
+  { name: "title", type: "TEXT", notNull: true },
+]);
+await db.upsert("products", { id: 1, title: "Starter Pack" });
+
+// Always close to checkpoint pending WAL frames and release file descriptors
+await db.close();
+```
+
+> [!IMPORTANT]
+> **Browser-First Scope (Not a Server DB Replacement):** WebDB is designed **primarily for web browsers**. Node.js 20+ support is intended for companion workflows—**unit/integration testing, SSR, build-time `.db` snapshot generation for browser hydration, CLI inspection, and single-process local tooling**. It is **not** a replacement for server-side SQLite (`better-sqlite3`, `node:sqlite`), PostgreSQL, or other multi-process server database engines.
+>
+> **Node.js Limitations to Keep in Mind:**
+>
+> - **Single-process only:** `NodeFsStorage` does not implement OS-level file locking (`flock`). Never write to the same `.db` file concurrently from multiple Node.js processes or cluster workers.
+> - **WASM loading:** Use `new WasmEngine()` (embedded binary) or `new WasmEngine({ wasmBinary })` in Node—avoid passing local filesystem paths to `wasmUrl` (Node's `fetch()` only supports HTTP/HTTPS).
+> - **ESM subpath:** `@ahmadmoussawi/webdb/storage/node` is an ESM-only export; CommonJS projects on Node 20 should load it via dynamic `import()`.
 
 ---
 
@@ -110,7 +149,7 @@ export interface WebDbOptions {
   /** Default query planner strategy (defaults to CostBasedPlanner). */
   planner?: QueryPlanner;
 
-  /** Enable cross-tab synchronization via Web Locks and BroadcastChannel (default: `true`). */
+  /** Enable cross-tab synchronization via Web Locks and BroadcastChannel (default: `true` in browsers, `false` for `NodeFsStorage`). */
   crossTabSync?: boolean;
 }
 ```
@@ -149,8 +188,14 @@ const db = await WebDB.open({
 >   wasmUrl: new URL("@ahmadmoussawi/webdb/wasm", import.meta.url),
 > });
 >
-> const usersDb = await WebDB.open({ engine, storage: new IdbStorage("users") });
-> const cacheDb = await WebDB.open({ engine, storage: new IdbStorage("cache") });
+> const usersDb = await WebDB.open({
+>   engine,
+>   storage: new IdbStorage("users"),
+> });
+> const cacheDb = await WebDB.open({
+>   engine,
+>   storage: new IdbStorage("cache"),
+> });
 > ```
 
 ---
@@ -189,19 +234,21 @@ const db = await WebDB.open({
 
 ### Subpath Export Reference
 
-| Subpath | Exports | Notes |
-| :-- | :-- | :-- |
-| `@ahmadmoussawi/webdb` | Full API, engine classes & storage classes | Tree-shakeable ESM (`"sideEffects": false`) + single-file UMD/CJS bundle |
-| `@ahmadmoussawi/webdb/slim` | `WebDB`, `QueryBuilder`, `liveQuery`, compiler, planners, types | Zero static imports of WASM, JS VM, or storage classes (ESM) |
-| `@ahmadmoussawi/webdb/core/wasm` | `WasmEngine`, `instantiateWasmCore`, `instantiateWasmCoreAsync`, `instantiateWasmCoreStreaming` | Embedded chunk lazy-loaded only when `wasmBinary` / `wasmUrl` is omitted (ESM) |
-| `@ahmadmoussawi/webdb/core/js` | `JsEngine`, `vm_step`, `vm_step_raw` | Pure JS VM interpreter; zero WASM code (ESM) |
-| `@ahmadmoussawi/webdb/storage/idb` | `IdbStorage`, `IdbStorageOptions`, `IdbDurability` | IndexedDB storage only (ESM) |
-| `@ahmadmoussawi/webdb/storage/opfs` | `OpfsStorage` | OPFS storage only (ESM) |
-| `@ahmadmoussawi/webdb/storage/memory` | `MemoryStorage` | In-memory storage only (ESM) |
-| `@ahmadmoussawi/webdb/wasm` | `dist/webdb_core.wasm` | Raw WebAssembly binary for `new WasmEngine({ wasmUrl })` streaming |
+| Subpath                               | Exports                                                                                         | Notes                                                                          |
+| :------------------------------------ | :---------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------- |
+| `@ahmadmoussawi/webdb`                | Full API, engine classes & storage classes                                                      | Tree-shakeable ESM (`"sideEffects": false`) + single-file UMD/CJS bundle       |
+| `@ahmadmoussawi/webdb/slim`           | `WebDB`, `QueryBuilder`, `liveQuery`, compiler, planners, types                                 | Zero static imports of WASM, JS VM, or storage classes (ESM)                   |
+| `@ahmadmoussawi/webdb/core/wasm`      | `WasmEngine`, `instantiateWasmCore`, `instantiateWasmCoreAsync`, `instantiateWasmCoreStreaming` | Embedded chunk lazy-loaded only when `wasmBinary` / `wasmUrl` is omitted (ESM) |
+| `@ahmadmoussawi/webdb/core/js`        | `JsEngine`, `vm_step`, `vm_step_raw`                                                            | Pure JS VM interpreter; zero WASM code (ESM)                                   |
+| `@ahmadmoussawi/webdb/storage/idb`    | `IdbStorage`, `IdbStorageOptions`, `IdbDurability`                                              | IndexedDB storage only (ESM)                                                   |
+| `@ahmadmoussawi/webdb/storage/opfs`   | `OpfsStorage`                                                                                   | OPFS storage only (ESM)                                                        |
+| `@ahmadmoussawi/webdb/storage/memory` | `MemoryStorage`                                                                                 | In-memory storage only (ESM)                                                   |
+| `@ahmadmoussawi/webdb/storage/node`   | `NodeFsStorage`, `NodeFsStorageOptions`                                                         | Node.js 20+ filesystem storage (ESM, experimental)                             |
+| `@ahmadmoussawi/webdb/cli`            | `runCli`, `CLI_VERSION`, `HELP_TEXT`, `NodeFsStorage`                                           | Programmatic CLI runner for Node.js 20+ (ESM)                                  |
+| `@ahmadmoussawi/webdb/wasm`           | `dist/webdb_core.wasm`                                                                          | Raw WebAssembly binary for `new WasmEngine({ wasmUrl })` streaming             |
 
 > [!NOTE]
-> The granular subpath entrypoints (`/slim`, `/core/*`, `/storage/*`) target ESM / modern bundler environments (and Node 22+). CommonJS (`require('@ahmadmoussawi/webdb')`) and `<script>` UMD consumers use the self-contained root bundle.
+> The granular subpath entrypoints (`/slim`, `/core/*`, `/storage/*`, `/cli`) target ESM / modern bundler environments (and Node 20+). CommonJS (`require('@ahmadmoussawi/webdb')`) and `<script>` UMD consumers use the self-contained root bundle.
 
 ---
 

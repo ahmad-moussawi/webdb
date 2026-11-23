@@ -1025,6 +1025,11 @@ export class TransactionCoordinator {
       pagesToWrite.sort((a, b) => a.pageId - b.pageId);
     }
 
+    // Read-only VFS adapters must never attempt to write pages or rewrite the WAL header
+    if (this.vfs.readOnly) {
+      return { pagesWritten: 0 };
+    }
+
     const nextCheckpointSeq = this.checkpointSeq + 1;
     const nextWalHeader = encodeWalFileHeader({
       checkpointSeq: nextCheckpointSeq,
@@ -1123,6 +1128,8 @@ export class TransactionCoordinator {
     this.idleTimer = setTimeout(() => {
       this.checkpoint().catch(() => {});
     }, 5000);
+    // Allow short-lived Node.js scripts to exit cleanly without waiting 5s on idle checkpoint
+    (this.idleTimer as unknown as { unref?: () => void })?.unref?.();
   }
 
   private pauseIdleTimer(): void {

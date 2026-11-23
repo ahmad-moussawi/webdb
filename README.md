@@ -256,9 +256,38 @@ const db = await WebDB.open({
 | `@ahmadmoussawi/webdb/storage/idb` | `IdbStorage`, `IdbStorageOptions`, `IdbDurability` |
 | `@ahmadmoussawi/webdb/storage/opfs` | `OpfsStorage` |
 | `@ahmadmoussawi/webdb/storage/memory` | `MemoryStorage` |
+| `@ahmadmoussawi/webdb/storage/node` | `NodeFsStorage` (Node.js `.db` + `.wal` filesystem VFS adapter) |
+| `@ahmadmoussawi/webdb/cli` | Programmatic CLI runner (`runCli`) |
 | `@ahmadmoussawi/webdb/wasm` | Raw `webdb_core.wasm` binary asset for streaming via `new WasmEngine({ wasmUrl })` |
 
 See the [Storage Backends & Configuration Guide](https://ahmad-moussawi.github.io/webdb/guides/storage-and-configuration) for full details.
+
+---
+
+## 🖥️ Command-Line Interface (`webdb`)
+
+Inspect, query, verify, and dump `.db` / `.webdb` files directly from your terminal—without writing JavaScript or adding any overhead to browser bundles:
+
+```bash
+# Inspect header, WAL status, and page breakdown
+npx webdb info app.db
+
+# List tables, schemas, and indexes
+npx webdb tables app.db --exact-count
+npx webdb schema app.db users
+
+# Query rows with WebDB expressions, joins, grouping, sorting, and CSV/JSON/NDJSON output
+npx webdb query app.db users -s "name, score * 2 as doubled" -w "age >= 21" -o "score desc" -l 10
+
+# Inspect query plan + VDBE bytecode, raw 4 KB pages, or verify all CRC32 checksums
+npx webdb explain app.db users -w "score > 80"
+npx webdb page app.db 3 --rows --hex
+npx webdb verify app.db
+```
+
+All inspection and query commands run strictly read-only (replaying any pending WAL frames in memory without modifying files on disk). See [src/cli/README.md](src/cli/README.md) or the [CLI Documentation](https://ahmad-moussawi.github.io/webdb/guides/cli) for the complete command reference and `NodeFsStorage` examples.
+
+> **Node.js 20+ Support:** WebDB is designed **primarily for web browsers** (`IdbStorage` and `OpfsStorage`). Node.js 20+ is supported for **testing, SSR, build-time `.db` snapshot generation, and CLI inspection**, with experimental single-process disk persistence via `@ahmadmoussawi/webdb/storage/node` (`NodeFsStorage`). It is **not** intended as a server-side replacement for SQLite, PostgreSQL, or other multi-process database engines.
 
 ---
 

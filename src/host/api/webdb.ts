@@ -73,6 +73,7 @@ import {
   TableSubscriptionCallback,
 } from "../../types/index.ts";
 import { IVfsAdapter } from "../storage/vfs.ts";
+import { ReadOnlyOverlayVfs } from "../storage/read_only_overlay.ts";
 import { Io } from "../storage/io.ts";
 import { computePageChecksum } from "../storage/crc32.ts";
 import {
@@ -338,7 +339,14 @@ export class WebDB implements IDatabaseQueryExecutor {
       );
     }
 
-    const vfs = options.storage;
+    const rawVfs = options.storage;
+    const readOnlyOverlay =
+      rawVfs.readOnly && !(rawVfs instanceof ReadOnlyOverlayVfs)
+        ? new ReadOnlyOverlayVfs(rawVfs)
+        : rawVfs instanceof ReadOnlyOverlayVfs
+          ? rawVfs
+          : null;
+    const vfs = readOnlyOverlay ?? rawVfs;
 
     const slotCount = options.slotCount ?? DEFAULT_SLOT_COUNT;
     if (
@@ -365,7 +373,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     });
 
     const dbName = options.name ?? vfs.databaseName;
-    const crossTabSync = options.crossTabSync ?? true;
+    // Node.js filesystem adapters lack browser Web Locks (`navigator.locks`), so disable
+    // cross-tab BroadcastChannel/Web Locks by default for `node-fs` to avoid keeping the
+    // Node event loop alive or giving a false impression of multi-process locking.
+    const defaultCrossTabSync =
+      vfs.name !== "node-fs" && vfs.name !== "node-fs-ro";
+    const crossTabSync = options.crossTabSync ?? defaultCrossTabSync;
     const crossTabLockName =
       crossTabSync && dbName && vfs.name !== "memory"
         ? `webdb_lock_${vfs.name}_${dbName}`
@@ -383,10 +396,18 @@ export class WebDB implements IDatabaseQueryExecutor {
     await coordinator.leaseQueue.enqueue(async () => {
       // Section 6: Crash Recovery Protocol & Startup WAL Replay
       await recoverFromWal(vfs);
+      if (readOnlyOverlay) {
+        readOnlyOverlay.seal();
+      }
 
       // Check if Page 1 exists in storage
       const [page1Data] = await vfs.readPages([1]);
       if (!page1Data) {
+        if (vfs.readOnly) {
+          throw new InvalidDatabaseError(
+            "Database file is missing a valid 4 KB Page 1 and cannot be initialized in read-only mode",
+          );
+        }
         // Initialize Page 1 in slot 0
         catalog_init_page1(driver.getSlotDataView(0));
         driver.markDirty(0);
@@ -418,7 +439,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
 
     if (options.initialData) {
-      await dbInstance.importBinary(options.initialData);
+      try {
+        await dbInstance.importBinary(options.initialData);
+      } catch (err) {
+        await dbInstance.close().catch(() => {});
+        throw err;
+      }
     }
 
     return dbInstance;
@@ -829,7 +855,11 @@ export class WebDB implements IDatabaseQueryExecutor {
       return;
     }
     if (byteLen > MAX_INDEX_KEY_SIZE) {
-      throw new IndexKeySizeExceededError(indexName, byteLen, MAX_INDEX_KEY_SIZE);
+      throw new IndexKeySizeExceededError(
+        indexName,
+        byteLen,
+        MAX_INDEX_KEY_SIZE,
+      );
     }
   }
 
@@ -1088,7 +1118,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
   }
 
-  private async _dropTableIfExistsInternal(tableName: string): Promise<boolean> {
+  private async _dropTableIfExistsInternal(
+    tableName: string,
+  ): Promise<boolean> {
     const exists = await this._hasTableInternal(tableName);
     if (!exists) {
       return false;
@@ -1987,7 +2019,9 @@ export class WebDB implements IDatabaseQueryExecutor {
     );
   }
 
-  private async _dropIndexIfExistsInternal(indexName: string): Promise<boolean> {
+  private async _dropIndexIfExistsInternal(
+    indexName: string,
+  ): Promise<boolean> {
     const page1View = this.pool.getSlotDataView(0);
     const found = catalog_find_index_by_name(page1View, indexName);
     if (!found) {
@@ -2653,7 +2687,11 @@ export class WebDB implements IDatabaseQueryExecutor {
     if (freeOverflow) {
       for (let k = 0; k < deletedCellIndicesAsc.length; k++) {
         const cellOff = page_get_cell_offset(view, 0, deletedCellIndicesAsc[k]);
-        const ovIds = page_extract_overflow_descriptors(table.columns, view, cellOff);
+        const ovIds = page_extract_overflow_descriptors(
+          table.columns,
+          view,
+          cellOff,
+        );
         for (let j = 0; j < ovIds.length; j++) {
           overflowPageIdsToFree.push(ovIds[j]);
         }
@@ -4480,13 +4518,20 @@ export class WebDB implements IDatabaseQueryExecutor {
                 if (
                   rel_offset >= min_payload_rel_offset &&
                   rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= record_length &&
-                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= view.byteLength
+                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <=
+                    view.byteLength
                 ) {
                   pendingOverflow.push({
                     colArr,
                     rowIdx,
-                    firstPageId: view.getUint32(record_offset + rel_offset, true),
-                    totalLen: view.getUint32(record_offset + rel_offset + 4, true),
+                    firstPageId: view.getUint32(
+                      record_offset + rel_offset,
+                      true,
+                    ),
+                    totalLen: view.getUint32(
+                      record_offset + rel_offset + 4,
+                      true,
+                    ),
                     isText: true,
                   });
                 } else {
@@ -4524,13 +4569,20 @@ export class WebDB implements IDatabaseQueryExecutor {
                 if (
                   rel_offset >= min_payload_rel_offset &&
                   rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= record_length &&
-                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <= view.byteLength
+                  record_offset + rel_offset + OVERFLOW_DESCRIPTOR_SIZE <=
+                    view.byteLength
                 ) {
                   pendingOverflow.push({
                     colArr,
                     rowIdx,
-                    firstPageId: view.getUint32(record_offset + rel_offset, true),
-                    totalLen: view.getUint32(record_offset + rel_offset + 4, true),
+                    firstPageId: view.getUint32(
+                      record_offset + rel_offset,
+                      true,
+                    ),
+                    totalLen: view.getUint32(
+                      record_offset + rel_offset + 4,
+                      true,
+                    ),
                     isText: false,
                   });
                 } else {
@@ -4561,8 +4613,13 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     for (let p = 0; p < pendingOverflow.length; p++) {
       const item = pendingOverflow[p];
-      const bytes = await this._readOverflowChain(item.firstPageId, item.totalLen);
-      item.colArr[item.rowIdx] = item.isText ? textDecoder.decode(bytes) : bytes;
+      const bytes = await this._readOverflowChain(
+        item.firstPageId,
+        item.totalLen,
+      );
+      item.colArr[item.rowIdx] = item.isText
+        ? textDecoder.decode(bytes)
+        : bytes;
     }
 
     return result;
@@ -4616,8 +4673,16 @@ export class WebDB implements IDatabaseQueryExecutor {
       selectExprs: options.selectExprs,
       udfNameMap: hasUdfs ? this.getUdfMap() : undefined,
       udfDefs: hasUdfs ? this.getUdfDefs() : undefined,
-      limit: hasBatchedWhere ? undefined : (options.limit !== null ? options.limit : undefined),
-      offset: hasBatchedWhere ? undefined : (options.offset !== null ? options.offset : undefined),
+      limit: hasBatchedWhere
+        ? undefined
+        : options.limit !== null
+          ? options.limit
+          : undefined,
+      offset: hasBatchedWhere
+        ? undefined
+        : options.offset !== null
+          ? options.offset
+          : undefined,
       planner: options.planner ?? this.planner,
     };
 
@@ -4742,7 +4807,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         status === lastStatus &&
         this.vmCtx.pc === lastPc &&
         this.vmCtx.resultCount === 0 &&
-        (status !== VmStatus.PAGE_FAULT || this.vmCtx.fault_page_id === lastFaultPage)
+        (status !== VmStatus.PAGE_FAULT ||
+          this.vmCtx.fault_page_id === lastFaultPage)
       ) {
         consecutiveStalls++;
         if (consecutiveStalls > 3) {
@@ -4754,7 +4820,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         consecutiveStalls = 0;
         lastPc = this.vmCtx.pc;
         lastStatus = status;
-        lastFaultPage = status === VmStatus.PAGE_FAULT ? this.vmCtx.fault_page_id : -1;
+        lastFaultPage =
+          status === VmStatus.PAGE_FAULT ? this.vmCtx.fault_page_id : -1;
       }
 
       if (status === VmStatus.BUFFER_FULL && this.vmCtx.resultCount === 0) {
@@ -4791,109 +4858,116 @@ export class WebDB implements IDatabaseQueryExecutor {
           pinActiveCursorPage(this.vmCtx.fault_page_id);
           this.vmCtx.status = VmStatus.RUNNING;
 
-          if (hasBatchedWhere && this.vmCtx.resultOffset + 4096 < RESULT_BUFFER_SIZE) {
+          if (
+            hasBatchedWhere &&
+            this.vmCtx.resultOffset + 4096 < RESULT_BUFFER_SIZE
+          ) {
             continue;
           }
         }
 
-      // Hydrate rows from Output Result Buffer for current chunk
-      if (hasBatchedWhere) {
-        const count = this.vmCtx.resultCount;
-        if (count > 0) {
-          const offsets = new Int32Array(count);
-          let curOff = 0;
-          for (let i = 0; i < count; i++) {
-            const rowLen = this.pool.view.getUint16(
-              RESULT_BUFFER_OFFSET + curOff,
-              true,
-            );
-            offsets[i] = RESULT_BUFFER_OFFSET + curOff + 2;
-            curOff += 2 + rowLen;
-          }
-
-          const colData = await this._extractColumnarBatch(
-            outputColumns,
-            this.pool.view,
-            offsets,
-            filterCols!,
-          );
-
-          let surviving = new Uint32Array(count);
-          for (let i = 0; i < count; i++) surviving[i] = i;
-          let survivingCount = count;
-
-          const udfs = (name: string) => this.getUdf(name)?.def;
-          const rowCache = options.exprCache ? new Array<Map<string, any>>(count) : undefined;
-
-          for (const f of options.batchedWhereFilters!) {
-            if (survivingCount === 0) break;
-            if (f.type === "expr" && f.expr) {
-              const batchResults = evalExprNodeBatch(
-                f.expr,
-                colData,
-                udfs,
-                VECTOR_BATCH_SIZE,
-                rowCache,
+        // Hydrate rows from Output Result Buffer for current chunk
+        if (hasBatchedWhere) {
+          const count = this.vmCtx.resultCount;
+          if (count > 0) {
+            const offsets = new Int32Array(count);
+            let curOff = 0;
+            for (let i = 0; i < count; i++) {
+              const rowLen = this.pool.view.getUint16(
+                RESULT_BUFFER_OFFSET + curOff,
+                true,
               );
-              let nextCount = 0;
-              for (let i = 0; i < survivingCount; i++) {
-                const idx = surviving[i];
-                const val = batchResults[idx];
-                if (val && val !== 0) {
-                  surviving[nextCount++] = idx;
+              offsets[i] = RESULT_BUFFER_OFFSET + curOff + 2;
+              curOff += 2 + rowLen;
+            }
+
+            const colData = await this._extractColumnarBatch(
+              outputColumns,
+              this.pool.view,
+              offsets,
+              filterCols!,
+            );
+
+            let surviving = new Uint32Array(count);
+            for (let i = 0; i < count; i++) surviving[i] = i;
+            let survivingCount = count;
+
+            const udfs = (name: string) => this.getUdf(name)?.def;
+            const rowCache = options.exprCache
+              ? new Array<Map<string, any>>(count)
+              : undefined;
+
+            for (const f of options.batchedWhereFilters!) {
+              if (survivingCount === 0) break;
+              if (f.type === "expr" && f.expr) {
+                const batchResults = evalExprNodeBatch(
+                  f.expr,
+                  colData,
+                  udfs,
+                  VECTOR_BATCH_SIZE,
+                  rowCache,
+                );
+                let nextCount = 0;
+                for (let i = 0; i < survivingCount; i++) {
+                  const idx = surviving[i];
+                  const val = batchResults[idx];
+                  if (val && val !== 0) {
+                    surviving[nextCount++] = idx;
+                  }
                 }
+                survivingCount = nextCount;
               }
-              survivingCount = nextCount;
+            }
+
+            for (let i = 0; i < survivingCount; i++) {
+              const idx = surviving[i];
+              const rowOff = offsets[idx];
+              const record =
+                (this.pool.view.getUint8(rowOff) & ROW_FLAG_HAS_OVERFLOW) !== 0
+                  ? await this._deserializeRowWithOverflow(
+                      outputColumns,
+                      this.pool.view,
+                      rowOff,
+                    )
+                  : page_deserialize_row(outputColumns, this.pool.view, rowOff);
+              if (record) {
+                if (options.exprCache && rowCache && rowCache[idx]) {
+                  options.exprCache.set(record, rowCache[idx]);
+                }
+                rows.push(record);
+              }
             }
           }
+        } else {
+          let currentOffset = 0;
+          for (let i = 0; i < this.vmCtx.resultCount; i++) {
+            const rowLen = this.pool.view.getUint16(
+              RESULT_BUFFER_OFFSET + currentOffset,
+              true,
+            );
+            const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
 
-          for (let i = 0; i < survivingCount; i++) {
-            const idx = surviving[i];
-            const rowOff = offsets[idx];
             const record =
-              (this.pool.view.getUint8(rowOff) & ROW_FLAG_HAS_OVERFLOW) !== 0
+              (this.pool.view.getUint8(rowRecordOffset) &
+                ROW_FLAG_HAS_OVERFLOW) !==
+              0
                 ? await this._deserializeRowWithOverflow(
                     outputColumns,
                     this.pool.view,
-                    rowOff,
+                    rowRecordOffset,
                   )
-                : page_deserialize_row(outputColumns, this.pool.view, rowOff);
+                : page_deserialize_row(
+                    outputColumns,
+                    this.pool.view,
+                    rowRecordOffset,
+                  );
             if (record) {
-              if (options.exprCache && rowCache && rowCache[idx]) {
-                options.exprCache.set(record, rowCache[idx]);
-              }
               rows.push(record);
             }
+
+            currentOffset += 2 + rowLen;
           }
         }
-      } else {
-        let currentOffset = 0;
-        for (let i = 0; i < this.vmCtx.resultCount; i++) {
-          const rowLen = this.pool.view.getUint16(
-            RESULT_BUFFER_OFFSET + currentOffset,
-            true,
-          );
-          const rowRecordOffset = RESULT_BUFFER_OFFSET + currentOffset + 2;
-
-          const record =
-            (this.pool.view.getUint8(rowRecordOffset) & ROW_FLAG_HAS_OVERFLOW) !== 0
-              ? await this._deserializeRowWithOverflow(
-                  outputColumns,
-                  this.pool.view,
-                  rowRecordOffset,
-                )
-              : page_deserialize_row(
-                  outputColumns,
-                  this.pool.view,
-                  rowRecordOffset,
-                );
-          if (record) {
-            rows.push(record);
-          }
-
-          currentOffset += 2 + rowLen;
-        }
-      }
       } finally {
         for (const s of pinnedCursorSlots) {
           this.pool.unpinSlot(s);
@@ -4917,7 +4991,10 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       if (status === VmStatus.DONE) {
         break;
-      } else if (status === VmStatus.BUFFER_FULL || status === VmStatus.PAGE_FAULT) {
+      } else if (
+        status === VmStatus.BUFFER_FULL ||
+        status === VmStatus.PAGE_FAULT
+      ) {
         this.vmCtx.resultOffset = 0;
         this.vmCtx.resultCount = 0;
         this.vmCtx.status = VmStatus.RUNNING;
@@ -5122,7 +5199,11 @@ export class WebDB implements IDatabaseQueryExecutor {
         }
         visitedCatalogPages.add(pageId);
         const offset = (pageId - 1) * PAGE_SIZE;
-        const view = new DataView(bytes.buffer, bytes.byteOffset + offset, PAGE_SIZE);
+        const view = new DataView(
+          bytes.buffer,
+          bytes.byteOffset + offset,
+          PAGE_SIZE,
+        );
         const catHeader = catalog_read_page_header(view, 0);
         if (catHeader.pageType !== PAGE_TYPE_CATALOG_PAGE) {
           throw new InvalidDatabaseError(
@@ -5142,7 +5223,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         true,
       );
       while (importTableCatPid !== 0) {
-        importTableCatPid = validateCatalogPage(importTableCatPid).nextColCatalogPageId;
+        importTableCatPid =
+          validateCatalogPage(importTableCatPid).nextColCatalogPageId;
       }
 
       let importIdxCatPid = page1View.getUint32(
@@ -5150,7 +5232,8 @@ export class WebDB implements IDatabaseQueryExecutor {
         true,
       );
       while (importIdxCatPid !== 0) {
-        importIdxCatPid = validateCatalogPage(importIdxCatPid).nextColCatalogPageId;
+        importIdxCatPid =
+          validateCatalogPage(importIdxCatPid).nextColCatalogPageId;
       }
 
       const rawImportPager = {
@@ -5167,7 +5250,10 @@ export class WebDB implements IDatabaseQueryExecutor {
         rawImportPager,
       );
       for (const desc of importedTableDescs) {
-        if (desc.rootPageId !== 0 && (desc.rootPageId < 2 || desc.rootPageId > numPages)) {
+        if (
+          desc.rootPageId !== 0 &&
+          (desc.rootPageId < 2 || desc.rootPageId > numPages)
+        ) {
           throw new InvalidDatabaseError(
             `Imported table "${desc.name}" has out-of-bounds rootPageId ${desc.rootPageId}`,
           );
@@ -5287,8 +5373,13 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.beforeCommitHooks.clear();
     this.commitHooks.clear();
     this.subscriptions.clear();
-    await this.coordinator.close();
-    await this.driver.flushAllDirty();
-    await this.vfs.close?.();
+    try {
+      await this.coordinator.close();
+      if (!this.vfs.readOnly) {
+        await this.driver.flushAllDirty();
+      }
+    } finally {
+      await this.vfs.close?.();
+    }
   }
 }

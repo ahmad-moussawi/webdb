@@ -6,7 +6,16 @@ export default defineConfig({
   plugins: [
     dts({
       include: ['src/**/*'],
-      exclude: ['src/react/**/*', 'src/angular/**/*', 'src/vue/**/*', 'src/migrations/**/*', 'src/search/**/*', 'src/intl/**/*'],
+      exclude: [
+        'src/react/**/*',
+        'src/angular/**/*',
+        'src/vue/**/*',
+        'src/migrations/**/*',
+        'src/search/**/*',
+        'src/intl/**/*',
+        'src/cli/**/*',
+        'src/host/storage/node_fs.ts',
+      ],
       entryRoot: 'src',
       beforeWriteFile: (filePath, content) => ({
         filePath,
@@ -22,6 +31,8 @@ export default defineConfig({
       '@ahmadmoussawi/webdb/storage/memory': resolve(__dirname, 'src/host/storage/memory.ts'),
       '@ahmadmoussawi/webdb/storage/idb': resolve(__dirname, 'src/host/storage/idb.ts'),
       '@ahmadmoussawi/webdb/storage/opfs': resolve(__dirname, 'src/host/storage/opfs.ts'),
+      '@ahmadmoussawi/webdb/storage/node': resolve(__dirname, 'src/host/storage/node_fs.ts'),
+      '@ahmadmoussawi/webdb/cli': resolve(__dirname, 'src/cli/index.ts'),
       '@ahmadmoussawi/webdb/wasm': resolve(__dirname, 'src/core/wasm/webdb_core.wasm'),
       '@ahmadmoussawi/webdb/migrations': resolve(__dirname, 'src/migrations/index.ts'),
       '@ahmadmoussawi/webdb/search': resolve(__dirname, 'src/search/index.ts'),

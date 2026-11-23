@@ -8,6 +8,8 @@ export interface IVfsAdapter {
    */
   readonly databaseName?: string;
   readonly isSynchronous?: boolean;
+  /** Optional hint indicating this storage adapter is opened read-only. */
+  readonly readOnly?: boolean;
 
   /** Reads one or more 4KB pages from storage by 1-indexed pageId */
   readPages(pageIds: number[]): Promise<Array<Uint8Array | null>>;

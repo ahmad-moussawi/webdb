@@ -238,6 +238,15 @@ export default defineConfig({
         ],
       },
       {
+        text: "CLI & Node.js Tooling",
+        items: [
+          {
+            text: "WebDB CLI (webdb)",
+            link: "/guides/cli",
+          },
+        ],
+      },
+      {
         text: "Reference",
         items: [
           {
