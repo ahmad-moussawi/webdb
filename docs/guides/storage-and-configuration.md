@@ -139,6 +139,20 @@ const db = await WebDB.open({
 });
 ```
 
+> [!TIP]
+> **Reusing `WasmEngine` Across Multiple Databases:** A `WasmEngine` instance compiles and caches its `WebAssembly.Module` once, while each `WebDB.open()` call instantiates it with its own isolated `WebAssembly.Memory`. Share a single `WasmEngine` instance across multiple databases to avoid extra `fetch()` calls and redundant compilation:
+>
+> ```typescript
+> import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
+>
+> const engine = new WasmEngine({
+>   wasmUrl: new URL("@ahmadmoussawi/webdb/wasm", import.meta.url),
+> });
+>
+> const usersDb = await WebDB.open({ engine, storage: new IdbStorage("users") });
+> const cacheDb = await WebDB.open({ engine, storage: new IdbStorage("cache") });
+> ```
+
 ---
 
 ## 4. Modular Loading, Tree-Shaking & Subpath Exports
