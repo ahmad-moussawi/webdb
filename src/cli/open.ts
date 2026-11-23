@@ -1,17 +1,17 @@
-import { stat } from 'node:fs/promises';
-import { PAGE_SIZE } from '../constants.js';
-import { WebDB } from '../host/api/webdb.js';
-import { NodeFsStorage } from '../host/storage/node_fs.js';
-import { ReadOnlyOverlayVfs } from '../host/storage/read_only_overlay.js';
-import { WasmEngine } from '../core/wasm/entry.js';
-import { JsEngine } from '../core/js/entry.js';
-import type { WebDbCoreEngine } from '../core/js/vm_host.js';
+import { stat } from "node:fs/promises";
+import { PAGE_SIZE } from "../constants.js";
+import { WebDB } from "../host/api/webdb.js";
+import { NodeFsStorage } from "../host/storage/node_fs.js";
+import { ReadOnlyOverlayVfs } from "../host/storage/read_only_overlay.js";
+import { WasmEngine } from "../core/wasm/entry.js";
+import { JsEngine } from "../core/js/entry.js";
+import type { WebDbCoreEngine } from "../core/js/vm_host.js";
 
-export type CoreMode = 'wasm' | 'js';
+export type CoreMode = "wasm" | "js";
 export { ReadOnlyOverlayVfs };
 
 export function createEngine(core: CoreMode): WebDbCoreEngine {
-  return core === 'js' ? new JsEngine() : new WasmEngine();
+  return core === "js" ? new JsEngine() : new WasmEngine();
 }
 
 /**
@@ -26,10 +26,10 @@ export async function statDbFile(filePath: string): Promise<{ size: number }> {
     return { size: info.size };
   } catch (err: unknown) {
     if (
-      typeof err === 'object' &&
+      typeof err === "object" &&
       err !== null &&
-      'code' in err &&
-      (err as { code?: unknown }).code === 'ENOENT'
+      "code" in err &&
+      (err as { code?: unknown }).code === "ENOENT"
     ) {
       throw new Error(`Database file not found: ${filePath}`);
     }
@@ -37,7 +37,9 @@ export async function statDbFile(filePath: string): Promise<{ size: number }> {
   }
 }
 
-export async function assertDbFileExists(filePath: string): Promise<{ size: number }> {
+export async function assertDbFileExists(
+  filePath: string,
+): Promise<{ size: number }> {
   const { size } = await statDbFile(filePath);
   if (size === 0) {
     throw new Error(`Database file is empty (0 bytes): ${filePath}`);
@@ -45,7 +47,9 @@ export async function assertDbFileExists(filePath: string): Promise<{ size: numb
   return { size };
 }
 
-export async function getOptionalFileSize(filePath: string): Promise<number | null> {
+export async function getOptionalFileSize(
+  filePath: string,
+): Promise<number | null> {
   try {
     const info = await stat(filePath);
     return info.isFile() ? info.size : null;
@@ -71,7 +75,7 @@ export interface OpenedReadOnlyDb {
  */
 export async function openReadOnlyDb(
   filePath: string,
-  core: CoreMode = 'wasm',
+  core: CoreMode = "wasm",
 ): Promise<OpenedReadOnlyDb> {
   const { size: dbFileSize } = await assertDbFileExists(filePath);
   const storage = new NodeFsStorage(filePath, { readOnly: true });

@@ -1,6 +1,6 @@
-import { mkdir, open } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
-import type { IVfsAdapter } from './vfs.js';
+import { mkdir, open } from "node:fs/promises";
+import { basename, dirname } from "node:path";
+import type { IVfsAdapter } from "./vfs.js";
 
 const PAGE_SIZE = 4096;
 const WAL_HEADER_SIZE = 32;
@@ -50,7 +50,7 @@ export interface NodeFsStorageOptions {
 
 function defaultWalPath(dbPath: string): string {
   if (/\.db$/i.test(dbPath)) {
-    return dbPath.slice(0, -3) + '.wal';
+    return dbPath.slice(0, -3) + ".wal";
   }
   return `${dbPath}.wal`;
 }
@@ -62,16 +62,18 @@ function defaultDatabaseName(dbPath: string): string {
 
 function isErrCode(err: unknown, code: string): boolean {
   return (
-    typeof err === 'object' &&
+    typeof err === "object" &&
     err !== null &&
-    'code' in err &&
+    "code" in err &&
     (err as { code?: unknown }).code === code
   );
 }
 
 function assertNonNegativeInt(val: number, name: string): void {
   if (!Number.isInteger(val) || val < 0) {
-    throw new RangeError(`Invalid ${name}: ${val}. Expected a non-negative integer`);
+    throw new RangeError(
+      `Invalid ${name}: ${val}. Expected a non-negative integer`,
+    );
   }
 }
 
@@ -127,7 +129,7 @@ async function writeFully(
  * using the exact same on-disk binary format as `OpfsStorage` and `WebDB.exportBinary()`.
  */
 export class NodeFsStorage implements IVfsAdapter {
-  readonly name = 'node-fs' as const;
+  readonly name = "node-fs" as const;
   readonly databaseName: string;
   readonly isSynchronous = false;
   readonly dbPath: string;
@@ -142,8 +144,8 @@ export class NodeFsStorage implements IVfsAdapter {
   private closeGeneration = 0;
 
   constructor(dbPath: string, options: NodeFsStorageOptions = {}) {
-    if (!dbPath || typeof dbPath !== 'string') {
-      throw new TypeError('NodeFsStorage requires a non-empty file path');
+    if (!dbPath || typeof dbPath !== "string") {
+      throw new TypeError("NodeFsStorage requires a non-empty file path");
     }
     this.dbPath = dbPath;
     this.walPath = options.walPath ?? defaultWalPath(dbPath);
@@ -154,7 +156,9 @@ export class NodeFsStorage implements IVfsAdapter {
 
   private assertWritable(op: string): void {
     if (this.readOnly) {
-      throw new Error(`Cannot ${op}: NodeFsStorage is opened in read-only mode (${this.dbPath})`);
+      throw new Error(
+        `Cannot ${op}: NodeFsStorage is opened in read-only mode (${this.dbPath})`,
+      );
     }
   }
 
@@ -165,9 +169,9 @@ export class NodeFsStorage implements IVfsAdapter {
   ): Promise<NodeFileHandleLike | null> {
     if (this.readOnly) {
       try {
-        return (await open(filePath, 'r')) as unknown as NodeFileHandleLike;
+        return (await open(filePath, "r")) as unknown as NodeFileHandleLike;
       } catch (err) {
-        if (!forWrite && isErrCode(err, 'ENOENT')) {
+        if (!forWrite && isErrCode(err, "ENOENT")) {
           return null;
         }
         throw err;
@@ -175,9 +179,9 @@ export class NodeFsStorage implements IVfsAdapter {
     }
 
     try {
-      return (await open(filePath, 'r+')) as unknown as NodeFileHandleLike;
+      return (await open(filePath, "r+")) as unknown as NodeFileHandleLike;
     } catch (err) {
-      if (!isErrCode(err, 'ENOENT')) {
+      if (!isErrCode(err, "ENOENT")) {
         throw err;
       }
       if (!allowCreate) {
@@ -185,10 +189,10 @@ export class NodeFsStorage implements IVfsAdapter {
       }
       await mkdir(dirname(filePath), { recursive: true });
       try {
-        return (await open(filePath, 'wx+')) as unknown as NodeFileHandleLike;
+        return (await open(filePath, "wx+")) as unknown as NodeFileHandleLike;
       } catch (createErr) {
-        if (isErrCode(createErr, 'EEXIST')) {
-          return (await open(filePath, 'r+')) as unknown as NodeFileHandleLike;
+        if (isErrCode(createErr, "EEXIST")) {
+          return (await open(filePath, "r+")) as unknown as NodeFileHandleLike;
         }
         throw createErr;
       }
@@ -197,20 +201,26 @@ export class NodeFsStorage implements IVfsAdapter {
 
   private async ensureDbHandle(forWrite: boolean): Promise<NodeFileHandleLike> {
     if (forWrite) {
-      this.assertWritable('write database pages');
+      this.assertWritable("write database pages");
     }
     if (this.dbHandle) return this.dbHandle;
     if (this.dbHandlePromise) return this.dbHandlePromise;
 
     const gen = this.closeGeneration;
     const opening = (async (): Promise<NodeFileHandleLike> => {
-      const handle = await this.openFileSafe(this.dbPath, forWrite, this.create);
+      const handle = await this.openFileSafe(
+        this.dbPath,
+        forWrite,
+        this.create,
+      );
       if (!handle) {
         throw new Error(`Database file not found: ${this.dbPath}`);
       }
       if (this.closeGeneration !== gen) {
         await handle.close().catch(() => {});
-        throw new Error(`NodeFsStorage was closed while opening: ${this.dbPath}`);
+        throw new Error(
+          `NodeFsStorage was closed while opening: ${this.dbPath}`,
+        );
       }
       this.dbHandle = handle;
       return handle;
@@ -226,9 +236,11 @@ export class NodeFsStorage implements IVfsAdapter {
     }
   }
 
-  private async ensureWalHandle(forWrite: boolean): Promise<NodeFileHandleLike | null> {
+  private async ensureWalHandle(
+    forWrite: boolean,
+  ): Promise<NodeFileHandleLike | null> {
     if (forWrite) {
-      this.assertWritable('write WAL');
+      this.assertWritable("write WAL");
     }
     if (this.walHandle) return this.walHandle;
 
@@ -247,7 +259,9 @@ export class NodeFsStorage implements IVfsAdapter {
       if (this.closeGeneration !== gen) {
         await handle.close().catch(() => {});
         if (forWrite) {
-          throw new Error(`NodeFsStorage was closed while opening WAL: ${this.walPath}`);
+          throw new Error(
+            `NodeFsStorage was closed while opening WAL: ${this.walPath}`,
+          );
         }
         return null;
       }
@@ -295,7 +309,9 @@ export class NodeFsStorage implements IVfsAdapter {
         pageIds.length,
         Math.floor((size - startOffset) / PAGE_SIZE),
       );
-      const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
+      const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(
+        null,
+      );
       if (readablePages > 0) {
         const bulk = new Uint8Array(readablePages * PAGE_SIZE);
         const bytesRead = await readFully(handle, bulk, startOffset);
@@ -307,7 +323,9 @@ export class NodeFsStorage implements IVfsAdapter {
       return results;
     }
 
-    const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
+    const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(
+      null,
+    );
     for (let i = 0; i < pageIds.length; i++) {
       const pageId = pageIds[i];
       if (!Number.isInteger(pageId) || pageId < 1) {
@@ -334,7 +352,9 @@ export class NodeFsStorage implements IVfsAdapter {
     pages: Array<{ pageId: number; data: Uint8Array }>,
   ): Array<{ offset: number; data: Uint8Array }> {
     if (pages.length === 1) {
-      return [{ offset: (pages[0].pageId - 1) * PAGE_SIZE, data: pages[0].data }];
+      return [
+        { offset: (pages[0].pageId - 1) * PAGE_SIZE, data: pages[0].data },
+      ];
     }
 
     let sorted = pages;
@@ -349,7 +369,10 @@ export class NodeFsStorage implements IVfsAdapter {
     let i = 0;
     while (i < sorted.length) {
       let j = i + 1;
-      while (j < sorted.length && sorted[j].pageId === sorted[j - 1].pageId + 1) {
+      while (
+        j < sorted.length &&
+        sorted[j].pageId === sorted[j - 1].pageId + 1
+      ) {
         j++;
       }
       const startOffset = (sorted[i].pageId - 1) * PAGE_SIZE;
@@ -368,8 +391,10 @@ export class NodeFsStorage implements IVfsAdapter {
     return runs;
   }
 
-  async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
-    this.assertWritable('writePages');
+  async writePages(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+  ): Promise<void> {
+    this.assertWritable("writePages");
     if (pages.length === 0) return;
     for (const p of pages) {
       assertPositivePageId(p.pageId);
@@ -392,8 +417,8 @@ export class NodeFsStorage implements IVfsAdapter {
   }
 
   async truncate(pageCount: number): Promise<void> {
-    this.assertWritable('truncate');
-    assertNonNegativeInt(pageCount, 'pageCount');
+    this.assertWritable("truncate");
+    assertNonNegativeInt(pageCount, "pageCount");
     const handle = await this.ensureDbHandle(true);
     await handle.truncate(pageCount * PAGE_SIZE);
   }
@@ -411,7 +436,7 @@ export class NodeFsStorage implements IVfsAdapter {
   }
 
   async writeWalHeader(header: Uint8Array): Promise<void> {
-    this.assertWritable('writeWalHeader');
+    this.assertWritable("writeWalHeader");
     const handle = await this.ensureWalHandle(true);
     if (!handle) {
       throw new Error(`Failed to open WAL file for writing: ${this.walPath}`);
@@ -419,10 +444,13 @@ export class NodeFsStorage implements IVfsAdapter {
     await writeFully(handle, header, 0);
   }
 
-  async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
-    assertNonNegativeInt(startFrameIndex, 'startFrameIndex');
+  async readWalFrames(
+    startFrameIndex: number,
+    maxFrames?: number,
+  ): Promise<Uint8Array[]> {
+    assertNonNegativeInt(startFrameIndex, "startFrameIndex");
     if (maxFrames !== undefined) {
-      assertNonNegativeInt(maxFrames, 'maxFrames');
+      assertNonNegativeInt(maxFrames, "maxFrames");
       if (maxFrames === 0) return [];
     }
 
@@ -450,7 +478,7 @@ export class NodeFsStorage implements IVfsAdapter {
   }
 
   async appendWalFrames(frames: Uint8Array[]): Promise<void> {
-    this.assertWritable('appendWalFrames');
+    this.assertWritable("appendWalFrames");
     if (frames.length === 0) return;
     const handle = await this.ensureWalHandle(true);
     if (!handle) {
@@ -482,11 +510,12 @@ export class NodeFsStorage implements IVfsAdapter {
   }
 
   async truncateWal(frameIndex: number): Promise<void> {
-    this.assertWritable('truncateWal');
-    assertNonNegativeInt(frameIndex, 'frameIndex');
+    this.assertWritable("truncateWal");
+    assertNonNegativeInt(frameIndex, "frameIndex");
     const handle = await this.ensureWalHandle(false);
     if (!handle) return;
-    const targetSize = frameIndex === 0 ? 0 : WAL_HEADER_SIZE + frameIndex * WAL_FRAME_SIZE;
+    const targetSize =
+      frameIndex === 0 ? 0 : WAL_HEADER_SIZE + frameIndex * WAL_FRAME_SIZE;
     const { size } = await handle.stat();
     if (targetSize < size) {
       await handle.truncate(targetSize);

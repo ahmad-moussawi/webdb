@@ -1,4 +1,4 @@
-import type { IVfsAdapter } from './vfs.js';
+import type { IVfsAdapter } from "./vfs.js";
 
 /**
  * Copy-on-write in-memory overlay over a read-only `IVfsAdapter`.
@@ -23,7 +23,7 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
 
   constructor(base: IVfsAdapter) {
     this.base = base;
-    this.name = base.name === 'node-fs' ? 'node-fs-ro' : `${base.name}-ro`;
+    this.name = base.name === "node-fs" ? "node-fs-ro" : `${base.name}-ro`;
     this.databaseName = base.databaseName;
   }
 
@@ -51,7 +51,9 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   }
 
   async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
-    const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(null);
+    const results: Array<Uint8Array | null> = new Array(pageIds.length).fill(
+      null,
+    );
     const missingIds: number[] = [];
     const missingPositions: number[] = [];
 
@@ -63,7 +65,10 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
         results[i] = new Uint8Array(overlaid);
         continue;
       }
-      if (this.truncatedPageCount !== null && pageId > this.truncatedPageCount) {
+      if (
+        this.truncatedPageCount !== null &&
+        pageId > this.truncatedPageCount
+      ) {
         results[i] = null;
         continue;
       }
@@ -81,8 +86,10 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
     return results;
   }
 
-  async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
-    this.assertNotSealed('writePages');
+  async writePages(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+  ): Promise<void> {
+    this.assertNotSealed("writePages");
     for (const { pageId, data } of pages) {
       const copy = new Uint8Array(data.byteLength);
       copy.set(data);
@@ -95,9 +102,11 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   }
 
   async truncate(pageCount: number): Promise<void> {
-    this.assertNotSealed('truncate');
+    this.assertNotSealed("truncate");
     if (!Number.isInteger(pageCount) || pageCount < 0) {
-      throw new RangeError(`Invalid pageCount: ${pageCount}. Expected a non-negative integer`);
+      throw new RangeError(
+        `Invalid pageCount: ${pageCount}. Expected a non-negative integer`,
+      );
     }
     this.truncatedPageCount =
       this.truncatedPageCount === null
@@ -113,20 +122,25 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   async readWalHeader(): Promise<Uint8Array | null> {
     if (this.walTruncated) return null;
     if (this.walHeaderOverlay !== undefined) {
-      return this.walHeaderOverlay ? new Uint8Array(this.walHeaderOverlay) : null;
+      return this.walHeaderOverlay
+        ? new Uint8Array(this.walHeaderOverlay)
+        : null;
     }
     return this.base.readWalHeader();
   }
 
   async writeWalHeader(header: Uint8Array): Promise<void> {
-    this.assertNotSealed('writeWalHeader');
+    this.assertNotSealed("writeWalHeader");
     const copy = new Uint8Array(header.byteLength);
     copy.set(header);
     this.walHeaderOverlay = copy;
     this.walTruncated = false;
   }
 
-  async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
+  async readWalFrames(
+    startFrameIndex: number,
+    maxFrames?: number,
+  ): Promise<Uint8Array[]> {
     if (!Number.isInteger(startFrameIndex) || startFrameIndex < 0) {
       throw new RangeError(
         `Invalid startFrameIndex: ${startFrameIndex}. Expected a non-negative integer`,
@@ -134,7 +148,9 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
     }
     if (maxFrames !== undefined) {
       if (!Number.isInteger(maxFrames) || maxFrames < 0) {
-        throw new RangeError(`Invalid maxFrames: ${maxFrames}. Expected a non-negative integer`);
+        throw new RangeError(
+          `Invalid maxFrames: ${maxFrames}. Expected a non-negative integer`,
+        );
       }
       if (maxFrames === 0) return [];
     }
@@ -152,9 +168,11 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   }
 
   async appendWalFrames(frames: Uint8Array[]): Promise<void> {
-    this.assertNotSealed('appendWalFrames');
+    this.assertNotSealed("appendWalFrames");
     if (this.walFramesOverlay === null) {
-      this.walFramesOverlay = this.walTruncated ? [] : await this.base.readWalFrames(0);
+      this.walFramesOverlay = this.walTruncated
+        ? []
+        : await this.base.readWalFrames(0);
     }
     this.walTruncated = false;
     for (const frame of frames) {
@@ -169,7 +187,7 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   }
 
   async truncateWal(frameIndex: number): Promise<void> {
-    this.assertNotSealed('truncateWal');
+    this.assertNotSealed("truncateWal");
     if (frameIndex === 0) {
       this.walTruncated = true;
       this.walHeaderOverlay = null;
@@ -178,7 +196,10 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
       if (this.walFramesOverlay === null) {
         this.walFramesOverlay = await this.base.readWalFrames(0);
       }
-      this.walFramesOverlay.length = Math.min(this.walFramesOverlay.length, frameIndex);
+      this.walFramesOverlay.length = Math.min(
+        this.walFramesOverlay.length,
+        frameIndex,
+      );
     }
   }
 

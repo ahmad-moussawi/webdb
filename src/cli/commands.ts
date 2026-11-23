@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { writeFile } from "node:fs/promises";
 import {
   PAGE_SIZE,
   PAGE_HEADER_SIZE,
@@ -14,20 +14,26 @@ import {
   WAL_FRAME_TYPE_TX_COMMIT,
   WAL_FRAME_TYPE_PAGE_DATA,
   WAL_FRAME_TYPE_TX_UNCOMMITTED,
-} from '../constants.js';
-import type { TableMeta, IndexDescriptor, DbRow } from '../types/index.js';
-import { WebDB } from '../host/api/webdb.js';
-import type { QueryBuilder } from '../host/api/query_builder.js';
-import { recoverFromWal } from '../host/driver/crash_recovery.js';
-import { NodeFsStorage } from '../host/storage/node_fs.js';
-import { computePageChecksum, computePage1Checksum } from '../host/storage/crc32.js';
-import { decodeWalFileHeader, validateWalFrame } from '../host/storage/wal_codec.js';
+} from "../constants.js";
+import type { TableMeta, IndexDescriptor, DbRow } from "../types/index.js";
+import { WebDB } from "../host/api/webdb.js";
+import type { QueryBuilder } from "../host/api/query_builder.js";
+import { recoverFromWal } from "../host/driver/crash_recovery.js";
+import { NodeFsStorage } from "../host/storage/node_fs.js";
+import {
+  computePageChecksum,
+  computePage1Checksum,
+} from "../host/storage/crc32.js";
+import {
+  decodeWalFileHeader,
+  validateWalFrame,
+} from "../host/storage/wal_codec.js";
 import {
   catalog_read_page1_header,
   catalog_read_page_header,
   catalog_list_table_descriptors,
   catalog_list_all_indexes,
-} from '../core/js/catalog.c.js';
+} from "../core/js/catalog.c.js";
 import {
   page_get_type,
   page_get_cell_count,
@@ -40,7 +46,7 @@ import {
   page_get_overflow_chunk_size,
   page_get_overflow_next_page_id,
   type OverflowDescriptorInfo,
-} from '../core/js/page.c.js';
+} from "../core/js/page.c.js";
 import {
   CliUsageError,
   parseCliArgs,
@@ -51,7 +57,7 @@ import {
   splitTopLevelComma,
   type FlagDef,
   type ParsedArgs,
-} from './args.js';
+} from "./args.js";
 import {
   formatBytes,
   formatColumnFlags,
@@ -68,14 +74,14 @@ import {
   formatTable,
   toJsonSafe,
   type OutputFormat,
-} from './format.js';
+} from "./format.js";
 import {
   assertDbFileExists,
   getOptionalFileSize,
   openReadOnlyDb,
   statDbFile,
   type CoreMode,
-} from './open.js';
+} from "./open.js";
 
 export interface CliIo {
   stdout(text: string): void;
@@ -102,61 +108,61 @@ const VALID_PAGE_TYPES = new Set<number>([
 ]);
 
 export const INFO_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "format", short: "f", type: "string" },
 ];
 
 export const TABLES_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
-  { name: 'exact-count', type: 'boolean' },
+  { name: "format", short: "f", type: "string" },
+  { name: "exact-count", type: "boolean" },
 ];
 
 export const SCHEMA_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "format", short: "f", type: "string" },
 ];
 
 export const INDEXES_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "format", short: "f", type: "string" },
 ];
 
 const BASE_QUERY_FLAG_DEFS: FlagDef[] = [
-  { name: 'select', short: 's', type: 'string', multiple: true },
-  { name: 'where', short: 'w', type: 'string', multiple: true },
-  { name: 'or-where', type: 'string', multiple: true },
-  { name: 'join', type: 'string', multiple: true },
-  { name: 'left-join', type: 'string', multiple: true },
-  { name: 'group-by', short: 'g', type: 'string', multiple: true },
-  { name: 'having', type: 'string', multiple: true },
-  { name: 'order', short: 'o', type: 'string', multiple: true },
-  { name: 'limit', short: 'l', type: 'string' },
-  { name: 'offset', type: 'string' },
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "select", short: "s", type: "string", multiple: true },
+  { name: "where", short: "w", type: "string", multiple: true },
+  { name: "or-where", type: "string", multiple: true },
+  { name: "join", type: "string", multiple: true },
+  { name: "left-join", type: "string", multiple: true },
+  { name: "group-by", short: "g", type: "string", multiple: true },
+  { name: "having", type: "string", multiple: true },
+  { name: "order", short: "o", type: "string", multiple: true },
+  { name: "limit", short: "l", type: "string" },
+  { name: "offset", type: "string" },
+  { name: "format", short: "f", type: "string" },
 ];
 
 export const QUERY_FLAG_DEFS: FlagDef[] = [
   ...BASE_QUERY_FLAG_DEFS,
-  { name: 'count', type: 'boolean' },
+  { name: "count", type: "boolean" },
 ];
 
 export const EXPLAIN_FLAG_DEFS: FlagDef[] = BASE_QUERY_FLAG_DEFS;
 
 export const PAGE_FLAG_DEFS: FlagDef[] = [
-  { name: 'hex', type: 'boolean' },
-  { name: 'rows', type: 'boolean' },
-  { name: 'raw', type: 'boolean' },
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "hex", type: "boolean" },
+  { name: "rows", type: "boolean" },
+  { name: "raw", type: "boolean" },
+  { name: "format", short: "f", type: "string" },
 ];
 
 export const VERIFY_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "format", short: "f", type: "string" },
 ];
 
 export const DUMP_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
-  { name: 'out', short: 'o', type: 'string' },
+  { name: "format", short: "f", type: "string" },
+  { name: "out", short: "o", type: "string" },
 ];
 
 export const CHECKPOINT_FLAG_DEFS: FlagDef[] = [
-  { name: 'format', short: 'f', type: 'string' },
+  { name: "format", short: "f", type: "string" },
 ];
 
 function writeFormattedRows(
@@ -166,36 +172,47 @@ function writeFormattedRows(
   format: OutputFormat,
 ): void {
   const rendered = formatRowsOutput(columns, rows, format);
-  if (format === 'ndjson' && rows.length === 0) {
+  if (format === "ndjson" && rows.length === 0) {
     return;
   }
-  io.stdout(rendered + '\n');
+  io.stdout(rendered + "\n");
 }
 
 // ============================================================================
 // 1. info
 // ============================================================================
 
-export async function cmdInfo(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdInfo(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, INFO_FLAG_DEFS);
   if (positionals.length !== 1) {
-    throw new CliUsageError('Usage: webdb info <file> [--format table|json]');
+    throw new CliUsageError("Usage: webdb info <file> [--format table|json]");
   }
 
   const filePath = positionals[0];
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
   try {
     const page1Bytes = opened.db.pool.getPageBytesInSlot(0);
-    const page1View = new DataView(page1Bytes.buffer, page1Bytes.byteOffset, PAGE_SIZE);
+    const page1View = new DataView(
+      page1Bytes.buffer,
+      page1Bytes.byteOffset,
+      PAGE_SIZE,
+    );
     const header = catalog_read_page1_header(page1View, false);
     const computedP1 = computePage1Checksum(page1Bytes);
     const page1ChecksumStatus =
       header.storedChecksum === 0
-        ? 'unstamped (0)'
+        ? "unstamped (0)"
         : header.storedChecksum === computedP1
-          ? 'valid'
+          ? "valid"
           : `mismatch (stored ${formatHex32(header.storedChecksum)}, computed ${formatHex32(computedP1)})`;
 
     const tables = await opened.db.listTables();
@@ -289,34 +306,46 @@ export async function cmdInfo(argv: string[], ctx: CommandContext): Promise<numb
       ...(warnings.length > 0 ? { warnings } : {}),
     };
 
-    if (format === 'json') {
-      ctx.io.stdout(formatJson(summary) + '\n');
+    if (format === "json") {
+      ctx.io.stdout(formatJson(summary) + "\n");
       return 0;
     }
 
     const entries: Array<[string, string | number]> = [
-      ['File', `${filePath} (${formatBytes(opened.dbFileSize)})`],
-      ['Format Version', `${header.fileFormatVersion} (min read: ${header.minReadVersion})`],
-      ['Page Size', `${header.pageSize} bytes`],
-      ['Total Pages', `${header.totalPages} (${formatBytes(header.totalPages * header.pageSize)})`],
-      ['Free Page Head', header.freePageHead === 0 ? '0 (none)' : String(header.freePageHead)],
-      ['Schema Version', header.schemaVersion],
-      ['Change Counter', header.changeCounter],
-      ['Page 1 Checksum', `${formatHex32(header.storedChecksum)} (${page1ChecksumStatus})`],
-      ['Tables', tables.length],
-      ['Indexes', indexes.length],
+      ["File", `${filePath} (${formatBytes(opened.dbFileSize)})`],
       [
-        'WAL Status',
+        "Format Version",
+        `${header.fileFormatVersion} (min read: ${header.minReadVersion})`,
+      ],
+      ["Page Size", `${header.pageSize} bytes`],
+      [
+        "Total Pages",
+        `${header.totalPages} (${formatBytes(header.totalPages * header.pageSize)})`,
+      ],
+      [
+        "Free Page Head",
+        header.freePageHead === 0 ? "0 (none)" : String(header.freePageHead),
+      ],
+      ["Schema Version", header.schemaVersion],
+      ["Change Counter", header.changeCounter],
+      [
+        "Page 1 Checksum",
+        `${formatHex32(header.storedChecksum)} (${page1ChecksumStatus})`,
+      ],
+      ["Tables", tables.length],
+      ["Indexes", indexes.length],
+      [
+        "WAL Status",
         opened.walFileSize === null
-          ? 'none'
+          ? "none"
           : `${formatBytes(opened.walFileSize)}, ${opened.walFramesOnDisk} frame(s)` +
             (opened.overlay.replayedPageCount > 0
               ? ` (${opened.overlay.replayedPageCount} page(s) overlaid read-only)`
-              : ''),
+              : ""),
       ],
     ];
 
-    ctx.io.stdout(formatKeyValue(entries) + '\n\n');
+    ctx.io.stdout(formatKeyValue(entries) + "\n\n");
     const breakdownRows = Object.entries(pageTypeCounts)
       .filter(([, count]) => count > 0)
       .map(([type, count]) => ({
@@ -324,9 +353,13 @@ export async function cmdInfo(argv: string[], ctx: CommandContext): Promise<numb
         pages: count,
         size: formatBytes(count * header.pageSize),
       }));
-    ctx.io.stdout(formatTable(['page_type', 'pages', 'size'], breakdownRows) + '\n');
+    ctx.io.stdout(
+      formatTable(["page_type", "pages", "size"], breakdownRows) + "\n",
+    );
     if (warnings.length > 0) {
-      ctx.io.stdout('\nWarnings:\n' + warnings.map((w) => `  - ${w}`).join('\n') + '\n');
+      ctx.io.stdout(
+        "\nWarnings:\n" + warnings.map((w) => `  - ${w}`).join("\n") + "\n",
+      );
     }
     return 0;
   } finally {
@@ -338,17 +371,20 @@ export async function cmdInfo(argv: string[], ctx: CommandContext): Promise<numb
 // 2. tables
 // ============================================================================
 
-export async function cmdTables(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdTables(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, TABLES_FLAG_DEFS);
   if (positionals.length !== 1) {
     throw new CliUsageError(
-      'Usage: webdb tables <file> [--exact-count] [--format table|json|ndjson|csv]',
+      "Usage: webdb tables <file> [--exact-count] [--format table|json|ndjson|csv]",
     );
   }
 
   const filePath = positionals[0];
   const format = parseOutputFormat(values.format as string | undefined);
-  const exactCount = Boolean(values['exact-count']);
+  const exactCount = Boolean(values["exact-count"]);
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
   try {
@@ -358,7 +394,10 @@ export async function cmdTables(argv: string[], ctx: CommandContext): Promise<nu
     for (const t of tables) {
       let rowCount: number = t.rowCountEstimate;
       if (exactCount) {
-        const countRows = await opened.db.from(t.name).count('*', 'count').toArray();
+        const countRows = await opened.db
+          .from(t.name)
+          .count("*", "count")
+          .toArray();
         rowCount = Number(countRows[0]?.count ?? 0);
       }
       rows.push({
@@ -366,20 +405,20 @@ export async function cmdTables(argv: string[], ctx: CommandContext): Promise<nu
         name: t.name,
         columns: t.columns.length,
         rows: rowCount,
-        primary_key: t.primaryKey?.join(', ') || '-',
+        primary_key: t.primaryKey?.join(", ") || "-",
         indexes: t.indexes?.length ?? 0,
         root_page: t.rootPageId,
       });
     }
 
-    if (rows.length === 0 && format === 'table') {
-      ctx.io.stdout('(no tables)\n');
+    if (rows.length === 0 && format === "table") {
+      ctx.io.stdout("(no tables)\n");
       return 0;
     }
 
     writeFormattedRows(
       ctx.io,
-      ['id', 'name', 'columns', 'rows', 'primary_key', 'indexes', 'root_page'],
+      ["id", "name", "columns", "rows", "primary_key", "indexes", "root_page"],
       rows,
       format,
     );
@@ -398,21 +437,30 @@ function formatIndexColumns(idx: IndexDescriptor, table?: TableMeta): string {
   for (let i = 0; i < idx.columnCount; i++) {
     const colIdx = idx.columnIndices[i];
     const colName = table?.columns[colIdx]?.name ?? `col#${colIdx}`;
-    const dir = idx.colDirections[i] === 1 ? 'DESC' : 'ASC';
+    const dir = idx.colDirections[i] === 1 ? "DESC" : "ASC";
     parts.push(`${colName} ${dir}`);
   }
-  return parts.join(', ');
+  return parts.join(", ");
 }
 
-export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdSchema(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, SCHEMA_FLAG_DEFS);
   if (positionals.length < 1 || positionals.length > 2) {
-    throw new CliUsageError('Usage: webdb schema <file> [table] [--format table|json]');
+    throw new CliUsageError(
+      "Usage: webdb schema <file> [table] [--format table|json]",
+    );
   }
 
   const filePath = positionals[0];
   const tableName = positionals[1];
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
   try {
@@ -420,7 +468,7 @@ export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<nu
       ? [await opened.db.getTable(tableName)]
       : await opened.db.listTables();
 
-    if (format === 'json') {
+    if (format === "json") {
       const payload = tables.map((t) => ({
         tableId: t.tableId,
         name: t.name,
@@ -445,12 +493,12 @@ export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<nu
           columns: formatIndexColumns(ix, t),
         })),
       }));
-      ctx.io.stdout(formatJson(tableName ? payload[0] : payload) + '\n');
+      ctx.io.stdout(formatJson(tableName ? payload[0] : payload) + "\n");
       return 0;
     }
 
     if (tables.length === 0) {
-      ctx.io.stdout('(no tables)\n');
+      ctx.io.stdout("(no tables)\n");
       return 0;
     }
 
@@ -460,13 +508,16 @@ export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<nu
         `Table: ${t.name} (id=${t.tableId}, rootPage=${t.rootPageId}, ` +
         `catalogPage=${t.colCatalogPageId}, estRows=${t.rowCountEstimate}, autoIncNext=${t.autoIncNext})`;
       const colRows = t.columns.map((c, idx) => ({
-        '#': idx,
+        "#": idx,
         name: c.name,
         type: formatDataType(c.type),
         flags: formatColumnFlags(c.flags),
         offset: c.colOffset,
       }));
-      let section = header + '\n' + formatTable(['#', 'name', 'type', 'flags', 'offset'], colRows);
+      let section =
+        header +
+        "\n" +
+        formatTable(["#", "name", "type", "flags", "offset"], colRows);
       if (t.indexes && t.indexes.length > 0) {
         const idxRows = t.indexes.map((ix) => ({
           id: ix.indexId,
@@ -476,13 +527,13 @@ export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<nu
           root_page: ix.rootPageId,
         }));
         section +=
-          '\nIndexes:\n' +
-          formatTable(['id', 'name', 'columns', 'flags', 'root_page'], idxRows);
+          "\nIndexes:\n" +
+          formatTable(["id", "name", "columns", "flags", "root_page"], idxRows);
       }
       sections.push(section);
     }
 
-    ctx.io.stdout(sections.join('\n\n') + '\n');
+    ctx.io.stdout(sections.join("\n\n") + "\n");
     return 0;
   } finally {
     await opened.close();
@@ -493,11 +544,14 @@ export async function cmdSchema(argv: string[], ctx: CommandContext): Promise<nu
 // 4. indexes
 // ============================================================================
 
-export async function cmdIndexes(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdIndexes(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, INDEXES_FLAG_DEFS);
   if (positionals.length < 1 || positionals.length > 2) {
     throw new CliUsageError(
-      'Usage: webdb indexes <file> [table] [--format table|json|ndjson|csv]',
+      "Usage: webdb indexes <file> [table] [--format table|json|ndjson|csv]",
     );
   }
 
@@ -524,14 +578,14 @@ export async function cmdIndexes(argv: string[], ctx: CommandContext): Promise<n
       };
     });
 
-    if (rows.length === 0 && format === 'table') {
-      ctx.io.stdout('(no indexes)\n');
+    if (rows.length === 0 && format === "table") {
+      ctx.io.stdout("(no indexes)\n");
       return 0;
     }
 
     writeFormattedRows(
       ctx.io,
-      ['id', 'name', 'table', 'columns', 'flags', 'root_page'],
+      ["id", "name", "table", "columns", "flags", "root_page"],
       rows,
       format,
     );
@@ -564,10 +618,10 @@ function buildQueryFromFlags(
 
   // Replay joins in the exact CLI order so chained LEFT JOIN + INNER JOIN preserve semantics
   for (const entry of entries) {
-    if (entry.name === 'join') {
+    if (entry.name === "join") {
       const j = parseJoinSpec(String(entry.value));
       qb = qb.join(j.table, j.leftCol, j.op, j.rightCol);
-    } else if (entry.name === 'left-join') {
+    } else if (entry.name === "left-join") {
       const j = parseJoinSpec(String(entry.value));
       qb = qb.leftJoin(j.table, j.leftCol, j.op, j.rightCol);
     }
@@ -575,14 +629,14 @@ function buildQueryFromFlags(
 
   // Replay WHERE / OR WHERE in exact CLI order
   for (const entry of entries) {
-    if (entry.name === 'where') {
+    if (entry.name === "where") {
       qb = qb.where(String(entry.value));
-    } else if (entry.name === 'or-where') {
+    } else if (entry.name === "or-where") {
       qb = qb.orWhere(String(entry.value));
     }
   }
 
-  const groupBys = values['group-by'] as string[];
+  const groupBys = values["group-by"] as string[];
   const groupCols: string[] = [];
   for (const g of groupBys) {
     groupCols.push(...splitTopLevelComma(g));
@@ -602,11 +656,11 @@ function buildQueryFromFlags(
     }
   }
 
-  if (typeof values.limit === 'string') {
-    qb = qb.limit(parsePositiveInt(values.limit, '--limit', true));
+  if (typeof values.limit === "string") {
+    qb = qb.limit(parsePositiveInt(values.limit, "--limit", true));
   }
-  if (typeof values.offset === 'string') {
-    qb = qb.offset(parsePositiveInt(values.offset, '--offset', true));
+  if (typeof values.offset === "string") {
+    qb = qb.offset(parsePositiveInt(values.offset, "--offset", true));
   }
 
   return qb;
@@ -627,19 +681,22 @@ function collectColumns(rows: DbRow[], fallbackCols: string[]): string[] {
   return cols;
 }
 
-export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdQuery(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const parsed = parseCliArgs(argv, QUERY_FLAG_DEFS);
   const { positionals, values } = parsed;
   if (positionals.length !== 2) {
     throw new CliUsageError(
-      'Usage: webdb query <file> <table> [--select <expr>] [--where <expr>] [--order <col[:asc|desc]>] [--limit <n>] [--offset <n>] [--format table|json|ndjson|csv]',
+      "Usage: webdb query <file> <table> [--select <expr>] [--where <expr>] [--order <col[:asc|desc]>] [--limit <n>] [--offset <n>] [--format table|json|ndjson|csv]",
     );
   }
 
   const [filePath, tableName] = positionals;
   const format = parseOutputFormat(values.format as string | undefined);
   const countOnly = Boolean(values.count);
-  const hasGroupBy = (values['group-by'] as string[]).length > 0;
+  const hasGroupBy = (values["group-by"] as string[]).length > 0;
 
   if (countOnly) {
     if (hasGroupBy) {
@@ -648,13 +705,15 @@ export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<num
       );
     }
     if ((values.select as string[]).length > 0) {
-      throw new CliUsageError('Cannot combine --count with --select');
+      throw new CliUsageError("Cannot combine --count with --select");
     }
     if ((values.order as string[]).length > 0) {
-      throw new CliUsageError('Cannot combine --count with --order');
+      throw new CliUsageError("Cannot combine --count with --order");
     }
-    if (typeof values.limit === 'string' || typeof values.offset === 'string') {
-      throw new CliUsageError('Cannot combine --count with --limit or --offset');
+    if (typeof values.limit === "string" || typeof values.offset === "string") {
+      throw new CliUsageError(
+        "Cannot combine --count with --limit or --offset",
+      );
     }
   }
 
@@ -664,13 +723,13 @@ export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<num
     const qb = buildQueryFromFlags(opened.db, tableName, parsed);
 
     if (countOnly) {
-      const countRows = await qb.count('*', 'count').toArray();
+      const countRows = await qb.count("*", "count").toArray();
       const total = Number(countRows[0]?.count ?? 0);
-      if (format === 'json') {
-        ctx.io.stdout(formatJson({ count: total }) + '\n');
-      } else if (format === 'ndjson') {
-        ctx.io.stdout(JSON.stringify({ count: total }) + '\n');
-      } else if (format === 'csv') {
+      if (format === "json") {
+        ctx.io.stdout(formatJson({ count: total }) + "\n");
+      } else if (format === "ndjson") {
+        ctx.io.stdout(JSON.stringify({ count: total }) + "\n");
+      } else if (format === "csv") {
         ctx.io.stdout(`count\n${total}\n`);
       } else {
         ctx.io.stdout(`${total}\n`);
@@ -686,8 +745,8 @@ export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<num
         : tableMeta.columns.map((c) => c.name);
     const columns = collectColumns(rows, fallbackCols);
 
-    if (rows.length === 0 && format === 'table') {
-      ctx.io.stdout('(0 rows)\n');
+    if (rows.length === 0 && format === "table") {
+      ctx.io.stdout("(0 rows)\n");
       return 0;
     }
 
@@ -698,62 +757,75 @@ export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<num
   }
 }
 
-export async function cmdExplain(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdExplain(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const parsed = parseCliArgs(argv, EXPLAIN_FLAG_DEFS);
   const { positionals, values } = parsed;
   if (positionals.length !== 2) {
     throw new CliUsageError(
-      'Usage: webdb explain <file> <table> [--select <expr>] [--where <expr>] [--order <spec>] [--limit <n>] [--format table|json]',
+      "Usage: webdb explain <file> <table> [--select <expr>] [--where <expr>] [--order <spec>] [--limit <n>] [--format table|json]",
     );
   }
 
   const [filePath, tableName] = positionals;
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
   try {
     const qb = buildQueryFromFlags(opened.db, tableName, parsed);
     const result = await qb.explain();
 
-    if (format === 'json') {
-      ctx.io.stdout(formatJson(result) + '\n');
+    if (format === "json") {
+      ctx.io.stdout(formatJson(result) + "\n");
       return 0;
     }
 
     const planEntries: Array<[string, string | number | boolean]> = [
-      ['Table', result.plan.table],
-      ['Root Page', result.plan.rootPageId],
-      ['Scan Type', result.plan.scanType],
+      ["Table", result.plan.table],
+      ["Root Page", result.plan.rootPageId],
+      ["Scan Type", result.plan.scanType],
     ];
     if (result.plan.indexName) {
-      planEntries.push(['Index', result.plan.indexName]);
+      planEntries.push(["Index", result.plan.indexName]);
     }
     if (result.plan.filters.length > 0) {
-      planEntries.push(['Filters', result.plan.filters.length]);
+      planEntries.push(["Filters", result.plan.filters.length]);
     }
     if (result.plan.orderBy && result.plan.orderBy.length > 0) {
       planEntries.push([
-        'Order By',
+        "Order By",
         result.plan.orderBy
-          .map((k) => `${k.colName ?? 'expr'} ${(k.direction ?? 'asc').toUpperCase()}`)
-          .join(', '),
+          .map(
+            (k) =>
+              `${k.colName ?? "expr"} ${(k.direction ?? "asc").toUpperCase()}`,
+          )
+          .join(", "),
       ]);
     }
     if (result.plan.isOrderSatisfied !== undefined) {
-      planEntries.push(['Order Satisfied by Index', result.plan.isOrderSatisfied]);
+      planEntries.push([
+        "Order Satisfied by Index",
+        result.plan.isOrderSatisfied,
+      ]);
     }
     if (result.plan.limit !== undefined) {
-      planEntries.push(['Limit', result.plan.limit]);
+      planEntries.push(["Limit", result.plan.limit]);
     }
     if (result.plan.offset !== undefined) {
-      planEntries.push(['Offset', result.plan.offset]);
+      planEntries.push(["Offset", result.plan.offset]);
     }
     planEntries.push([
-      'Bytecode Size',
+      "Bytecode Size",
       `${result.bytecodeSize} bytes (${result.instructions.length} ops)`,
     ]);
 
-    ctx.io.stdout(formatKeyValue(planEntries) + '\n\n');
+    ctx.io.stdout(formatKeyValue(planEntries) + "\n\n");
     ctx.io.stdout(result.assembly);
     return 0;
   } finally {
@@ -792,7 +864,10 @@ async function mapPagesToTables(
         if (nextPid >= 2 && !visited.has(nextPid)) queue.push(nextPid);
       } else if (ptype === PAGE_TYPE_TABLE_INTERIOR) {
         owners.set(pid, table);
-        const cellCount = Math.min(page_get_cell_count(view, 0), MAX_SLOTS_PER_PAGE);
+        const cellCount = Math.min(
+          page_get_cell_count(view, 0),
+          MAX_SLOTS_PER_PAGE,
+        );
         for (let i = 0; i < cellCount; i++) {
           const off = page_get_cell_offset(view, 0, i);
           if (off >= PAGE_HEADER_SIZE && off + 4 <= PAGE_SIZE) {
@@ -837,7 +912,9 @@ async function readOverflowBytesFromVfs(
     );
     const nextPageId = page_get_overflow_next_page_id(view, 0);
     if (chunkLen > 0) {
-      chunks.push(bytes.slice(OVERFLOW_HEADER_SIZE, OVERFLOW_HEADER_SIZE + chunkLen));
+      chunks.push(
+        bytes.slice(OVERFLOW_HEADER_SIZE, OVERFLOW_HEADER_SIZE + chunkLen),
+      );
       copied += chunkLen;
     }
     currPageId = nextPageId;
@@ -858,9 +935,14 @@ async function hydrateOverflowColumns(
   readPage: (pageId: number) => Promise<Uint8Array | null>,
 ): Promise<void> {
   for (const desc of overflowDescs) {
-    const raw = await readOverflowBytesFromVfs(desc.firstPageId, desc.totalLen, readPage);
+    const raw = await readOverflowBytesFromVfs(
+      desc.firstPageId,
+      desc.totalLen,
+      readPage,
+    );
     if (raw === null) {
-      row[desc.colName] = `<OVERFLOW page=${desc.firstPageId} len=${desc.totalLen}>`;
+      row[desc.colName] =
+        `<OVERFLOW page=${desc.firstPageId} len=${desc.totalLen}>`;
     } else if (desc.isText) {
       row[desc.colName] = textDecoder.decode(raw);
     } else {
@@ -869,20 +951,27 @@ async function hydrateOverflowColumns(
   }
 }
 
-export async function cmdPage(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdPage(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, PAGE_FLAG_DEFS);
   if (positionals.length !== 2) {
     throw new CliUsageError(
-      'Usage: webdb page <file> <pageId> [--rows] [--hex] [--raw] [--format table|json]',
+      "Usage: webdb page <file> <pageId> [--rows] [--hex] [--raw] [--format table|json]",
     );
   }
 
   const filePath = positionals[0];
-  const pageId = parsePositiveInt(positionals[1], '<pageId>', false);
+  const pageId = parsePositiveInt(positionals[1], "<pageId>", false);
   const showHex = Boolean(values.hex);
   const showRows = Boolean(values.rows);
   const rawMode = Boolean(values.raw);
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   await assertDbFileExists(filePath);
 
@@ -923,7 +1012,11 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
       throw new Error(`Page ${pageId} does not exist in ${filePath}`);
     }
 
-    const view = new DataView(pageBytes.buffer, pageBytes.byteOffset, PAGE_SIZE);
+    const view = new DataView(
+      pageBytes.buffer,
+      pageBytes.byteOffset,
+      PAGE_SIZE,
+    );
     const warnings: string[] = openWarning ? [openWarning] : [];
 
     if (pageId === 1) {
@@ -937,30 +1030,56 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
       }
 
       const computed = computePage1Checksum(pageBytes);
-      const storedChecksum = header ? header.storedChecksum : view.getUint32(28, true);
+      const storedChecksum = header
+        ? header.storedChecksum
+        : view.getUint32(28, true);
       const checksumValid = storedChecksum === 0 || storedChecksum === computed;
 
-      let tablesSummary: Array<{ id: number; name: string; rootPageId: number }> = [];
-      let indexesSummary: Array<{ id: number; name: string; rootPageId: number }> = [];
+      let tablesSummary: Array<{
+        id: number;
+        name: string;
+        rootPageId: number;
+      }> = [];
+      let indexesSummary: Array<{
+        id: number;
+        name: string;
+        rootPageId: number;
+      }> = [];
 
       if (header) {
         if (!rawMode && opened) {
           const tables = await opened.db.listTables();
           const indexes = await opened.db.listIndexes();
-          tablesSummary = tables.map((t) => ({ id: t.tableId, name: t.name, rootPageId: t.rootPageId }));
-          indexesSummary = indexes.map((ix) => ({ id: ix.indexId, name: ix.name, rootPageId: ix.rootPageId }));
+          tablesSummary = tables.map((t) => ({
+            id: t.tableId,
+            name: t.name,
+            rootPageId: t.rootPageId,
+          }));
+          indexesSummary = indexes.map((ix) => ({
+            id: ix.indexId,
+            name: ix.name,
+            rootPageId: ix.rootPageId,
+          }));
         } else {
           // Decode Page 1 local catalog descriptors directly from raw page bytes
           const rawTables = catalog_list_table_descriptors(view);
           const rawIndexes = catalog_list_all_indexes(view);
-          tablesSummary = rawTables.map((t) => ({ id: t.tableId, name: t.name, rootPageId: t.rootPageId }));
-          indexesSummary = rawIndexes.map((ix) => ({ id: ix.indexId, name: ix.name, rootPageId: ix.rootPageId }));
+          tablesSummary = rawTables.map((t) => ({
+            id: t.tableId,
+            name: t.name,
+            rootPageId: t.rootPageId,
+          }));
+          indexesSummary = rawIndexes.map((ix) => ({
+            id: ix.indexId,
+            name: ix.name,
+            rootPageId: ix.rootPageId,
+          }));
         }
       }
 
       const info = {
         pageId: 1,
-        pageType: 'HEADER_CATALOG',
+        pageType: "HEADER_CATALOG",
         ...(header
           ? {
               pageSize: header.pageSize,
@@ -980,38 +1099,50 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
         ...(warnings.length > 0 ? { warnings } : {}),
       };
 
-      if (format === 'json') {
-        ctx.io.stdout(formatJson(info) + '\n');
+      if (format === "json") {
+        ctx.io.stdout(formatJson(info) + "\n");
         return 0;
       }
 
       const kv: Array<[string, string | number]> = [
-        ['Page ID', 1],
-        ['Page Type', 'HEADER_CATALOG (Page 1)'],
+        ["Page ID", 1],
+        ["Page Type", "HEADER_CATALOG (Page 1)"],
       ];
       if (header) {
-        kv.push(['Total Pages', header.totalPages]);
-        kv.push(['Schema Version', header.schemaVersion]);
-        kv.push(['Change Counter', header.changeCounter]);
-        kv.push(['Free Page Head', header.freePageHead]);
+        kv.push(["Total Pages", header.totalPages]);
+        kv.push(["Schema Version", header.schemaVersion]);
+        kv.push(["Change Counter", header.changeCounter]);
+        kv.push(["Free Page Head", header.freePageHead]);
       } else if (headerError) {
-        kv.push(['Header Status', `INVALID (${headerError})`]);
+        kv.push(["Header Status", `INVALID (${headerError})`]);
       }
       kv.push([
-        'Checksum',
+        "Checksum",
         `${formatHex32(storedChecksum)} (computed ${formatHex32(computed)}, ${
-          storedChecksum === 0 ? 'unstamped' : checksumValid ? 'valid' : 'MISMATCH'
+          storedChecksum === 0
+            ? "unstamped"
+            : checksumValid
+              ? "valid"
+              : "MISMATCH"
         })`,
       ]);
-      kv.push(['Tables', tablesSummary.map((t) => t.name).join(', ') || '(none)']);
-      kv.push(['Indexes', indexesSummary.map((ix) => ix.name).join(', ') || '(none)']);
+      kv.push([
+        "Tables",
+        tablesSummary.map((t) => t.name).join(", ") || "(none)",
+      ]);
+      kv.push([
+        "Indexes",
+        indexesSummary.map((ix) => ix.name).join(", ") || "(none)",
+      ]);
 
-      ctx.io.stdout(formatKeyValue(kv) + '\n');
+      ctx.io.stdout(formatKeyValue(kv) + "\n");
       if (warnings.length > 0) {
-        ctx.io.stdout('\nWarnings:\n' + warnings.map((w) => `  - ${w}`).join('\n') + '\n');
+        ctx.io.stdout(
+          "\nWarnings:\n" + warnings.map((w) => `  - ${w}`).join("\n") + "\n",
+        );
       }
       if (showHex) {
-        ctx.io.stdout('\n' + formatHexDump(pageBytes) + '\n');
+        ctx.io.stdout("\n" + formatHexDump(pageBytes) + "\n");
       }
       return 0;
     }
@@ -1020,7 +1151,8 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
     const pageTypeName = formatPageType(pageType, pageId);
     const storedChecksum = page_get_checksum(view, 0);
     const computedChecksum = computePageChecksum(pageBytes);
-    const checksumValid = storedChecksum === 0 || storedChecksum === computedChecksum;
+    const checksumValid =
+      storedChecksum === 0 || storedChecksum === computedChecksum;
 
     let extra: Record<string, unknown> = {};
     const decodedRows: Array<{ slot: number; offset: number; row: DbRow }> = [];
@@ -1075,7 +1207,8 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
 
       if (
         opened &&
-        (pageType === PAGE_TYPE_LEAF_DATA || pageType === PAGE_TYPE_TABLE_INTERIOR)
+        (pageType === PAGE_TYPE_LEAF_DATA ||
+          pageType === PAGE_TYPE_TABLE_INTERIOR)
       ) {
         const tables = await opened.db.listTables();
         const owners = await mapPagesToTables(tables, readOnePage);
@@ -1084,7 +1217,11 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
           extra.ownerTable = ownerTable.name;
         }
 
-        if (pageType === PAGE_TYPE_LEAF_DATA && ownerTable && (showRows || format === 'json')) {
+        if (
+          pageType === PAGE_TYPE_LEAF_DATA &&
+          ownerTable &&
+          (showRows || format === "json")
+        ) {
           for (let i = 0; i < safeCellCount; i++) {
             const off = offsets[i];
             if (off < PAGE_HEADER_SIZE || off >= PAGE_SIZE) {
@@ -1107,7 +1244,9 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
                 decodedRows.push({ slot: i, offset: off, row });
               }
             } catch (err: any) {
-              warnings.push(`Slot ${i} (offset ${off}): failed to decode row (${err?.message ?? String(err)})`);
+              warnings.push(
+                `Slot ${i} (offset ${off}): failed to decode row (${err?.message ?? String(err)})`,
+              );
             }
           }
         }
@@ -1126,67 +1265,84 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
       ...(warnings.length > 0 ? { warnings } : {}),
     };
 
-    if (format === 'json') {
-      ctx.io.stdout(formatJson(payload) + '\n');
+    if (format === "json") {
+      ctx.io.stdout(formatJson(payload) + "\n");
       return 0;
     }
 
     const kv: Array<[string, string | number]> = [
-      ['Page ID', pageId],
-      ['Page Type', `${pageTypeName} (0x${pageType.toString(16).padStart(2, '0')})`],
+      ["Page ID", pageId],
       [
-        'Checksum',
+        "Page Type",
+        `${pageTypeName} (0x${pageType.toString(16).padStart(2, "0")})`,
+      ],
+      [
+        "Checksum",
         `${formatHex32(storedChecksum)} (computed ${formatHex32(computedChecksum)}, ${
-          storedChecksum === 0 ? 'unstamped' : checksumValid ? 'valid' : 'MISMATCH'
+          storedChecksum === 0
+            ? "unstamped"
+            : checksumValid
+              ? "valid"
+              : "MISMATCH"
         })`,
       ],
     ];
-    if (ownerTable) kv.push(['Owner Table', ownerTable.name]);
+    if (ownerTable) kv.push(["Owner Table", ownerTable.name]);
     if (pageType === PAGE_TYPE_FREE) {
-      kv.push(['Next Free Page ID', extra.nextFreePageId as number]);
+      kv.push(["Next Free Page ID", extra.nextFreePageId as number]);
     } else if (pageType === PAGE_TYPE_CATALOG_PAGE) {
-      kv.push(['Table ID', extra.tableId as number]);
-      kv.push(['Columns in Page', extra.colCountInPage as number]);
-      kv.push(['Start Col Index', extra.startColIndex as number]);
-      kv.push(['Next Catalog Page', extra.nextColCatalogPageId as number]);
+      kv.push(["Table ID", extra.tableId as number]);
+      kv.push(["Columns in Page", extra.colCountInPage as number]);
+      kv.push(["Start Col Index", extra.startColIndex as number]);
+      kv.push(["Next Catalog Page", extra.nextColCatalogPageId as number]);
     } else if (pageType === PAGE_TYPE_OVERFLOW) {
-      kv.push(['Chunk Size', `${extra.chunkSize} bytes`]);
-      kv.push(['Next Overflow Page', extra.nextOverflowPageId as number]);
+      kv.push(["Chunk Size", `${extra.chunkSize} bytes`]);
+      kv.push(["Next Overflow Page", extra.nextOverflowPageId as number]);
     } else {
-      kv.push(['Cell Count', extra.cellCount as number]);
-      kv.push(['Cell Content Offset', extra.cellContentOffset as number]);
+      kv.push(["Cell Count", extra.cellCount as number]);
+      kv.push(["Cell Content Offset", extra.cellContentOffset as number]);
       kv.push([
-        'Free Space',
+        "Free Space",
         `${extra.totalFreeBytes} bytes (${extra.contiguousFreeBytes} contiguous + ${extra.fragmentedFreeBytes} fragmented)`,
       ]);
       const isInterior =
-        pageType === PAGE_TYPE_TABLE_INTERIOR || pageType === PAGE_TYPE_INDEX_INTERIOR;
-      kv.push([isInterior ? 'Right Child Page' : 'Next Page ID', extra.nextPageId as number]);
+        pageType === PAGE_TYPE_TABLE_INTERIOR ||
+        pageType === PAGE_TYPE_INDEX_INTERIOR;
+      kv.push([
+        isInterior ? "Right Child Page" : "Next Page ID",
+        extra.nextPageId as number,
+      ]);
     }
 
-    ctx.io.stdout(formatKeyValue(kv) + '\n');
+    ctx.io.stdout(formatKeyValue(kv) + "\n");
 
     if (warnings.length > 0) {
-      ctx.io.stdout('\nWarnings:\n' + warnings.map((w) => `  - ${w}`).join('\n') + '\n');
+      ctx.io.stdout(
+        "\nWarnings:\n" + warnings.map((w) => `  - ${w}`).join("\n") + "\n",
+      );
     }
 
     if (showRows && ownerTable && pageType === PAGE_TYPE_LEAF_DATA) {
-      ctx.io.stdout('\n');
+      ctx.io.stdout("\n");
       if (decodedRows.length === 0) {
-        ctx.io.stdout('(no rows in page)\n');
+        ctx.io.stdout("(no rows in page)\n");
       } else {
-        const cols = ['_slot', '_offset', ...ownerTable.columns.map((c) => c.name)];
+        const cols = [
+          "_slot",
+          "_offset",
+          ...ownerTable.columns.map((c) => c.name),
+        ];
         const tableRows = decodedRows.map((entry) => ({
           _slot: entry.slot,
           _offset: entry.offset,
           ...entry.row,
         }));
-        ctx.io.stdout(formatTable(cols, tableRows) + '\n');
+        ctx.io.stdout(formatTable(cols, tableRows) + "\n");
       }
     }
 
     if (showHex) {
-      ctx.io.stdout('\n' + formatHexDump(pageBytes) + '\n');
+      ctx.io.stdout("\n" + formatHexDump(pageBytes) + "\n");
     }
 
     return 0;
@@ -1200,14 +1356,21 @@ export async function cmdPage(argv: string[], ctx: CommandContext): Promise<numb
 // 8. verify
 // ============================================================================
 
-export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdVerify(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, VERIFY_FLAG_DEFS);
   if (positionals.length !== 1) {
-    throw new CliUsageError('Usage: webdb verify <file> [--format table|json]');
+    throw new CliUsageError("Usage: webdb verify <file> [--format table|json]");
   }
 
   const filePath = positionals[0];
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   const { size: fileSize } = await statDbFile(filePath);
   const storage = new NodeFsStorage(filePath, { readOnly: true });
@@ -1231,7 +1394,7 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
     const physicalPages = Math.floor(fileSize / PAGE_SIZE);
     const [page1] = physicalPages >= 1 ? await storage.readPages([1]) : [null];
     if (!page1) {
-      errors.push('Could not read Page 1 (file is smaller than 4096 bytes)');
+      errors.push("Could not read Page 1 (file is smaller than 4096 bytes)");
     } else {
       pagesChecked = 1;
       const p1View = new DataView(page1.buffer, page1.byteOffset, PAGE_SIZE);
@@ -1251,7 +1414,9 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
         }
 
         if (hdr.totalPages < 1) {
-          errors.push(`Page 1 declares invalid totalPages=${hdr.totalPages} (must be >= 1)`);
+          errors.push(
+            `Page 1 declares invalid totalPages=${hdr.totalPages} (must be >= 1)`,
+          );
         } else if (hdr.totalPages > physicalPages) {
           errors.push(
             `Page 1 declares totalPages=${hdr.totalPages}, but file only holds ${physicalPages} page(s)`,
@@ -1268,7 +1433,9 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
     }
 
     const pagesToCheck =
-      headerTotalPages >= 1 ? Math.min(headerTotalPages, physicalPages) : physicalPages;
+      headerTotalPages >= 1
+        ? Math.min(headerTotalPages, physicalPages)
+        : physicalPages;
     for (let start = 2; start <= pagesToCheck; start += PAGE_SCAN_BATCH_SIZE) {
       const end = Math.min(pagesToCheck, start + PAGE_SCAN_BATCH_SIZE - 1);
       const ids: number[] = [];
@@ -1288,7 +1455,7 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
         const ptype = page_get_type(view, 0);
         if (!VALID_PAGE_TYPES.has(ptype)) {
           warnings.push(
-            `Page ${pid}: unrecognized page type 0x${ptype.toString(16).padStart(2, '0')}`,
+            `Page ${pid}: unrecognized page type 0x${ptype.toString(16).padStart(2, "0")}`,
           );
         }
         const stored = page_get_checksum(view, 0);
@@ -1318,7 +1485,9 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
       let invalidFrames = 0;
 
       if (!rawWalHeader) {
-        errors.push(`WAL file exists (${walSize} bytes) but is smaller than 32-byte header`);
+        errors.push(
+          `WAL file exists (${walSize} bytes) but is smaller than 32-byte header`,
+        );
       } else {
         try {
           const decodedWal = decodeWalFileHeader(rawWalHeader, true);
@@ -1350,7 +1519,9 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
               const res = validateWalFrame(frames[i]);
               if (!res.valid || !res.header) {
                 invalidFrames++;
-                errors.push(`WAL frame ${frameIdx}: ${res.reason ?? 'invalid'}`);
+                errors.push(
+                  `WAL frame ${frameIdx}: ${res.reason ?? "invalid"}`,
+                );
                 halted = true;
                 break;
               }
@@ -1370,7 +1541,9 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
                 res.header.frameType !== WAL_FRAME_TYPE_PAGE_DATA &&
                 res.header.frameType !== WAL_FRAME_TYPE_TX_UNCOMMITTED
               ) {
-                warnings.push(`WAL frame ${frameIdx}: unknown frameType ${res.header.frameType}`);
+                warnings.push(
+                  `WAL frame ${frameIdx}: unknown frameType ${res.header.frameType}`,
+                );
               }
             }
           }
@@ -1406,26 +1579,30 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
       errors,
     };
 
-    if (format === 'json') {
-      ctx.io.stdout(formatJson(report) + '\n');
+    if (format === "json") {
+      ctx.io.stdout(formatJson(report) + "\n");
     } else {
       ctx.io.stdout(
         formatKeyValue([
-          ['File', filePath],
-          ['Status', ok ? 'OK' : 'FAILED'],
-          ['Pages Checked', pagesChecked],
-          ['Valid Checksums', validChecksumPages],
-          ['Unstamped Checksums', unstampedChecksumPages],
-          ['Corrupt Pages', corruptPages],
-          ['Warnings', warnings.length],
-          ['Errors', errors.length],
-        ]) + '\n',
+          ["File", filePath],
+          ["Status", ok ? "OK" : "FAILED"],
+          ["Pages Checked", pagesChecked],
+          ["Valid Checksums", validChecksumPages],
+          ["Unstamped Checksums", unstampedChecksumPages],
+          ["Corrupt Pages", corruptPages],
+          ["Warnings", warnings.length],
+          ["Errors", errors.length],
+        ]) + "\n",
       );
       if (warnings.length > 0) {
-        ctx.io.stdout('\nWarnings:\n' + warnings.map((w) => `  - ${w}`).join('\n') + '\n');
+        ctx.io.stdout(
+          "\nWarnings:\n" + warnings.map((w) => `  - ${w}`).join("\n") + "\n",
+        );
       }
       if (errors.length > 0) {
-        ctx.io.stdout('\nErrors:\n' + errors.map((e) => `  - ${e}`).join('\n') + '\n');
+        ctx.io.stdout(
+          "\nErrors:\n" + errors.map((e) => `  - ${e}`).join("\n") + "\n",
+        );
       }
     }
 
@@ -1439,18 +1616,27 @@ export async function cmdVerify(argv: string[], ctx: CommandContext): Promise<nu
 // 9. dump
 // ============================================================================
 
-export async function cmdDump(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdDump(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, DUMP_FLAG_DEFS);
   if (positionals.length < 1 || positionals.length > 2) {
     throw new CliUsageError(
-      'Usage: webdb dump <file> [table] [--format json|ndjson|csv] [--out <path>]',
+      "Usage: webdb dump <file> [table] [--format json|ndjson|csv] [--out <path>]",
     );
   }
 
   const filePath = positionals[0];
   const tableName = positionals[1];
-  const allowed: OutputFormat[] = tableName ? ['json', 'ndjson', 'csv'] : ['json'];
-  const format = parseOutputFormat(values.format as string | undefined, allowed, 'json');
+  const allowed: OutputFormat[] = tableName
+    ? ["json", "ndjson", "csv"]
+    : ["json"];
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    allowed,
+    "json",
+  );
   const outPath = values.out as string | undefined;
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
@@ -1461,12 +1647,12 @@ export async function cmdDump(argv: string[], ctx: CommandContext): Promise<numb
       const tableMeta = await opened.db.getTable(tableName);
       const rows = await opened.db.from(tableName).toArray();
       const cols = tableMeta.columns.map((c) => c.name);
-      if (format === 'csv') {
-        output = formatCsv(cols, rows) + '\n';
-      } else if (format === 'ndjson') {
-        output = formatNdjson(rows) + (rows.length > 0 ? '\n' : '');
+      if (format === "csv") {
+        output = formatCsv(cols, rows) + "\n";
+      } else if (format === "ndjson") {
+        output = formatNdjson(rows) + (rows.length > 0 ? "\n" : "");
       } else {
-        output = formatJson(rows) + '\n';
+        output = formatJson(rows) + "\n";
       }
     } else {
       const tables = await opened.db.listTables();
@@ -1486,11 +1672,11 @@ export async function cmdDump(argv: string[], ctx: CommandContext): Promise<numb
           rows: toJsonSafe(rows),
         };
       }
-      output = formatJson(dumpObj) + '\n';
+      output = formatJson(dumpObj) + "\n";
     }
 
     if (outPath) {
-      await writeFile(outPath, output, 'utf8');
+      await writeFile(outPath, output, "utf8");
       const byteLen = new TextEncoder().encode(output).byteLength;
       ctx.io.stdout(`Wrote dump to ${outPath} (${formatBytes(byteLen)})\n`);
     } else {
@@ -1506,17 +1692,29 @@ export async function cmdDump(argv: string[], ctx: CommandContext): Promise<numb
 // 10. checkpoint
 // ============================================================================
 
-export async function cmdCheckpoint(argv: string[], ctx: CommandContext): Promise<number> {
+export async function cmdCheckpoint(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
   const { positionals, values } = parseCliArgs(argv, CHECKPOINT_FLAG_DEFS);
   if (positionals.length !== 1) {
-    throw new CliUsageError('Usage: webdb checkpoint <file> [--format table|json]');
+    throw new CliUsageError(
+      "Usage: webdb checkpoint <file> [--format table|json]",
+    );
   }
 
   const filePath = positionals[0];
-  const format = parseOutputFormat(values.format as string | undefined, ['table', 'json'], 'table');
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
 
   const { size: dbSize } = await assertDbFileExists(filePath);
-  const storage = new NodeFsStorage(filePath, { readOnly: false, create: false });
+  const storage = new NodeFsStorage(filePath, {
+    readOnly: false,
+    create: false,
+  });
 
   try {
     const framesBefore = await storage.getWalFrameCount();
@@ -1557,18 +1755,18 @@ export async function cmdCheckpoint(argv: string[], ctx: CommandContext): Promis
       abortedTxCount,
     };
 
-    if (format === 'json') {
-      ctx.io.stdout(formatJson(payload) + '\n');
+    if (format === "json") {
+      ctx.io.stdout(formatJson(payload) + "\n");
     } else {
       ctx.io.stdout(
         formatKeyValue([
-          ['File', filePath],
-          ['WAL Frames Before', framesBefore],
-          ['WAL Frames After', framesAfter],
-          ['Committed Transactions', committedTxCount],
-          ['Aborted Transactions', abortedTxCount],
-          ['Pages Written', pagesWritten],
-        ]) + '\n',
+          ["File", filePath],
+          ["WAL Frames Before", framesBefore],
+          ["WAL Frames After", framesAfter],
+          ["Committed Transactions", committedTxCount],
+          ["Aborted Transactions", abortedTxCount],
+          ["Pages Written", pagesWritten],
+        ]) + "\n",
       );
     }
     return 0;

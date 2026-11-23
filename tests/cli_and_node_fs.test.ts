@@ -783,15 +783,21 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
     // info and tables must fail (exit 1), never fabricate an empty DB
     const infoCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "info", fakePath], infoCap.io)).toBe(1);
+    expect(
+      await runCli(["--core", coreMode, "info", fakePath], infoCap.io),
+    ).toBe(1);
     expect(infoCap.stderr()).toMatch(/smaller than|Invalid database/i);
 
     const tablesCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "tables", fakePath], tablesCap.io)).toBe(1);
+    expect(
+      await runCli(["--core", coreMode, "tables", fakePath], tablesCap.io),
+    ).toBe(1);
 
     // checkpoint must fail AND leave the file completely untouched on disk
     const cpCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "checkpoint", fakePath], cpCap.io)).toBe(1);
+    expect(
+      await runCli(["--core", coreMode, "checkpoint", fakePath], cpCap.io),
+    ).toBe(1);
     expect(await readFile(fakePath, "utf8")).toBe(originalContent);
 
     // Direct WebDB.open with readOnly NodeFsStorage must also reject missing Page 1
@@ -830,8 +836,12 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
       expect(bad).toEqual([null, null, null]);
 
       // Invalid write/truncate/WAL bounds throw RangeError
-      await expect(storage.writePages([{ pageId: 0, data: new Uint8Array(PAGE_SIZE) }])).rejects.toThrow(RangeError);
-      await expect(storage.writePages([{ pageId: 1, data: new Uint8Array(100) }])).rejects.toThrow(RangeError);
+      await expect(
+        storage.writePages([{ pageId: 0, data: new Uint8Array(PAGE_SIZE) }]),
+      ).rejects.toThrow(RangeError);
+      await expect(
+        storage.writePages([{ pageId: 1, data: new Uint8Array(100) }]),
+      ).rejects.toThrow(RangeError);
       await expect(storage.truncate(-1)).rejects.toThrow(RangeError);
       await expect(storage.readWalFrames(-1)).rejects.toThrow(RangeError);
       await expect(storage.truncateWal(-1)).rejects.toThrow(RangeError);
@@ -855,7 +865,11 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     // Build an updated image with row 2 and put it into a companion .wal
     const baseBytes = await readFile(dbPath);
     const mem = new MemoryStorage();
-    const tmp = await WebDB.open({ storage: mem, engine: createEngine(), initialData: baseBytes });
+    const tmp = await WebDB.open({
+      storage: mem,
+      engine: createEngine(),
+      initialData: baseBytes,
+    });
     await tmp.insert("items", { id: 2, val: "committed-wal" });
     const nextBytes = await tmp.exportBinary();
     await tmp.close();
@@ -868,17 +882,32 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     for (let p = 1; p <= totalPages; p++) {
       frames.push(
         encodeWalFrame(
-          { frameType: WAL_FRAME_TYPE_PAGE_DATA, flags: 0, txId: 1, pageId: p, dbSizePages: totalPages, frameSeq: seq++ },
+          {
+            frameType: WAL_FRAME_TYPE_PAGE_DATA,
+            flags: 0,
+            txId: 1,
+            pageId: p,
+            dbSizePages: totalPages,
+            frameSeq: seq++,
+          },
           nextBytes.subarray((p - 1) * PAGE_SIZE, p * PAGE_SIZE),
         ),
       );
     }
     frames.push(
-      encodeWalFrame({ frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 1, pageId: 0, dbSizePages: totalPages, frameSeq: seq++ }),
+      encodeWalFrame({
+        frameType: WAL_FRAME_TYPE_TX_COMMIT,
+        flags: 0,
+        txId: 1,
+        pageId: 0,
+        dbSizePages: totalPages,
+        frameSeq: seq++,
+      }),
     );
     const walBuf = new Uint8Array(32 + frames.length * 4128);
     walBuf.set(walHdr, 0);
-    for (let i = 0; i < frames.length; i++) walBuf.set(frames[i], 32 + i * 4128);
+    for (let i = 0; i < frames.length; i++)
+      walBuf.set(frames[i], 32 + i * 4128);
     await writeFile(walPath, walBuf);
 
     // Direct WebDB.open with readOnly NodeFsStorage replays WAL in memory and stays strictly read-only
@@ -893,13 +922,21 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     ]);
 
     // All mutating entry points must fail upfront WITHOUT poisoning in-memory buffer pool or catalog cache
-    await expect(roDb.insert("items", { id: 3, val: "should-fail" })).rejects.toThrow(/read-only/i);
-    await expect(roDb.update("items", 1, { val: "mutated" })).rejects.toThrow(/read-only/i);
+    await expect(
+      roDb.insert("items", { id: 3, val: "should-fail" }),
+    ).rejects.toThrow(/read-only/i);
+    await expect(roDb.update("items", 1, { val: "mutated" })).rejects.toThrow(
+      /read-only/i,
+    );
     await expect(roDb.delete("items", 1)).rejects.toThrow(/read-only/i);
     await expect(
-      roDb.createTable("extra", [{ name: "id", type: "INT32", primaryKey: true }]),
+      roDb.createTable("extra", [
+        { name: "id", type: "INT32", primaryKey: true },
+      ]),
     ).rejects.toThrow(/read-only/i);
-    await expect(roDb.transaction(async () => {})).rejects.toThrow(/read-only/i);
+    await expect(roDb.transaction(async () => {})).rejects.toThrow(
+      /read-only/i,
+    );
     await expect(roDb.importBinary(baseBytes)).rejects.toThrow(/read-only/i);
 
     // State in RAM must remain completely untouched after rejected mutations
@@ -913,7 +950,9 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     await roDb.close();
 
     // Disk files untouched
-    expect(new Uint8Array(await readFile(dbPath))).toEqual(new Uint8Array(baseBytes));
+    expect(new Uint8Array(await readFile(dbPath))).toEqual(
+      new Uint8Array(baseBytes),
+    );
     expect(new Uint8Array(await readFile(walPath))).toEqual(walBuf);
   });
 
@@ -934,7 +973,21 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
     // 1. cmdPage --rows --format json hydrates overflow TEXT (not NULL)
     const cap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", dbPath, String(rootPage), "--rows", "-f", "json"], cap.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "page",
+          dbPath,
+          String(rootPage),
+          "--rows",
+          "-f",
+          "json",
+        ],
+        cap.io,
+      ),
+    ).toBe(0);
     const parsed = JSON.parse(cap.stdout());
     expect(parsed.rows[0].row.body).toBe(bigText);
 
@@ -947,14 +1000,35 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     await writeFile(corruptPath, corruptBytes);
 
     const rawLeaf = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", corruptPath, String(rootPage), "--raw", "-f", "json"], rawLeaf.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "page",
+          corruptPath,
+          String(rootPage),
+          "--raw",
+          "-f",
+          "json",
+        ],
+        rawLeaf.io,
+      ),
+    ).toBe(0);
     const leafJson = JSON.parse(rawLeaf.stdout());
     expect(leafJson.cellCount).toBe(50000);
     expect(leafJson.cellOffsets).toHaveLength(2040);
-    expect(leafJson.warnings.some((w: string) => w.includes("clamped"))).toBe(true);
+    expect(leafJson.warnings.some((w: string) => w.includes("clamped"))).toBe(
+      true,
+    );
 
     const rawP1 = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", corruptPath, "1", "--raw", "-f", "json"], rawP1.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "page", corruptPath, "1", "--raw", "-f", "json"],
+        rawP1.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(rawP1.stdout()).checksumValid).toBe(false);
   });
 
@@ -963,7 +1037,12 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const emptyPath = join(workDir, "empty.db");
     await writeFile(emptyPath, new Uint8Array(0));
     const emptyCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", emptyPath, "-f", "json"], emptyCap.io)).toBe(1);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", emptyPath, "-f", "json"],
+        emptyCap.io,
+      ),
+    ).toBe(1);
     expect(JSON.parse(emptyCap.stdout()).ok).toBe(false);
 
     // Prepare a clean stamped snapshot for header mutations
@@ -984,8 +1063,17 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const zeroPagesPath = join(workDir, "zero-pages.db");
     await writeFile(zeroPagesPath, zeroPages);
     const zpCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", zeroPagesPath, "-f", "json"], zpCap.io)).toBe(1);
-    expect(JSON.parse(zpCap.stdout()).errors.some((e: string) => e.includes("totalPages=0"))).toBe(true);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", zeroPagesPath, "-f", "json"],
+        zpCap.io,
+      ),
+    ).toBe(1);
+    expect(
+      JSON.parse(zpCap.stdout()).errors.some((e: string) =>
+        e.includes("totalPages=0"),
+      ),
+    ).toBe(true);
 
     // 3. totalPages > physicalPages fails with exit code 1
     const tooHigh = new Uint8Array(stamped);
@@ -995,8 +1083,17 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const tooHighPath = join(workDir, "too-high.db");
     await writeFile(tooHighPath, tooHigh);
     const thCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", tooHighPath, "-f", "json"], thCap.io)).toBe(1);
-    expect(JSON.parse(thCap.stdout()).errors.some((e: string) => e.includes("totalPages=999"))).toBe(true);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", tooHighPath, "-f", "json"],
+        thCap.io,
+      ),
+    ).toBe(1);
+    expect(
+      JSON.parse(thCap.stdout()).errors.some((e: string) =>
+        e.includes("totalPages=999"),
+      ),
+    ).toBe(true);
 
     // 4. Trailing extra physical page emits warning (exit code 0)
     const extraPage = new Uint8Array(stamped.byteLength + PAGE_SIZE);
@@ -1004,7 +1101,12 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const extraPath = join(workDir, "extra-page.db");
     await writeFile(extraPath, extraPage);
     const extraCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", extraPath, "-f", "json"], extraCap.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", extraPath, "-f", "json"],
+        extraCap.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(extraCap.stdout()).warnings.length).toBeGreaterThan(0);
 
     // 5. Non-4096-multiple file size fails
@@ -1012,16 +1114,26 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     unaligned.set(stamped, 0);
     const unalignedPath = join(workDir, "unaligned.db");
     await writeFile(unalignedPath, unaligned);
-    expect(await runCli(["--core", coreMode, "verify", unalignedPath, "-f", "json"], createCaptureIo().io)).toBe(1);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", unalignedPath, "-f", "json"],
+        createCaptureIo().io,
+      ),
+    ).toBe(1);
 
     // 6. Corrupt WAL frame checksum causes verify to exit 1 with invalidFrames=1
     const dbPath = join(workDir, "badwal.db");
     await writeFile(dbPath, stamped);
     const walPath = join(workDir, "badwal.wal");
     const hdr = encodeWalFileHeader({ checkpointSeq: 1 });
-    const badFrame = encodeWalFrame(
-      { frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 1, pageId: 0, dbSizePages: 1, frameSeq: 1 },
-    );
+    const badFrame = encodeWalFrame({
+      frameType: WAL_FRAME_TYPE_TX_COMMIT,
+      flags: 0,
+      txId: 1,
+      pageId: 0,
+      dbSizePages: 1,
+      frameSeq: 1,
+    });
     badFrame[40] ^= 0xff;
     const buf = new Uint8Array(32 + 4128);
     buf.set(hdr, 0);
@@ -1029,36 +1141,76 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     await writeFile(walPath, buf);
 
     const walCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", dbPath, "-f", "json"], walCap.io)).toBe(1);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", dbPath, "-f", "json"],
+        walCap.io,
+      ),
+    ).toBe(1);
     const report = JSON.parse(walCap.stdout());
     expect(report.ok).toBe(false);
     expect(report.wal.invalidFrames).toBe(1);
 
     // 7. WAL sequence gap fails with invalidFrames=1
-    const gapFrame = encodeWalFrame(
-      { frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 1, pageId: 0, dbSizePages: 1, frameSeq: 5 },
-    );
+    const gapFrame = encodeWalFrame({
+      frameType: WAL_FRAME_TYPE_TX_COMMIT,
+      flags: 0,
+      txId: 1,
+      pageId: 0,
+      dbSizePages: 1,
+      frameSeq: 5,
+    });
     const gapBuf = new Uint8Array(32 + 4128);
     gapBuf.set(hdr, 0);
     gapBuf.set(gapFrame, 32);
     await writeFile(walPath, gapBuf);
     const gapCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", dbPath, "-f", "json"], gapCap.io)).toBe(1);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", dbPath, "-f", "json"],
+        gapCap.io,
+      ),
+    ).toBe(1);
     expect(JSON.parse(gapCap.stdout()).wal.invalidFrames).toBe(1);
 
     // 8. Truncated WAL header (< 32 bytes) and corrupt WAL header pageSize fail
     await writeFile(walPath, new Uint8Array(10));
-    expect(await runCli(["--core", coreMode, "verify", dbPath, "-f", "json"], createCaptureIo().io)).toBe(1);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", dbPath, "-f", "json"],
+        createCaptureIo().io,
+      ),
+    ).toBe(1);
 
-    await writeFile(walPath, encodeWalFileHeader({ checkpointSeq: 1, pageSize: 8192 }));
-    expect(await runCli(["--core", coreMode, "verify", dbPath, "-f", "json"], createCaptureIo().io)).toBe(1);
+    await writeFile(
+      walPath,
+      encodeWalFileHeader({ checkpointSeq: 1, pageSize: 8192 }),
+    );
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", dbPath, "-f", "json"],
+        createCaptureIo().io,
+      ),
+    ).toBe(1);
 
     // 9. Valid WAL with 1 committed tx + 1 uncommitted tx passes with counts
-    const f1 = encodeWalFrame(
-      { frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 1, pageId: 0, dbSizePages: 1, frameSeq: 1 },
-    );
+    const f1 = encodeWalFrame({
+      frameType: WAL_FRAME_TYPE_TX_COMMIT,
+      flags: 0,
+      txId: 1,
+      pageId: 0,
+      dbSizePages: 1,
+      frameSeq: 1,
+    });
     const f2 = encodeWalFrame(
-      { frameType: WAL_FRAME_TYPE_TX_UNCOMMITTED, flags: 0, txId: 2, pageId: 1, dbSizePages: 1, frameSeq: 2 },
+      {
+        frameType: WAL_FRAME_TYPE_TX_UNCOMMITTED,
+        flags: 0,
+        txId: 2,
+        pageId: 1,
+        dbSizePages: 1,
+        frameSeq: 2,
+      },
       stamped.subarray(0, PAGE_SIZE),
     );
     const validWal = new Uint8Array(32 + 2 * 4128);
@@ -1067,7 +1219,12 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     validWal.set(f2, 32 + 4128);
     await writeFile(walPath, validWal);
     const okWalCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "verify", dbPath, "-f", "json"], okWalCap.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "verify", dbPath, "-f", "json"],
+        okWalCap.io,
+      ),
+    ).toBe(0);
     const okWalRep = JSON.parse(okWalCap.stdout());
     expect(okWalRep.wal.committedTx).toBe(1);
     expect(okWalRep.wal.uncommittedTx).toBe(1);
@@ -1154,60 +1311,210 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
         hvCap.io,
       ),
     ).toBe(0);
-    expect(JSON.parse(hvCap.stdout())).toEqual([{ dept: "eng", avg_score: 91.75 }]);
+    expect(JSON.parse(hvCap.stdout())).toEqual([
+      { dept: "eng", avg_score: 91.75 },
+    ]);
 
     const offCap = createCaptureIo();
     expect(
       await runCli(
-        ["--core", coreMode, "query", dbPath, "users", "-s", "id", "-o", "id asc", "--offset", "2", "-l", "1", "-f", "json"],
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "-s",
+          "id",
+          "-o",
+          "id asc",
+          "--offset",
+          "2",
+          "-l",
+          "1",
+          "-f",
+          "json",
+        ],
         offCap.io,
       ),
     ).toBe(0);
     expect(JSON.parse(offCap.stdout())).toEqual([{ id: 3 }]);
 
     // Empty --limit "" rejected with exit code 2
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--limit", ""], createCaptureIo().io)).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "--limit", ""],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
 
     // explain rejects --count with exit code 2
-    expect(await runCli(["--core", coreMode, "explain", dbPath, "users", "--count"], createCaptureIo().io)).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "explain", dbPath, "users", "--count"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
 
     // query --count rejects --group-by, --select, --order, --limit, --offset with exit code 2
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "-g", "dept", "--count"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "-s", "name", "--count"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "-o", "id asc", "--count"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "-l", "1", "--count"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--offset", "1", "--count"], createCaptureIo().io)).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "-g", "dept", "--count"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "-s", "name", "--count"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "-o",
+          "id asc",
+          "--count",
+        ],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "-l", "1", "--count"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "--offset",
+          "1",
+          "--count",
+        ],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
 
     // query --count respects csv, json, ndjson
     const csvCount = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--count", "-f", "csv"], csvCount.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "--count", "-f", "csv"],
+        csvCount.io,
+      ),
+    ).toBe(0);
     expect(csvCount.stdout()).toBe("count\n4\n");
     const jsonCount = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--count", "-f", "json"], jsonCount.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "--count", "-f", "json"],
+        jsonCount.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(jsonCount.stdout())).toEqual({ count: 4 });
     const ndjsonCount = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--count", "-f", "ndjson"], ndjsonCount.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "--count",
+          "-f",
+          "ndjson",
+        ],
+        ndjsonCount.io,
+      ),
+    ).toBe(0);
     expect(ndjsonCount.stdout()).toBe('{"count":4}\n');
 
     // 0-row --select CSV uses projected headers only, and 0-row NDJSON emits empty output
     const emptyCsv = createCaptureIo();
     expect(
-      await runCli(["--core", coreMode, "query", dbPath, "users", "-s", "name, score", "-w", "age > 999", "-f", "csv"], emptyCsv.io),
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "-s",
+          "name, score",
+          "-w",
+          "age > 999",
+          "-f",
+          "csv",
+        ],
+        emptyCsv.io,
+      ),
     ).toBe(0);
     expect(emptyCsv.stdout()).toBe("name,score\n");
 
     const emptyNdjson = createCaptureIo();
     expect(
-      await runCli(["--core", coreMode, "query", dbPath, "users", "-w", "age > 999", "-f", "ndjson"], emptyNdjson.io),
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "-w",
+          "age > 999",
+          "-f",
+          "ndjson",
+        ],
+        emptyNdjson.io,
+      ),
     ).toBe(0);
     expect(emptyNdjson.stdout()).toBe("");
 
     // Malformed join specs, invalid --core, invalid boolean, missing value -> exit code 2
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--join", "   :a=b"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core", coreMode, "query", dbPath, "users", "--join", "orders:badcond"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["--core=bogus", "info", dbPath], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["tables", dbPath, "--exact-count=maybe"], createCaptureIo().io)).toBe(2);
-    expect(await runCli(["query", dbPath, "users", "--limit"], createCaptureIo().io)).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "query", dbPath, "users", "--join", "   :a=b"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          dbPath,
+          "users",
+          "--join",
+          "orders:badcond",
+        ],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(["--core=bogus", "info", dbPath], createCaptureIo().io),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["tables", dbPath, "--exact-count=maybe"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(["query", dbPath, "users", "--limit"], createCaptureIo().io),
+    ).toBe(2);
 
     // -- separator stops help flag parsing; --out --help treats "--help" as filename, not help flag
     const dashH = createCaptureIo();
@@ -1216,23 +1523,50 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
     const helpFile = join(workDir, "--help");
     const outHelpCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "dump", dbPath, "orders", "-o", helpFile], outHelpCap.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "dump", dbPath, "orders", "-o", helpFile],
+        outHelpCap.io,
+      ),
+    ).toBe(0);
     expect(outHelpCap.stdout()).toContain("Wrote dump");
 
     // CSV RFC-4180 escaping with commas, quotes, newlines, null, and BLOBs
     const csvDbPath = join(workDir, "csv-escape.db");
-    const csvDb = await WebDB.open({ storage: new NodeFsStorage(csvDbPath), engine: createEngine() });
+    const csvDb = await WebDB.open({
+      storage: new NodeFsStorage(csvDbPath),
+      engine: createEngine(),
+    });
     await csvDb.createTable("notes", [
       { name: "id", type: "INT32", primaryKey: true },
       { name: "text", type: "TEXT" },
       { name: "bin", type: "BLOB" },
     ]);
-    await csvDb.insert("notes", { id: 1, text: 'a, "b"\nc', bin: new Uint8Array([0xab, 0xcd]) });
+    await csvDb.insert("notes", {
+      id: 1,
+      text: 'a, "b"\nc',
+      bin: new Uint8Array([0xab, 0xcd]),
+    });
     await csvDb.insert("notes", { id: 2, text: null, bin: null });
     await csvDb.close();
 
     const escCsv = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "query", csvDbPath, "notes", "-o", "id asc", "-f", "csv"], escCsv.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "query",
+          csvDbPath,
+          "notes",
+          "-o",
+          "id asc",
+          "-f",
+          "csv",
+        ],
+        escCsv.io,
+      ),
+    ).toBe(0);
     expect(escCsv.stdout()).toBe('id,text,bin\n1,"a, ""b""\nc",0xabcd\n2,,\n');
   });
 
@@ -1245,7 +1579,9 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     await noCreate.close();
 
     // 2. Non-.db path default walPath & custom options
-    const customStorage = new NodeFsStorage(join(workDir, "store.webdb"), { databaseName: "custom_name" });
+    const customStorage = new NodeFsStorage(join(workDir, "store.webdb"), {
+      databaseName: "custom_name",
+    });
     expect(customStorage.walPath).toBe(join(workDir, "store.webdb.wal"));
     expect(customStorage.databaseName).toBe("custom_name");
     await customStorage.close();
@@ -1274,7 +1610,10 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
       // truncate(2) shrinks file
       await st.truncate(2);
-      expect((await st.readPages([2, 3])).map((p) => p?.[0] ?? null)).toEqual([2, null]);
+      expect((await st.readPages([2, 3])).map((p) => p?.[0] ?? null)).toEqual([
+        2,
+        null,
+      ]);
 
       // truncateWal(> 0) on non-existent WAL must NOT create or zero-extend a corrupt .wal
       await st.truncateWal(3);
@@ -1282,8 +1621,22 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
       // Concurrent WAL read + multiple WAL writes must not leak FileHandles
       const hdr = encodeWalFileHeader({ checkpointSeq: 1 });
-      const f1 = encodeWalFrame({ frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 1, pageId: 0, dbSizePages: 2, frameSeq: 1 });
-      const f2 = encodeWalFrame({ frameType: WAL_FRAME_TYPE_TX_COMMIT, flags: 0, txId: 2, pageId: 0, dbSizePages: 2, frameSeq: 2 });
+      const f1 = encodeWalFrame({
+        frameType: WAL_FRAME_TYPE_TX_COMMIT,
+        flags: 0,
+        txId: 1,
+        pageId: 0,
+        dbSizePages: 2,
+        frameSeq: 1,
+      });
+      const f2 = encodeWalFrame({
+        frameType: WAL_FRAME_TYPE_TX_COMMIT,
+        flags: 0,
+        txId: 2,
+        pageId: 0,
+        dbSizePages: 2,
+        frameSeq: 2,
+      });
       await Promise.all([
         st.readWalHeader(),
         st.writeWalHeader(hdr),
@@ -1325,17 +1678,26 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     ]);
     const overlay = new ReadOnlyOverlayVfs(memBase);
     await overlay.truncate(1);
-    expect((await overlay.readPages([1, 2, 3])).map((p) => p?.[0] ?? null)).toEqual([1, null, null]);
+    expect(
+      (await overlay.readPages([1, 2, 3])).map((p) => p?.[0] ?? null),
+    ).toEqual([1, null, null]);
     // Monotonic truncate: truncate(3) after truncate(1) must NOT resurrect base pages 2..3
     await overlay.truncate(3);
-    expect((await overlay.readPages([1, 2, 3])).map((p) => p?.[0] ?? null)).toEqual([1, null, null]);
+    expect(
+      (await overlay.readPages([1, 2, 3])).map((p) => p?.[0] ?? null),
+    ).toEqual([1, null, null]);
     // Write after truncate IS visible via overlay
-    await overlay.writePages([{ pageId: 2, data: new Uint8Array(PAGE_SIZE).fill(9) }]);
+    await overlay.writePages([
+      { pageId: 2, data: new Uint8Array(PAGE_SIZE).fill(9) },
+    ]);
     expect((await overlay.readPages([2]))[0]?.[0]).toBe(9);
     // WAL overlay + negative index validation
     const walHdr = encodeWalFileHeader({ checkpointSeq: 1 });
     await overlay.writeWalHeader(walHdr);
-    await overlay.appendWalFrames([new Uint8Array(4128).fill(7), new Uint8Array(4128).fill(8)]);
+    await overlay.appendWalFrames([
+      new Uint8Array(4128).fill(7),
+      new Uint8Array(4128).fill(8),
+    ]);
     expect(await overlay.getWalFrameCount()).toBe(2);
     expect((await overlay.readWalFrames(1, 1))[0]?.[0]).toBe(8);
     await expect(overlay.readWalFrames(-1)).rejects.toThrow(RangeError);
@@ -1343,10 +1705,14 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     expect(await overlay.getWalFrameCount()).toBe(1);
     // seal() blocks all 5 mutating methods
     overlay.seal();
-    await expect(overlay.writePages([{ pageId: 1, data: p1 }])).rejects.toThrow(/read-only/i);
+    await expect(overlay.writePages([{ pageId: 1, data: p1 }])).rejects.toThrow(
+      /read-only/i,
+    );
     await expect(overlay.truncate(1)).rejects.toThrow(/read-only/i);
     await expect(overlay.writeWalHeader(walHdr)).rejects.toThrow(/read-only/i);
-    await expect(overlay.appendWalFrames([new Uint8Array(4128)])).rejects.toThrow(/read-only/i);
+    await expect(
+      overlay.appendWalFrames([new Uint8Array(4128)]),
+    ).rejects.toThrow(/read-only/i);
     await expect(overlay.truncateWal(0)).rejects.toThrow(/read-only/i);
     // Base untouched
     expect((await memBase.readPages([2]))[0]?.[0]).toBe(2);
@@ -1374,22 +1740,67 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     await writeFile(noWalPath, snap);
 
     const cpClean = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "checkpoint", noWalPath, "-f", "json"], cpClean.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "checkpoint", noWalPath, "-f", "json"],
+        cpClean.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(cpClean.stdout()).pagesWritten).toBe(0);
     await expect(stat(join(workDir, "no-wal.wal"))).rejects.toThrow();
 
     // 2. Overflow BLOB hydration in cmdPage --rows + CATALOG/INDEX/OVERFLOW/FREE page inspection
     const leafCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", noWalPath, String(tMeta.rootPageId), "--rows", "-f", "json"], leafCap.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "page",
+          noWalPath,
+          String(tMeta.rootPageId),
+          "--rows",
+          "-f",
+          "json",
+        ],
+        leafCap.io,
+      ),
+    ).toBe(0);
     const leafJson = JSON.parse(leafCap.stdout());
     expect(leafJson.rows[0].row.blob_col.byteLength).toBe(5000);
 
     const catCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", noWalPath, String(tMeta.colCatalogPageId), "-f", "json"], catCap.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "page",
+          noWalPath,
+          String(tMeta.colCatalogPageId),
+          "-f",
+          "json",
+        ],
+        catCap.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(catCap.stdout()).pageType).toBe("CATALOG_PAGE");
 
     const idxCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", noWalPath, String(tIndexes[0].rootPageId), "-f", "json"], idxCap.io)).toBe(0);
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "page",
+          noWalPath,
+          String(tIndexes[0].rootPageId),
+          "-f",
+          "json",
+        ],
+        idxCap.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(idxCap.stdout()).pageType).toBe("INDEX_LEAF");
 
     // Inspect FREE page explicitly by appending a PAGE_TYPE_FREE page
@@ -1402,7 +1813,12 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const freeDbPath = join(workDir, "with-free.db");
     await writeFile(freeDbPath, withFree);
     const freeCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "page", freeDbPath, String(freePageId)], freeCap.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "page", freeDbPath, String(freePageId)],
+        freeCap.io,
+      ),
+    ).toBe(0);
     expect(freeCap.stdout()).toContain("Next Free Page ID");
     expect(freeCap.stdout()).toContain("42");
 
@@ -1410,7 +1826,14 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     const abortWalPath = join(workDir, "no-wal.wal");
     const hdr = encodeWalFileHeader({ checkpointSeq: 1 });
     const uncomm = encodeWalFrame(
-      { frameType: WAL_FRAME_TYPE_TX_UNCOMMITTED, flags: 0, txId: 99, pageId: 1, dbSizePages: snap.byteLength / PAGE_SIZE, frameSeq: 1 },
+      {
+        frameType: WAL_FRAME_TYPE_TX_UNCOMMITTED,
+        flags: 0,
+        txId: 99,
+        pageId: 1,
+        dbSizePages: snap.byteLength / PAGE_SIZE,
+        frameSeq: 1,
+      },
       snap.subarray(0, PAGE_SIZE),
     );
     const abortWal = new Uint8Array(32 + 4128);
@@ -1420,11 +1843,21 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
 
     // info sees WAL status before checkpoint
     const infoWalCap = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "info", noWalPath, "-f", "json"], infoWalCap.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "info", noWalPath, "-f", "json"],
+        infoWalCap.io,
+      ),
+    ).toBe(0);
     expect(JSON.parse(infoWalCap.stdout()).wal.framesOnDisk).toBe(1);
 
     const cpAbort = createCaptureIo();
-    expect(await runCli(["--core", coreMode, "checkpoint", noWalPath, "-f", "json"], cpAbort.io)).toBe(0);
+    expect(
+      await runCli(
+        ["--core", coreMode, "checkpoint", noWalPath, "-f", "json"],
+        cpAbort.io,
+      ),
+    ).toBe(0);
     const cpAbortJson = JSON.parse(cpAbort.stdout());
     expect(cpAbortJson.abortedTxCount).toBe(1);
     expect(cpAbortJson.pagesWritten).toBe(0);
@@ -1442,10 +1875,19 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
     // 5. Built dist/cli.js subprocess smoke test (runs when dist/cli.js is built)
     const distBin = resolve("dist/cli.js");
     if (existsSync(distBin)) {
-      const { stdout: verOut } = await execFileAsync(process.execPath, [distBin, "--version"]);
+      const { stdout: verOut } = await execFileAsync(process.execPath, [
+        distBin,
+        "--version",
+      ]);
       expect(verOut.trim()).toMatch(/^webdb \d+\.\d+\.\d+/);
 
-      const { stdout: infoOut } = await execFileAsync(process.execPath, [distBin, "info", noWalPath, "-f", "json"]);
+      const { stdout: infoOut } = await execFileAsync(process.execPath, [
+        distBin,
+        "info",
+        noWalPath,
+        "-f",
+        "json",
+      ]);
       expect(JSON.parse(infoOut).tableCount).toBe(1);
 
       let usageExit = 0;
