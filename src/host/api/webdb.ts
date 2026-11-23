@@ -81,6 +81,7 @@ import {
   createWasmMemory,
   TransactionCoordinator,
   recoverFromWal,
+  type ReadAheadOptions,
 } from "../driver/index.js";
 import {
   catalog_init_page1,
@@ -199,6 +200,7 @@ export {
   type ExplainOutput,
   type IDatabaseQueryExecutor,
   type QueryExecutionOptions,
+  type ReadAheadOptions,
 };
 
 import type { WasmCoreExports } from "../../core/wasm/wasm_runtime.ts";
@@ -220,6 +222,11 @@ export interface WebDbOptions {
    * to avoid per-operation cross-tab sync reads.
    */
   crossTabSync?: boolean;
+  /**
+   * Sequential page read detection & adaptive read-ahead prefetching.
+   * Defaults to enabled (`maxPages: 32`) on persistent storage adapters and disabled on `MemoryStorage`.
+   */
+  readAhead?: boolean | ReadAheadOptions;
 }
 
 export class WebDB implements IDatabaseQueryExecutor {
@@ -370,6 +377,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       memory,
       slotCount,
       maxQueryMemory,
+      readAhead: options.readAhead,
     });
 
     const dbName = options.name ?? vfs.databaseName;
@@ -5344,6 +5352,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         this.pool.clearDirty(slot);
         this.pool.getPageBytesInSlot(slot).fill(0);
       }
+      this.driver.resetReadAhead();
 
       this.pool.getPageBytesInSlot(0).set(pagesToWrite[0].data);
       this.pool.clearDirty(0);

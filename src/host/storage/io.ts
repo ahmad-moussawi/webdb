@@ -38,6 +38,7 @@ export class Io {
 
   private in_flight_flushes = new Map<number, Promise<void>>();
   private in_flight_reads = new Map<number, Promise<Uint8Array | null>>();
+  private page_write_generations = new Map<number, number>();
   private coordinator: {
     isInTransaction(): boolean;
     spillUncommittedSlot(slotIdx: number, pageId: number): Promise<void>;
@@ -83,6 +84,14 @@ export class Io {
     } while (pending.length > 0);
   }
 
+  private bumpPageWriteGen(pageId: number): void {
+    this.page_write_generations.set(
+      pageId,
+      (this.page_write_generations.get(pageId) ?? 0) + 1,
+    );
+    this.in_flight_reads.delete(pageId);
+  }
+
   /** Atomically logs several slots to the WAL as one committed mini-transaction. */
   async writeSlotsViaWal(slots: Array<{ slotIdx: number; pageId: number }>): Promise<void> {
     if (slots.length === 0) return;
@@ -105,6 +114,7 @@ export class Io {
 
     const wal_promise = this.coordinator!.commitDirectPagesViaWal(pages);
     for (const { pageId } of pages) {
+      this.bumpPageWriteGen(pageId);
       this.in_flight_flushes.set(pageId, wal_promise);
     }
     try {
@@ -165,95 +175,311 @@ export class Io {
   }
 
   /**
+   * Checks whether `pageId` currently has an uncommitted spill or uncheckpointed WAL image.
+   */
+  hasSpilledOrCommittedPage(pageId: number): boolean {
+    return !!this.coordinator && this.coordinator.hasSpilledPage(pageId);
+  }
+
+  hasInFlightFlush(pageId: number): boolean {
+    return this.in_flight_flushes.has(pageId);
+  }
+
+  hasInFlightRead(pageId: number): boolean {
+    return this.in_flight_reads.has(pageId);
+  }
+
+  private validateDiskPage(
+    pageId: number,
+    disk_page: Uint8Array | null,
+  ): Uint8Array | null {
+    if (!disk_page) {
+      return null;
+    }
+
+    if (disk_page.byteLength !== PAGE_SIZE) {
+      throw new CorruptPageError(
+        pageId,
+        `Unexpected page byte length: ${disk_page.byteLength}, expected ${PAGE_SIZE}`,
+      );
+    }
+
+    // Verify CRC32 checksum
+    const checksum_offset =
+      pageId === 1
+        ? HEADER_OFFSET_PAGE_CHECKSUM
+        : PAGE_HEADER_OFFSET_CHECKSUM;
+
+    const stored_checksum = read_u32(
+      new DataView(disk_page.buffer, disk_page.byteOffset, disk_page.byteLength),
+      checksum_offset,
+    );
+
+    if (stored_checksum !== 0) {
+      const computed =
+        pageId === 1
+          ? computePage1Checksum(disk_page)
+          : computePageChecksum(disk_page);
+
+      if (computed !== stored_checksum) {
+        throw new CorruptPageError(pageId, stored_checksum, computed);
+      }
+    }
+
+    return disk_page;
+  }
+
+  /**
    * Reads a page from VFS directly into slotIdx in linear memory.
    * Validates CRC32 checksum. If page does not exist in storage, zeroes the slot.
    */
   async readSlot(slotIdx: number, pageId: number): Promise<void> {
-    if (pageId <= 0) {
+    if (!Number.isInteger(pageId) || pageId <= 0) {
       throw new Error(
         `Invalid page ID: ${pageId}. Page IDs must be positive integers.`,
       );
     }
 
-    if (this.coordinator && this.coordinator.hasSpilledPage(pageId)) {
-      const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
-      const spilled = this.coordinator.getSpilledPage(pageId)!;
-      this.uint8.set(spilled, slot_offset);
-      return;
-    }
-
-    // Await any in-flight flush for this page first
-    while (this.in_flight_flushes.has(pageId)) {
-      await this.in_flight_flushes.get(pageId);
-    }
-
     const slot_offset = this.slotsBaseOffset + slotIdx * PAGE_SIZE;
 
-    // Coalesce in-flight reads for the same pageId, copying verified bytes into caller's slotIdx
-    const in_flight_read = this.in_flight_reads.get(pageId);
-
-    if (in_flight_read) {
-      const disk_page = await in_flight_read;
-      if (disk_page) {
-        this.uint8.set(disk_page, slot_offset);
-      } else {
-        this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+    while (true) {
+      // Await any in-flight flush before checking spilled/WAL state or reading VFS
+      while (this.in_flight_flushes.has(pageId)) {
+        await this.in_flight_flushes.get(pageId);
       }
-      return;
+
+      if (this.coordinator && this.coordinator.hasSpilledPage(pageId)) {
+        const spilled = this.coordinator.getSpilledPage(pageId)!;
+        this.uint8.set(spilled, slot_offset);
+        return;
+      }
+
+      const genAtStart = this.page_write_generations.get(pageId) ?? 0;
+
+      // Coalesce in-flight reads for the same pageId, validating & copying bytes into caller's slotIdx
+      const in_flight_read = this.in_flight_reads.get(pageId);
+
+      if (in_flight_read) {
+        const raw_page = await in_flight_read;
+        if ((this.page_write_generations.get(pageId) ?? 0) !== genAtStart) {
+          continue;
+        }
+        const disk_page = this.validateDiskPage(pageId, raw_page);
+        if (disk_page) {
+          this.uint8.set(disk_page, slot_offset);
+        } else {
+          this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+        }
+        return;
+      }
+
+      const read_promise = (async (): Promise<Uint8Array | null> => {
+        const [disk_page] = await this.vfs.readPages([pageId]);
+        return disk_page ?? null;
+      })();
+
+      this.in_flight_reads.set(pageId, read_promise);
+
+      try {
+        const raw_page = await read_promise;
+        if ((this.page_write_generations.get(pageId) ?? 0) !== genAtStart) {
+          continue;
+        }
+        const disk_page = this.validateDiskPage(pageId, raw_page);
+        if (disk_page) {
+          this.uint8.set(disk_page, slot_offset);
+        } else {
+          this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
+        }
+        return;
+      } finally {
+        if (this.in_flight_reads.get(pageId) === read_promise) {
+          this.in_flight_reads.delete(pageId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Batches a demand page read together with speculative read-ahead pages in a single
+   * `vfs.readPages()` call. Demand-page corruption throws `CorruptPageError`; corrupt or
+   * missing speculative pages are silently omitted from the returned map.
+   */
+  async readPagesBatch(
+    pageIds: number[],
+    demandPageId: number,
+  ): Promise<Map<number, Uint8Array | null>> {
+    if (!Number.isInteger(demandPageId) || demandPageId <= 0) {
+      throw new Error(
+        `Invalid page ID: ${demandPageId}. Page IDs must be positive integers.`,
+      );
     }
 
-    const read_promise = (async (): Promise<Uint8Array | null> => {
-      const [disk_page] = await this.vfs.readPages([pageId]);
+    while (this.in_flight_flushes.has(demandPageId)) {
+      await this.in_flight_flushes.get(demandPageId);
+    }
 
-      if (disk_page) {
-        if (disk_page.byteLength !== PAGE_SIZE) {
-          throw new CorruptPageError(
-            pageId,
-            `Unexpected page byte length: ${disk_page.byteLength}, expected ${PAGE_SIZE}`,
-          );
+    const result = new Map<number, Uint8Array | null>();
+    if (this.hasSpilledOrCommittedPage(demandPageId)) {
+      result.set(demandPageId, this.coordinator!.getSpilledPage(demandPageId)!);
+    }
+
+    const existingDemandGen = this.page_write_generations.get(demandPageId) ?? 0;
+    const existingDemandRead = !result.has(demandPageId)
+      ? this.in_flight_reads.get(demandPageId)
+      : undefined;
+
+    const vfsFetchIds: number[] = [];
+    const seen = new Set<number>();
+    for (const p of pageIds) {
+      if (
+        Number.isInteger(p) &&
+        p > 0 &&
+        !seen.has(p) &&
+        !this.in_flight_reads.has(p) &&
+        !this.in_flight_flushes.has(p) &&
+        !(p === demandPageId && result.has(demandPageId))
+      ) {
+        seen.add(p);
+        vfsFetchIds.push(p);
+      }
+    }
+
+    // Trim leading/trailing spilled pages while keeping any interior spilled gaps intact
+    // so contiguous ascending ranges preserve IdbStorage's IDBKeyRange fast-path.
+    while (
+      vfsFetchIds.length > 0 &&
+      this.hasSpilledOrCommittedPage(vfsFetchIds[vfsFetchIds.length - 1])
+    ) {
+      vfsFetchIds.pop();
+    }
+    while (
+      vfsFetchIds.length > 0 &&
+      this.hasSpilledOrCommittedPage(vfsFetchIds[0])
+    ) {
+      vfsFetchIds.shift();
+    }
+
+    let rawDemand: Uint8Array | null = null;
+    let hasRawDemand = false;
+    const startWriteGen = new Map<number, number>();
+
+    if (vfsFetchIds.length > 0) {
+      for (const p of vfsFetchIds) {
+        startWriteGen.set(p, this.page_write_generations.get(p) ?? 0);
+      }
+
+      const registered = new Map<number, Promise<Uint8Array | null>>();
+      const batchReadPromise = this.vfs.readPages(vfsFetchIds);
+      for (let i = 0; i < vfsFetchIds.length; i++) {
+        const p = vfsFetchIds[i];
+        if (!this.hasSpilledOrCommittedPage(p)) {
+          const idx = i;
+          const pPromise = batchReadPromise.then((arr) => arr[idx] ?? null);
+          pPromise.catch(() => {});
+          this.in_flight_reads.set(p, pPromise);
+          registered.set(p, pPromise);
         }
+      }
 
-        // Verify CRC32 checksum
-        const checksum_offset =
-          pageId === 1
-            ? HEADER_OFFSET_PAGE_CHECKSUM
-            : PAGE_HEADER_OFFSET_CHECKSUM;
-
-        const stored_checksum = read_u32(
-          new DataView(disk_page.buffer, disk_page.byteOffset),
-          checksum_offset,
-        );
-
-        if (stored_checksum !== 0) {
-          const computed =
-            pageId === 1
-              ? computePage1Checksum(disk_page)
-              : computePageChecksum(disk_page);
-
-          if (computed !== stored_checksum) {
-            throw new CorruptPageError(pageId, stored_checksum, computed);
+      let rawPages: Array<Uint8Array | null>;
+      try {
+        rawPages = await batchReadPromise;
+      } finally {
+        for (const [p, pPromise] of registered.entries()) {
+          if (this.in_flight_reads.get(p) === pPromise) {
+            this.in_flight_reads.delete(p);
           }
         }
-
-        return disk_page;
       }
-      return null;
-    })();
 
-    this.in_flight_reads.set(pageId, read_promise);
-
-    try {
-      const disk_page = await read_promise;
-      if (disk_page) {
-        this.uint8.set(disk_page, slot_offset);
-      } else {
-        this.uint8.fill(0, slot_offset, slot_offset + PAGE_SIZE);
-      }
-    } finally {
-      if (this.in_flight_reads.get(pageId) === read_promise) {
-        this.in_flight_reads.delete(pageId);
+      for (let i = 0; i < vfsFetchIds.length; i++) {
+        const p = vfsFetchIds[i];
+        const raw = rawPages[i] ?? null;
+        if (p === demandPageId) {
+          rawDemand = raw;
+          hasRawDemand = true;
+          continue;
+        }
+        if (
+          this.hasSpilledOrCommittedPage(p) ||
+          this.in_flight_flushes.has(p) ||
+          (this.page_write_generations.get(p) ?? 0) !== (startWriteGen.get(p) ?? 0)
+        ) {
+          continue;
+        }
+        try {
+          const validated = this.validateDiskPage(p, raw);
+          if (validated) {
+            result.set(p, validated);
+          }
+        } catch {
+          // Never fail a demand read because a speculative page was corrupt on disk
+        }
       }
     }
+
+    if (!result.has(demandPageId)) {
+      const demandWriteGenChanged = hasRawDemand
+        ? (this.page_write_generations.get(demandPageId) ?? 0) !==
+          (startWriteGen.get(demandPageId) ?? 0)
+        : existingDemandRead !== undefined &&
+          (this.page_write_generations.get(demandPageId) ?? 0) !==
+            existingDemandGen;
+
+      if (demandWriteGenChanged) {
+        while (this.in_flight_flushes.has(demandPageId)) {
+          await this.in_flight_flushes.get(demandPageId);
+        }
+      }
+
+      if (this.hasSpilledOrCommittedPage(demandPageId)) {
+        result.set(
+          demandPageId,
+          this.coordinator!.getSpilledPage(demandPageId)!,
+        );
+      } else if (hasRawDemand && !demandWriteGenChanged) {
+        result.set(
+          demandPageId,
+          this.validateDiskPage(demandPageId, rawDemand),
+        );
+      } else if (existingDemandRead && !demandWriteGenChanged) {
+        const raw = await existingDemandRead;
+        if (
+          (this.page_write_generations.get(demandPageId) ?? 0) !==
+          existingDemandGen
+        ) {
+          while (this.in_flight_flushes.has(demandPageId)) {
+            await this.in_flight_flushes.get(demandPageId);
+          }
+          if (this.hasSpilledOrCommittedPage(demandPageId)) {
+            result.set(
+              demandPageId,
+              this.coordinator!.getSpilledPage(demandPageId)!,
+            );
+          } else {
+            const [freshRaw] = await this.vfs.readPages([demandPageId]);
+            result.set(
+              demandPageId,
+              this.validateDiskPage(demandPageId, freshRaw ?? null),
+            );
+          }
+        } else {
+          result.set(
+            demandPageId,
+            this.validateDiskPage(demandPageId, raw ?? null),
+          );
+        }
+      } else {
+        const [raw] = await this.vfs.readPages([demandPageId]);
+        result.set(
+          demandPageId,
+          this.validateDiskPage(demandPageId, raw ?? null),
+        );
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -288,6 +514,7 @@ export class Io {
       !this.coordinator.isInTransaction() &&
       this.coordinator.hasCommittedWalPage(pageId)
     ) {
+      this.bumpPageWriteGen(pageId);
       const wal_promise = this.coordinator.commitDirectPagesViaWal([
         { pageId, data: write_snapshot },
       ]);
@@ -302,6 +529,7 @@ export class Io {
       return;
     }
 
+    this.bumpPageWriteGen(pageId);
     const write_promise = this.vfs.writePages([
       { pageId, data: write_snapshot },
     ]);
@@ -361,6 +589,9 @@ export class Io {
 
     pages.sort((a, b) => a.pageId - b.pageId);
 
+    for (const { pageId } of pages) {
+      this.bumpPageWriteGen(pageId);
+    }
     const write_promise = this.vfs.writePages(pages);
     for (const { pageId } of pages) {
       this.in_flight_flushes.set(pageId, write_promise);
@@ -386,6 +617,7 @@ export class Io {
    */
   async spillOrWriteSlot(slotIdx: number, pageId: number): Promise<void> {
     if (this.coordinator && this.coordinator.isInTransaction()) {
+      this.bumpPageWriteGen(pageId);
       await this.coordinator.spillUncommittedSlot(slotIdx, pageId);
     } else {
       await this.writeSlot(slotIdx, pageId);
@@ -403,20 +635,10 @@ export class Io {
     flushPageId: number,
   ): Promise<void> {
     if (flushPageId > 0) {
-      if (this.coordinator && this.coordinator.isInTransaction()) {
-        await this.coordinator.spillUncommittedSlot(targetSlot, flushPageId);
-      } else {
-        await this.writeSlot(targetSlot, flushPageId);
-      }
+      await this.spillOrWriteSlot(targetSlot, flushPageId);
     }
 
-    if (this.coordinator && this.coordinator.hasSpilledPage(faultPageId)) {
-      const slot_offset = this.slotsBaseOffset + targetSlot * PAGE_SIZE;
-      const spilled = this.coordinator.getSpilledPage(faultPageId)!;
-      this.uint8.set(spilled, slot_offset);
-    } else {
-      await this.readSlot(targetSlot, faultPageId);
-    }
+    await this.readSlot(targetSlot, faultPageId);
   }
 
   /**

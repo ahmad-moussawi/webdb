@@ -151,6 +151,13 @@ export interface WebDbOptions {
 
   /** Enable cross-tab synchronization via Web Locks and BroadcastChannel (default: `true` in browsers, `false` for `NodeFsStorage`). */
   crossTabSync?: boolean;
+
+  /**
+   * Sequential page read detection & adaptive read-ahead prefetching.
+   * Defaults to enabled (`maxPages: 32`) on persistent storage (`IdbStorage`, `OpfsStorage`,
+   * `NodeFsStorage`) and disabled on `MemoryStorage`.
+   */
+  readAhead?: boolean | { maxPages?: number };
 }
 ```
 

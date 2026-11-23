@@ -338,6 +338,7 @@ export class TransactionCoordinator {
       this.pool.pin_counts[slot] = 0;
     }
     this.pool.pin_counts[0] = 1;
+    this.pool.resetReadAhead();
 
     if (this.onCrossTabInvalidated) {
       await this.onCrossTabInvalidated();
@@ -702,6 +703,7 @@ export class TransactionCoordinator {
       this.pool.unassignSlot(slot);
       this.pool.clearDirty(slot);
     }
+    this.pool.resetReadAhead();
 
     // Pass 2: Restore slot assignments, page data, and dirty flags
     for (let slot = 0; slot < this.pool.slotCount; slot++) {
