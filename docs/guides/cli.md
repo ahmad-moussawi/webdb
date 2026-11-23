@@ -174,7 +174,7 @@ webdb query app.db users --format csv
 
 ### 4. Inspect Query Plans & VDBE Bytecode (`explain`)
 
-`explain` accepts the exact same flags as `query` and prints the planner decision (`TableScan` vs `IndexScan`, index name, sort avoidance) plus the disassembled VDBE bytecode:
+`explain` accepts the query flags from `query` (except `--count`, which is query-only, and with `--format table|json`) and prints the planner decision (`TableScan` vs `IndexScan`, index name, sort avoidance) plus the disassembled VDBE bytecode:
 
 ```bash
 webdb explain app.db users -w "score > 80" -o "score desc"

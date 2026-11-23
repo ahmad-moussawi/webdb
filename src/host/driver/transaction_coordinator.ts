@@ -919,6 +919,11 @@ export class TransactionCoordinator {
   }
 
   async executeCheckpoint(): Promise<{ pagesWritten: number }> {
+    // Read-only VFS adapters must never attempt to write pages or rewrite the WAL header
+    if (this.vfs.readOnly) {
+      return { pagesWritten: 0 };
+    }
+
     // 1. Collect committed WAL pages.
     // Fast-path: when this coordinator owns the active WAL (walHeaderReady && txCommitCount > 0),
     // `committedWalPages` already holds the exact latest committed image for every WAL page in RAM,
@@ -1023,11 +1028,6 @@ export class TransactionCoordinator {
 
     if (pagesToWrite.length > 0) {
       pagesToWrite.sort((a, b) => a.pageId - b.pageId);
-    }
-
-    // Read-only VFS adapters must never attempt to write pages or rewrite the WAL header
-    if (this.vfs.readOnly) {
-      return { pagesWritten: 0 };
     }
 
     const nextCheckpointSeq = this.checkpointSeq + 1;

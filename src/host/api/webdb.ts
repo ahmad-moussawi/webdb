@@ -556,10 +556,17 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
   }
 
+  private assertWritable(op: string): void {
+    if (this.vfs.readOnly) {
+      throw new Error(`Cannot ${op}: database is opened in read-only mode`);
+    }
+  }
+
   async createTable(
     name: string,
     columns: ColumnDefinition[],
   ): Promise<TableMeta> {
+    this.assertWritable("createTable");
     return this.coordinator.leaseQueue.enqueue(
       () => this._createTableInternal(name, columns),
       this.currentLeaseId ?? undefined,
@@ -1105,6 +1112,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async dropTable(tableName: string): Promise<void> {
+    this.assertWritable("dropTable");
     return this.coordinator.leaseQueue.enqueue(
       () => this._dropTableInternal(tableName),
       this.currentLeaseId ?? undefined,
@@ -1219,6 +1227,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async renameTable(oldName: string, newName: string): Promise<TableMeta> {
+    this.assertWritable("renameTable");
     return this.coordinator.leaseQueue.enqueue(
       () => this._renameTableInternal(oldName, newName),
       this.currentLeaseId ?? undefined,
@@ -1300,6 +1309,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     oldColumnName: string,
     newColumnName: string,
   ): Promise<TableMeta> {
+    this.assertWritable("renameColumn");
     return this.coordinator.leaseQueue.enqueue(
       () => this._renameColumnInternal(tableName, oldColumnName, newColumnName),
       this.currentLeaseId ?? undefined,
@@ -1373,6 +1383,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     column: ColumnDefinition,
     options?: { defaultValue?: DbValue } | DbValue,
   ): Promise<TableMeta> {
+    this.assertWritable("addColumn");
     this.validateIdentifier(column.name, "Column name");
     const defaultVal: DbValue =
       options !== undefined &&
@@ -1465,6 +1476,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async dropColumn(tableName: string, columnName: string): Promise<TableMeta> {
+    this.assertWritable("dropColumn");
     this.validateIdentifier(columnName, "Column name");
 
     return this._executeTableRebuildAtomic(tableName, (table) => {
@@ -1735,6 +1747,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     columns: string | string[],
     options?: IndexOptions,
   ): Promise<void> {
+    this.assertWritable("createIndex");
     return this.coordinator.leaseQueue.enqueue(
       () => this._createIndexInternal(tableName, columns, options),
       this.currentLeaseId ?? undefined,
@@ -1969,6 +1982,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   async dropIndex(indexName: string): Promise<void> {
+    this.assertWritable("dropIndex");
     return this.coordinator.leaseQueue.enqueue(
       () => this._dropIndexInternal(indexName),
       this.currentLeaseId ?? undefined,
@@ -2752,6 +2766,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     rows: DbRow[],
     options?: TransactionOptions,
   ): Promise<void> {
+    this.assertWritable("insert");
     if (!rows || rows.length === 0) return;
     if (
       !this.coordinator.isInTransaction() &&
@@ -3137,6 +3152,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     patch: Partial<DbRow>,
     options?: DmlOptions,
   ): Promise<number> {
+    this.assertWritable("update");
     if (
       !this.coordinator.isInTransaction() &&
       this.beforeCommitHooks.size > 0
@@ -3176,6 +3192,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     patch: Partial<DbRow>,
     options?: DmlOptions,
   ): Promise<number> {
+    this.assertWritable("update");
     if (
       !this.coordinator.isInTransaction() &&
       this.beforeCommitHooks.size > 0
@@ -3595,6 +3612,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     whereOrPk: DbValue | Partial<DbRow>,
     options?: DmlOptions,
   ): Promise<number> {
+    this.assertWritable("delete");
     if (
       !this.coordinator.isInTransaction() &&
       this.beforeCommitHooks.size > 0
@@ -3632,6 +3650,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     filters: QueryFilter[],
     options?: DmlOptions,
   ): Promise<number> {
+    this.assertWritable("delete");
     if (
       !this.coordinator.isInTransaction() &&
       this.beforeCommitHooks.size > 0
@@ -3785,6 +3804,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     rows: DbRow[],
     options?: UpsertOptions,
   ): Promise<{ inserted: number; updated: number; ignored: number }> {
+    this.assertWritable("upsert");
     if (!rows || rows.length === 0) {
       return { inserted: 0, updated: 0, ignored: 0 };
     }
@@ -3972,6 +3992,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     callback: (tx: WebDB) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
+    this.assertWritable("begin transaction");
     const lease = await this.coordinator.begin();
     const leaseId = lease.leaseId;
     this.activeTxChanges = [];
@@ -5111,6 +5132,7 @@ export class WebDB implements IDatabaseQueryExecutor {
    * replacing all pages, resetting the WAL, and pinning the imported schema catalog.
    */
   async importBinary(data: Uint8Array | ArrayBuffer): Promise<void> {
+    this.assertWritable("importBinary");
     if (this.coordinator.isInTransaction()) {
       throw new Error(
         "Cannot import binary database while a transaction is active",

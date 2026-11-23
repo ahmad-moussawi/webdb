@@ -96,7 +96,13 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
 
   async truncate(pageCount: number): Promise<void> {
     this.assertNotSealed('truncate');
-    this.truncatedPageCount = pageCount;
+    if (!Number.isInteger(pageCount) || pageCount < 0) {
+      throw new RangeError(`Invalid pageCount: ${pageCount}. Expected a non-negative integer`);
+    }
+    this.truncatedPageCount =
+      this.truncatedPageCount === null
+        ? pageCount
+        : Math.min(this.truncatedPageCount, pageCount);
     for (const key of Array.from(this.pageOverlay.keys())) {
       if (key > pageCount) {
         this.pageOverlay.delete(key);
@@ -121,6 +127,17 @@ export class ReadOnlyOverlayVfs implements IVfsAdapter {
   }
 
   async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
+    if (!Number.isInteger(startFrameIndex) || startFrameIndex < 0) {
+      throw new RangeError(
+        `Invalid startFrameIndex: ${startFrameIndex}. Expected a non-negative integer`,
+      );
+    }
+    if (maxFrames !== undefined) {
+      if (!Number.isInteger(maxFrames) || maxFrames < 0) {
+        throw new RangeError(`Invalid maxFrames: ${maxFrames}. Expected a non-negative integer`);
+      }
+      if (maxFrames === 0) return [];
+    }
     if (this.walTruncated) return [];
     if (this.walFramesOverlay !== null) {
       const end =

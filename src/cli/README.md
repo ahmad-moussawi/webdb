@@ -178,7 +178,7 @@ webdb query app.db users --format csv
 
 ### `explain <file> <table> [query options]`
 
-Accepts the same query flags as `query` and prints the chosen query plan (`TableScan` vs `IndexScan`, index name, order satisfaction) along with the full VDBE bytecode disassembly.
+Accepts the query flags from `query` (except `--count`, which is query-only, and with `--format table|json`) and prints the chosen query plan (`TableScan` vs `IndexScan`, index name, order satisfaction) along with the full VDBE bytecode disassembly.
 
 ```bash
 webdb explain app.db users -w "score > 80" -o "score desc"

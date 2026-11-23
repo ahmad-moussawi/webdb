@@ -75,19 +75,18 @@ export async function openReadOnlyDb(
 ): Promise<OpenedReadOnlyDb> {
   const { size: dbFileSize } = await assertDbFileExists(filePath);
   const storage = new NodeFsStorage(filePath, { readOnly: true });
-  const walFileSize = await getOptionalFileSize(storage.walPath);
-  const walFramesOnDisk = await storage.getWalFrameCount();
-
-  if (dbFileSize < PAGE_SIZE && walFramesOnDisk === 0) {
-    await storage.close();
-    throw new Error(
-      `Invalid database file (${dbFileSize} bytes): file is smaller than a single ${PAGE_SIZE}-byte page (${filePath})`,
-    );
-  }
-
-  const overlay = new ReadOnlyOverlayVfs(storage);
 
   try {
+    const walFileSize = await getOptionalFileSize(storage.walPath);
+    const walFramesOnDisk = await storage.getWalFrameCount();
+
+    if (dbFileSize < PAGE_SIZE && walFramesOnDisk === 0) {
+      throw new Error(
+        `Invalid database file (${dbFileSize} bytes): file is smaller than a single ${PAGE_SIZE}-byte page (${filePath})`,
+      );
+    }
+
+    const overlay = new ReadOnlyOverlayVfs(storage);
     const db = await WebDB.open({
       storage: overlay,
       engine: createEngine(core),

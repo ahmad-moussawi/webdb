@@ -641,10 +641,21 @@ export async function cmdQuery(argv: string[], ctx: CommandContext): Promise<num
   const countOnly = Boolean(values.count);
   const hasGroupBy = (values['group-by'] as string[]).length > 0;
 
-  if (countOnly && hasGroupBy) {
-    throw new CliUsageError(
-      'Cannot combine --count with --group-by; use --select "<group>, count(*) as count" --group-by "<group>" instead',
-    );
+  if (countOnly) {
+    if (hasGroupBy) {
+      throw new CliUsageError(
+        'Cannot combine --count with --group-by; use --select "<group>, count(*) as count" --group-by "<group>" instead',
+      );
+    }
+    if ((values.select as string[]).length > 0) {
+      throw new CliUsageError('Cannot combine --count with --select');
+    }
+    if ((values.order as string[]).length > 0) {
+      throw new CliUsageError('Cannot combine --count with --order');
+    }
+    if (typeof values.limit === 'string' || typeof values.offset === 'string') {
+      throw new CliUsageError('Cannot combine --count with --limit or --offset');
+    }
   }
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
@@ -803,8 +814,10 @@ async function readOverflowBytesFromVfs(
   totalLen: number,
   readPage: (pageId: number) => Promise<Uint8Array | null>,
 ): Promise<Uint8Array | null> {
-  if (totalLen === 0 || firstPageId <= 1) return new Uint8Array(0);
-  const result = new Uint8Array(totalLen);
+  if (totalLen === 0) return new Uint8Array(0);
+  if (firstPageId <= 1 || totalLen < 0) return null;
+
+  const chunks: Uint8Array[] = [];
   let copied = 0;
   let currPageId = firstPageId;
   const visited = new Set<number>();
@@ -824,13 +837,19 @@ async function readOverflowBytesFromVfs(
     );
     const nextPageId = page_get_overflow_next_page_id(view, 0);
     if (chunkLen > 0) {
-      result.set(bytes.subarray(OVERFLOW_HEADER_SIZE, OVERFLOW_HEADER_SIZE + chunkLen), copied);
+      chunks.push(bytes.slice(OVERFLOW_HEADER_SIZE, OVERFLOW_HEADER_SIZE + chunkLen));
       copied += chunkLen;
     }
     currPageId = nextPageId;
   }
 
-  return copied === totalLen ? result : result.subarray(0, copied);
+  const result = new Uint8Array(copied);
+  let pos = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, pos);
+    pos += chunk.byteLength;
+  }
+  return result;
 }
 
 async function hydrateOverflowColumns(

@@ -232,10 +232,11 @@ export class NodeFsStorage implements IVfsAdapter {
     }
     if (this.walHandle) return this.walHandle;
 
-    if (this.walHandlePromise) {
+    while (this.walHandlePromise) {
       const existing = await this.walHandlePromise;
-      if (existing || !forWrite) return existing;
       if (this.walHandle) return this.walHandle;
+      if (existing) return existing;
+      if (!forWrite) return null;
     }
 
     const gen = this.closeGeneration;
@@ -249,6 +250,10 @@ export class NodeFsStorage implements IVfsAdapter {
           throw new Error(`NodeFsStorage was closed while opening WAL: ${this.walPath}`);
         }
         return null;
+      }
+      if (this.walHandle) {
+        await handle.close().catch(() => {});
+        return this.walHandle;
       }
       this.walHandle = handle;
       return handle;
@@ -479,15 +484,13 @@ export class NodeFsStorage implements IVfsAdapter {
   async truncateWal(frameIndex: number): Promise<void> {
     this.assertWritable('truncateWal');
     assertNonNegativeInt(frameIndex, 'frameIndex');
-    if (frameIndex === 0) {
-      const handle = await this.ensureWalHandle(false);
-      if (!handle) return;
-      await handle.truncate(0);
-      return;
-    }
-    const handle = await this.ensureWalHandle(true);
+    const handle = await this.ensureWalHandle(false);
     if (!handle) return;
-    await handle.truncate(WAL_HEADER_SIZE + frameIndex * WAL_FRAME_SIZE);
+    const targetSize = frameIndex === 0 ? 0 : WAL_HEADER_SIZE + frameIndex * WAL_FRAME_SIZE;
+    const { size } = await handle.stat();
+    if (targetSize < size) {
+      await handle.truncate(targetSize);
+    }
   }
 
   async getWalFrameCount(): Promise<number> {
