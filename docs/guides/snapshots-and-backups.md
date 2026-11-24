@@ -83,7 +83,52 @@ async function restoreFromFileInput(db: WebDB, file: File) {
 
 ---
 
-## 4. Opening Remote & Compressed (`.webdb.gz`) Snapshots in WebDB Studio
+## 4. Compacting & Reclaiming Space (`db.compact`)
+
+Over time, bulk `delete()` calls, dropped tables (`dropTable`), dropped indexes, or heavy row updates leave behind `FREE` pages, sparse `LEAF_DATA` / `INDEX_LEAF` pages, and intra-page fragmentation. Calling `await db.compact()` performs a SQLite `VACUUM`-style rebuild into densely packed 4 KB pages while preserving all schemas, rows, `0x0E` overflow payloads, secondary indexes (including `UNIQUE` constraints and sort directions), `autoIncNext` counters, and `schemaVersion`:
+
+```typescript
+// 1. Preview fragmentation and exact compacted size without mutating storage
+//    (allowed even on read-only databases)
+const preview = await db.compact({ dryRun: true });
+console.log(
+  `Can reclaim ${preview.pagesReclaimed} pages (${preview.bytesReclaimed} bytes), ` +
+    `${preview.freePagesBefore} free, ${preview.unreferencedPagesBefore} unreferenced, ` +
+    `${preview.fragmentedBytesBefore} fragmented cell bytes`,
+);
+
+// 2. Compact only if at least 16 pages (64 KB) will be reclaimed
+const maybeCompacted = await db.compact({ minReclaimPages: 16 });
+if (maybeCompacted.compacted) {
+  console.log(`Shrank DB to ${maybeCompacted.pagesAfter} pages`);
+}
+
+// 3. Always run full compaction (increments changeCounter by 1 and emits origin: "compact")
+const result = await db.compact();
+```
+
+### `CompactOptions` & `CompactResult`
+
+| Option / Field | Type | Description |
+| :--- | :--- | :--- |
+| **`dryRun`** | `boolean` | When `true`, analyzes fragmentation and builds the compacted layout without modifying storage (`compacted` is `false`). Allowed on read-only databases. |
+| **`minReclaimPages`** | `number` | Skips rewriting storage and returns `compacted: false` if `pagesReclaimed < minReclaimPages`. |
+| **`batchSize`** | `number` | Rows inserted per `insertMany` batch during rebuild (default: `500`). |
+| **`compacted`** | `boolean` | Whether live storage was replaced (`false` on `dryRun` or when skipped by `minReclaimPages`). |
+| **`pagesBefore` / `pagesAfter`** | `number` | Total 4 KB page count before and after compaction. |
+| **`bytesBefore` / `bytesAfter`** | `number` | Total database byte size before and after compaction. |
+| **`pagesReclaimed` / `bytesReclaimed`** | `number` | Number of 4 KB pages and bytes reclaimed (`before - after`). |
+| **`freePagesBefore`** | `number` | Count of `FREE` (`0x00`) pages present before compaction. |
+| **`unreferencedPagesBefore`** | `number` | Count of orphaned/unreferenced non-free pages present before compaction. |
+| **`fragmentedBytesBefore`** | `number` | Cumulative fragmented free bytes recorded inside leaf/index pages before compaction. |
+| **`tablesCompacted` / `indexesRebuilt` / `rowsCopied`** | `number` | Verification counts of tables, secondary indexes, and rows rebuilt. |
+
+> [!WARNING]
+> `db.compact()` cannot be called *inside* an active `db.transaction()` block, and requires writable storage unless `{ dryRun: true }` is passed.
+
+---
+
+## 5. Opening Remote & Compressed (`.webdb.gz`) Snapshots in WebDB Studio
 
 The [**WebDB Studio Playground**](https://studio.webdb.dev/) natively supports exporting and importing both raw `.webdb` images and gzip-compressed `.webdb.gz` snapshots (which typically compress 4 KB slotted pages by **70–90%** using the browser's native `CompressionStream` / `DecompressionStream`).
 

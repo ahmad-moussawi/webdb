@@ -1,22 +1,26 @@
 import { CliUsageError, hasHelpFlag, type FlagDef } from './args.js';
 import {
   CHECKPOINT_FLAG_DEFS,
+  COMPACT_FLAG_DEFS,
   DUMP_FLAG_DEFS,
   EXPLAIN_FLAG_DEFS,
   INDEXES_FLAG_DEFS,
   INFO_FLAG_DEFS,
   PAGE_FLAG_DEFS,
   QUERY_FLAG_DEFS,
+  RECOVER_FLAG_DEFS,
   SCHEMA_FLAG_DEFS,
   TABLES_FLAG_DEFS,
   VERIFY_FLAG_DEFS,
   cmdCheckpoint,
+  cmdCompact,
   cmdDump,
   cmdExplain,
   cmdIndexes,
   cmdInfo,
   cmdPage,
   cmdQuery,
+  cmdRecover,
   cmdSchema,
   cmdTables,
   cmdVerify,
@@ -26,6 +30,21 @@ import type { CoreMode } from './open.js';
 
 export type { CliIo, CoreMode };
 export { NodeFsStorage, type NodeFsStorageOptions } from '../host/storage/node_fs.js';
+export {
+  buildRecoverySchemaTemplate,
+  extractRecoverySchemaFromTables,
+  inspectDatabaseStructure,
+  parseRecoverySchemaJson,
+  recoverDatabaseBuffer,
+  type RecoverOptions,
+  type RecoveryColumnSchema,
+  type RecoveryIndexSchema,
+  type RecoveryReport,
+  type RecoverySchemaMap,
+  type RecoveryTableSchema,
+  type StructuralCheckResult,
+  type TableRecoverySummary,
+} from './recover.js';
 
 declare const __WEBDB_CLI_VERSION__: string | undefined;
 
@@ -45,7 +64,9 @@ Commands:
   query <file> <table> [options]      Query rows using WebDB expressions
   explain <file> <table> [options]    Show query plan and VDBE bytecode disassembly
   page <file> <pageId> [options]      Inspect a raw 4 KB page (--rows, --hex, --raw)
-  verify <file>                       Verify Page 1, all page CRC32 checksums, and WAL
+  verify <file>                       Verify Page 1, checksums, structure, and WAL
+  recover <file> --out <out> [opts]   Deterministically recover a damaged .db file
+  compact <file> [options]            Repack fragmented pages and shrink .db file
   dump <file> [table] [options]       Export table or full database (json, ndjson, csv)
   checkpoint <file>                   Replay WAL frames into main .db file (writes to disk)
 
@@ -72,10 +93,13 @@ Examples:
   webdb info app.db
   webdb tables app.db --exact-count
   webdb schema app.db users
+  webdb schema app.db --recovery --out schema.json
   webdb query app.db users -s "name, score * 2 as doubled" -w "age >= 21" -o "score desc" -l 10
   webdb explain app.db users -w "score > 80"
   webdb page app.db 2 --rows --hex
   webdb verify app.db
+  webdb recover damaged.db --out recovered.db --schema-from healthy.db
+  webdb compact app.db --out app.compacted.db
   webdb dump app.db users --format csv --out users.csv
 `;
 
@@ -93,6 +117,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   explain: { handler: cmdExplain, flags: EXPLAIN_FLAG_DEFS },
   page: { handler: cmdPage, flags: PAGE_FLAG_DEFS },
   verify: { handler: cmdVerify, flags: VERIFY_FLAG_DEFS },
+  recover: { handler: cmdRecover, flags: RECOVER_FLAG_DEFS },
+  compact: { handler: cmdCompact, flags: COMPACT_FLAG_DEFS },
   dump: { handler: cmdDump, flags: DUMP_FLAG_DEFS },
   checkpoint: { handler: cmdCheckpoint, flags: CHECKPOINT_FLAG_DEFS },
 };

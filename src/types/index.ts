@@ -442,6 +442,32 @@ export interface SyncState {
   schemaVersion: number;
 }
 
+export interface CompactOptions {
+  /** Analyze fragmentation and compute compacted size without mutating the database. */
+  dryRun?: boolean;
+  /** Number of rows per insertMany batch when rebuilding tables (default: 500). */
+  batchSize?: number;
+  /** Skip rewriting storage and return compacted: false if pagesReclaimed < minReclaimPages. */
+  minReclaimPages?: number;
+}
+
+export interface CompactResult {
+  compacted: boolean;
+  dryRun: boolean;
+  pagesBefore: number;
+  pagesAfter: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  pagesReclaimed: number;
+  bytesReclaimed: number;
+  freePagesBefore: number;
+  unreferencedPagesBefore: number;
+  fragmentedBytesBefore: number;
+  tablesCompacted: number;
+  indexesRebuilt: number;
+  rowsCopied: number;
+}
+
 export type BeforeCommitHook = (
   changeset: Changeset,
   tx: any,

@@ -1,4 +1,5 @@
-import { mkdir, open } from "node:fs/promises";
+import { mkdir, open, realpath, rename, stat, unlink } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { basename, dirname } from "node:path";
 import type { IVfsAdapter } from "./vfs.js";
 
@@ -48,11 +49,33 @@ export interface NodeFsStorageOptions {
   databaseName?: string;
 }
 
-function defaultWalPath(dbPath: string): string {
+export function defaultWalPath(dbPath: string): string {
   if (/\.db$/i.test(dbPath)) {
     return dbPath.slice(0, -3) + ".wal";
   }
   return `${dbPath}.wal`;
+}
+
+async function getOptionalFileMode(filePath: string): Promise<number | null> {
+  try {
+    const info = await stat(filePath);
+    return info.mode & 0o777;
+  } catch {
+    return null;
+  }
+}
+
+async function bestEffortSyncDir(dirPath: string): Promise<void> {
+  try {
+    const dirHandle = await open(dirPath, "r");
+    try {
+      await (dirHandle as unknown as { sync(): Promise<void> }).sync();
+    } finally {
+      await dirHandle.close();
+    }
+  } catch {
+    // Directory fsync is unsupported on some platforms/filesystems
+  }
 }
 
 function defaultDatabaseName(dbPath: string): string {
@@ -528,6 +551,93 @@ export class NodeFsStorage implements IVfsAdapter {
     const { size } = await handle.stat();
     if (size <= WAL_HEADER_SIZE) return 0;
     return Math.ceil((size - WAL_HEADER_SIZE) / WAL_FRAME_SIZE);
+  }
+
+  /**
+   * Crash-safely replaces the database file and WAL header using synced temp files
+   * and atomic POSIX renames, resolving symlinks and preserving file permissions.
+   */
+  async replaceDatabaseAtomic(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+    walHeader: Uint8Array,
+  ): Promise<void> {
+    this.assertWritable("replaceDatabaseAtomic");
+    if (pages.length === 0) {
+      throw new RangeError("replaceDatabaseAtomic requires at least 1 page");
+    }
+
+    const sorted = [...pages].sort((a, b) => a.pageId - b.pageId);
+    const fullDb = new Uint8Array(sorted.length * PAGE_SIZE);
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      if (p.pageId !== i + 1) {
+        throw new RangeError(
+          `replaceDatabaseAtomic requires contiguous pages 1..${sorted.length} (got pageId=${p.pageId} at index ${i})`,
+        );
+      }
+      if (p.data.byteLength !== PAGE_SIZE) {
+        throw new RangeError(
+          `Invalid page buffer length for page ${p.pageId}: expected ${PAGE_SIZE} bytes, got ${p.data.byteLength}`,
+        );
+      }
+      fullDb.set(p.data, i * PAGE_SIZE);
+    }
+
+    const realDbPath = await realpath(this.dbPath).catch(() => this.dbPath);
+    const realWalPath = await realpath(this.walPath).catch(() => this.walPath);
+
+    await mkdir(dirname(realDbPath), { recursive: true });
+    await mkdir(dirname(realWalPath), { recursive: true });
+
+    const dbMode = (await getOptionalFileMode(realDbPath)) ?? 0o644;
+    const walMode = (await getOptionalFileMode(realWalPath)) ?? dbMode;
+    const suffix = `${process.pid}.${randomBytes(6).toString("hex")}`;
+    const tmpDbPath = `${realDbPath}.atomic.${suffix}.tmp`;
+    const tmpWalPath = `${realWalPath}.atomic.${suffix}.tmp`;
+
+    let swappedWal = false;
+    try {
+      const dbTmpHandle = await open(tmpDbPath, "wx", dbMode);
+      try {
+        await writeFully(
+          dbTmpHandle as unknown as NodeFileHandleLike,
+          fullDb,
+          0,
+        );
+        await dbTmpHandle.datasync();
+      } finally {
+        await dbTmpHandle.close();
+      }
+
+      const walTmpHandle = await open(tmpWalPath, "wx", walMode);
+      try {
+        await writeFully(
+          walTmpHandle as unknown as NodeFileHandleLike,
+          walHeader,
+          0,
+        );
+        await walTmpHandle.datasync();
+      } finally {
+        await walTmpHandle.close();
+      }
+
+      await this.close();
+
+      await rename(tmpWalPath, realWalPath);
+      swappedWal = true;
+      await rename(tmpDbPath, realDbPath);
+
+      await bestEffortSyncDir(dirname(realDbPath));
+      if (dirname(realWalPath) !== dirname(realDbPath)) {
+        await bestEffortSyncDir(dirname(realWalPath));
+      }
+    } catch (err) {
+      if (!swappedWal) {
+        await unlink(tmpWalPath).catch(() => {});
+      }
+      await unlink(tmpDbPath).catch(() => {});
+      throw err;
+    }
   }
 
   async close(): Promise<void> {

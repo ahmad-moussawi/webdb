@@ -28,11 +28,11 @@ npm run cli -- --help
 
 ## Read-Only Safety & WAL Handling
 
-Every inspection and query command (`info`, `tables`, `schema`, `indexes`, `query`, `explain`, `page`, `verify`, `dump`) opens the database **strictly read-only**:
+Every inspection, query, verification, and preview command (`info`, `tables`, `schema`, `indexes`, `query`, `explain`, `page`, `verify`, `dump`, `compact --dry-run`, `recover --dry-run`, `recover --schema-template`) opens the database **strictly read-only**:
 
 - It never creates an empty `.wal` file if one does not exist.
-- If a companion `.wal` file has pending committed frames on disk, the CLI replays them **strictly in memory** via `ReadOnlyOverlayVfs` so queries reflect the latest committed state without modifying a single byte of your `.db` or `.wal` files.
-- Only `webdb checkpoint <file>` opens the database read-write to fold committed WAL frames into the main `.db` file.
+- If a companion `.wal` file has pending committed frames on disk, the CLI replays them **strictly in memory** via `ReadOnlyOverlayVfs` so commands reflect the latest committed state without modifying a single byte of your input `.db` or `.wal` files.
+- `webdb compact --out <out.db>` and `webdb recover --out <out.db>` write only to the new output file. Only `webdb checkpoint <file>` and `webdb compact <file> --in-place` modify the target `.db` / `.wal` files on disk.
 
 ---
 
@@ -218,6 +218,7 @@ Performs a full binary integrity check across the `.db` file and any companion `
 - Validates file size alignment (multiple of 4,096 bytes)
 - Validates Page 1 magic bytes (`WEBDB\0`), page size, version handshake, `totalPages`, and Page 1 CRC32
 - Validates IEEE 802.3 CRC32 checksums and page types for all pages `2..totalPages`
+- Validates structural integrity: unlinked `0x00` pages outside the free list, table/index overflow catalog headers (`0x0C`), column catalog chains, table `0x0D` leaf chains, orphaned `0x0D` pages, and index target page pointers
 - Validates WAL header (`WEBWAL` + CRC32), frame checksums, and sequence numbers when a `.wal` file is present
 
 Returns exit code `0` when valid and `1` if corruption is detected.
@@ -226,6 +227,66 @@ Returns exit code `0` when valid and `1` if corruption is detected.
 webdb verify app.db
 webdb verify app.db --format json
 ```
+
+---
+
+### `recover <file> --out <output.db> [options]`
+
+Deterministically repairs and rebuilds a damaged WebDB file into a clean new output file without modifying the input file:
+
+- Repairs zeroed 12-byte headers on table/index overflow catalog pages (`0x0C`) and relinks overflow chains
+- Deduplicates duplicate catalog index entries
+- Re-attaches orphaned `0x0D` data leaf chains back to their owning tables via primary/secondary index pointers and schema validation, hydrating `0x0E` overflow payloads
+- Restores missing column catalog pages (`0x0C`) deterministically when `--schema <schema.json>` is supplied (or skips unreadable tables with a warning and exits `1`)
+- Rebuilds all recovered tables, rows, and primary/secondary B-tree indexes cleanly and reports any lost primary keys (`lostIndexEntries` / `lostKeysSample`)
+
+```bash
+# Dry-run inspection without writing an output file
+webdb recover damaged.db --dry-run
+
+# Recover with schema definitions for zeroed column catalog pages
+webdb recover damaged.db --out recovered.db --schema schema.json --report report.json
+```
+
+| Flag                         | Description                                                                                         |
+| :--------------------------- | :-------------------------------------------------------------------------------------------------- |
+| `-o, --out <path>`           | Destination path for the rebuilt database (refuses to overwrite `<file>` in-place).                 |
+| `--schema <schema.json>`     | Optional JSON schema map (`{ "table": { columns, indexes? } }`) for missing `0x0C` column catalogs. |
+| `--report <report.json>`     | Write the detailed per-table recovery report JSON to disk.                                          |
+| `--dry-run`                  | Analyze and report recoverable tables/rows without rebuilding or writing `--out`.                   |
+| `--force`                    | Allow overwriting `--out` if it already exists.                                                     |
+| `--no-wal`                   | Skip replaying companion `.wal` frames before recovery.                                             |
+| `-f, --format <table\|json>` | Output format (default: `table`).                                                                   |
+
+---
+
+### `compact <file> [options]`
+
+Rebuilds a healthy WebDB file into a densely packed layout (similar to SQLite `VACUUM`), reclaiming free-list pages, unreferenced pages, dropped-table/index space, and intra-page fragmentation while preserving schemas, rows, secondary indexes, `autoIncNext`, and `schemaVersion`:
+
+```bash
+# Preview fragmentation and space savings without writing
+webdb compact app.db --dry-run
+
+# Compact into a new output file
+webdb compact app.db --out app.compacted.db
+
+# Compact atomically in place (merges and removes companion .wal if present)
+webdb compact app.db --in-place
+
+# Only rewrite if at least 10 pages can be reclaimed
+webdb compact app.db --in-place --min-reclaim 10
+```
+
+| Flag                         | Description                                                                    |
+| :--------------------------- | :----------------------------------------------------------------------------- |
+| `-o, --out <path>`           | Write compacted database to a new path (mutually exclusive with `--in-place`). |
+| `--in-place`                 | Atomically replace `<file>` via a temporary file and remove merged `.wal`.     |
+| `--dry-run`                  | Analyze fragmentation and report compacted size without modifying disk.        |
+| `--force`                    | Allow overwriting `--out` if it already exists.                                |
+| `--min-reclaim <pages>`      | Skip writing if fewer than `<pages>` pages would be reclaimed.                 |
+| `--batch-size <rows>`        | Rows per `insertMany` batch during rebuild (default: `500`).                   |
+| `-f, --format <table\|json>` | Output format (default: `table`).                                              |
 
 ---
 
@@ -248,7 +309,7 @@ webdb dump app.db orders --format ndjson
 
 ### `checkpoint <file>`
 
-Replays committed frames from the companion `.wal` file into the main `.db` file and resets the WAL to 0 frames. This is the only command that writes to disk.
+Replays committed frames from the companion `.wal` file into the main `.db` file and resets the WAL to 0 frames. Like `compact --in-place`, this command modifies `<file>` and its `.wal` on disk.
 
 ```bash
 webdb checkpoint app.db

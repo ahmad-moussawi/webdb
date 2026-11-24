@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
-import { PAGE_SIZE } from "../constants.js";
+import { DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT, PAGE_SIZE } from "../constants.js";
+import { InvalidDatabaseError } from "../types/index.js";
 import { WebDB } from "../host/api/webdb.js";
 import { NodeFsStorage } from "../host/storage/node_fs.js";
 import { ReadOnlyOverlayVfs } from "../host/storage/read_only_overlay.js";
@@ -65,6 +66,7 @@ export interface OpenedReadOnlyDb {
   dbFileSize: number;
   walFileSize: number | null;
   walFramesOnDisk: number;
+  slotCount: number;
   close(): Promise<void>;
 }
 
@@ -78,37 +80,56 @@ export async function openReadOnlyDb(
   core: CoreMode = "wasm",
 ): Promise<OpenedReadOnlyDb> {
   const { size: dbFileSize } = await assertDbFileExists(filePath);
-  const storage = new NodeFsStorage(filePath, { readOnly: true });
+  const candidateSlotCounts = [DEFAULT_SLOT_COUNT, 4096, 16384, MAX_SLOT_COUNT];
 
-  try {
-    const walFileSize = await getOptionalFileSize(storage.walPath);
-    const walFramesOnDisk = await storage.getWalFrameCount();
+  for (let i = 0; i < candidateSlotCounts.length; i++) {
+    const slotCount = candidateSlotCounts[i];
+    const storage = new NodeFsStorage(filePath, { readOnly: true });
+    let closed = false;
+    try {
+      const walFileSize = await getOptionalFileSize(storage.walPath);
+      const walFramesOnDisk = await storage.getWalFrameCount();
 
-    if (dbFileSize < PAGE_SIZE && walFramesOnDisk === 0) {
-      throw new Error(
-        `Invalid database file (${dbFileSize} bytes): file is smaller than a single ${PAGE_SIZE}-byte page (${filePath})`,
-      );
+      if (dbFileSize < PAGE_SIZE && walFramesOnDisk === 0) {
+        throw new Error(
+          `Invalid database file (${dbFileSize} bytes): file is smaller than a single ${PAGE_SIZE}-byte page (${filePath})`,
+        );
+      }
+
+      const overlay = new ReadOnlyOverlayVfs(storage);
+      const db = await WebDB.open({
+        storage: overlay,
+        engine: createEngine(core),
+        slotCount,
+        crossTabSync: false,
+      });
+      return {
+        db,
+        storage,
+        overlay,
+        dbFileSize,
+        walFileSize,
+        walFramesOnDisk,
+        slotCount,
+        close: async () => {
+          await db.close();
+        },
+      };
+    } catch (err) {
+      await storage.close().catch(() => {});
+      closed = true;
+      const isPoolCapacityError =
+        err instanceof InvalidDatabaseError &&
+        /exceed buffer pool capacity/i.test(err.message);
+      if (isPoolCapacityError && i < candidateSlotCounts.length - 1) {
+        continue;
+      }
+      throw err;
+    } finally {
+      if (!closed) {
+        // Ownership transferred to returned `OpenedReadOnlyDb`
+      }
     }
-
-    const overlay = new ReadOnlyOverlayVfs(storage);
-    const db = await WebDB.open({
-      storage: overlay,
-      engine: createEngine(core),
-      crossTabSync: false,
-    });
-    return {
-      db,
-      storage,
-      overlay,
-      dbFileSize,
-      walFileSize,
-      walFramesOnDisk,
-      close: async () => {
-        await db.close();
-      },
-    };
-  } catch (err) {
-    await storage.close();
-    throw err;
   }
+  throw new Error(`Failed to open database: ${filePath}`);
 }

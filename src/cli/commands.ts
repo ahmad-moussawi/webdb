@@ -1,4 +1,6 @@
-import { writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { lstat, open, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import {
   PAGE_SIZE,
   PAGE_HEADER_SIZE,
@@ -19,7 +21,8 @@ import type { TableMeta, IndexDescriptor, DbRow } from "../types/index.js";
 import { WebDB } from "../host/api/webdb.js";
 import type { QueryBuilder } from "../host/api/query_builder.js";
 import { recoverFromWal } from "../host/driver/crash_recovery.js";
-import { NodeFsStorage } from "../host/storage/node_fs.js";
+import { MemoryStorage } from "../host/storage/memory.js";
+import { defaultWalPath, NodeFsStorage } from "../host/storage/node_fs.js";
 import {
   computePageChecksum,
   computePage1Checksum,
@@ -77,11 +80,20 @@ import {
 } from "./format.js";
 import {
   assertDbFileExists,
+  createEngine,
   getOptionalFileSize,
   openReadOnlyDb,
   statDbFile,
   type CoreMode,
 } from "./open.js";
+import {
+  buildRecoverySchemaTemplate,
+  extractRecoverySchemaFromTables,
+  inspectDatabaseStructure,
+  parseRecoverySchemaJson,
+  recoverDatabaseBuffer,
+  type RecoverySchemaMap,
+} from "./recover.js";
 
 export interface CliIo {
   stdout(text: string): void;
@@ -118,6 +130,8 @@ export const TABLES_FLAG_DEFS: FlagDef[] = [
 
 export const SCHEMA_FLAG_DEFS: FlagDef[] = [
   { name: "format", short: "f", type: "string" },
+  { name: "recovery", type: "boolean" },
+  { name: "out", short: "o", type: "string" },
 ];
 
 export const INDEXES_FLAG_DEFS: FlagDef[] = [
@@ -162,6 +176,28 @@ export const DUMP_FLAG_DEFS: FlagDef[] = [
 ];
 
 export const CHECKPOINT_FLAG_DEFS: FlagDef[] = [
+  { name: "format", short: "f", type: "string" },
+];
+
+export const RECOVER_FLAG_DEFS: FlagDef[] = [
+  { name: "out", short: "o", type: "string" },
+  { name: "schema", type: "string" },
+  { name: "schema-from", type: "string" },
+  { name: "schema-template", type: "boolean" },
+  { name: "report", type: "string" },
+  { name: "dry-run", type: "boolean" },
+  { name: "force", type: "boolean" },
+  { name: "no-wal", type: "boolean" },
+  { name: "format", short: "f", type: "string" },
+];
+
+export const COMPACT_FLAG_DEFS: FlagDef[] = [
+  { name: "out", short: "o", type: "string" },
+  { name: "in-place", type: "boolean" },
+  { name: "dry-run", type: "boolean" },
+  { name: "force", type: "boolean" },
+  { name: "min-reclaim", type: "string" },
+  { name: "batch-size", type: "string" },
   { name: "format", short: "f", type: "string" },
 ];
 
@@ -450,16 +486,18 @@ export async function cmdSchema(
   const { positionals, values } = parseCliArgs(argv, SCHEMA_FLAG_DEFS);
   if (positionals.length < 1 || positionals.length > 2) {
     throw new CliUsageError(
-      "Usage: webdb schema <file> [table] [--format table|json]",
+      "Usage: webdb schema <file> [table] [--format table|json] [--recovery] [--out <path>]",
     );
   }
 
   const filePath = positionals[0];
   const tableName = positionals[1];
+  const recoveryMode = Boolean(values.recovery);
+  const outPath = values.out as string | undefined;
   const format = parseOutputFormat(
     values.format as string | undefined,
     ["table", "json"],
-    "table",
+    recoveryMode ? "json" : "table",
   );
 
   const opened = await openReadOnlyDb(filePath, ctx.core);
@@ -467,6 +505,20 @@ export async function cmdSchema(
     const tables: TableMeta[] = tableName
       ? [await opened.db.getTable(tableName)]
       : await opened.db.listTables();
+
+    if (recoveryMode) {
+      const schemaMap = extractRecoverySchemaFromTables(tables);
+      const output = formatJson(schemaMap) + "\n";
+      if (outPath) {
+        await writeFile(outPath, output, "utf8");
+        ctx.io.stdout(
+          `Wrote recovery schema to ${outPath} (${tables.length} table(s))\n`,
+        );
+      } else {
+        ctx.io.stdout(output);
+      }
+      return 0;
+    }
 
     if (format === "json") {
       const payload = tables.map((t) => ({
@@ -493,12 +545,23 @@ export async function cmdSchema(
           columns: formatIndexColumns(ix, t),
         })),
       }));
-      ctx.io.stdout(formatJson(tableName ? payload[0] : payload) + "\n");
+      const output = formatJson(tableName ? payload[0] : payload) + "\n";
+      if (outPath) {
+        await writeFile(outPath, output, "utf8");
+        ctx.io.stdout(`Wrote schema to ${outPath}\n`);
+      } else {
+        ctx.io.stdout(output);
+      }
       return 0;
     }
 
     if (tables.length === 0) {
-      ctx.io.stdout("(no tables)\n");
+      const emptyOut = "(no tables)\n";
+      if (outPath) {
+        await writeFile(outPath, emptyOut, "utf8");
+      } else {
+        ctx.io.stdout(emptyOut);
+      }
       return 0;
     }
 
@@ -533,7 +596,13 @@ export async function cmdSchema(
       sections.push(section);
     }
 
-    ctx.io.stdout(sections.join("\n\n") + "\n");
+    const textOut = sections.join("\n\n") + "\n";
+    if (outPath) {
+      await writeFile(outPath, textOut, "utf8");
+      ctx.io.stdout(`Wrote schema to ${outPath}\n`);
+    } else {
+      ctx.io.stdout(textOut);
+    }
     return 0;
   } finally {
     await opened.close();
@@ -1436,6 +1505,14 @@ export async function cmdVerify(
       headerTotalPages >= 1
         ? Math.min(headerTotalPages, physicalPages)
         : physicalPages;
+    const checkedBytes =
+      headerTotalPages >= 1 && pagesToCheck >= 1
+        ? new Uint8Array(pagesToCheck * PAGE_SIZE)
+        : null;
+    if (checkedBytes && page1) {
+      checkedBytes.set(page1, 0);
+    }
+
     for (let start = 2; start <= pagesToCheck; start += PAGE_SCAN_BATCH_SIZE) {
       const end = Math.min(pagesToCheck, start + PAGE_SCAN_BATCH_SIZE - 1);
       const ids: number[] = [];
@@ -1450,6 +1527,9 @@ export async function cmdVerify(
           corruptPages++;
           errors.push(`Page ${pid}: missing/unreadable`);
           continue;
+        }
+        if (checkedBytes) {
+          checkedBytes.set(bytes, (pid - 1) * PAGE_SIZE);
         }
         const view = new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
         const ptype = page_get_type(view, 0);
@@ -1565,6 +1645,14 @@ export async function cmdVerify(
       };
     }
 
+    let structuralIssues = 0;
+    if (checkedBytes && headerTotalPages >= 1) {
+      const structural = inspectDatabaseStructure(checkedBytes, pagesToCheck);
+      structuralIssues = structural.errors.length;
+      errors.push(...structural.errors);
+      warnings.push(...structural.warnings);
+    }
+
     const ok = errors.length === 0;
     const report = {
       file: filePath,
@@ -1574,6 +1662,7 @@ export async function cmdVerify(
       validChecksumPages,
       unstampedChecksumPages,
       corruptPages,
+      structuralIssues,
       wal: walSummary,
       warnings,
       errors,
@@ -1590,6 +1679,7 @@ export async function cmdVerify(
           ["Valid Checksums", validChecksumPages],
           ["Unstamped Checksums", unstampedChecksumPages],
           ["Corrupt Pages", corruptPages],
+          ["Structural Issues", structuralIssues],
           ["Warnings", warnings.length],
           ["Errors", errors.length],
         ]) + "\n",
@@ -1602,6 +1692,11 @@ export async function cmdVerify(
       if (errors.length > 0) {
         ctx.io.stdout(
           "\nErrors:\n" + errors.map((e) => `  - ${e}`).join("\n") + "\n",
+        );
+      }
+      if (structuralIssues > 0) {
+        ctx.io.stdout(
+          `\nTip: Run "webdb recover ${filePath} --out <recovered.db>" to repair structural corruption.\n`,
         );
       }
     }
@@ -1772,5 +1867,651 @@ export async function cmdCheckpoint(
     return 0;
   } finally {
     await storage.close();
+  }
+}
+
+// ============================================================================
+// 11. recover
+// ============================================================================
+
+export async function cmdRecover(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
+  const { positionals, values } = parseCliArgs(argv, RECOVER_FLAG_DEFS);
+  if (positionals.length !== 1) {
+    throw new CliUsageError(
+      "Usage: webdb recover <file> --out <output.db> [--schema <schema.json>] [--schema-from <healthy.db>] [--schema-template] [--report <report.json>] [--dry-run] [--force] [--no-wal] [--format table|json]",
+    );
+  }
+
+  const filePath = positionals[0];
+  const outPath = values.out as string | undefined;
+  const schemaPath = values.schema as string | undefined;
+  const schemaFromPath = values["schema-from"] as string | undefined;
+  const schemaTemplate = Boolean(values["schema-template"]);
+  const reportPath = values.report as string | undefined;
+  const dryRun = Boolean(values["dry-run"]);
+  const force = Boolean(values.force);
+  const noWal = Boolean(values["no-wal"]);
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
+
+  if (!dryRun && !schemaTemplate && !outPath) {
+    throw new CliUsageError(
+      "Missing --out <output.db> (pass --dry-run to inspect recovery plan or --schema-template to emit missing table schema templates)",
+    );
+  }
+
+  await assertDbFileExists(filePath);
+
+  if (outPath) {
+    if (resolve(outPath) === resolve(filePath)) {
+      throw new CliUsageError(
+        "Refusing to overwrite the input file in place: specify a different path for --out",
+      );
+    }
+    if (!dryRun && !force && (await getOptionalFileSize(outPath)) !== null) {
+      throw new Error(
+        `Output file already exists: ${outPath}. Pass --force to overwrite.`,
+      );
+    }
+  }
+
+  const rawBytes = new Uint8Array(await readFile(filePath));
+  const storageInfo = new NodeFsStorage(filePath, { readOnly: true });
+  let walBytes: Uint8Array | null = null;
+  if (!noWal && (await getOptionalFileSize(storageInfo.walPath)) !== null) {
+    walBytes = new Uint8Array(await readFile(storageInfo.walPath));
+  }
+  await storageInfo.close();
+
+  if (schemaTemplate) {
+    const { template, missingTables } = buildRecoverySchemaTemplate(rawBytes, {
+      walBytes,
+      replayWal: !noWal,
+    });
+    const output = formatJson(template) + "\n";
+    if (outPath) {
+      await writeFile(outPath, output, "utf8");
+      ctx.io.stdout(
+        missingTables.length > 0
+          ? `Wrote schema template for ${missingTables.length} table(s) (${missingTables
+              .map((t) => t.name)
+              .join(", ")}) to ${outPath}\n`
+          : `No damaged column catalogs found; wrote empty template {} to ${outPath}\n`,
+      );
+    } else {
+      ctx.io.stdout(output);
+      if (missingTables.length === 0) {
+        ctx.io.stderr("Note: No damaged column catalogs found in this database.\n");
+      }
+    }
+    return 0;
+  }
+
+  let schema: RecoverySchemaMap | undefined;
+  if (schemaFromPath) {
+    const healthy = await openReadOnlyDb(schemaFromPath, ctx.core);
+    try {
+      const healthyTables = await healthy.db.listTables();
+      schema = extractRecoverySchemaFromTables(healthyTables);
+    } finally {
+      await healthy.close();
+    }
+  }
+  if (schemaPath) {
+    const rawSchema = await readFile(schemaPath, "utf8");
+    const fileSchema = parseRecoverySchemaJson(rawSchema);
+    schema = schema ? { ...schema, ...fileSchema } : fileSchema;
+  }
+
+  const { binary, report } = await recoverDatabaseBuffer(rawBytes, {
+    schema,
+    walBytes,
+    replayWal: !noWal,
+    core: ctx.core,
+    dryRun,
+  });
+
+  report.inputFile = filePath;
+  if (outPath && !dryRun) {
+    report.outputFile = outPath;
+  }
+
+  if (!dryRun && outPath && binary) {
+    await writeFile(outPath, binary);
+  }
+  if (reportPath) {
+    await writeFile(reportPath, formatJson(report) + "\n", "utf8");
+  }
+
+  if (format === "json") {
+    ctx.io.stdout(formatJson(report) + "\n");
+  } else {
+    const summaryPairs: Array<[string, string | number | boolean]> = [
+      ["Input File", filePath],
+      ["Mode", dryRun ? "DRY RUN (no output written)" : "RECOVERED"],
+      ...(outPath && !dryRun
+        ? [["Output File", outPath] as [string, string | number | boolean]]
+        : []),
+      ["Input Pages", `${report.inputPages} (${formatBytes(report.inputPages * PAGE_SIZE)})`],
+      [
+        "Output Pages",
+        dryRun
+          ? "-"
+          : `${report.outputPages} (${formatBytes(report.outputPages * PAGE_SIZE)})`,
+      ],
+      ["Repaired Catalog Pages", report.repairedCatalogPages.length],
+      ["Deduplicated Indexes", report.deduplicatedIndexes],
+      ["Tables Recovered", `${report.tablesRecovered} (${report.tablesSkipped} skipped)`],
+      ["Orphan Leaf Pages Recovered", report.orphanLeafPagesRecovered],
+      ["Total Rows Recovered", report.totalRowsRecovered],
+      ["Warnings", report.warnings.length],
+    ];
+    ctx.io.stdout(formatKeyValue(summaryPairs) + "\n");
+
+    const interestingTables = report.tables.filter(
+      (t) =>
+        t.totalRecoveredRows > 0 ||
+        t.lostIndexEntries > 0 ||
+        t.repairedColCatalog ||
+        t.orphanRowsRecovered > 0 ||
+        t.status !== "recovered",
+    );
+    if (interestingTables.length > 0) {
+      ctx.io.stdout(
+        "\n" +
+          formatTable(
+            [
+              "id",
+              "table",
+              "status",
+              "reachable",
+              "orphan_rows",
+              "total",
+              "lost_entries",
+              "repaired_cat",
+            ],
+            interestingTables.map((t) => ({
+              id: t.tableId,
+              table: t.name,
+              status: t.status,
+              reachable: t.reachableRows,
+              orphan_rows: t.orphanRowsRecovered,
+              total: t.totalRecoveredRows,
+              lost_entries: t.lostIndexEntries,
+              repaired_cat: t.repairedColCatalog ? "yes" : "no",
+            })),
+          ) +
+          "\n",
+      );
+    }
+
+    if (report.warnings.length > 0) {
+      ctx.io.stdout(
+        "\nWarnings:\n" +
+          report.warnings.map((w) => `  - ${w}`).join("\n") +
+          "\n",
+      );
+    }
+
+    if (report.tablesSkipped > 0) {
+      const skippedNames = report.tables
+        .filter((t) => t.status === "skipped_missing_schema")
+        .map((t) => t.name)
+        .join(", ");
+      ctx.io.stdout(
+        `\nTip: ${report.tablesSkipped} table(s) (${skippedNames}) had damaged column catalogs and were skipped.\n` +
+          `  - If you have an earlier healthy backup: webdb recover ${filePath} --out <recovered.db> --schema-from <healthy.db>\n` +
+          `  - Or export schema JSON from a healthy backup: webdb schema <healthy.db> --recovery --out schema.json\n` +
+          `  - Or generate an editable starter template: webdb recover ${filePath} --schema-template --out template.json\n`,
+      );
+    }
+  }
+
+  return report.tablesSkipped > 0 ? 1 : 0;
+}
+
+// ============================================================================
+// 12. compact
+// ============================================================================
+
+async function inspectWalForCompact(filePath: string): Promise<{
+  present: boolean;
+  walPath: string;
+  walSize: number;
+  totalFrames: number;
+  committedFrameCount: number;
+  uncommittedFrameCount: number;
+  errors: string[];
+}> {
+  const storage = new NodeFsStorage(filePath, { readOnly: true });
+  const walPath = storage.walPath;
+  const errors: string[] = [];
+  let committedFrameCount = 0;
+  let uncommittedFrameCount = 0;
+  let totalFrames = 0;
+  let walSize = 0;
+
+  try {
+    const size = await getOptionalFileSize(walPath);
+    if (size === null || size === 0) {
+      return {
+        present: false,
+        walPath,
+        walSize: 0,
+        totalFrames: 0,
+        committedFrameCount: 0,
+        uncommittedFrameCount: 0,
+        errors,
+      };
+    }
+
+    walSize = size;
+    totalFrames = await storage.getWalFrameCount();
+    const rawHeader = await storage.readWalHeader();
+    if (!rawHeader) {
+      errors.push(
+        `WAL file exists (${walSize} bytes) but is smaller than 32-byte header`,
+      );
+      return {
+        present: true,
+        walPath,
+        walSize,
+        totalFrames,
+        committedFrameCount,
+        uncommittedFrameCount,
+        errors,
+      };
+    }
+
+    try {
+      const decoded = decodeWalFileHeader(rawHeader, true);
+      if (decoded.pageSize !== PAGE_SIZE) {
+        errors.push(
+          `WAL header pageSize mismatch: expected ${PAGE_SIZE}, got ${decoded.pageSize}`,
+        );
+      }
+    } catch (err: any) {
+      errors.push(`WAL header corrupt: ${err?.message ?? String(err)}`);
+    }
+
+    if (errors.length === 0 && totalFrames > 0) {
+      const txFrameCounts = new Map<number, number>();
+      const committedTxs = new Set<number>();
+      let validFrames = 0;
+      let halted = false;
+
+      for (
+        let start = 0;
+        start < totalFrames && !halted;
+        start += PAGE_SCAN_BATCH_SIZE
+      ) {
+        const count = Math.min(PAGE_SCAN_BATCH_SIZE, totalFrames - start);
+        const frames = await storage.readWalFrames(start, count);
+        for (let i = 0; i < frames.length; i++) {
+          const frameIdx = start + i;
+          const res = validateWalFrame(frames[i]);
+          if (!res.valid || !res.header) {
+            errors.push(`WAL frame ${frameIdx}: ${res.reason ?? "invalid"}`);
+            halted = true;
+            break;
+          }
+          if (res.header.frameSeq !== validFrames + 1) {
+            errors.push(
+              `WAL frame ${frameIdx}: sequence gap (expected ${validFrames + 1}, got ${res.header.frameSeq})`,
+            );
+            halted = true;
+            break;
+          }
+          validFrames++;
+          const txId = res.header.txId;
+          txFrameCounts.set(txId, (txFrameCounts.get(txId) ?? 0) + 1);
+          if (res.header.frameType === WAL_FRAME_TYPE_TX_COMMIT) {
+            committedTxs.add(txId);
+          }
+        }
+      }
+
+      for (const [txId, cnt] of txFrameCounts.entries()) {
+        if (committedTxs.has(txId)) {
+          committedFrameCount += cnt;
+        } else {
+          uncommittedFrameCount += cnt;
+        }
+      }
+    }
+
+    return {
+      present: true,
+      walPath,
+      walSize,
+      totalFrames,
+      committedFrameCount,
+      uncommittedFrameCount,
+      errors,
+    };
+  } finally {
+    await storage.close();
+  }
+}
+
+async function writeFileExclusiveSynced(
+  targetPath: string,
+  bytes: Uint8Array,
+  mode: number,
+): Promise<string> {
+  const tmpPath = `${targetPath}.compact.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    const handle = await open(tmpPath, "wx", mode);
+    try {
+      let written = 0;
+      while (written < bytes.byteLength) {
+        const res = await handle.write(
+          bytes,
+          written,
+          bytes.byteLength - written,
+          written,
+        );
+        if (res.bytesWritten === 0) {
+          throw new Error(`Short write writing ${tmpPath}`);
+        }
+        written += res.bytesWritten;
+      }
+      await handle.datasync();
+    } finally {
+      await handle.close();
+    }
+    return tmpPath;
+  } catch (err) {
+    await unlink(tmpPath).catch(() => {});
+    throw err;
+  }
+}
+
+async function bestEffortFsyncDir(dirPath: string): Promise<void> {
+  try {
+    const dirHandle = await open(dirPath, "r");
+    try {
+      await (dirHandle as unknown as { sync(): Promise<void> }).sync();
+    } finally {
+      await dirHandle.close();
+    }
+  } catch {
+    // Parent dir fsync not supported on all filesystems/OSes
+  }
+}
+
+export async function cmdCompact(
+  argv: string[],
+  ctx: CommandContext,
+): Promise<number> {
+  const { positionals, values } = parseCliArgs(argv, COMPACT_FLAG_DEFS);
+  if (positionals.length !== 1) {
+    throw new CliUsageError(
+      "Usage: webdb compact <file> (--out <output.db> | --in-place | --dry-run) [--force] [--min-reclaim <pages>] [--batch-size <rows>] [--format table|json]",
+    );
+  }
+
+  const filePath = positionals[0];
+  const outPath = values.out as string | undefined;
+  const inPlace = Boolean(values["in-place"]);
+  const dryRun = Boolean(values["dry-run"]);
+  const force = Boolean(values.force);
+  const format = parseOutputFormat(
+    values.format as string | undefined,
+    ["table", "json"],
+    "table",
+  );
+
+  if (outPath && inPlace) {
+    throw new CliUsageError("Cannot combine --out and --in-place");
+  }
+  if (!dryRun && !outPath && !inPlace) {
+    throw new CliUsageError(
+      "Missing --out <output.db> or --in-place (or pass --dry-run to preview without writing)",
+    );
+  }
+  if (outPath && resolve(outPath) === resolve(filePath)) {
+    throw new CliUsageError(
+      "Refusing to overwrite the input file with --out: use --in-place or specify a different --out path",
+    );
+  }
+
+  const minReclaimPages =
+    values["min-reclaim"] !== undefined
+      ? parsePositiveInt(String(values["min-reclaim"]), "--min-reclaim", true)
+      : undefined;
+
+  const batchSize =
+    values["batch-size"] !== undefined
+      ? parsePositiveInt(String(values["batch-size"]), "--batch-size")
+      : 500;
+
+  await assertDbFileExists(filePath);
+  const realInputPath = await realpath(filePath);
+  const inputStat = await stat(realInputPath);
+  const inputMode = inputStat.mode & 0o777;
+
+  if (outPath) {
+    const outExists = (await getOptionalFileSize(outPath)) !== null;
+    if (outExists) {
+      const realOutPath = await realpath(outPath).catch(() => resolve(outPath));
+      if (realOutPath === realInputPath) {
+        throw new CliUsageError(
+          "Refusing to overwrite the input file via symlink with --out: use --in-place or specify a different --out path",
+        );
+      }
+      if (!dryRun && !force) {
+        throw new Error(
+          `Output file already exists: ${outPath}. Pass --force to overwrite.`,
+        );
+      }
+    }
+  }
+
+  if (inputStat.size % PAGE_SIZE !== 0) {
+    throw new Error(
+      `Invalid database file alignment (${inputStat.size} bytes is not a multiple of ${PAGE_SIZE}): ${filePath}`,
+    );
+  }
+
+  const walInfo = await inspectWalForCompact(realInputPath);
+  if (walInfo.errors.length > 0) {
+    throw new Error(
+      `Companion WAL "${walInfo.walPath}" is corrupted (${walInfo.errors[0]}). Refusing compaction to avoid losing WAL data; run "webdb verify ${filePath}" or "webdb recover ${filePath} --out <recovered.db>" first.`,
+    );
+  }
+  const resolvedInputArg = resolve(filePath);
+  const inputLstat = await lstat(resolvedInputArg);
+  if (inputLstat.isSymbolicLink()) {
+    const symlinkSidecarWal = defaultWalPath(resolvedInputArg);
+    if ((await getOptionalFileSize(symlinkSidecarWal)) !== null) {
+      const realSidecarWal = await realpath(symlinkSidecarWal).catch(() => symlinkSidecarWal);
+      const realTargetWal = await realpath(walInfo.walPath).catch(() => walInfo.walPath);
+      if (realSidecarWal !== realTargetWal) {
+        throw new Error(
+          `Symlink sidecar WAL "${symlinkSidecarWal}" exists alongside symlink "${filePath}" while target "${realInputPath}" is the real file. Checkpoint or remove "${symlinkSidecarWal}" before compacting via symlink.`,
+        );
+      }
+    }
+  }
+
+  const opened = await openReadOnlyDb(realInputPath, ctx.core);
+  let sourceBytes: Uint8Array | undefined;
+  const usedSlotCount = opened.slotCount;
+  try {
+    sourceBytes = await opened.db.exportBinary();
+  } finally {
+    await opened.close();
+  }
+
+  if (
+    walInfo.committedFrameCount === 0 &&
+    inputStat.size < sourceBytes.byteLength
+  ) {
+    throw new Error(
+      `Database file is truncated (${inputStat.size} bytes on disk < ${sourceBytes.byteLength} expected bytes): ${filePath}`,
+    );
+  }
+
+  const sourceCheck = inspectDatabaseStructure(
+    sourceBytes,
+    sourceBytes.byteLength / PAGE_SIZE,
+  );
+  if (
+    sourceCheck.errors.length > 0 ||
+    sourceCheck.duplicateIndexes.length > 0
+  ) {
+    const issues = [
+      ...sourceCheck.errors,
+      ...sourceCheck.duplicateIndexes.map(
+        (d) => `Duplicate index descriptor: ${d}`,
+      ),
+    ];
+    const preview = issues.slice(0, 3).join("; ");
+    throw new Error(
+      `Database "${filePath}" has structural issues (${issues.length} issue(s): ${preview}). Run "webdb recover ${filePath} --out <recovered.db>" instead.`,
+    );
+  }
+
+  const workDb = await WebDB.open({
+    storage: new MemoryStorage(),
+    engine: createEngine(ctx.core),
+    slotCount: usedSlotCount,
+    initialData: sourceBytes,
+    crossTabSync: false,
+    readAhead: false,
+  });
+  sourceBytes = undefined;
+
+  try {
+    const result = await workDb.compact({
+      dryRun,
+      batchSize,
+      minReclaimPages,
+    });
+
+    if (!dryRun && result.compacted) {
+      const compactedBytes = await workDb.exportBinary();
+      const postCheck = inspectDatabaseStructure(
+        compactedBytes,
+        compactedBytes.byteLength / PAGE_SIZE,
+      );
+      if (
+        postCheck.errors.length > 0 ||
+        postCheck.duplicateIndexes.length > 0
+      ) {
+        throw new Error(
+          `Post-compaction verification failed: ${postCheck.errors.join("; ")}`,
+        );
+      }
+
+      const targetPath = inPlace ? realInputPath : outPath!;
+      const targetMode = inPlace ? inputMode : 0o644;
+      const tmpPath = await writeFileExclusiveSynced(
+        targetPath,
+        compactedBytes,
+        targetMode,
+      );
+
+      try {
+        if (inPlace) {
+          if (walInfo.present) {
+            if (walInfo.committedFrameCount > 0) {
+              // Ensure all committed WAL frames are folded into the original DB file BEFORE unlinking WAL
+              const ckptStorage = new NodeFsStorage(realInputPath, {
+                walPath: walInfo.walPath,
+              });
+              try {
+                await recoverFromWal(ckptStorage);
+              } finally {
+                await ckptStorage.close();
+              }
+            }
+            await unlink(walInfo.walPath);
+          }
+          await rename(tmpPath, targetPath);
+        } else {
+          if (force) {
+            const outWalPath = defaultWalPath(targetPath);
+            if ((await getOptionalFileSize(outWalPath)) !== null) {
+              await unlink(outWalPath);
+            }
+          }
+          await rename(tmpPath, targetPath);
+        }
+      } catch (err) {
+        await unlink(tmpPath).catch(() => {});
+        throw err;
+      }
+
+      await bestEffortFsyncDir(dirname(targetPath));
+    }
+
+    const mode = dryRun
+      ? "DRY RUN (no output written)"
+      : result.compacted
+        ? inPlace
+          ? "COMPACTED IN PLACE"
+          : "COMPACTED"
+        : "SKIPPED (below --min-reclaim)";
+
+    const outputTarget =
+      dryRun || !result.compacted ? null : inPlace ? filePath : outPath ?? null;
+    const pctReclaimed =
+      result.bytesBefore > 0
+        ? ((result.bytesReclaimed / result.bytesBefore) * 100).toFixed(1)
+        : "0.0";
+
+    if (format === "json") {
+      ctx.io.stdout(
+        formatJson({
+          file: filePath,
+          outputFile: outputTarget,
+          inPlace,
+          walFramesMerged: walInfo.committedFrameCount,
+          uncommittedWalFrames: walInfo.uncommittedFrameCount,
+          ...result,
+        }) + "\n",
+      );
+    } else {
+      const pairs: Array<[string, string | number | boolean]> = [
+        ["File", filePath],
+        ["Mode", mode],
+        ...(outputTarget
+          ? [["Output File", outputTarget] as [string, string | number | boolean]]
+          : []),
+        ["Compacted", result.compacted],
+        [
+          "Pages Before",
+          `${result.pagesBefore} (${formatBytes(result.bytesBefore)})`,
+        ],
+        [
+          "Pages After",
+          `${result.pagesAfter} (${formatBytes(result.bytesAfter)})`,
+        ],
+        [
+          "Reclaimed",
+          `${result.pagesReclaimed} pages (${formatBytes(result.bytesReclaimed)}, ${pctReclaimed}%)`,
+        ],
+        ["Free Pages Before", result.freePagesBefore],
+        ["Unreferenced Pages Before", result.unreferencedPagesBefore],
+        ["Fragmented Cell Bytes", formatBytes(result.fragmentedBytesBefore)],
+        ["Tables Compacted", result.tablesCompacted],
+        ["Indexes Rebuilt", result.indexesRebuilt],
+        ["Rows Copied", result.rowsCopied],
+        ["WAL Frames Merged", walInfo.committedFrameCount],
+      ];
+      ctx.io.stdout(formatKeyValue(pairs) + "\n");
+    }
+
+    return 0;
+  } finally {
+    await workDb.close();
   }
 }

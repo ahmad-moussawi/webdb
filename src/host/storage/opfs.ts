@@ -337,6 +337,125 @@ export class OpfsStorage implements IVfsAdapter {
     return Math.ceil((size - 32) / 4128);
   }
 
+  /**
+   * Atomically replaces all database pages and resets the WAL header.
+   * Uses FileSystemWritableFileStream atomic swap when async handles are active,
+   * or stages to a temporary OPFS file (with `.move()` atomic swap when supported)
+   * before updating SyncAccessHandles so failures never tear the live database.
+   */
+  async replaceDatabaseAtomic(
+    pages: Array<{ pageId: number; data: Uint8Array }>,
+    walHeader: Uint8Array,
+  ): Promise<void> {
+    if (pages.length === 0) {
+      throw new RangeError("replaceDatabaseAtomic requires at least 1 page");
+    }
+    await this.initHandles();
+
+    const sorted = [...pages].sort((a, b) => a.pageId - b.pageId);
+    const fullDb = new Uint8Array(sorted.length * 4096);
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      if (p.pageId !== i + 1) {
+        throw new RangeError(
+          `replaceDatabaseAtomic requires contiguous pages 1..${sorted.length}`,
+        );
+      }
+      if (p.data.byteLength !== 4096) {
+        throw new RangeError(
+          `Invalid page buffer length for page ${p.pageId}: expected 4096 bytes, got ${p.data.byteLength}`,
+        );
+      }
+      fullDb.set(p.data, i * 4096);
+    }
+
+    const writeWritableAbortSafe = async (
+      fileHandle: FileSystemFileHandle,
+      data: Uint8Array,
+    ) => {
+      const writable = await (fileHandle as any).createWritable({
+        keepExistingData: false,
+      });
+      try {
+        await writable.write(data);
+        await writable.close();
+      } catch (err) {
+        await writable.abort?.().catch(() => {});
+        throw err;
+      }
+    };
+
+    if (this.dbSyncHandle && this.rootDir) {
+      // Stage full DB into a sibling temp file first so write/quota errors leave live DB + WAL untouched
+      const tmpName = `${this.dbName}.db.atomic.tmp`;
+      const tmpHandle = await this.rootDir.getFileHandle(tmpName, {
+        create: true,
+      });
+      const tmpSync = await (tmpHandle as any).createSyncAccessHandle();
+      let tmpClosed = false;
+      try {
+        tmpSync.truncate(0);
+        tmpSync.write(fullDb, { at: 0 });
+        tmpSync.flush();
+
+        // Reset WAL only after the new DB image is durably staged
+        if (this.walSyncHandle) {
+          this.walSyncHandle.truncate(0);
+          this.walSyncHandle.write(walHeader, { at: 0 });
+          this.walSyncHandle.flush();
+        } else {
+          await writeWritableAbortSafe(this.walFileHandle!, walHeader);
+        }
+
+        if (typeof (tmpHandle as any).move === "function") {
+          tmpSync.close();
+          tmpClosed = true;
+          this.dbSyncHandle.close();
+          this.dbSyncHandle = null;
+          try {
+            await (tmpHandle as any).move(this.rootDir, `${this.dbName}.db`);
+          } finally {
+            this.dbFileHandle = await this.rootDir.getFileHandle(
+              `${this.dbName}.db`,
+              { create: true },
+            );
+            this.dbSyncHandle = await (
+              this.dbFileHandle as any
+            ).createSyncAccessHandle();
+          }
+          return;
+        }
+
+        // Fallback when FileSystemFileHandle.move() is unavailable:
+        // write pages 2..N before Page 1 + truncate, then remove temp staging file.
+        if (fullDb.byteLength > 4096) {
+          this.dbSyncHandle.write(fullDb.subarray(4096), { at: 4096 });
+          this.dbSyncHandle.flush();
+        }
+        this.dbSyncHandle.write(fullDb.subarray(0, 4096), { at: 0 });
+        this.dbSyncHandle.truncate(fullDb.byteLength);
+        this.dbSyncHandle.flush();
+      } finally {
+        if (!tmpClosed) {
+          try {
+            tmpSync.close();
+          } catch {
+            // Ignore close error
+          }
+        }
+        if (typeof (this.rootDir as any).removeEntry === "function") {
+          await (this.rootDir as any).removeEntry(tmpName).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // Async handles path: reset WAL first (prior frames were already checkpointed into the live DB),
+    // then atomically replace the main DB file via OPFS `.crswap` writable stream with abort-on-error lock safety.
+    await writeWritableAbortSafe(this.walFileHandle!, walHeader);
+    await writeWritableAbortSafe(this.dbFileHandle!, fullDb);
+  }
+
   async close(): Promise<void> {
     if (this.dbSyncHandle) {
       this.dbSyncHandle.close();

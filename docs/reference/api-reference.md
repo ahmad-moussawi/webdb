@@ -35,6 +35,7 @@ import {
 | **`WebDB.open`**      | `static open(options: WebDbOptions): Promise<WebDB>`           | Opens or creates a database, runs crash recovery if needed, and loads the schema catalog. |
 | **`db.close`**        | `close(): Promise<void>`                                       | Flushes dirty pages, closes cross-tab channels, and releases storage handles.             |
 | **`db.checkpoint`**   | `checkpoint(): Promise<{ pagesWritten: number }>`              | Forces an immediate WAL checkpoint to main storage and truncates the `.wal` file.         |
+| **`db.compact`**      | `compact(options?: CompactOptions): Promise<CompactResult>`    | Rebuilds the database into densely packed 4 KB pages, reclaiming free/unreferenced pages and intra-page fragmentation while preserving schemas, indexes, `autoIncNext`, and `schemaVersion` (supports `{ dryRun, minReclaimPages, batchSize }`). |
 | **`db.exportBinary`** | `exportBinary(): Promise<Uint8Array>`                          | Exports the entire database as a self-contained binary image with CRC32 checksums.        |
 | **`db.importBinary`** | `importBinary(data: Uint8Array \| ArrayBuffer): Promise<void>` | Validates checksums and atomically replaces the database with a binary image.             |
 | **`db.getPlanner`**   | `getPlanner(): QueryPlanner \| undefined`                      | Returns the configured default query planner.                                             |

@@ -1,6 +1,6 @@
 # Command-Line Interface (`webdb`)
 
-WebDB ships with a zero-dependency Node.js CLI (`webdb`) and filesystem storage adapter (`NodeFsStorage`) so you can inspect schemas, run queries, disassemble VDBE bytecode, examine raw 4 KB slotted pages, verify CRC32 checksums, and export data—**without writing JavaScript**.
+WebDB ships with a zero-dependency Node.js CLI (`webdb`) and filesystem storage adapter (`NodeFsStorage`) so you can inspect schemas, run queries, disassemble VDBE bytecode, examine raw 4 KB slotted pages, verify CRC32 checksums and B+Tree structure, compact fragmented databases, recover damaged files, and export data—**without writing JavaScript**.
 
 Because the CLI lives in a dedicated Node-only build (`dist/cli.js`), browser bundles keep WebDB's tiny ~19 KB gzipped WASM footprint with zero CLI or Node.js overhead.
 
@@ -26,11 +26,12 @@ webdb --help
 
 ## Read-Only Guarantee & WAL Safety
 
-All inspection and query commands open database files **strictly read-only**:
+All inspection, query, verification, and preview commands (`info`, `tables`, `schema`, `indexes`, `query`, `explain`, `page`, `verify`, `dump`, `compact --dry-run`, `recover --dry-run`, `recover --schema-template`) open database files **strictly read-only**:
 
-- They never modify `.db` / `.webdb` files or create stray `.wal` files.
-- If a companion `.wal` file contains uncheckpointed committed frames, the CLI automatically replays them **in memory only**, so `info`, `tables`, `query`, and `page` show the exact committed state without mutating disk files.
-- Use `webdb checkpoint <file>` only when you explicitly want to fold committed WAL frames into the main `.db` file.
+- They never modify input `.db` / `.webdb` files or create stray `.wal` files.
+- If a companion `.wal` file contains uncheckpointed committed frames, the CLI automatically replays them **in memory only**, so `info`, `tables`, `query`, `page`, `compact`, and `recover` reflect the exact committed state without mutating disk files.
+- `webdb compact --out <out.db>` and `webdb recover --out <out.db>` write only to the new output path, leaving the source file untouched.
+- Only `webdb checkpoint <file>` and `webdb compact <file> --in-place` modify the target `.db` / `.wal` files on disk.
 
 ---
 
@@ -79,6 +80,9 @@ webdb tables app.db --exact-count
 # Show detailed columns, types, flags (PK, NOT NULL, AUTO_INC, INDEXED), and indexes
 webdb schema app.db
 webdb schema app.db users
+
+# Export `--schema`-compatible recovery JSON from a healthy database
+webdb schema app.db --recovery --out schema.json
 
 # List all indexes (or filter to one table)
 webdb indexes app.db
@@ -217,7 +221,7 @@ webdb page app.db 3 --raw --format json
 
 ### 6. Verify Binary Integrity (`verify`)
 
-Validates file alignment (4,096-byte multiples), Page 1 magic bytes (`WEBDB\0`), format version, page count, IEEE 802.3 CRC32 checksums on every page, and WAL header/frame checksums if a `.wal` file is present:
+Validates file alignment (4,096-byte multiples), Page 1 magic bytes (`WEBDB\0`), format version, page count, IEEE 802.3 CRC32 checksums on every page, structural integrity (unlinked `0x00` pages outside the free list, table/index overflow catalog headers, column catalog chains, table `0x0D` leaf chains, orphaned `0x0D` pages, and index target page pointers), and WAL header/frame checksums if a `.wal` file is present:
 
 ```bash
 webdb verify app.db
@@ -228,7 +232,71 @@ Exits with code `0` when valid and `1` if any corruption is detected—making it
 
 ---
 
-### 7. Dump Data to JSON, NDJSON, or CSV (`dump`)
+### 7. Compact & Shrink a Database (`compact`)
+
+Rebuilds a healthy database into densely packed 4 KB pages (similar to SQLite `VACUUM`), reclaiming `FREE` pages, unreferenced pages, dropped-table/index space, and intra-page fragmentation while preserving schemas, rows, `0x0E` overflow payloads, secondary indexes, `autoIncNext`, and `schemaVersion`:
+
+```bash
+# Preview fragmentation and space savings without writing
+webdb compact app.db --dry-run
+
+# Write compacted output to a new file
+webdb compact app.db --out app.compacted.db
+
+# Atomically replace app.db in place (merges and removes companion .wal if present)
+webdb compact app.db --in-place
+
+# Only rewrite when at least 10 pages (40 KB) can be reclaimed
+webdb compact app.db --in-place --min-reclaim 10
+```
+
+| Flag | Description |
+| :--- | :--- |
+| `-o, --out <path>` | Write compacted database to a new path (mutually exclusive with `--in-place`). |
+| `--in-place` | Atomically replace `<file>` via a temporary file rename and remove merged `.wal`. |
+| `--dry-run` | Analyze fragmentation and report compacted size without writing to disk. |
+| `--force` | Allow overwriting `--out` if it already exists. |
+| `--min-reclaim <pages>` | Skip writing if fewer than `<pages>` pages would be reclaimed. |
+| `--batch-size <rows>` | Rows per `insertMany` batch during rebuild (default: `500`). |
+| `-f, --format <table\|json>` | Output format (default: `table`). |
+
+If `<file>` has structural corruption, `compact` refuses to run and directs you to `webdb recover`.
+
+---
+
+### 8. Recover a Damaged Database (`recover`)
+
+Deterministically repairs and rebuilds a corrupted `.webdb` file into a clean new output file without modifying the input file—relinking broken overflow catalog pages (`0x0C`), deduplicating catalog indexes, re-attaching orphaned `0x0D` leaf chains, hydrating `0x0E` overflow payloads, and rebuilding missing column catalogs when schema hints are supplied:
+
+```bash
+# Dry-run inspection of recoverable tables, orphans, and missing catalogs
+webdb recover damaged.db --dry-run
+
+# Recover using schemas borrowed directly from a healthy backup
+webdb recover damaged.db --out recovered.db --schema-from healthy.db
+
+# Generate an editable starter template JSON for tables with damaged column catalogs
+webdb recover damaged.db --schema-template --out template.json
+
+# Recover with schema JSON (accepts `webdb schema --recovery` or `--format json`)
+webdb recover damaged.db --out recovered.db --schema schema.json --report report.json
+```
+
+| Flag | Description |
+| :--- | :--- |
+| `-o, --out <path>` | Destination path for the rebuilt database (refuses to overwrite `<file>` in-place). |
+| `--schema <schema.json>` | JSON schema map (also accepts `webdb schema --recovery` and `webdb schema --format json` output). |
+| `--schema-from <healthy.db>` | Borrow missing table schemas directly from an earlier healthy WebDB file (can be combined with `--schema`). |
+| `--schema-template` | Emit an editable schema template JSON for tables whose column catalog page (`0x0C`) is damaged. |
+| `--report <report.json>` | Write the detailed per-table recovery report JSON to disk. |
+| `--dry-run` | Analyze and report recoverable tables/rows without rebuilding or writing `--out`. |
+| `--force` | Allow overwriting `--out` if it already exists. |
+| `--no-wal` | Skip replaying companion `.wal` frames before recovery. |
+| `-f, --format <table\|json>` | Output format (default: `table`). |
+
+---
+
+### 9. Dump Data to JSON, NDJSON, or CSV (`dump`)
 
 ```bash
 # Dump the entire database (schemas + rows for every table) to a JSON file
@@ -243,7 +311,7 @@ webdb dump app.db orders --format ndjson | jq '.amount'
 
 ---
 
-### 8. Checkpoint a WAL File (`checkpoint`)
+### 10. Checkpoint a WAL File (`checkpoint`)
 
 Folds committed frames from `<name>.wal` into `<name>.db` and resets the WAL to 0 frames:
 
@@ -252,11 +320,11 @@ webdb checkpoint app.db
 ```
 
 > [!WARNING]
-> `checkpoint` is the only CLI command that writes to disk. Avoid running it while another Node.js process has the same `.db` file open for writing.
+> Like `compact --in-place`, `checkpoint` modifies `<file>` and its `.wal` on disk. Avoid running it while another Node.js process has the same `.db` file open for writing.
 
 ---
 
-### 9. Switching Engine Core (`--core`)
+### 11. Switching Engine Core (`--core`)
 
 By default, the CLI runs queries on WebDB's WASM core (`--core wasm`). You can switch to the pure-JS VM interpreter for differential debugging or environments without WebAssembly:
 

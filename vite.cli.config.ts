@@ -24,6 +24,7 @@ export default defineConfig({
         'src/host/storage/node_fs.ts',
         'src/cli/index.ts',
         'src/cli/commands.ts',
+        'src/cli/recover.ts',
         'src/cli/open.ts',
         'src/host/storage/vfs.ts',
       ],
@@ -45,6 +46,17 @@ export default defineConfig({
             content: [
               "import type { NodeFsStorageOptions } from './storage-node.js';",
               "import { NodeFsStorage } from './storage-node.js';",
+              "import type {",
+              "  RecoverOptions,",
+              "  RecoveryColumnSchema,",
+              "  RecoveryIndexSchema,",
+              "  RecoveryReport,",
+              "  RecoverySchemaMap,",
+              "  RecoveryTableSchema,",
+              "  StructuralCheckResult,",
+              "  TableRecoverySummary,",
+              "} from './cli/recover.js';",
+              "import type { TableMeta } from './types/index.js';",
               'export type CoreMode = "wasm" | "js";',
               'export interface CliIo {',
               '  stdout(text: string): void;',
@@ -53,9 +65,31 @@ export default defineConfig({
               'export declare const CLI_VERSION: string;',
               'export declare const HELP_TEXT: string;',
               'export declare function runCli(argv: string[], io?: CliIo): Promise<number>;',
-              'export { NodeFsStorage, type NodeFsStorageOptions };',
+              'export declare function buildRecoverySchemaTemplate(rawBytes: Uint8Array, options?: { walBytes?: Uint8Array | null; replayWal?: boolean }): { template: RecoverySchemaMap; missingTables: Array<{ tableId: number; name: string; columnCount: number; colCatalogPageId: number; rowCountEstimate: number }> };',
+              'export declare function extractRecoverySchemaFromTables(tables: TableMeta[]): RecoverySchemaMap;',
+              'export declare function inspectDatabaseStructure(dbBytes: Uint8Array, pagesToCheck: number): StructuralCheckResult;',
+              'export declare function parseRecoverySchemaJson(rawJson: string): RecoverySchemaMap;',
+              'export declare function recoverDatabaseBuffer(rawBytes: Uint8Array, options?: RecoverOptions): Promise<{ binary: Uint8Array | null; report: RecoveryReport }>;',
+              'export {',
+              '  NodeFsStorage,',
+              '  type NodeFsStorageOptions,',
+              '  type RecoverOptions,',
+              '  type RecoveryColumnSchema,',
+              '  type RecoveryIndexSchema,',
+              '  type RecoveryReport,',
+              '  type RecoverySchemaMap,',
+              '  type RecoveryTableSchema,',
+              '  type StructuralCheckResult,',
+              '  type TableRecoverySummary,',
+              '};',
               '',
             ].join('\n'),
+          };
+        }
+        if (filePath.endsWith('cli/recover.d.ts')) {
+          return {
+            filePath: resolve(__dirname, 'dist/cli/recover.d.ts'),
+            content: normalized,
           };
         }
         return false;

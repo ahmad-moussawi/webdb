@@ -25,6 +25,8 @@ import {
   ROW_FLAG_HAS_OVERFLOW,
   HEADER_OFFSET_NEXT_CATALOG_PAGE_ID,
   HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+  HEADER_OFFSET_SCHEMA_VERSION,
+  HEADER_OFFSET_CHANGE_COUNTER,
 } from "../../constants.ts";
 import {
   ColumnDefinition,
@@ -32,6 +34,8 @@ import {
   TableMeta,
   DbRow,
   DbValue,
+  CompactOptions,
+  CompactResult,
   TableNotFoundError,
   TableAlreadyExistsError,
   ColumnFlag,
@@ -238,6 +242,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   readonly coreMode: "js" | "wasm";
   readonly wasmCore?: WasmCoreExports;
   private readonly initialWasmCore?: WasmCoreExports;
+  private readonly engine: WebDbCoreEngine;
   private readonly vmStepFn: VmStepFn;
   private planner?: QueryPlanner;
 
@@ -254,7 +259,7 @@ export class WebDB implements IDatabaseQueryExecutor {
   private udfs: Map<string, { id: number; def: UdfDefinition }> = new Map();
   private nextUdfId = 1;
   private tableMetaCache: Map<string, TableMeta> = new Map();
-  private tableTailPages: Map<string, number> = new Map();
+  private tableTailPages: Map<number, number> = new Map();
   private indexTailPages: Map<number, number> = new Map();
 
   // Sync & Reactive state
@@ -281,6 +286,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     coordinator: TransactionCoordinator,
     coreMode: "js" | "wasm",
     vmStepFn: VmStepFn,
+    engine: WebDbCoreEngine,
     wasmCore?: WasmCoreExports,
     planner?: QueryPlanner,
     dbName?: string,
@@ -292,6 +298,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     this.coordinator = coordinator;
     this.coreMode = coreMode;
     this.vmStepFn = vmStepFn;
+    this.engine = engine;
     this.wasmCore = wasmCore;
     this.initialWasmCore = wasmCore;
     this.planner = planner;
@@ -442,6 +449,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       coordinator,
       coreMode,
       vmStepFn,
+      options.engine,
       wasmCore,
       options.planner,
       dbName,
@@ -720,7 +728,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       await this.driver.flushAllDirty();
     }
     this.tableMetaCache.delete(name.toLowerCase());
-    this.tableTailPages.set(table.name.toLowerCase(), table.rootPageId);
+    this.tableTailPages.set(table.tableId, table.rootPageId);
     if (table.pkRootPageId) {
       this.indexTailPages.set(table.pkRootPageId, table.pkRootPageId);
     }
@@ -739,12 +747,16 @@ export class WebDB implements IDatabaseQueryExecutor {
 
   private async _getTableInternal(tableName: string): Promise<TableMeta> {
     const key = tableName.toLowerCase();
+    const page1View = this.pool.getSlotDataView(0);
     const cached = this.tableMetaCache.get(key);
-    if (cached) {
+    if (
+      cached &&
+      (cached.name === tableName ||
+        catalog_find_table_slot(page1View, tableName) === -1)
+    ) {
       return cached;
     }
 
-    const page1View = this.pool.getSlotDataView(0);
     const slotIdx = catalog_find_table_slot(page1View, tableName);
 
     if (slotIdx === -1) {
@@ -927,8 +939,15 @@ export class WebDB implements IDatabaseQueryExecutor {
   private async _readOverflowChain(
     firstPageId: number,
     totalLen: number,
+    strict: boolean = false,
   ): Promise<Uint8Array> {
-    if (totalLen === 0 || firstPageId <= 1) {
+    if (totalLen === 0) {
+      return new Uint8Array(0);
+    }
+    if (firstPageId <= 1) {
+      if (strict) {
+        throw new CorruptPageError(firstPageId, totalLen, 0);
+      }
       return new Uint8Array(0);
     }
     const result = new Uint8Array(totalLen);
@@ -936,11 +955,20 @@ export class WebDB implements IDatabaseQueryExecutor {
     let currPageId = firstPageId;
     const visited = new Set<number>();
 
-    while (currPageId > 1 && copied < totalLen && !visited.has(currPageId)) {
+    while (currPageId > 1 && copied < totalLen) {
+      if (visited.has(currPageId)) {
+        if (strict) {
+          throw new CorruptPageError(currPageId, totalLen, copied);
+        }
+        break;
+      }
       visited.add(currPageId);
       const slot = await this.driver.acquirePage(currPageId);
       const view = this.pool.getSlotDataView(slot);
       if (page_get_type(view, 0) !== PAGE_TYPE_OVERFLOW) {
+        if (strict) {
+          throw new CorruptPageError(currPageId, PAGE_TYPE_OVERFLOW, page_get_type(view, 0));
+        }
         break;
       }
       const chunkLen = Math.min(
@@ -959,11 +987,19 @@ export class WebDB implements IDatabaseQueryExecutor {
           copied,
         );
         copied += chunkLen;
+      } else if (strict) {
+        throw new CorruptPageError(currPageId, totalLen, copied);
       }
       currPageId = nextPageId;
     }
 
-    return copied === totalLen ? result : result.subarray(0, copied);
+    if (copied !== totalLen) {
+      if (strict) {
+        throw new CorruptPageError(firstPageId, totalLen, copied);
+      }
+      return result.subarray(0, copied);
+    }
+    return result;
   }
 
   private async _freeOverflowChain(firstPageId: number): Promise<void> {
@@ -1008,6 +1044,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     view: DataView,
     recordOffset: number,
     selectedCols?: Set<string>,
+    strict: boolean = false,
   ): Promise<DbRow> {
     if (
       recordOffset < 0 ||
@@ -1029,7 +1066,11 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
     for (let i = 0; i < descriptors.length; i++) {
       const d = descriptors[i];
-      const bytes = await this._readOverflowChain(d.firstPageId, d.totalLen);
+      const bytes = await this._readOverflowChain(
+        d.firstPageId,
+        d.totalLen,
+        strict,
+      );
       row[d.colName] = d.isText ? WebDB._ovTextDecoder.decode(bytes) : bytes;
     }
     return row;
@@ -1158,10 +1199,9 @@ export class WebDB implements IDatabaseQueryExecutor {
       throw new TableNotFoundError(tableName);
     }
 
-    this.tableMetaCache.delete(tableName.toLowerCase());
-    this.tableTailPages.delete(tableName.toLowerCase());
-
     const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    this.tableTailPages.delete(desc.tableId);
     let tableColumns: ColumnMeta[] | undefined;
     try {
       const meta = await this._getTableInternal(tableName);
@@ -1302,15 +1342,6 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     this.tableMetaCache.delete(oldName.toLowerCase());
     this.tableMetaCache.delete(newName.toLowerCase());
-    const oldTailKey = oldName.toLowerCase();
-    const newTailKey = newName.toLowerCase();
-    const tailPage = this.tableTailPages.get(oldTailKey);
-    if (tailPage !== undefined) {
-      this.tableTailPages.delete(oldTailKey);
-      this.tableTailPages.set(newTailKey, tailPage);
-    } else {
-      this.tableTailPages.delete(newTailKey);
-    }
     if (this.vmCtx.table?.name.toLowerCase() === oldName.toLowerCase()) {
       this.vmCtx.table = null;
     }
@@ -2113,6 +2144,12 @@ export class WebDB implements IDatabaseQueryExecutor {
     const searchFn = this.wasmCore
       ? this.wasmCore.page_binary_search_index_leaf
       : page_binary_search_index_leaf;
+    const isInt64 = keyType === DataType.INT64;
+    const isFloat64 = keyType === DataType.FLOAT64;
+    const targetBig = isInt64 ? BigInt(keyVal) : 0n;
+    const targetNum = isFloat64 ? Number(keyVal) : 0;
+    const targetIsNaN = isFloat64 && Number.isNaN(targetNum);
+
     let currIdxPageId = rootPageId;
     const visitedIdxPages = new Set<number>();
     while (currIdxPageId > 1 && !visitedIdxPages.has(currIdxPageId)) {
@@ -2121,13 +2158,82 @@ export class WebDB implements IDatabaseQueryExecutor {
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
-        const search = searchFn(view, 0, keyType, keyVal);
-        if (search.found) {
-          const cellOff = page_get_cell_offset(view, 0, search.slot_idx);
-          const kLen = view.getUint16(cellOff, true);
-          const foundRowid = view.getBigInt64(cellOff + 2 + kLen, true);
-          if (!excludedRowids || !excludedRowids.has(foundRowid)) {
-            return true;
+        if (targetIsNaN) {
+          for (let i = 0; i < cellCount; i++) {
+            const cellOff = page_get_cell_offset(view, 0, i);
+            const kLen = view.getUint16(cellOff, true);
+            if (kLen === 8 && Number.isNaN(view.getFloat64(cellOff + 2, true))) {
+              const foundRowid = view.getBigInt64(cellOff + 2 + kLen, true);
+              if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+                return true;
+              }
+            }
+          }
+        } else {
+          const search = searchFn(view, 0, keyType, keyVal);
+          if (search.found) {
+            const cellOff = page_get_cell_offset(view, 0, search.slot_idx);
+            const kLen = view.getUint16(cellOff, true);
+            if (isInt64 && kLen === 8) {
+              // Binary search compares INT64 via f64; verify exact 64-bit equality across neighbors
+              let lo = search.slot_idx;
+              while (lo > 0) {
+                const prevOff = page_get_cell_offset(view, 0, lo - 1);
+                if (
+                  view.getUint16(prevOff, true) !== 8 ||
+                  Number(view.getBigInt64(prevOff + 2, true)) !== Number(targetBig)
+                ) {
+                  break;
+                }
+                lo--;
+              }
+              for (let i = lo; i < cellCount; i++) {
+                const cOff = page_get_cell_offset(view, 0, i);
+                const cLen = view.getUint16(cOff, true);
+                if (cLen !== 8) break;
+                const cBig = view.getBigInt64(cOff + 2, true);
+                if (Number(cBig) !== Number(targetBig)) break;
+                if (cBig === targetBig) {
+                  const foundRowid = view.getBigInt64(cOff + 2 + cLen, true);
+                  if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+                    return true;
+                  }
+                }
+              }
+            } else if (
+              isFloat64 &&
+              kLen === 8 &&
+              view.getFloat64(cellOff + 2, true) !== targetNum
+            ) {
+              // NaN cell disrupted binary search order; scan page linearly for exact FLOAT64 match
+              for (let i = 0; i < cellCount; i++) {
+                const cOff = page_get_cell_offset(view, 0, i);
+                const cLen = view.getUint16(cOff, true);
+                if (cLen === 8 && view.getFloat64(cOff + 2, true) === targetNum) {
+                  const foundRowid = view.getBigInt64(cOff + 2 + cLen, true);
+                  if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+                    return true;
+                  }
+                }
+              }
+            } else {
+              const foundRowid = view.getBigInt64(cellOff + 2 + kLen, true);
+              if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+                return true;
+              }
+            }
+          } else if (isFloat64) {
+            // If a NaN cell disrupted page sort order, binary search may miss an existing non-NaN key.
+            for (let i = 0; i < cellCount; i++) {
+              const cOff = page_get_cell_offset(view, 0, i);
+              const cLen = view.getUint16(cOff, true);
+              if (cLen === 8 && view.getFloat64(cOff + 2, true) === targetNum) {
+                const foundRowid = view.getBigInt64(cOff + 2 + cLen, true);
+                if (!excludedRowids || !excludedRowids.has(foundRowid)) {
+                  return true;
+                }
+              }
+            }
           }
         }
       }
@@ -2187,9 +2293,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     view: DataView;
     repaired: boolean;
   }> {
-    const tableKey = table.name.toLowerCase();
     const totalPages = catalog_get_total_pages(this.pool.getSlotDataView(0));
-    const cachedTail = this.tableTailPages.get(tableKey);
+    const cachedTail = this.tableTailPages.get(table.tableId);
     let currentPageId =
       cachedTail !== undefined && cachedTail >= 2 && cachedTail <= totalPages
         ? cachedTail
@@ -2238,7 +2343,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       view = nextView;
     }
 
-    this.tableTailPages.set(tableKey, currentPageId);
+    this.tableTailPages.set(table.tableId, currentPageId);
     return {
       pageId: currentPageId,
       slot,
@@ -2589,7 +2694,9 @@ export class WebDB implements IDatabaseQueryExecutor {
   private notifySubscriptions(event: TableChangeEvent): void {
     if (this.subscriptions.size === 0) return;
     const isWildcardOrImport =
-      event.origin === "import" || event.tables.includes("*");
+      event.origin === "import" ||
+      event.origin === "compact" ||
+      event.tables.includes("*");
     if (!isWildcardOrImport && event.tables.length === 0) return;
     const lowerChanged = new Set(event.tables.map((t) => t.toLowerCase()));
     for (const sub of this.subscriptions) {
@@ -3016,6 +3123,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     tableName: string,
     rows: DbRow[],
     trackChanges: boolean = true,
+    skipAutoIncAssign: boolean = false,
   ): Promise<MutationRecord[]> {
     if (!rows || rows.length === 0) return [];
     const table = await this._getTableInternal(tableName);
@@ -3025,14 +3133,14 @@ export class WebDB implements IDatabaseQueryExecutor {
       (idx) => (idx.flags & (IndexFlag.UNIQUE | IndexFlag.PRIMARY)) !== 0,
     );
 
-    const autoIncCol = table.columns.find(
-      (c) => (c.flags & ColumnFlag.AUTO_INC) !== 0,
-    );
+    const autoIncCol = skipAutoIncAssign
+      ? undefined
+      : table.columns.find((c) => (c.flags & ColumnFlag.AUTO_INC) !== 0);
 
     const requiredPkCols = table.columns.filter(
       (c) =>
         (c.flags & ColumnFlag.PRIMARY_KEY) !== 0 &&
-        (c.flags & ColumnFlag.AUTO_INC) === 0,
+        (skipAutoIncAssign || (c.flags & ColumnFlag.AUTO_INC) === 0),
     );
 
     // Check which unique indexes already contain entries prior to this batch
@@ -3229,7 +3337,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             targetPageId = newPageId;
             slot = newSlot;
             view = newView;
-            this.tableTailPages.set(table.name.toLowerCase(), newPageId);
+            this.tableTailPages.set(table.tableId, newPageId);
           } finally {
             this.pool.unpinSlot(newSlot);
           }
@@ -3711,7 +3819,7 @@ export class WebDB implements IDatabaseQueryExecutor {
               this.pool.markDirty(newSlot);
               currentPageId = newPageId;
               targetPageId = newPageId;
-              this.tableTailPages.set(table.name.toLowerCase(), newPageId);
+              this.tableTailPages.set(table.tableId, newPageId);
               tailChanged = true;
             } finally {
               this.pool.unpinSlot(newSlot);
@@ -5294,9 +5402,28 @@ export class WebDB implements IDatabaseQueryExecutor {
           slice.set(this.coordinator.getSpilledPage(p)!);
         } else {
           const diskPage = diskPageMap.get(p);
-          if (diskPage) {
-            slice.set(diskPage);
+          if (!diskPage) {
+            throw new InvalidDatabaseError(
+              `Database page ${p} is missing from storage (expected totalPages=${totalPages})`,
+            );
           }
+          if (diskPage.byteLength !== PAGE_SIZE) {
+            throw new InvalidDatabaseError(
+              `Database page ${p} has invalid size ${diskPage.byteLength} (expected ${PAGE_SIZE})`,
+            );
+          }
+          const storedChk = new DataView(
+            diskPage.buffer,
+            diskPage.byteOffset,
+            PAGE_SIZE,
+          ).getUint32(12, true);
+          if (storedChk !== 0) {
+            const computedChk = computePageChecksum(diskPage);
+            if (computedChk !== storedChk) {
+              throw new CorruptPageError(p, storedChk, computedChk);
+            }
+          }
+          slice.set(diskPage);
         }
 
         // Stamp CRC32 checksum at page header offset 12..15
@@ -5313,6 +5440,550 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   /**
+   * Analyzes fragmentation and rebuilds the database into a freshly compacted
+   * layout, reclaiming free pages, orphaned/unreferenced pages, and intra-page
+   * fragmentation while preserving schemas, rows, indexes, and auto-increment counters.
+   */
+  async compact(options: CompactOptions = {}): Promise<CompactResult> {
+    const dryRun = Boolean(options.dryRun);
+    const batchSize = options.batchSize ?? 500;
+    if (!Number.isInteger(batchSize) || batchSize < 1) {
+      throw new RangeError(
+        `Invalid compact batchSize: ${batchSize}. Must be a positive integer`,
+      );
+    }
+    const minReclaimPages = options.minReclaimPages;
+    if (
+      minReclaimPages !== undefined &&
+      (!Number.isInteger(minReclaimPages) || minReclaimPages < 0)
+    ) {
+      throw new RangeError(
+        `Invalid compact minReclaimPages: ${minReclaimPages}. Must be a non-negative integer`,
+      );
+    }
+
+    if (!dryRun) {
+      this.assertWritable("compact");
+    }
+    if (this.coordinator.isInTransaction()) {
+      throw new Error(
+        "Cannot compact database while a transaction is active",
+      );
+    }
+
+    return this.coordinator.leaseQueue.enqueue(async () => {
+      const page1View = this.pool.getSlotDataView(0);
+      const origHeader = catalog_read_page1_header(page1View, false);
+      const pagesBefore = origHeader.totalPages;
+      const bytesBefore = pagesBefore * PAGE_SIZE;
+      const origSchemaVersion = origHeader.schemaVersion;
+      const origChangeCounter = origHeader.changeCounter;
+
+      const sourcePager = {
+        getPageBytes: (pageId: number) => {
+          const slot = this.pool.getResidentSlot(pageId);
+          if (slot !== -1) return this.pool.getPageBytesInSlot(slot);
+          return new Uint8Array(PAGE_SIZE);
+        },
+      };
+
+      const tableDescs = catalog_list_table_descriptors(page1View, sourcePager);
+      const tableSnapshots: Array<{
+        meta: TableMeta;
+        secIndexes: IndexDescriptor[];
+      }> = [];
+      for (const desc of tableDescs) {
+        // Ensure column catalog chain pages are loaded into the pool and bypass
+        // lowercase `tableMetaCache` so case-variant table names never collide.
+        let catPid = desc.colCatalogPageId;
+        const visitedColCats = new Set<number>();
+        while (
+          catPid >= 2 &&
+          catPid <= pagesBefore &&
+          !visitedColCats.has(catPid)
+        ) {
+          visitedColCats.add(catPid);
+          const cSlot = await this.driver.acquirePage(catPid);
+          catPid = catalog_read_page_header(
+            this.pool.getSlotDataView(cSlot),
+            0,
+          ).nextColCatalogPageId;
+        }
+        const meta = catalog_load_table_meta(page1View, sourcePager, desc.name);
+        const secIndexes = catalog_list_table_indexes(
+          page1View,
+          meta.tableId,
+          sourcePager,
+        ).filter((idx) => (idx.flags & IndexFlag.PRIMARY) === 0);
+        tableSnapshots.push({ meta, secIndexes });
+      }
+
+      // Snapshot all pages 2..pagesBefore once to compute pre-compaction fragmentation metrics
+      const missingPageIds: number[] = [];
+      for (let p = 2; p <= pagesBefore; p++) {
+        if (
+          this.pool.getResidentSlot(p) === -1 &&
+          !this.coordinator.hasSpilledPage(p)
+        ) {
+          missingPageIds.push(p);
+        }
+      }
+      const fetchedPages =
+        missingPageIds.length > 0
+          ? await this.vfs.readPages(missingPageIds)
+          : [];
+      const diskPageMap = new Map<number, Uint8Array | null>();
+      for (let i = 0; i < missingPageIds.length; i++) {
+        diskPageMap.set(missingPageIds[i], fetchedPages[i] ?? null);
+      }
+      const getPageSnapshot = (pageId: number): Uint8Array | null => {
+        if (pageId < 1 || pageId > pagesBefore) return null;
+        if (pageId === 1) return this.pool.getPageBytesInSlot(0);
+        const slot = this.pool.getResidentSlot(pageId);
+        if (slot !== -1) return this.pool.getPageBytesInSlot(slot);
+        if (this.coordinator.hasSpilledPage(pageId)) {
+          return this.coordinator.getSpilledPage(pageId) ?? null;
+        }
+        return diskPageMap.get(pageId) ?? null;
+      };
+
+      const reachable = new Set<number>([1]);
+      let catalogPagesCount = 1;
+      const markCatalogChain = (startPid: number) => {
+        let cur = startPid;
+        while (cur >= 2 && cur <= pagesBefore && !reachable.has(cur)) {
+          reachable.add(cur);
+          catalogPagesCount++;
+          const bytes = getPageSnapshot(cur);
+          if (!bytes) break;
+          const view = new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
+          cur = catalog_read_page_header(view, 0).nextColCatalogPageId;
+        }
+      };
+      const markOverflowChain = (startPid: number) => {
+        let cur = startPid;
+        while (cur >= 2 && cur <= pagesBefore && !reachable.has(cur)) {
+          const bytes = getPageSnapshot(cur);
+          if (!bytes) break;
+          const view = new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
+          if (page_get_type(view, 0) !== PAGE_TYPE_OVERFLOW) break;
+          reachable.add(cur);
+          cur = page_get_overflow_next_page_id(view, 0);
+        }
+      };
+      const maxSlotsPerPage = Math.floor((PAGE_SIZE - 16) / 2);
+      const markBTreeReachable = (
+        startPid: number,
+        columns?: ColumnMeta[],
+      ) => {
+        const stack: number[] = [];
+        if (startPid >= 2 && startPid <= pagesBefore) stack.push(startPid);
+        while (stack.length > 0) {
+          const pid = stack.pop()!;
+          if (pid < 2 || pid > pagesBefore || reachable.has(pid)) continue;
+          const bytes = getPageSnapshot(pid);
+          if (!bytes) continue;
+          const view = new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
+          const pType = page_get_type(view, 0);
+          if (pType === PAGE_TYPE_FREE) continue;
+          reachable.add(pid);
+
+          if (
+            pType === PAGE_TYPE_LEAF_DATA ||
+            pType === PAGE_TYPE_INDEX_LEAF
+          ) {
+            if (pType === PAGE_TYPE_LEAF_DATA && columns) {
+              const cellCount = page_get_cell_count(view, 0);
+              if (cellCount > maxSlotsPerPage) {
+                throw new CorruptPageError(pid, maxSlotsPerPage, cellCount);
+              }
+              for (let i = 0; i < cellCount; i++) {
+                const off = page_get_cell_offset(view, 0, i);
+                if (off < PAGE_SIZE) {
+                  const ovIds = page_extract_overflow_descriptors(
+                    columns,
+                    view,
+                    off,
+                  );
+                  for (let j = 0; j < ovIds.length; j++) {
+                    markOverflowChain(ovIds[j]);
+                  }
+                }
+              }
+            }
+            const nextPid = page_get_next_page_id(view, 0);
+            if (nextPid >= 2 && nextPid <= pagesBefore && !reachable.has(nextPid)) {
+              stack.push(nextPid);
+            }
+          } else if (
+            pType === PAGE_TYPE_TABLE_INTERIOR ||
+            pType === PAGE_TYPE_INDEX_INTERIOR
+          ) {
+            const cellCount = page_get_cell_count(view, 0);
+            if (cellCount > maxSlotsPerPage) {
+              throw new CorruptPageError(pid, maxSlotsPerPage, cellCount);
+            }
+            for (let i = 0; i < cellCount; i++) {
+              const off = page_get_cell_offset(view, 0, i);
+              if (off > 0 && off + 4 <= PAGE_SIZE) {
+                const childId = view.getUint32(off, true);
+                if (childId >= 2 && childId <= pagesBefore && !reachable.has(childId)) {
+                  stack.push(childId);
+                }
+              }
+            }
+            const rightId = page_get_next_page_id(view, 0);
+            if (rightId >= 2 && rightId <= pagesBefore && !reachable.has(rightId)) {
+              stack.push(rightId);
+            }
+          }
+        }
+      };
+
+      markCatalogChain(
+        page1View.getUint32(HEADER_OFFSET_NEXT_CATALOG_PAGE_ID, true),
+      );
+      markCatalogChain(
+        page1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true),
+      );
+      for (const { meta, secIndexes } of tableSnapshots) {
+        markCatalogChain(meta.colCatalogPageId);
+        markBTreeReachable(meta.rootPageId, meta.columns);
+        if (meta.pkRootPageId) {
+          markBTreeReachable(meta.pkRootPageId);
+        }
+        for (const idx of secIndexes) {
+          markBTreeReachable(idx.rootPageId);
+        }
+      }
+
+      let freePagesBefore = 0;
+      let unreferencedPagesBefore = 0;
+      let fragmentedBytesBefore = 0;
+      for (let p = 2; p <= pagesBefore; p++) {
+        const bytes = getPageSnapshot(p);
+        if (!bytes) continue;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, PAGE_SIZE);
+        const pType = page_get_type(view, 0);
+        if (pType === PAGE_TYPE_FREE) {
+          freePagesBefore++;
+        } else if (!reachable.has(p)) {
+          unreferencedPagesBefore++;
+        } else if (
+          pType === PAGE_TYPE_LEAF_DATA ||
+          pType === PAGE_TYPE_INDEX_LEAF
+        ) {
+          fragmentedBytesBefore += view.getUint16(10, true);
+        }
+      }
+      // Release snapshot memory before allocating the staging database
+      diskPageMap.clear();
+      fetchedPages.length = 0;
+
+      // Collect table leaf pages in scan order so rows are rebuilt cleanly
+      const collectDataLeafPages = async (
+        rootPageId: number,
+      ): Promise<number[]> => {
+        const leaves: number[] = [];
+        const visited = new Set<number>();
+        const walk = async (pid: number) => {
+          let cur = pid;
+          while (cur >= 2 && cur <= pagesBefore && !visited.has(cur)) {
+            visited.add(cur);
+            const slot = await this.driver.acquirePage(cur);
+            const view = this.pool.getSlotDataView(slot);
+            const pType = page_get_type(view, 0);
+            if (pType === PAGE_TYPE_LEAF_DATA) {
+              leaves.push(cur);
+              cur = page_get_next_page_id(view, 0);
+            } else if (pType === PAGE_TYPE_TABLE_INTERIOR) {
+              const cellCount = page_get_cell_count(view, 0);
+              const children: number[] = [];
+              for (let i = 0; i < cellCount; i++) {
+                const off = page_get_cell_offset(view, 0, i);
+                if (off > 0 && off + 4 <= PAGE_SIZE) {
+                  children.push(view.getUint32(off, true));
+                }
+              }
+              const rightChild = page_get_next_page_id(view, 0);
+              for (const childId of children) {
+                await walk(childId);
+              }
+              cur = rightChild;
+            } else {
+              break;
+            }
+          }
+        };
+        await walk(rootPageId);
+        return leaves;
+      };
+
+      // Size staging pool with headroom for catalog pages + simultaneous createTable/page-split pins
+      const stagingSlotCount = Math.min(
+        MAX_SLOT_COUNT,
+        Math.max(this.pool.slotCount, catalogPagesCount + 16),
+      );
+      const stagingDb = await WebDB.open({
+        storage: new TempMemoryVfs(),
+        engine: this.engine,
+        slotCount: stagingSlotCount,
+        crossTabSync: false,
+        readAhead: false,
+      });
+
+      let rowsCopied = 0;
+      let indexesRebuilt = 0;
+      let compactedBinary: Uint8Array;
+
+      try {
+        const stagingPager = {
+          getPageBytes: (pageId: number) => {
+            const slot = stagingDb.pool.getResidentSlot(pageId);
+            if (slot !== -1) return stagingDb.pool.getPageBytesInSlot(slot);
+            return new Uint8Array(PAGE_SIZE);
+          },
+          markPageDirty: (pageId: number) => {
+            const slot = stagingDb.pool.getResidentSlot(pageId);
+            if (slot !== -1) stagingDb.pool.markDirty(slot);
+          },
+        };
+        const stagingPage1View = stagingDb.pool.getSlotDataView(0);
+
+        for (const { meta, secIndexes } of tableSnapshots) {
+          stagingDb.tableMetaCache.clear();
+          const colDefs: ColumnDefinition[] = meta.columns.map((c) => ({
+            name: c.name,
+            type: c.type,
+            primaryKey: (c.flags & ColumnFlag.PRIMARY_KEY) !== 0,
+            notNull: (c.flags & ColumnFlag.NOT_NULL) !== 0,
+            indexed: (c.flags & ColumnFlag.INDEXED) !== 0,
+            autoInc: (c.flags & ColumnFlag.AUTO_INC) !== 0,
+          }));
+          const createdMeta = await stagingDb.createTable(meta.name, colDefs);
+          if (!meta.pkRootPageId && createdMeta.pkRootPageId) {
+            // Source table had its PK index dropped; clear embedded PK by exact table slot
+            // (never via name lookup, which is case-insensitive and can hit another table).
+            await stagingDb.freeTableTreePages(createdMeta.pkRootPageId);
+            stagingDb.indexTailPages.delete(createdMeta.pkRootPageId);
+            const dropSlotIdx = catalog_find_table_slot(
+              stagingPage1View,
+              meta.name,
+              stagingPager,
+            );
+            if (dropSlotIdx !== -1) {
+              const dropDesc = catalog_read_table_descriptor(
+                stagingPage1View,
+                dropSlotIdx,
+                stagingPager,
+              );
+              if (dropDesc) {
+                catalog_write_table_descriptor(
+                  stagingPage1View,
+                  dropSlotIdx,
+                  {
+                    ...dropDesc,
+                    pkRootPageId: undefined,
+                    pkColumnCount: undefined,
+                    pkFlags: undefined,
+                    pkColumnIndices: undefined,
+                    pkTailPageId: undefined,
+                  },
+                  stagingPager,
+                );
+              }
+            }
+          }
+          stagingDb.tableMetaCache.clear();
+
+          const maxSlotsPerPage = Math.floor((PAGE_SIZE - 16) / 2);
+          const leafPages = await collectDataLeafPages(meta.rootPageId);
+          let batch: DbRow[] = [];
+          for (const leafPid of leafPages) {
+            let slot = await this.driver.acquirePage(leafPid);
+            let view = this.pool.getSlotDataView(slot);
+            const cellCount = page_get_cell_count(view, 0);
+            if (cellCount > maxSlotsPerPage) {
+              throw new CorruptPageError(leafPid, maxSlotsPerPage, cellCount);
+            }
+            for (let i = 0; i < cellCount; i++) {
+              slot = await this.driver.acquirePage(leafPid);
+              view = this.pool.getSlotDataView(slot);
+              const cellOffset = page_get_cell_offset(view, 0, i);
+              const row = await this._deserializeRowWithOverflow(
+                meta.columns,
+                view,
+                cellOffset,
+                undefined,
+                true,
+              );
+              if (!row) {
+                throw new CorruptPageError(leafPid, 0, 0);
+              }
+              batch.push(row);
+              if (batch.length >= batchSize) {
+                const toInsert = batch;
+                batch = [];
+                await stagingDb.coordinator.leaseQueue.enqueue(() =>
+                  stagingDb._insertManyInternal(meta.name, toInsert, false, true),
+                );
+                rowsCopied += toInsert.length;
+              }
+            }
+          }
+          if (batch.length > 0) {
+            const toInsert = batch;
+            await stagingDb.coordinator.leaseQueue.enqueue(() =>
+              stagingDb._insertManyInternal(meta.name, toInsert, false, true),
+            );
+            rowsCopied += toInsert.length;
+          }
+
+          // Preserve autoIncNext (even if high-ID rows were deleted) and original table flags
+          const stSlotIdx = catalog_find_table_slot(
+            stagingPage1View,
+            meta.name,
+            stagingPager,
+          );
+          if (stSlotIdx !== -1) {
+            const stDesc = catalog_read_table_descriptor(
+              stagingPage1View,
+              stSlotIdx,
+              stagingPager,
+            );
+            if (stDesc) {
+              catalog_write_table_descriptor(
+                stagingPage1View,
+                stSlotIdx,
+                {
+                  ...stDesc,
+                  autoIncNext: meta.autoIncNext,
+                  flags: meta.flags,
+                },
+                stagingPager,
+              );
+            }
+          }
+
+          // Rebuild secondary indexes cleanly
+          for (const idx of secIndexes) {
+            const colNames = idx.columnIndices
+              .slice(0, idx.columnCount)
+              .map((ci) => meta.columns[ci].name);
+            await stagingDb.createIndex(meta.name, colNames, {
+              name: idx.name,
+              unique: (idx.flags & IndexFlag.UNIQUE) !== 0,
+            });
+            const hasDirections = idx.colDirections
+              .slice(0, idx.columnCount)
+              .some((d) => d !== 0);
+            if (hasDirections || (idx.flags & ~IndexFlag.UNIQUE) !== 0) {
+              // Note: engine B+Tree ordering currently always sorts ASC; preserve descriptor flags/directions metadata.
+              const found = catalog_find_index_by_name(
+                stagingPage1View,
+                idx.name,
+                stagingPager,
+              );
+              if (found && found.slotIdx >= 0) {
+                catalog_write_index_descriptor(
+                  stagingPage1View,
+                  found.slotIdx,
+                  {
+                    ...found.desc,
+                    colDirections: [...idx.colDirections],
+                    flags: idx.flags,
+                  },
+                  stagingPager,
+                );
+              }
+            }
+            indexesRebuilt++;
+          }
+        }
+
+        stagingPage1View.setUint32(
+          HEADER_OFFSET_SCHEMA_VERSION,
+          origSchemaVersion,
+          true,
+        );
+        stagingPage1View.setUint32(
+          HEADER_OFFSET_CHANGE_COUNTER,
+          (origChangeCounter + 1) >>> 0,
+          true,
+        );
+        catalog_update_page1_checksum(stagingPage1View, 0);
+        stagingDb.pool.markDirty(0);
+
+        compactedBinary = await stagingDb.exportBinary();
+      } finally {
+        await stagingDb.close().catch(() => {});
+      }
+
+      const pagesAfter = compactedBinary.byteLength / PAGE_SIZE;
+      const bytesAfter = compactedBinary.byteLength;
+      const pagesReclaimed = pagesBefore - pagesAfter;
+      const bytesReclaimed = bytesBefore - bytesAfter;
+
+      if (dryRun) {
+        return {
+          compacted: false,
+          dryRun: true,
+          pagesBefore,
+          pagesAfter,
+          bytesBefore,
+          bytesAfter,
+          pagesReclaimed,
+          bytesReclaimed,
+          freePagesBefore,
+          unreferencedPagesBefore,
+          fragmentedBytesBefore,
+          tablesCompacted: tableSnapshots.length,
+          indexesRebuilt,
+          rowsCopied,
+        };
+      }
+
+      if (minReclaimPages !== undefined && pagesReclaimed < minReclaimPages) {
+        return {
+          compacted: false,
+          dryRun: false,
+          pagesBefore,
+          pagesAfter,
+          bytesBefore,
+          bytesAfter,
+          pagesReclaimed,
+          bytesReclaimed,
+          freePagesBefore,
+          unreferencedPagesBefore,
+          fragmentedBytesBefore,
+          tablesCompacted: tableSnapshots.length,
+          indexesRebuilt,
+          rowsCopied,
+        };
+      }
+
+      await this._importBinaryUnlocked(compactedBinary, "compact");
+
+      return {
+        compacted: true,
+        dryRun: false,
+        pagesBefore,
+        pagesAfter,
+        bytesBefore,
+        bytesAfter,
+        pagesReclaimed,
+        bytesReclaimed,
+        freePagesBefore,
+        unreferencedPagesBefore,
+        fragmentedBytesBefore,
+        tablesCompacted: tableSnapshots.length,
+        indexesRebuilt,
+        rowsCopied,
+      };
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  /**
    * Validates and atomically imports a binary WebDB database image (totalPages * 4096 bytes),
    * replacing all pages, resetting the WAL, and pinning the imported schema catalog.
    */
@@ -5325,10 +5996,18 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     return this.coordinator.leaseQueue.enqueue(async () => {
-      const bytes =
-        data instanceof Uint8Array
-          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-          : new Uint8Array(data);
+      await this._importBinaryUnlocked(data, "import");
+    }, this.currentLeaseId ?? undefined);
+  }
+
+  private async _importBinaryUnlocked(
+    data: Uint8Array | ArrayBuffer,
+    notifyOrigin: string = "import",
+  ): Promise<void> {
+    const bytes =
+      data instanceof Uint8Array
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : new Uint8Array(data);
 
       // Pass 1: Pre-validate binary image size, Page 1 header, magic bytes, version, and all page CRC32 checksums
       if (bytes.byteLength < PAGE_SIZE || bytes.byteLength % PAGE_SIZE !== 0) {
@@ -5553,9 +6232,33 @@ export class WebDB implements IDatabaseQueryExecutor {
         });
       }
 
+      // Checkpoint any pending WAL frames before replacing DB & WAL on non-single-tx backends
+      // (NodeFs/OPFS replace WAL before DB separately, unlike IdbStorage's single IDB transaction).
+      if (!this.vfs.readOnly && this.vfs.name !== "idb") {
+        await this.coordinator.executeCheckpoint();
+      }
+
       // Persist replacement to storage BEFORE resetting live buffer pool state,
       // so a failed atomic replacement leaves the existing live pool & WAL intact.
-      await this.coordinator.resetWalAfterImport(pagesToWrite);
+      try {
+        await this.coordinator.resetWalAfterImport(pagesToWrite);
+      } catch (err) {
+        if (!this.vfs.replaceDatabaseAtomic) {
+          // Non-atomic VFS may have partially overwritten on-disk pages; drop stale cached state
+          for (let slot = 1; slot < this.pool.slotCount; slot++) {
+            this.pool.forceUnpinSlot(slot);
+            this.pool.unassignSlot(slot);
+            this.pool.clearDirty(slot);
+            this.pool.getPageBytesInSlot(slot).fill(0);
+          }
+          this.driver.resetReadAhead();
+          this.tableMetaCache.clear();
+          this.tableTailPages.clear();
+          this.indexTailPages.clear();
+          this.vmCtx.table = null;
+        }
+        throw err;
+      }
 
       for (let slot = 1; slot < this.pool.slotCount; slot++) {
         this.pool.forceUnpinSlot(slot);
@@ -5585,7 +6288,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
       this.notifySubscriptions({
         tables: affectedTables,
-        origin: "import",
+        origin: notifyOrigin,
         changeCounter: header.changeCounter,
         schemaVersion: header.schemaVersion,
         crossTab: false,
@@ -5596,7 +6299,7 @@ export class WebDB implements IDatabaseQueryExecutor {
           this.broadcastChannel.postMessage({
             senderId: this.instanceId,
             tables: affectedTables,
-            origin: "import",
+            origin: notifyOrigin,
             changeCounter: header.changeCounter,
             schemaVersion: header.schemaVersion,
           });
@@ -5604,7 +6307,6 @@ export class WebDB implements IDatabaseQueryExecutor {
           // Ignore broadcast errors
         }
       }
-    });
   }
 
   async close(): Promise<void> {
@@ -5623,5 +6325,81 @@ export class WebDB implements IDatabaseQueryExecutor {
     } finally {
       await this.vfs.close?.();
     }
+  }
+}
+
+/**
+ * Minimal in-memory IVfsAdapter used internally by `WebDB.compact()` so
+ * `@ahmadmoussawi/webdb/slim` remains free of storage adapter imports.
+ */
+class TempMemoryVfs implements IVfsAdapter {
+  readonly name = "memory" as const;
+  readonly isSynchronous = true;
+
+  private pages = new Map<number, Uint8Array>();
+  private walHeader: Uint8Array | null = null;
+  private walFrames: Uint8Array[] = [];
+
+  async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
+    return pageIds.map((pageId) => {
+      const page = this.pages.get(pageId);
+      return page ? new Uint8Array(page) : null;
+    });
+  }
+
+  async writePages(pages: Array<{ pageId: number; data: Uint8Array }>): Promise<void> {
+    for (const { pageId, data } of pages) {
+      this.pages.set(pageId, new Uint8Array(data));
+    }
+  }
+
+  async flush(): Promise<void> {}
+
+  async truncate(pageCount: number): Promise<void> {
+    for (const key of Array.from(this.pages.keys())) {
+      if (key > pageCount) {
+        this.pages.delete(key);
+      }
+    }
+  }
+
+  async readWalHeader(): Promise<Uint8Array | null> {
+    return this.walHeader ? new Uint8Array(this.walHeader) : null;
+  }
+
+  async writeWalHeader(header: Uint8Array): Promise<void> {
+    this.walHeader = new Uint8Array(header);
+  }
+
+  async readWalFrames(startFrameIndex: number, maxFrames?: number): Promise<Uint8Array[]> {
+    const end = maxFrames !== undefined ? startFrameIndex + maxFrames : this.walFrames.length;
+    return this.walFrames.slice(startFrameIndex, end).map((f) => new Uint8Array(f));
+  }
+
+  async appendWalFrames(frames: Uint8Array[]): Promise<void> {
+    for (const frame of frames) {
+      this.walFrames.push(new Uint8Array(frame));
+    }
+  }
+
+  async flushWal(): Promise<void> {}
+
+  async truncateWal(frameIndex: number): Promise<void> {
+    if (frameIndex === 0) {
+      this.walFrames = [];
+      this.walHeader = null;
+    } else {
+      this.walFrames.length = Math.min(this.walFrames.length, frameIndex);
+    }
+  }
+
+  async getWalFrameCount(): Promise<number> {
+    return this.walFrames.length;
+  }
+
+  async close(): Promise<void> {
+    this.pages.clear();
+    this.walFrames = [];
+    this.walHeader = null;
   }
 }

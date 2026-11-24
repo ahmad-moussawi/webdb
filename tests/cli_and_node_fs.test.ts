@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, readFile, writeFile, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -19,10 +19,23 @@ import {
 import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
 import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
 import { MemoryStorage } from "@ahmadmoussawi/webdb/storage/memory";
-import { NodeFsStorage } from "@ahmadmoussawi/webdb/storage/node";
+import {
+  NodeFsStorage,
+  defaultWalPath,
+} from "../src/host/storage/node_fs.ts";
 import { runCli, type CliIo } from "@ahmadmoussawi/webdb/cli";
 import { ReadOnlyOverlayVfs } from "../src/host/storage/read_only_overlay.ts";
-import { catalog_update_page1_checksum } from "../src/core/js/catalog.c.ts";
+import {
+  catalog_update_page1_checksum,
+  catalog_list_table_descriptors,
+  catalog_read_index_descriptor,
+  catalog_write_index_descriptor,
+} from "../src/core/js/catalog.c.ts";
+import { computePageChecksum } from "../src/host/storage/crc32.ts";
+import {
+  HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID,
+  PAGE_HEADER_OFFSET_CHECKSUM,
+} from "../src/constants.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -1898,5 +1911,906 @@ describe(`NodeFsStorage & Tier 1 CLI (${coreMode} core)`, () => {
       }
       expect(usageExit).toBe(2);
     }
+  });
+
+  it("detects structural corruption in verify even with valid CRC32 checksums and repairs it via recover", async () => {
+    // Build a multi-table DB with > 8 indexes (triggers overflow index catalog page),
+    // multi-page 0x0D leaf chains, and 0x0E overflow payloads.
+    const srcPath = join(workDir, "multi-corrupt-src.db");
+    const storage = new NodeFsStorage(srcPath);
+    const db = await WebDB.open({
+      storage,
+      engine: createEngine(),
+      crossTabSync: false,
+    });
+
+    await db.createTable("with_pk", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "sku", type: "TEXT", notNull: true },
+      { name: "blob_text", type: "TEXT" },
+    ]);
+    await db.createIndex("with_pk", "sku", { name: "idx_with_pk_sku", unique: true });
+
+    await db.createTable("no_pk", [
+      { name: "tag", type: "TEXT", notNull: true },
+      { name: "seq", type: "INT32", notNull: true },
+    ]);
+
+    await db.createTable("schema_tbl", [
+      { name: "k", type: "TEXT", primaryKey: true },
+      { name: "v", type: "TEXT", notNull: true },
+    ]);
+
+    // Extra table + > 8 indexes so index catalog spills to an overflow 0x0C page
+    await db.createTable("many_idx", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "c1", type: "INT32" },
+      { name: "c2", type: "INT32" },
+      { name: "c3", type: "INT32" },
+      { name: "c4", type: "INT32" },
+      { name: "c5", type: "INT32" },
+      { name: "c6", type: "INT32" },
+      { name: "c7", type: "INT32" },
+      { name: "c8", type: "INT32" },
+      { name: "c9", type: "INT32" },
+    ]);
+    for (let i = 1; i <= 9; i++) {
+      await db.createIndex("many_idx", `c${i}`, { name: `idx_many_c${i}` });
+    }
+
+    // Insert enough rows into with_pk (including an overflow payload) and no_pk to span multiple 0x0D pages
+    const bigPayload = "OV-" + "X".repeat(3200);
+    const pkRows = Array.from({ length: 45 }, (_, i) => ({
+      id: i + 1,
+      sku: `SKU-${String(i + 1).padStart(3, "0")}`,
+      blob_text: i === 44 ? bigPayload : `item-${i + 1}-${"a".repeat(120)}`,
+    }));
+    await db.insertMany("with_pk", pkRows);
+
+    const noPkRows = Array.from({ length: 180 }, (_, i) => ({
+      tag: `tag-${String(i + 1).padStart(3, "0")}-${"b".repeat(40)}`,
+      seq: i + 1,
+    }));
+    await db.insertMany("no_pk", noPkRows);
+    await db.insertMany("schema_tbl", [
+      { k: "mode", v: "pos" },
+      { k: "ver", v: "35" },
+    ]);
+    await db.insertMany("many_idx", [{ id: 1, c1: 10, c2: 20, c3: 30, c4: 40, c5: 50, c6: 60, c7: 70, c8: 80, c9: 90 }]);
+
+    const cleanBin = await db.exportBinary();
+    await db.close();
+
+    // Clone and inject legacy valid-CRC32 structural corruption
+    const corrupt = new Uint8Array(cleanBin);
+    const stampPage = (pid: number) => {
+      const slice = corrupt.subarray((pid - 1) * PAGE_SIZE, pid * PAGE_SIZE);
+      const dv = new DataView(slice.buffer, slice.byteOffset, PAGE_SIZE);
+      dv.setUint32(PAGE_HEADER_OFFSET_CHECKSUM, computePageChecksum(slice), true);
+    };
+    const zeroPageWithValidCrc = (pid: number) => {
+      const slice = corrupt.subarray((pid - 1) * PAGE_SIZE, pid * PAGE_SIZE);
+      slice.fill(0);
+      stampPage(pid);
+    };
+
+    const p1View = new DataView(corrupt.buffer, corrupt.byteOffset, PAGE_SIZE);
+    const pager = {
+      getPageBytes: (pid: number) => corrupt.subarray((pid - 1) * PAGE_SIZE, pid * PAGE_SIZE),
+    };
+    const tables = catalog_list_table_descriptors(p1View, pager);
+    const tWithPk = tables.find((t) => t.name === "with_pk")!;
+    const tNoPk = tables.find((t) => t.name === "no_pk")!;
+    const tSchema = tables.find((t) => t.name === "schema_tbl")!;
+    const idxOvPage = p1View.getUint32(HEADER_OFFSET_NEXT_INDEX_CATALOG_PAGE_ID, true);
+    expect(idxOvPage).toBeGreaterThan(1);
+
+    // Count how many rows live on rootPageId of with_pk and no_pk (these root pages will be zeroed)
+    const countLeafCells = (pid: number) => {
+      const s = pager.getPageBytes(pid);
+      return new DataView(s.buffer, s.byteOffset, PAGE_SIZE).getUint16(2, true);
+    };
+    const lostWithPkOnRoot = countLeafCells(tWithPk.rootPageId);
+    const lostNoPkOnRoot = countLeafCells(tNoPk.rootPageId);
+    expect(lostWithPkOnRoot).toBeGreaterThan(0);
+    expect(lostNoPkOnRoot).toBeGreaterThan(0);
+
+    // 1. Corrupt 12-byte header of overflow index catalog page (with valid CRC32) & duplicate an index
+    const firstOvIdx = catalog_read_index_descriptor(p1View, 8, pager)!;
+    expect(firstOvIdx).toBeTruthy();
+    const dupIdxDesc = { ...catalog_read_index_descriptor(p1View, 0, pager)!, indexId: 99 };
+    catalog_write_index_descriptor(p1View, 10, dupIdxDesc, {
+      getPageBytes: pager.getPageBytes,
+      markPageDirty: stampPage,
+    });
+    const ovSlice = pager.getPageBytes(idxOvPage);
+    ovSlice.fill(0, 0, 12);
+    stampPage(idxOvPage);
+
+    // 2. Zero rootPageId of with_pk (orphans later leaf pages + big overflow payload)
+    zeroPageWithValidCrc(tWithPk.rootPageId);
+
+    // 3. Zero rootPageId of no_pk (tests deserialization fallback since no_pk has no indexes)
+    zeroPageWithValidCrc(tNoPk.rootPageId);
+
+    // 4. Zero colCatalogPageId of schema_tbl
+    zeroPageWithValidCrc(tSchema.colCatalogPageId);
+
+    const corruptPath = join(workDir, "struct-corrupt.db");
+    await writeFile(corruptPath, corrupt);
+
+    // `verify` must detect structural corruption and exit 1 even though CRC32 checksums are valid
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(["--core", coreMode, "verify", corruptPath, "-f", "json"], cap.io),
+      ).toBe(1);
+      const rep = JSON.parse(cap.stdout());
+      expect(rep.ok).toBe(false);
+      expect(rep.corruptPages).toBe(0);
+      expect(rep.structuralIssues).toBeGreaterThan(0);
+      expect(rep.errors.some((e: string) => e.includes("unlinked zeroed page"))).toBe(true);
+    }
+
+    // `recover` CLI guard checks: missing --out, --out === input, --dry-run
+    expect(
+      await runCli(["--core", coreMode, "recover", corruptPath], createCaptureIo().io),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "recover", corruptPath, "--out", corruptPath],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+
+    // Dry-run without --schema reports skipped table (exit 1) and does not write
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "recover", corruptPath, "--dry-run", "-f", "json"],
+          cap.io,
+        ),
+      ).toBe(1);
+      const dryRep = JSON.parse(cap.stdout());
+      expect(dryRep.dryRun).toBe(true);
+      expect(dryRep.tablesSkipped).toBe(1);
+      expect(dryRep.tables.find((t: any) => t.name === "schema_tbl").status).toBe(
+        "skipped_missing_schema",
+      );
+    }
+
+    // Full recovery with --schema and --report
+    const schemaPath = join(workDir, "recover-schema.json");
+    await writeFile(
+      schemaPath,
+      JSON.stringify({
+        schema_tbl: {
+          columns: [
+            { name: "k", type: "TEXT", flags: { primaryKey: true } },
+            { name: "v", type: "TEXT", flags: { notNull: true } },
+          ],
+        },
+      }),
+    );
+
+    const recoveredPath = join(workDir, "recovered.db");
+    const reportPath = join(workDir, "recovery-report.json");
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "recover",
+            corruptPath,
+            "--out",
+            recoveredPath,
+            "--schema",
+            schemaPath,
+            "--report",
+            reportPath,
+            "-f",
+            "json",
+          ],
+          cap.io,
+        ),
+      ).toBe(0);
+      const recRep = JSON.parse(cap.stdout());
+      expect(recRep.tablesRecovered).toBe(4);
+      expect(recRep.tablesSkipped).toBe(0);
+      expect(recRep.repairedCatalogPages.length).toBe(1);
+      expect(recRep.repairedCatalogPages[0].pageId).toBe(idxOvPage);
+      expect(recRep.deduplicatedIndexes).toBeGreaterThanOrEqual(1);
+
+      const withPkSummary = recRep.tables.find((t: any) => t.name === "with_pk");
+      expect(withPkSummary.totalRecoveredRows).toBe(45 - lostWithPkOnRoot);
+      expect(withPkSummary.orphanRowsRecovered).toBe(45 - lostWithPkOnRoot);
+      expect(withPkSummary.lostIndexEntries).toBe(lostWithPkOnRoot);
+      expect(withPkSummary.lostKeysSample.length).toBe(lostWithPkOnRoot);
+
+      const noPkSummary = recRep.tables.find((t: any) => t.name === "no_pk");
+      expect(noPkSummary.totalRecoveredRows).toBe(180 - lostNoPkOnRoot);
+      expect(noPkSummary.orphanRowsRecovered).toBe(180 - lostNoPkOnRoot);
+
+      const schemaSummary = recRep.tables.find((t: any) => t.name === "schema_tbl");
+      expect(schemaSummary.repairedColCatalog).toBe(true);
+      expect(schemaSummary.totalRecoveredRows).toBe(2);
+
+      expect(existsSync(reportPath)).toBe(true);
+    }
+
+    // Refuses overwrite without --force, succeeds with --force
+    expect(
+      await runCli(
+        [
+          "--core",
+          coreMode,
+          "recover",
+          corruptPath,
+          "--out",
+          recoveredPath,
+          "--schema",
+          schemaPath,
+        ],
+        createCaptureIo().io,
+      ),
+    ).toBe(1);
+
+    // Recovered file passes `verify` completely cleanly (0 errors, 0 structural issues)
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(["--core", coreMode, "verify", recoveredPath, "-f", "json"], cap.io),
+      ).toBe(0);
+      const verRep = JSON.parse(cap.stdout());
+      expect(verRep.ok).toBe(true);
+      expect(verRep.structuralIssues).toBe(0);
+    }
+
+    // Recovered data & overflow payloads & rebuilt indexes are queryable via CLI
+    {
+      const qCap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "query",
+            recoveredPath,
+            "with_pk",
+            "-w",
+            "sku = 'SKU-045'",
+            "-s",
+            "id, sku, blob_text",
+            "-f",
+            "json",
+          ],
+          qCap.io,
+        ),
+      ).toBe(0);
+      const rows = JSON.parse(qCap.stdout());
+      expect(rows.length).toBe(1);
+      expect(rows[0].blob_text).toBe(bigPayload);
+    }
+
+    {
+      const sCap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "query",
+            recoveredPath,
+            "schema_tbl",
+            "-o",
+            "k asc",
+            "-f",
+            "json",
+          ],
+          sCap.io,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(sCap.stdout())).toEqual([
+        { k: "mode", v: "pos" },
+        { k: "ver", v: "35" },
+      ]);
+    }
+  });
+
+  it("supports schema --recovery, schema --format json in recover --schema, --schema-from, and --schema-template", async () => {
+    // Build healthy reference DB with PK + secondary index + ULID + INT32 columns
+    const healthyPath = join(workDir, "healthy-ref.db");
+    const db = await WebDB.open({
+      storage: new NodeFsStorage(healthyPath),
+      engine: createEngine(),
+      crossTabSync: false,
+    });
+    await db.createTable("products", [
+      { name: "id", type: "INT32", primaryKey: true },
+      { name: "code", type: "TEXT", notNull: true },
+      { name: "price", type: "FLOAT64", notNull: true },
+    ]);
+    await db.createIndex("products", "code", { name: "idx_products_code", unique: true });
+    await db.createTable("settings", [
+      { name: "key", type: "TEXT", primaryKey: true },
+      { name: "value", type: "TEXT" },
+    ]);
+    await db.insertMany("products", [
+      { id: 1, code: "ESP", price: 2.5 },
+      { id: 2, code: "LATTE", price: 4.0 },
+    ]);
+    await db.insertMany("settings", [{ key: "currency", value: "USD" }]);
+
+    const cleanBin = await db.exportBinary();
+    await db.close();
+
+    // Create damaged copy by zeroing colCatalogPageId for `products` (with valid CRC32)
+    const corrupt = new Uint8Array(cleanBin);
+    const p1View = new DataView(corrupt.buffer, corrupt.byteOffset, PAGE_SIZE);
+    const tProd = catalog_list_table_descriptors(p1View, {
+      getPageBytes: (pid) => corrupt.subarray((pid - 1) * PAGE_SIZE, pid * PAGE_SIZE),
+    }).find((t) => t.name === "products")!;
+    const catSlice = corrupt.subarray(
+      (tProd.colCatalogPageId - 1) * PAGE_SIZE,
+      tProd.colCatalogPageId * PAGE_SIZE,
+    );
+    catSlice.fill(0);
+    new DataView(catSlice.buffer, catSlice.byteOffset, PAGE_SIZE).setUint32(
+      PAGE_HEADER_OFFSET_CHECKSUM,
+      computePageChecksum(catSlice),
+      true,
+    );
+
+    const corruptPath = join(workDir, "corrupt-schema-test.db");
+    await writeFile(corruptPath, corrupt);
+
+    // 1. Missing schema without --schema prints actionable tip
+    {
+      const skipCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "recover", corruptPath, "--dry-run"],
+          skipCap.io,
+        ),
+      ).toBe(1);
+      expect(skipCap.stdout()).toContain("--schema-from");
+      expect(skipCap.stdout()).toContain("--schema-template");
+      expect(skipCap.stdout()).toContain("products");
+    }
+
+    // 2. `schema --recovery --out` exports --schema compatible JSON & recovers `products` + unique index
+    const recSchemaPath = join(workDir, "exported-recovery-schema.json");
+    {
+      const expCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "schema", healthyPath, "--recovery", "--out", recSchemaPath],
+          expCap.io,
+        ),
+      ).toBe(0);
+      const exportedJson = JSON.parse(await readFile(recSchemaPath, "utf8"));
+      expect(exportedJson.products.columns).toHaveLength(3);
+      expect(exportedJson.products.indexes).toEqual([
+        { name: "idx_products_code", columns: ["code"], unique: true },
+      ]);
+
+      const outPath = join(workDir, "rec-from-exported.db");
+      const rCap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "recover",
+            corruptPath,
+            "--out",
+            outPath,
+            "--schema",
+            recSchemaPath,
+            "-f",
+            "json",
+          ],
+          rCap.io,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(rCap.stdout()).tablesRecovered).toBe(2);
+
+      const qCap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "query",
+            outPath,
+            "products",
+            "-w",
+            "code = 'LATTE'",
+            "-f",
+            "json",
+          ],
+          qCap.io,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(qCap.stdout())).toEqual([{ id: 2, code: "LATTE", price: 4 }]);
+    }
+
+    // 3. Standard `webdb schema --format json` output works directly as `--schema`
+    const stdJsonPath = join(workDir, "std-schema.json");
+    {
+      const stdCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "schema", healthyPath, "products", "-f", "json", "--out", stdJsonPath],
+          stdCap.io,
+        ),
+      ).toBe(0);
+      const outPath = join(workDir, "rec-from-std-json.db");
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "recover",
+            corruptPath,
+            "--out",
+            outPath,
+            "--schema",
+            stdJsonPath,
+            "-f",
+            "json",
+          ],
+          createCaptureIo().io,
+        ),
+      ).toBe(0);
+      expect(
+        await runCli(["--core", coreMode, "verify", outPath], createCaptureIo().io),
+      ).toBe(0);
+    }
+
+    // 4. `recover --schema-from <healthy.db>` borrows schemas directly without JSON files
+    {
+      const outFromHealthy = join(workDir, "rec-schema-from.db");
+      const sfCap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "recover",
+            corruptPath,
+            "--out",
+            outFromHealthy,
+            "--schema-from",
+            healthyPath,
+            "-f",
+            "json",
+          ],
+          sfCap.io,
+        ),
+      ).toBe(0);
+      const rep = JSON.parse(sfCap.stdout());
+      expect(rep.tablesRecovered).toBe(2);
+      expect(rep.tablesSkipped).toBe(0);
+      expect(
+        await runCli(["--core", coreMode, "verify", outFromHealthy], createCaptureIo().io),
+      ).toBe(0);
+    }
+
+    // 5. `recover --schema-template` prints valid JSON for only the damaged table, pre-flags PK & indexes
+    {
+      const tplCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "recover", corruptPath, "--schema-template"],
+          tplCap.io,
+        ),
+      ).toBe(0);
+      const tpl = JSON.parse(tplCap.stdout());
+      expect(Object.keys(tpl)).toEqual(["products"]);
+      expect(tpl.products.columns).toHaveLength(3);
+      expect(tpl.products.columns[0]).toMatchObject({
+        name: "id",
+        type: "INT32",
+        flags: { primaryKey: true, notNull: true },
+      });
+      expect(tpl.products.columns[1]._hint).toContain("idx_products_code");
+      expect(tpl.products.indexes).toEqual([
+        { name: "idx_products_code", columns: ["col_1"], unique: true },
+      ]);
+
+      // Refuses overwriting input with --schema-template --out
+      expect(
+        await runCli(
+          ["--core", coreMode, "recover", corruptPath, "--schema-template", "--out", corruptPath],
+          createCaptureIo().io,
+        ),
+      ).toBe(2);
+
+      // Writes cleanly with --schema-template --out
+      const tplPath = join(workDir, "tpl.json");
+      expect(
+        await runCli(
+          ["--core", coreMode, "recover", corruptPath, "--schema-template", "--out", tplPath],
+          createCaptureIo().io,
+        ),
+      ).toBe(0);
+      expect(existsSync(tplPath)).toBe(true);
+    }
+  });
+
+  it("supports `compact` with --dry-run, --out, --min-reclaim, --in-place (WAL cleanup), and rejects damaged DBs", async () => {
+    const dbPath = join(workDir, "fragmented.db");
+    const storage = new NodeFsStorage(dbPath);
+    const db = await WebDB.open({
+      storage,
+      engine: createEngine(),
+      crossTabSync: false,
+    });
+    await db.createTable("events", [
+      { name: "id", type: "INT32", primaryKey: true, autoInc: true },
+      { name: "kind", type: "TEXT", notNull: true },
+      { name: "body", type: "TEXT" },
+    ]);
+    await db.createIndex("events", "kind", { name: "idx_events_kind" });
+    await db.insertMany(
+      "events",
+      Array.from({ length: 160 }, (_, i) => ({
+        kind: i % 2 === 0 ? "info" : "warn",
+        body: `event-${i}-${"b".repeat(160)}`,
+      })),
+    );
+    expect(await db.from("events").where("id", ">", 4).delete()).toBe(156);
+    await db.close();
+
+    // Also leave committed WAL frames on disk so we verify WAL merge & cleanup on --in-place
+    const walDb = await WebDB.open({
+      storage: new NodeFsStorage(dbPath),
+      engine: createEngine(),
+      crossTabSync: false,
+    });
+    // Force an uncheckpointed WAL transaction by reading/inserting cleanly
+    await walDb.insert("events", { kind: "info", body: "post-close-row" });
+    // Note: WebDB autocommit keeps WAL until checkpoint/close; verify before/after sizes cleanly
+    await walDb.close();
+
+    const sizeBefore = (await stat(dbPath)).size;
+
+    // 1. Validation errors
+    expect(
+      await runCli(["--core", coreMode, "compact", dbPath], createCaptureIo().io),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "compact", dbPath, "--out", dbPath],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+    expect(
+      await runCli(
+        ["--core", coreMode, "compact", dbPath, "--out", join(workDir, "a.db"), "--in-place"],
+        createCaptureIo().io,
+      ),
+    ).toBe(2);
+
+    // 2. --dry-run inspects without modifying file
+    let dryReclaimed = 0;
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--dry-run", "-f", "json"],
+          cap.io,
+        ),
+      ).toBe(0);
+      const rep = JSON.parse(cap.stdout());
+      expect(rep.dryRun).toBe(true);
+      expect(rep.compacted).toBe(false);
+      expect(rep.pagesAfter).toBeLessThan(rep.pagesBefore);
+      expect(rep.rowsCopied).toBe(5);
+      dryReclaimed = rep.pagesReclaimed;
+      expect((await stat(dbPath)).size).toBe(sizeBefore);
+    }
+
+    // 3. --min-reclaim skips writing --out when threshold exceeds reclaimable pages
+    const outPath = join(workDir, "compacted.db");
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          [
+            "--core",
+            coreMode,
+            "compact",
+            dbPath,
+            "--out",
+            outPath,
+            "--min-reclaim",
+            String(dryReclaimed + 1),
+            "-f",
+            "json",
+          ],
+          cap.io,
+        ),
+      ).toBe(0);
+      const rep = JSON.parse(cap.stdout());
+      expect(rep.compacted).toBe(false);
+      expect(existsSync(outPath)).toBe(false);
+    }
+
+    // 4. --out writes smaller compacted DB, refuses overwrite without --force, passes verify & queries
+    {
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--out", outPath],
+          cap.io,
+        ),
+      ).toBe(0);
+      expect(cap.stdout()).toContain("COMPACTED");
+      expect(existsSync(outPath)).toBe(true);
+      expect((await stat(outPath)).size).toBeLessThan(sizeBefore);
+
+      // Refuses overwrite without --force
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--out", outPath],
+          createCaptureIo().io,
+        ),
+      ).toBe(1);
+      // Succeeds with --force
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--out", outPath, "--force"],
+          createCaptureIo().io,
+        ),
+      ).toBe(0);
+
+      expect(
+        await runCli(["--core", coreMode, "verify", outPath], createCaptureIo().io),
+      ).toBe(0);
+    }
+
+    // 5. Append an uncheckpointed committed WAL frame onto dbPath and compact --in-place
+    {
+      const st = new NodeFsStorage(dbPath);
+      const walPath = st.walPath;
+      const [p1] = await st.readPages([1]);
+      expect(p1).toBeTruthy();
+      const hdr = encodeWalFileHeader({ checkpointSeq: 1, salt1: 777 });
+      await st.writeWalHeader(hdr);
+      const commitFrame = encodeWalFrame({
+        pageId: 1,
+        txId: 1,
+        frameSeq: 1,
+        frameType: WAL_FRAME_TYPE_TX_COMMIT,
+        salt1: 777,
+        checkpointSeq: 1,
+        pageData: p1!,
+      });
+      await st.appendWalFrames([commitFrame]);
+      await st.close();
+      expect(existsSync(walPath)).toBe(true);
+
+      const cap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--in-place", "-f", "json"],
+          cap.io,
+        ),
+      ).toBe(0);
+      const rep = JSON.parse(cap.stdout());
+      expect(rep.compacted).toBe(true);
+      expect(rep.inPlace).toBe(true);
+      expect(rep.walFramesMerged).toBe(1);
+      expect((await stat(dbPath)).size).toBe(rep.bytesAfter);
+      expect((await stat(dbPath)).size).toBeLessThan(sizeBefore);
+      expect(existsSync(walPath)).toBe(false);
+
+      expect(
+        await runCli(["--core", coreMode, "verify", dbPath], createCaptureIo().io),
+      ).toBe(0);
+    }
+
+    // 6. Structurally damaged DB is rejected with hint to use `webdb recover`
+    {
+      const corruptPath = join(workDir, "corrupt-compact.db");
+      const raw = new Uint8Array(await readFile(outPath));
+      // Zero Page 1's index/table root pointer page (page 2)
+      raw.fill(0, PAGE_SIZE, PAGE_SIZE * 2);
+      await writeFile(corruptPath, raw);
+
+      const errCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", corruptPath, "--dry-run"],
+          errCap.io,
+        ),
+      ).toBe(1);
+      expect(errCap.stderr()).toContain("webdb recover");
+    }
+
+    // 7. C1: Bit-flipped data page (bad CRC32) on disk is rejected instead of forging CRC32
+    {
+      const bitflipPath = join(workDir, "bitflip-cli.db");
+      const raw = new Uint8Array(await readFile(outPath));
+      // Flip 1 byte in page 4 (leaf data or index leaf) without updating CRC32
+      raw[PAGE_SIZE * 3 + PAGE_SIZE - 5] ^= 0x55;
+      await writeFile(bitflipPath, raw);
+
+      const errCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", bitflipPath, "--in-place"],
+          errCap.io,
+        ),
+      ).toBe(1);
+      expect(errCap.stderr()).toMatch(/corrupt|checksum/i);
+      // Must NOT overwrite or forge CRC32
+      expect(new Uint8Array(await readFile(bitflipPath))).toEqual(raw);
+    }
+
+    // 8. C3: --out --force removes stale <out>.wal; symlink & 0o600 permissions preserved on --in-place
+    {
+      const staleOut = join(workDir, "stale-force.db");
+      await writeFile(staleOut, await readFile(outPath));
+      const staleWal = defaultWalPath(staleOut);
+      // Write a corrupt/stale WAL beside staleOut
+      await writeFile(staleWal, new Uint8Array(64));
+      expect(existsSync(staleWal)).toBe(true);
+
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", dbPath, "--out", staleOut, "--force"],
+          createCaptureIo().io,
+        ),
+      ).toBe(0);
+      expect(existsSync(staleWal)).toBe(false);
+      expect(
+        await runCli(["--core", coreMode, "verify", staleOut], createCaptureIo().io),
+      ).toBe(0);
+
+      // Symlink & mode 0o600 preservation
+      const realTarget = join(workDir, "real-target.db");
+      const symLinkPath = join(workDir, "link-target.db");
+      await writeFile(realTarget, await readFile(outPath));
+      await chmod(realTarget, 0o600);
+      await symlink(realTarget, symLinkPath);
+
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", symLinkPath, "--in-place"],
+          createCaptureIo().io,
+        ),
+      ).toBe(0);
+      expect(await readlink(symLinkPath)).toBe(realTarget);
+      expect((await stat(realTarget)).mode & 0o777).toBe(0o600);
+    }
+
+    // 9. M4 & L5: Corrupt WAL refuses --in-place WITHOUT deleting .wal; uncommitted WAL frames not counted as merged; unsafe --min-reclaim rejected
+    {
+      const corruptWalDb = join(workDir, "corrupt-wal.db");
+      await writeFile(corruptWalDb, await readFile(outPath));
+      const badWalPath = defaultWalPath(corruptWalDb);
+      const badWal = new Uint8Array(64);
+      badWal.fill(0xab);
+      await writeFile(badWalPath, badWal);
+
+      const errCap = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", corruptWalDb, "--in-place"],
+          errCap.io,
+        ),
+      ).toBe(1);
+      expect(errCap.stderr()).toMatch(/WAL/i);
+      expect(existsSync(badWalPath)).toBe(true);
+
+      // Uncommitted WAL frame reported separately, not counted as walFramesMerged
+      const stUnc = new NodeFsStorage(corruptWalDb, { walPath: badWalPath });
+      const [p1] = await stUnc.readPages([1]);
+      await stUnc.truncateWal(0);
+      await stUnc.writeWalHeader(encodeWalFileHeader({ checkpointSeq: 1, salt1: 99 }));
+      await stUnc.appendWalFrames([
+        encodeWalFrame({
+          pageId: 1,
+          txId: 1,
+          frameSeq: 1,
+          frameType: WAL_FRAME_TYPE_TX_UNCOMMITTED,
+          salt1: 99,
+          checkpointSeq: 1,
+          pageData: p1!,
+        }),
+      ]);
+      await stUnc.close();
+
+      const capUnc = createCaptureIo();
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", corruptWalDb, "--in-place", "-f", "json"],
+          capUnc.io,
+        ),
+      ).toBe(0);
+      const repUnc = JSON.parse(capUnc.stdout());
+      expect(repUnc.walFramesMerged).toBe(0);
+      expect(repUnc.uncommittedWalFrames).toBe(1);
+      expect(existsSync(badWalPath)).toBe(false);
+
+      // Unsafe integer rejected for --min-reclaim
+      expect(
+        await runCli(
+          ["--core", coreMode, "compact", corruptWalDb, "--dry-run", "--min-reclaim", "99999999999999999"],
+          createCaptureIo().io,
+        ),
+      ).toBe(2);
+    }
+
+    // 10. H1 step 4d & L1: inspectDatabaseStructure catches cellCount > MAX_SLOTS_PER_PAGE (no RangeError) and duplicate indexes in CLI compact
+    {
+      const badSlotsDb = join(workDir, "bad-cellcount.db");
+      const raw = new Uint8Array(await readFile(outPath));
+      // Find first LEAF_DATA (0x0D) page and corrupt its cellCount to 50000 with valid CRC32
+      let leafPageOffset = -1;
+      for (let off = PAGE_SIZE; off < raw.byteLength; off += PAGE_SIZE) {
+        if (raw[off] === 0x0d) {
+          leafPageOffset = off;
+          break;
+        }
+      }
+      expect(leafPageOffset).toBeGreaterThan(0);
+      const lv = new DataView(raw.buffer, raw.byteOffset + leafPageOffset, PAGE_SIZE);
+      lv.setUint16(2, 50000, true);
+      lv.setUint32(12, computePageChecksum(raw.subarray(leafPageOffset, leafPageOffset + PAGE_SIZE)), true);
+      await writeFile(badSlotsDb, raw);
+
+      const verCap = createCaptureIo();
+      expect(
+        await runCli(["--core", coreMode, "verify", badSlotsDb, "-f", "json"], verCap.io),
+      ).toBe(1);
+      const verRep = JSON.parse(verCap.stdout());
+      expect(verRep.ok).toBe(false);
+      expect(verRep.errors.some((e: string) => /cellCount 50000 exceeds/i.test(e))).toBe(true);
+
+      const cmpErr = createCaptureIo();
+      expect(
+        await runCli(["--core", coreMode, "compact", badSlotsDb, "--dry-run"], cmpErr.io),
+      ).toBe(1);
+      expect(cmpErr.stderr()).toContain("webdb recover");
+    }
+  });
+
+  it("scales openReadOnlyDb and compact past the 1024-slot buffer pool limit (>1023 catalog pages)", async () => {
+    const bigCatDb = join(workDir, "many-catalogs.db");
+    // Build in MemoryStorage with 220 tables x 230 cols => 220 * 5 = 1100 col catalog pages (>1023)
+    const bigDb = await WebDB.open({
+      storage: new MemoryStorage(),
+      engine: createEngine(),
+      slotCount: 2048,
+      crossTabSync: false,
+    });
+    const wideCols = Array.from({ length: 230 }, (_, c) => ({
+      name: `c_${c}`,
+      type: "INT32" as const,
+    }));
+    for (let t = 1; t <= 220; t++) {
+      await bigDb.createTable(`mt_${t}`, wideCols);
+    }
+    await bigDb.insert("mt_1", { c_0: 7 });
+    await writeFile(bigCatDb, await bigDb.exportBinary());
+    await bigDb.close();
+
+    const bigCap = createCaptureIo();
+    expect(
+      await runCli(
+        ["--core", coreMode, "compact", bigCatDb, "--dry-run", "-f", "json"],
+        bigCap.io,
+      ),
+    ).toBe(0);
+    const bigRep = JSON.parse(bigCap.stdout());
+    expect(bigRep.tablesCompacted).toBe(220);
+    expect(bigRep.rowsCopied).toBe(1);
   });
 });

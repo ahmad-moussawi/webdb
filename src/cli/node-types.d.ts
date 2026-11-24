@@ -1,4 +1,15 @@
+declare module 'node:crypto' {
+  export function randomBytes(size: number): Uint8Array & { toString(encoding: 'hex'): string };
+}
+
 declare module 'node:fs/promises' {
+  export interface Stats {
+    size: number;
+    mode: number;
+    isFile(): boolean;
+    isSymbolicLink(): boolean;
+  }
+
   export interface FileHandle {
     read(
       buffer: Uint8Array,
@@ -12,15 +23,20 @@ declare module 'node:fs/promises' {
       length?: number | null,
       position?: number | null,
     ): Promise<{ bytesWritten: number; buffer: Uint8Array }>;
-    stat(): Promise<{ size: number; isFile(): boolean }>;
+    stat(): Promise<Stats>;
     truncate(len?: number): Promise<void>;
     datasync(): Promise<void>;
+    sync(): Promise<void>;
     close(): Promise<void>;
   }
 
-  export function open(path: string, flags?: string | number): Promise<FileHandle>;
+  export function open(path: string, flags?: string | number, mode?: number): Promise<FileHandle>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
-  export function stat(path: string): Promise<{ size: number; isFile(): boolean }>;
+  export function stat(path: string): Promise<Stats>;
+  export function lstat(path: string): Promise<Stats>;
+  export function realpath(path: string): Promise<string>;
+  export function rename(oldPath: string, newPath: string): Promise<void>;
+  export function unlink(path: string): Promise<void>;
   export function writeFile(path: string, data: string | Uint8Array, encoding?: string): Promise<void>;
   export function readFile(path: string): Promise<Uint8Array>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
@@ -34,6 +50,7 @@ declare module 'node:path' {
 }
 
 declare const process: {
+  pid: number;
   argv: string[];
   env: Record<string, string | undefined>;
   exitCode?: number;
