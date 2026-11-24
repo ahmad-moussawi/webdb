@@ -1131,17 +1131,25 @@ export class BufferPoolDriver {
 
   async flushAllDirty(): Promise<void> {
     const dirty: Array<{ slotIdx: number; pageId: number; generation: number }> = [];
-    for (let i = 0; i < this.slotCount; i++) {
+    // Collect slots 1..N-1 before slot 0 (Page 1) so data/index/overflow page links
+    // are written ahead of Page 1's updated tailPageId/totalPages pointers on non-atomic storage.
+    for (let i = 1; i < this.slotCount; i++) {
       if (this.isDirty(i)) {
         const pageId = this.getAssignedPage(i);
         if (pageId > 0) {
-          if (i === 0 && pageId !== 1) {
-            throw new Error(
-              `Corruption detected: slot 0 is assigned to page ${pageId} instead of page 1`,
-            );
-          }
           dirty.push({ slotIdx: i, pageId, generation: this.slot_dirty_generations[i] });
         }
+      }
+    }
+    if (this.isDirty(0)) {
+      const pageId = this.getAssignedPage(0);
+      if (pageId > 0) {
+        if (pageId !== 1) {
+          throw new Error(
+            `Corruption detected: slot 0 is assigned to page ${pageId} instead of page 1`,
+          );
+        }
+        dirty.push({ slotIdx: 0, pageId, generation: this.slot_dirty_generations[0] });
       }
     }
 

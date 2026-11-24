@@ -60,7 +60,7 @@
         { "name": "FLAGS", "size": 4, "type": "uint32_t", "description": "uint32_t table flags (WAL, system, etc.)" },
         { "name": "ROW_COUNT_ESTIMATE", "size": 4, "type": "uint32_t", "description": "uint32_t estimated row count" },
         { "name": "AUTO_INC_NEXT", "size": 8, "type": "uint64_t", "description": "uint64_t next auto_increment ID" },
-        { "name": "RESERVED", "size": 36, "type": "uint8_t[36]", "description": "36 bytes reserved space (92..127)" }
+        { "name": "RESERVED", "size": 36, "type": "uint8_t[36]", "description": "36 bytes reserved space (92..127): +92 pkRootPageId (4B), +96 pkColumnCount (1B), +97 pkFlags (1B), +98 pkColumnIndices (16B), +116 tailPageId (4B), +120 pkTailPageId (4B)" }
       ]
     },
     {
@@ -80,7 +80,7 @@
         { "name": "COLUMN_INDICES", "size": 16, "type": "uint16_t[8]", "description": "8 * uint16_t column indices (16 bytes)" },
         { "name": "COL_DIRECTIONS", "size": 8, "type": "uint8_t[8]", "description": "8 * uint8_t sort directions (8 bytes: 0=ASC, 1=DESC)" },
         { "name": "NAME", "size": 64, "type": "char[64]", "description": "64 bytes UTF-8 fixed string (null-padded)" },
-        { "name": "RESERVED", "size": 30, "type": "uint8_t[30]", "description": "30 bytes reserved space (98..127)" }
+        { "name": "RESERVED", "size": 30, "type": "uint8_t[30]", "description": "30 bytes reserved space (98..127): +100 tailPageId (4B)" }
       ]
     },
     {

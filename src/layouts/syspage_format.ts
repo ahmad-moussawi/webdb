@@ -268,7 +268,7 @@ export const MAX_COLUMNS_PER_TABLE = 256;
  * | 76     | 4B   | FLAGS               | uint32_t    | uint32_t table flags (WAL, system, etc.)       |
  * | 80     | 4B   | ROW_COUNT_ESTIMATE  | uint32_t    | uint32_t estimated row count                   |
  * | 84     | 8B   | AUTO_INC_NEXT       | uint64_t    | uint64_t next auto_increment ID                |
- * | 92     | 36B  | RESERVED            | uint8_t[36] | 36 bytes reserved space (92..127)              |
+ * | 92     | 36B  | RESERVED            | uint8_t[36] | 36 bytes reserved space (92..127): +92 pkRo... |
  * +--------+------+---------------------+-------------+------------------------------------------------+
  * | Total: 128 Bytes                                                                                   |
  * +----------------------------------------------------------------------------------------------------+
@@ -331,7 +331,7 @@ export const TABLE_DESCRIPTOR_OFFSET_ROW_COUNT_ESTIMATE = 80;
 export const TABLE_DESCRIPTOR_OFFSET_AUTO_INC_NEXT = 84;
 
 /**
- * 36 bytes reserved space (92..127)
+ * 36 bytes reserved space (92..127): +92 pkRootPageId (4B), +96 pkColumnCount (1B), +97 pkFlags (1B), +98 pkColumnIndices (16B), +116 tailPageId (4B), +120 pkTailPageId (4B)
  */
 export const TABLE_DESCRIPTOR_OFFSET_RESERVED = 92;
 
@@ -420,7 +420,7 @@ export const TABLE_DESCRIPTOR_OFFSET_RESERVED = 92;
  * | 10     | 16B  | COLUMN_INDICES | uint16_t[8] | 8 * uint16_t column indices (16 bytes)         |
  * | 26     | 8B   | COL_DIRECTIONS | uint8_t[8]  | 8 * uint8_t sort directions (8 bytes: 0=ASC... |
  * | 34     | 64B  | NAME           | char[64]    | 64 bytes UTF-8 fixed string (null-padded)      |
- * | 98     | 30B  | RESERVED       | uint8_t[30] | 30 bytes reserved space (98..127)              |
+ * | 98     | 30B  | RESERVED       | uint8_t[30] | 30 bytes reserved space (98..127): +100 tai... |
  * +--------+------+----------------+-------------+------------------------------------------------+
  * | Total: 128 Bytes                                                                              |
  * +-----------------------------------------------------------------------------------------------+
@@ -483,7 +483,7 @@ export const INDEX_DESCRIPTOR_OFFSET_COL_DIRECTIONS = 26;
 export const INDEX_DESCRIPTOR_OFFSET_NAME = 34;
 
 /**
- * 30 bytes reserved space (98..127)
+ * 30 bytes reserved space (98..127): +100 tailPageId (4B)
  */
 export const INDEX_DESCRIPTOR_OFFSET_RESERVED = 98;
 

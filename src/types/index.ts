@@ -180,10 +180,12 @@ export interface TableDescriptor {
   flags: number;
   rowCountEstimate: number;
   autoIncNext: bigint;
+  tailPageId?: number;
   pkRootPageId?: number;
   pkColumnCount?: number;
   pkFlags?: number;
   pkColumnIndices?: number[];
+  pkTailPageId?: number;
 }
 
 export interface IndexDescriptor {
@@ -195,6 +197,7 @@ export interface IndexDescriptor {
   columnIndices: number[];
   colDirections: number[];
   name: string;
+  tailPageId?: number;
 }
 
 export interface CatalogPageHeader {
@@ -218,6 +221,9 @@ export interface TableMeta {
   flags: number;
   rowCountEstimate: number;
   autoIncNext: bigint;
+  tailPageId?: number;
+  pkRootPageId?: number;
+  pkTailPageId?: number;
   columns: ColumnMeta[];
   primaryKey?: string[];
   indexes?: IndexDescriptor[];

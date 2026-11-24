@@ -93,6 +93,7 @@ import {
   catalog_find_free_table_slot,
   catalog_read_table_descriptor,
   catalog_write_table_descriptor,
+  catalog_update_table_tail_page,
   catalog_list_table_descriptors,
   catalog_read_page_header,
   catalog_write_column_meta,
@@ -104,6 +105,7 @@ import {
   catalog_find_index_by_name,
   catalog_find_free_index_slot,
   catalog_write_index_descriptor,
+  catalog_update_index_tail_page_by_root,
   catalog_delete_index_descriptor,
   catalog_delete_table_descriptor,
   catalog_read_index_descriptor,
@@ -718,6 +720,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       await this.driver.flushAllDirty();
     }
     this.tableMetaCache.delete(name.toLowerCase());
+    this.tableTailPages.set(table.name.toLowerCase(), table.rootPageId);
+    if (table.pkRootPageId) {
+      this.indexTailPages.set(table.pkRootPageId, table.pkRootPageId);
+    }
     return table;
   }
 
@@ -1146,14 +1152,14 @@ export class WebDB implements IDatabaseQueryExecutor {
   }
 
   private async _dropTableInternal(tableName: string): Promise<void> {
-    this.tableMetaCache.delete(tableName.toLowerCase());
-    this.tableTailPages.delete(tableName);
-
     const page1View = this.pool.getSlotDataView(0);
     const slotIdx = catalog_find_table_slot(page1View, tableName);
     if (slotIdx === -1) {
       throw new TableNotFoundError(tableName);
     }
+
+    this.tableMetaCache.delete(tableName.toLowerCase());
+    this.tableTailPages.delete(tableName.toLowerCase());
 
     const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
     let tableColumns: ColumnMeta[] | undefined;
@@ -1296,10 +1302,14 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     this.tableMetaCache.delete(oldName.toLowerCase());
     this.tableMetaCache.delete(newName.toLowerCase());
-    const tailPage = this.tableTailPages.get(oldName);
+    const oldTailKey = oldName.toLowerCase();
+    const newTailKey = newName.toLowerCase();
+    const tailPage = this.tableTailPages.get(oldTailKey);
     if (tailPage !== undefined) {
-      this.tableTailPages.delete(oldName);
-      this.tableTailPages.set(newName, tailPage);
+      this.tableTailPages.delete(oldTailKey);
+      this.tableTailPages.set(newTailKey, tailPage);
+    } else {
+      this.tableTailPages.delete(newTailKey);
     }
     if (this.vmCtx.table?.name.toLowerCase() === oldName.toLowerCase()) {
       this.vmCtx.table = null;
@@ -1826,86 +1836,94 @@ export class WebDB implements IDatabaseQueryExecutor {
       ? new Set<string | number | bigint>()
       : null;
 
-    // Backfill: iterate all data pages and insert existing rows into new index
-    let currentPageId = table.rootPageId;
-    const visitedPages = new Set<number>();
-    while (currentPageId > 1 && !visitedPages.has(currentPageId)) {
-      visitedPages.add(currentPageId);
-      let pageSlot = this.pool.getResidentSlot(currentPageId);
-      if (pageSlot !== -1) {
-        this.pool.setRefBit(pageSlot, 1);
-      } else {
-        pageSlot = await this.driver.acquirePage(currentPageId);
-      }
-      let pageView = this.pool.getSlotDataView(pageSlot);
-      if (page_get_type(pageView, 0) !== PAGE_TYPE_LEAF_DATA) {
-        break;
-      }
-      const cellCount = page_get_cell_count(pageView, 0);
-      const nextPageId = page_get_next_page_id(pageView, 0);
-
-      for (let i = 0; i < cellCount; i++) {
-        pageSlot = this.pool.getResidentSlot(currentPageId);
+    let freeSlot: number;
+    try {
+      // Backfill: iterate all data pages and insert existing rows into new index
+      let currentPageId = table.rootPageId;
+      const visitedPages = new Set<number>();
+      while (currentPageId > 1 && !visitedPages.has(currentPageId)) {
+        visitedPages.add(currentPageId);
+        let pageSlot = this.pool.getResidentSlot(currentPageId);
         if (pageSlot !== -1) {
           this.pool.setRefBit(pageSlot, 1);
         } else {
           pageSlot = await this.driver.acquirePage(currentPageId);
         }
-        pageView = this.pool.getSlotDataView(pageSlot);
-        const cellOffset = page_get_cell_offset(pageView, 0, i);
-        const row = await this._deserializeRowWithOverflow(
-          table.columns,
-          pageView,
-          cellOffset,
-        );
-        if (row) {
-          const rowid = (BigInt(currentPageId) << 16n) | BigInt(i);
-          const { keyVal, keyType } = this.extractIndexKey(
+        let pageView = this.pool.getSlotDataView(pageSlot);
+        if (page_get_type(pageView, 0) !== PAGE_TYPE_LEAF_DATA) {
+          break;
+        }
+        const cellCount = page_get_cell_count(pageView, 0);
+        const nextPageId = page_get_next_page_id(pageView, 0);
+
+        for (let i = 0; i < cellCount; i++) {
+          pageSlot = this.pool.getResidentSlot(currentPageId);
+          if (pageSlot !== -1) {
+            this.pool.setRefBit(pageSlot, 1);
+          } else {
+            pageSlot = await this.driver.acquirePage(currentPageId);
+          }
+          pageView = this.pool.getSlotDataView(pageSlot);
+          const cellOffset = page_get_cell_offset(pageView, 0, i);
+          const row = await this._deserializeRowWithOverflow(
             table.columns,
-            { columnCount: colIndices.length, columnIndices: colIndices },
-            row,
+            pageView,
+            cellOffset,
           );
+          if (row) {
+            const rowid = (BigInt(currentPageId) << 16n) | BigInt(i);
+            const { keyVal, keyType } = this.extractIndexKey(
+              table.columns,
+              { columnCount: colIndices.length, columnIndices: colIndices },
+              row,
+            );
 
-          if (keyVal !== undefined && keyVal !== null) {
-            try {
+            if (keyVal !== undefined && keyVal !== null) {
               this._validateIndexKeySize(indexName, keyType, keyVal);
-            } catch (e) {
-              await this.freeTableTreePages(indexRootPageId);
-              this.indexTailPages.delete(indexRootPageId);
-              throw e;
-            }
-            if (seenUniqueKeys !== null) {
-              const setKey =
-                keyVal instanceof Uint8Array
-                  ? Array.from(keyVal).join(",")
-                  : keyVal;
-              if (seenUniqueKeys.has(setKey)) {
-                await this.freeTableTreePages(indexRootPageId);
-                this.indexTailPages.delete(indexRootPageId);
-                throw new UniqueConstraintViolationError(
-                  `Duplicate key value violates unique constraint "${indexName}" on table "${tableName}"`,
-                );
+              if (seenUniqueKeys !== null) {
+                const setKey =
+                  keyVal instanceof Uint8Array
+                    ? Array.from(keyVal).join(",")
+                    : keyVal;
+                if (seenUniqueKeys.has(setKey)) {
+                  throw new UniqueConstraintViolationError(
+                    `Duplicate key value violates unique constraint "${indexName}" on table "${tableName}"`,
+                  );
+                }
+                seenUniqueKeys.add(setKey);
               }
-              seenUniqueKeys.add(setKey);
-            }
 
-            await this.insertIntoIndex(indexRootPageId, keyType, keyVal, rowid);
+              await this.insertIntoIndex(
+                indexRootPageId,
+                keyType,
+                keyVal,
+                rowid,
+                indexRootPageId,
+              );
+            }
           }
         }
+
+        currentPageId = nextPageId;
       }
 
-      currentPageId = nextPageId;
-    }
-
-    let freeSlot = catalog_find_free_index_slot(page1View);
-    if (freeSlot === -1) {
-      const overflowPageId = await this.driver.allocateAndPinPage();
-      freeSlot = catalog_append_index_overflow_page(page1View, overflowPageId);
+      freeSlot = catalog_find_free_index_slot(page1View);
       if (freeSlot === -1) {
-        throw new TooManyIndexesError(MAX_INDEXES_PAGE1 + 1, MAX_INDEXES_PAGE1);
+        const overflowPageId = await this.driver.allocateAndPinPage();
+        freeSlot = catalog_append_index_overflow_page(page1View, overflowPageId);
+        if (freeSlot === -1) {
+          throw new TooManyIndexesError(MAX_INDEXES_PAGE1 + 1, MAX_INDEXES_PAGE1);
+        }
+        this.pool.markDirty(0);
       }
-      this.pool.markDirty(0);
+    } catch (err) {
+      await this.freeTableTreePages(indexRootPageId);
+      this.indexTailPages.delete(indexRootPageId);
+      throw err;
     }
+
+    const finalIndexTailPageId =
+      this.indexTailPages.get(indexRootPageId) ?? indexRootPageId;
 
     // Write index descriptor into catalog (Page 1 or overflow catalog page)
     const column_indices = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -1924,6 +1942,7 @@ export class WebDB implements IDatabaseQueryExecutor {
       columnIndices: column_indices,
       colDirections: col_directions,
       name: indexName,
+      tailPageId: finalIndexTailPageId,
     });
 
     catalog_increment_schema_version(page1View);
@@ -1931,7 +1950,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
     this.tableMetaCache.delete(tableName.toLowerCase());
-    this.indexTailPages.delete(indexRootPageId);
+    this.indexTailPages.set(indexRootPageId, finalIndexTailPageId);
     if (!this.coordinator.isInTransaction()) {
       await this.driver.flushAllDirty();
     }
@@ -2020,6 +2039,7 @@ export class WebDB implements IDatabaseQueryExecutor {
         tDesc.pkColumnCount = undefined;
         tDesc.pkFlags = undefined;
         tDesc.pkColumnIndices = undefined;
+        tDesc.pkTailPageId = undefined;
         catalog_write_table_descriptor(page1View, tSlot, tDesc);
       }
     }
@@ -2094,13 +2114,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       ? this.wasmCore.page_binary_search_index_leaf
       : page_binary_search_index_leaf;
     let currIdxPageId = rootPageId;
-    while (currIdxPageId !== 0) {
-      let slot = this.pool.getResidentSlot(currIdxPageId);
-      if (slot !== -1) {
-        this.pool.setRefBit(slot, 1);
-      } else {
-        slot = await this.driver.acquirePage(currIdxPageId);
-      }
+    const visitedIdxPages = new Set<number>();
+    while (currIdxPageId > 1 && !visitedIdxPages.has(currIdxPageId)) {
+      visitedIdxPages.add(currIdxPageId);
+      const slot = await this.acquireOrRefPage(currIdxPageId);
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
@@ -2132,13 +2149,10 @@ export class WebDB implements IDatabaseQueryExecutor {
       ? this.wasmCore.page_delete_index_leaf_cell
       : page_delete_index_leaf_cell;
     let currIdxPageId = rootPageId;
-    while (currIdxPageId !== 0) {
-      let slot = this.pool.getResidentSlot(currIdxPageId);
-      if (slot !== -1) {
-        this.pool.setRefBit(slot, 1);
-      } else {
-        slot = await this.driver.acquirePage(currIdxPageId);
-      }
+    const visitedIdxPages = new Set<number>();
+    while (currIdxPageId > 1 && !visitedIdxPages.has(currIdxPageId)) {
+      visitedIdxPages.add(currIdxPageId);
+      const slot = await this.acquireOrRefPage(currIdxPageId);
       const view = this.pool.getSlotDataView(slot);
       const cellCount = page_get_cell_count(view, 0);
       if (cellCount > 0) {
@@ -2154,37 +2168,205 @@ export class WebDB implements IDatabaseQueryExecutor {
     return false;
   }
 
+  private async acquireOrRefPage(pageId: number): Promise<number> {
+    const slot = this.pool.getResidentSlot(pageId);
+    if (slot !== -1) {
+      this.pool.setRefBit(slot, 1);
+      return slot;
+    }
+    return this.driver.acquirePage(pageId);
+  }
+
+  /**
+   * Resolves the current tail data page for a table using cached/persisted hints,
+   * validating bounds and page type and repairing stale/corrupt/cyclic links cleanly.
+   */
+  private async resolveTableTailPage(table: TableMeta): Promise<{
+    pageId: number;
+    slot: number;
+    view: DataView;
+    repaired: boolean;
+  }> {
+    const tableKey = table.name.toLowerCase();
+    const totalPages = catalog_get_total_pages(this.pool.getSlotDataView(0));
+    const cachedTail = this.tableTailPages.get(tableKey);
+    let currentPageId =
+      cachedTail !== undefined && cachedTail >= 2 && cachedTail <= totalPages
+        ? cachedTail
+        : table.tailPageId !== undefined &&
+            table.tailPageId >= 2 &&
+            table.tailPageId <= totalPages
+          ? table.tailPageId
+          : table.rootPageId;
+
+    let slot = await this.acquireOrRefPage(currentPageId);
+    let view = this.pool.getSlotDataView(slot);
+    if (
+      page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA &&
+      currentPageId !== table.rootPageId
+    ) {
+      currentPageId = table.rootPageId;
+      slot = await this.acquireOrRefPage(currentPageId);
+      view = this.pool.getSlotDataView(slot);
+    }
+
+    const visitedTailPages = new Set<number>([currentPageId]);
+    while (true) {
+      const nextPageId = page_get_next_page_id(view, 0);
+      if (nextPageId === 0) break;
+      if (
+        nextPageId === 1 ||
+        nextPageId > totalPages ||
+        visitedTailPages.has(nextPageId)
+      ) {
+        page_set_next_page_id(view, 0, 0);
+        this.pool.markDirty(slot);
+        break;
+      }
+      visitedTailPages.add(nextPageId);
+      const nextSlot = await this.acquireOrRefPage(nextPageId);
+      const nextView = this.pool.getSlotDataView(nextSlot);
+      if (page_get_type(nextView, 0) !== PAGE_TYPE_LEAF_DATA) {
+        slot = await this.acquireOrRefPage(currentPageId);
+        view = this.pool.getSlotDataView(slot);
+        page_set_next_page_id(view, 0, 0);
+        this.pool.markDirty(slot);
+        break;
+      }
+      currentPageId = nextPageId;
+      slot = nextSlot;
+      view = nextView;
+    }
+
+    this.tableTailPages.set(tableKey, currentPageId);
+    return {
+      pageId: currentPageId,
+      slot,
+      view,
+      repaired: table.tailPageId !== currentPageId,
+    };
+  }
+
+  private snapshotIndexTails(
+    indexes: IndexDescriptor[],
+  ): Map<number, number | undefined> {
+    const tails = new Map<number, number | undefined>();
+    for (const idx of indexes) {
+      tails.set(idx.rootPageId, idx.tailPageId);
+    }
+    return tails;
+  }
+
+  private flushChangedIndexTails(
+    page1View: DataView,
+    indexes: IndexDescriptor[],
+    persistedIndexTails: Map<number, number | undefined>,
+    cachedMeta?: TableMeta,
+    skipPkRootPageId?: number,
+  ): void {
+    for (const idx of indexes) {
+      if (
+        skipPkRootPageId &&
+        (idx.flags & IndexFlag.PRIMARY) !== 0 &&
+        idx.rootPageId === skipPkRootPageId
+      ) {
+        continue;
+      }
+      const finalIdxTail = this.indexTailPages.get(idx.rootPageId);
+      if (
+        finalIdxTail !== undefined &&
+        finalIdxTail !== persistedIndexTails.get(idx.rootPageId)
+      ) {
+        const mutatedPageId = catalog_update_index_tail_page_by_root(
+          page1View,
+          idx.rootPageId,
+          finalIdxTail,
+        );
+        if (mutatedPageId > 0) {
+          idx.tailPageId = finalIdxTail;
+        }
+      }
+    }
+    if (cachedMeta) {
+      if (cachedMeta.pkRootPageId) {
+        const pkTail = this.indexTailPages.get(cachedMeta.pkRootPageId);
+        if (pkTail !== undefined) {
+          cachedMeta.pkTailPageId = pkTail;
+        }
+      }
+      if (cachedMeta.indexes) {
+        for (const cIdx of cachedMeta.indexes) {
+          const updatedTail = this.indexTailPages.get(cIdx.rootPageId);
+          if (updatedTail !== undefined) {
+            cIdx.tailPageId = updatedTail;
+          }
+        }
+      }
+    }
+  }
+
   private async insertIntoIndex(
     rootPageId: number,
     keyType: DataType,
     keyVal: any,
     rowid: bigint,
-  ): Promise<void> {
+    knownTailPageId?: number,
+  ): Promise<number> {
     const insertIdxFn = this.wasmCore
       ? this.wasmCore.page_insert_index_leaf_cell
       : page_insert_index_leaf_cell;
-    let idxPageId = this.indexTailPages.get(rootPageId) ?? rootPageId;
-    let idxSlot = this.pool.getResidentSlot(idxPageId);
-    if (idxSlot !== -1) {
-      this.pool.setRefBit(idxSlot, 1);
-    } else {
-      idxSlot = await this.driver.acquirePage(idxPageId);
-    }
-    let idxView = this.pool.getSlotDataView(idxSlot);
+    const totalPages = catalog_get_total_pages(this.pool.getSlotDataView(0));
+    const cachedTail = this.indexTailPages.get(rootPageId);
+    let idxPageId =
+      cachedTail !== undefined && cachedTail >= 2 && cachedTail <= totalPages
+        ? cachedTail
+        : knownTailPageId !== undefined &&
+            knownTailPageId >= 2 &&
+            knownTailPageId <= totalPages
+          ? knownTailPageId
+          : rootPageId;
 
+    let idxSlot = await this.acquireOrRefPage(idxPageId);
+    let idxView = this.pool.getSlotDataView(idxSlot);
+    if (
+      page_get_type(idxView, 0) !== PAGE_TYPE_INDEX_LEAF &&
+      idxPageId !== rootPageId
+    ) {
+      idxPageId = rootPageId;
+      idxSlot = await this.acquireOrRefPage(idxPageId);
+      idxView = this.pool.getSlotDataView(idxSlot);
+    }
+
+    const visitedIdxPages = new Set<number>([idxPageId]);
     while (true) {
       const nextIdxPageId = page_get_next_page_id(idxView, 0);
       if (nextIdxPageId === 0) break;
-      idxPageId = nextIdxPageId;
-      idxSlot = this.pool.getResidentSlot(idxPageId);
-      if (idxSlot !== -1) {
-        this.pool.setRefBit(idxSlot, 1);
-      } else {
-        idxSlot = await this.driver.acquirePage(idxPageId);
+      if (
+        nextIdxPageId === 1 ||
+        nextIdxPageId > totalPages ||
+        visitedIdxPages.has(nextIdxPageId)
+      ) {
+        page_set_next_page_id(idxView, 0, 0);
+        this.pool.markDirty(idxSlot);
+        break;
       }
-      idxView = this.pool.getSlotDataView(idxSlot);
+      visitedIdxPages.add(nextIdxPageId);
+      const nextIdxSlot = await this.acquireOrRefPage(nextIdxPageId);
+      const nextIdxView = this.pool.getSlotDataView(nextIdxSlot);
+      if (page_get_type(nextIdxView, 0) !== PAGE_TYPE_INDEX_LEAF) {
+        idxSlot = await this.acquireOrRefPage(idxPageId);
+        idxView = this.pool.getSlotDataView(idxSlot);
+        page_set_next_page_id(idxView, 0, 0);
+        this.pool.markDirty(idxSlot);
+        break;
+      }
+      idxPageId = nextIdxPageId;
+      idxSlot = nextIdxSlot;
+      idxView = nextIdxView;
     }
-    this.indexTailPages.set(rootPageId, idxPageId);
+
+    let finalTailPageId = idxPageId;
+    this.indexTailPages.set(rootPageId, finalTailPageId);
 
     let idxInsertRes = insertIdxFn(
       idxView,
@@ -2220,7 +2402,8 @@ export class WebDB implements IDatabaseQueryExecutor {
             );
           }
           this.pool.markDirty(newIdxSlot);
-          this.indexTailPages.set(rootPageId, newIdxPageId);
+          finalTailPageId = newIdxPageId;
+          this.indexTailPages.set(rootPageId, finalTailPageId);
         } finally {
           this.pool.unpinSlot(newIdxSlot);
         }
@@ -2230,6 +2413,8 @@ export class WebDB implements IDatabaseQueryExecutor {
     } else {
       this.pool.markDirty(idxSlot);
     }
+
+    return finalTailPageId;
   }
 
   private cloneRow(row: DbRow): DbRow {
@@ -2689,11 +2874,12 @@ export class WebDB implements IDatabaseQueryExecutor {
                 keyVal,
                 prevRowid,
               );
-              await this.insertIntoIndex(
+              idx.tailPageId = await this.insertIntoIndex(
                 idx.rootPageId,
                 keyType,
                 keyVal,
                 shiftedRowid,
+                idx.tailPageId,
               );
             }
           }
@@ -2988,46 +3174,11 @@ export class WebDB implements IDatabaseQueryExecutor {
     table.autoIncNext = tentativeAutoInc;
 
     // Fast resolution of tail data page
-    let currentPageId = this.tableTailPages.get(tableName) ?? table.rootPageId;
-    let slot = this.pool.getResidentSlot(currentPageId);
-    if (slot !== -1) {
-      this.pool.setRefBit(slot, 1);
-    } else {
-      slot = await this.driver.acquirePage(currentPageId);
-    }
-    let view = this.pool.getSlotDataView(slot);
-    if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
-      currentPageId = table.rootPageId;
-      slot = await this.driver.acquirePage(currentPageId);
-      view = this.pool.getSlotDataView(slot);
-    }
-
-    const visitedTailPages = new Set<number>([currentPageId]);
-    while (true) {
-      const nextPageId = page_get_next_page_id(view, 0);
-      if (nextPageId <= 1 || visitedTailPages.has(nextPageId)) break;
-      visitedTailPages.add(nextPageId);
-      let nextSlot = this.pool.getResidentSlot(nextPageId);
-      if (nextSlot !== -1) {
-        this.pool.setRefBit(nextSlot, 1);
-      } else {
-        nextSlot = await this.driver.acquirePage(nextPageId);
-      }
-      const nextView = this.pool.getSlotDataView(nextSlot);
-      if (page_get_type(nextView, 0) !== PAGE_TYPE_LEAF_DATA) {
-        slot = await this.driver.acquirePage(currentPageId);
-        view = this.pool.getSlotDataView(slot);
-        page_set_next_page_id(view, 0, 0);
-        this.pool.markDirty(slot);
-        break;
-      }
-      currentPageId = nextPageId;
-      slot = nextSlot;
-      view = nextView;
-    }
-    this.tableTailPages.set(tableName, currentPageId);
+    const resolvedTail = await this.resolveTableTailPage(table);
+    let currentPageId = resolvedTail.pageId;
 
     const recordedChanges: MutationRecord[] = [];
+    const persistedIndexTails = this.snapshotIndexTails(indexes);
     const insertRowFn = this.wasmCore
       ? this.wasmCore.page_insert_row
       : page_insert_row;
@@ -3041,13 +3192,8 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
 
       // 4. Data page insertion (re-acquire currentPageId in case index insertion evicted it)
-      slot = this.pool.getResidentSlot(currentPageId);
-      if (slot !== -1) {
-        this.pool.setRefBit(slot, 1);
-      } else {
-        slot = await this.driver.acquirePage(currentPageId);
-      }
-      view = this.pool.getSlotDataView(slot);
+      let slot = await this.acquireOrRefPage(currentPageId);
+      let view = this.pool.getSlotDataView(slot);
       let targetPageId = currentPageId;
       let insertSlot = insertRowFn(
         view,
@@ -3083,7 +3229,7 @@ export class WebDB implements IDatabaseQueryExecutor {
             targetPageId = newPageId;
             slot = newSlot;
             view = newView;
-            this.tableTailPages.set(tableName, newPageId);
+            this.tableTailPages.set(table.name.toLowerCase(), newPageId);
           } finally {
             this.pool.unpinSlot(newSlot);
           }
@@ -3104,7 +3250,13 @@ export class WebDB implements IDatabaseQueryExecutor {
           effectiveRow,
         );
         if (keyVal !== undefined && keyVal !== null) {
-          await this.insertIntoIndex(idx.rootPageId, keyType, keyVal, rowid);
+          idx.tailPageId = await this.insertIntoIndex(
+            idx.rootPageId,
+            keyType,
+            keyVal,
+            rowid,
+            idx.tailPageId,
+          );
         }
       }
 
@@ -3122,18 +3274,34 @@ export class WebDB implements IDatabaseQueryExecutor {
       }
     }
 
-    // 6. Update Page 1 table descriptor once for the batch
-    const slotIdx = catalog_find_table_slot(page1View, tableName);
+    // 6. Update Page 1 (or overflow catalog page) descriptors once for the batch
+    const slotIdx = catalog_find_table_slot(page1View, table.name);
     if (slotIdx !== -1) {
       const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
       desc.rowCountEstimate += rows.length;
       if (autoIncCol) {
         desc.autoIncNext = table.autoIncNext;
       }
+      desc.tailPageId = currentPageId;
+      const pkTail = desc.pkRootPageId
+        ? this.indexTailPages.get(desc.pkRootPageId)
+        : undefined;
+      if (pkTail !== undefined) {
+        desc.pkTailPageId = pkTail;
+      }
       catalog_write_table_descriptor(page1View, slotIdx, desc);
-      // Keep the cached TableMeta (returned by getTable/listTables) in sync with Page 1
-      const cachedMeta = this.tableMetaCache.get(tableName.toLowerCase());
-      if (cachedMeta) cachedMeta.rowCountEstimate = desc.rowCountEstimate;
+      const cachedMeta = this.tableMetaCache.get(table.name.toLowerCase());
+      if (cachedMeta) {
+        cachedMeta.rowCountEstimate = desc.rowCountEstimate;
+        cachedMeta.tailPageId = desc.tailPageId;
+      }
+      this.flushChangedIndexTails(
+        page1View,
+        indexes,
+        persistedIndexTails,
+        cachedMeta,
+        desc.pkRootPageId,
+      );
       catalog_increment_change_counter(page1View);
       catalog_update_page1_checksum(page1View);
       this.pool.markDirty(0);
@@ -3410,6 +3578,7 @@ export class WebDB implements IDatabaseQueryExecutor {
     }
 
     // Pass 3: Apply updates (in-place when fitting on page, or delete + tail-insert on page overflow)
+    const persistedIndexTails = this.snapshotIndexTails(indexes);
     const recordedChanges: MutationRecord[] = [];
     const overflowUpdates: Array<{
       oldRow: DbRow;
@@ -3459,11 +3628,12 @@ export class WebDB implements IDatabaseQueryExecutor {
                 );
               }
               if (newKey.keyVal !== undefined && newKey.keyVal !== null) {
-                await this.insertIntoIndex(
+                idx.tailPageId = await this.insertIntoIndex(
                   idx.rootPageId,
                   newKey.keyType,
                   newKey.keyVal,
                   rowid,
+                  idx.tailPageId,
                 );
               }
             }
@@ -3506,32 +3676,13 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     // Re-insert any overflowed rows onto the table's tail page
     if (overflowUpdates.length > 0) {
-      let currentPageId =
-        this.tableTailPages.get(tableName) ?? table.rootPageId;
-      let slot = await this.driver.acquirePage(currentPageId);
-      let view = this.pool.getSlotDataView(slot);
-      if (page_get_type(view, 0) !== PAGE_TYPE_LEAF_DATA) {
-        currentPageId = table.rootPageId;
-        slot = await this.driver.acquirePage(currentPageId);
-        view = this.pool.getSlotDataView(slot);
-      }
-      const visitedTailPages = new Set<number>([currentPageId]);
-      while (true) {
-        const nextPageId = page_get_next_page_id(view, 0);
-        if (nextPageId <= 1 || visitedTailPages.has(nextPageId)) break;
-        visitedTailPages.add(nextPageId);
-        const nextSlot = await this.driver.acquirePage(nextPageId);
-        const nextView = this.pool.getSlotDataView(nextSlot);
-        if (page_get_type(nextView, 0) !== PAGE_TYPE_LEAF_DATA) break;
-        currentPageId = nextPageId;
-        slot = nextSlot;
-        view = nextView;
-      }
-      this.tableTailPages.set(tableName, currentPageId);
+      const resolvedTail = await this.resolveTableTailPage(table);
+      let currentPageId = resolvedTail.pageId;
+      let tailChanged = resolvedTail.repaired;
 
       for (const m of overflowUpdates) {
-        slot = await this.driver.acquirePage(currentPageId);
-        view = this.pool.getSlotDataView(slot);
+        const slot = await this.driver.acquirePage(currentPageId);
+        const view = this.pool.getSlotDataView(slot);
         let targetPageId = currentPageId;
         let insertSlot = page_insert_row(
           view,
@@ -3560,7 +3711,8 @@ export class WebDB implements IDatabaseQueryExecutor {
               this.pool.markDirty(newSlot);
               currentPageId = newPageId;
               targetPageId = newPageId;
-              this.tableTailPages.set(tableName, newPageId);
+              this.tableTailPages.set(table.name.toLowerCase(), newPageId);
+              tailChanged = true;
             } finally {
               this.pool.unpinSlot(newSlot);
             }
@@ -3579,11 +3731,12 @@ export class WebDB implements IDatabaseQueryExecutor {
             m.newRow,
           );
           if (keyVal !== undefined && keyVal !== null) {
-            await this.insertIntoIndex(
+            idx.tailPageId = await this.insertIntoIndex(
               idx.rootPageId,
               keyType,
               keyVal,
               newRowid,
+              idx.tailPageId,
             );
           }
         }
@@ -3601,9 +3754,26 @@ export class WebDB implements IDatabaseQueryExecutor {
           this.activeTxChanges.push(rec);
         }
       }
+
+      if (tailChanged) {
+        const slotIdx = catalog_find_table_slot(page1View, table.name);
+        if (slotIdx !== -1) {
+          catalog_update_table_tail_page(page1View, slotIdx, currentPageId);
+        }
+        const cachedMeta = this.tableMetaCache.get(table.name.toLowerCase());
+        if (cachedMeta) {
+          cachedMeta.tailPageId = currentPageId;
+        }
+      }
     }
 
-    // Update Page 1 change counter
+    // Batch-persist any updated index tail pointers and update Page 1 change counter
+    this.flushChangedIndexTails(
+      page1View,
+      indexes,
+      persistedIndexTails,
+      this.tableMetaCache.get(table.name.toLowerCase()),
+    );
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
@@ -3704,6 +3874,7 @@ export class WebDB implements IDatabaseQueryExecutor {
 
     const page1View = this.pool.getSlotDataView(0);
     const indexes = catalog_list_table_indexes(page1View, table.tableId);
+    const persistedIndexTails = this.snapshotIndexTails(indexes);
 
     const recordedChanges: MutationRecord[] = [];
     let totalDeleted = 0;
@@ -3777,14 +3948,20 @@ export class WebDB implements IDatabaseQueryExecutor {
       return { count: 0, changes: [] };
     }
 
-    const slotIdx = catalog_find_table_slot(page1View, tableName);
+    const slotIdx = catalog_find_table_slot(page1View, table.name);
+    const cachedMeta = this.tableMetaCache.get(table.name.toLowerCase());
     if (slotIdx !== -1) {
       const desc = catalog_read_table_descriptor(page1View, slotIdx)!;
       desc.rowCountEstimate = Math.max(0, desc.rowCountEstimate - totalDeleted);
       catalog_write_table_descriptor(page1View, slotIdx, desc);
-      const cachedMeta = this.tableMetaCache.get(tableName.toLowerCase());
       if (cachedMeta) cachedMeta.rowCountEstimate = desc.rowCountEstimate;
     }
+    this.flushChangedIndexTails(
+      page1View,
+      indexes,
+      persistedIndexTails,
+      cachedMeta,
+    );
     catalog_increment_change_counter(page1View);
     catalog_update_page1_checksum(page1View);
     this.pool.markDirty(0);
@@ -5275,6 +5452,25 @@ export class WebDB implements IDatabaseQueryExecutor {
           return new Uint8Array(PAGE_SIZE);
         },
       };
+      const validateImportedTailPage = (
+        label: string,
+        tailPageId: number | undefined,
+        expectedPageType: number,
+      ) => {
+        if (tailPageId === undefined || tailPageId === 0) return;
+        if (tailPageId < 2 || tailPageId > numPages) {
+          throw new InvalidDatabaseError(
+            `Imported ${label} has out-of-bounds tailPageId ${tailPageId}`,
+          );
+        }
+        const pageType = rawImportPager.getPageBytes(tailPageId)[0];
+        if (pageType !== expectedPageType) {
+          throw new InvalidDatabaseError(
+            `Imported ${label} tailPageId ${tailPageId} has invalid page type 0x${pageType.toString(16)}`,
+          );
+        }
+      };
+
       const importedTableDescs = catalog_list_table_descriptors(
         page1View,
         rawImportPager,
@@ -5296,6 +5492,16 @@ export class WebDB implements IDatabaseQueryExecutor {
             `Imported table "${desc.name}" has out-of-bounds pkRootPageId ${desc.pkRootPageId}`,
           );
         }
+        validateImportedTailPage(
+          `table "${desc.name}"`,
+          desc.tailPageId,
+          PAGE_TYPE_LEAF_DATA,
+        );
+        validateImportedTailPage(
+          `table "${desc.name}" primary key`,
+          desc.pkTailPageId,
+          PAGE_TYPE_INDEX_LEAF,
+        );
         let colCatPid = desc.colCatalogPageId;
         while (colCatPid !== 0) {
           colCatPid = validateCatalogPage(colCatPid).nextColCatalogPageId;
@@ -5315,6 +5521,11 @@ export class WebDB implements IDatabaseQueryExecutor {
             `Imported index "${idxDesc.name}" has out-of-bounds rootPageId ${idxDesc.rootPageId}`,
           );
         }
+        validateImportedTailPage(
+          `index "${idxDesc.name}"`,
+          idxDesc.tailPageId,
+          PAGE_TYPE_INDEX_LEAF,
+        );
       }
 
       const residentPager = {

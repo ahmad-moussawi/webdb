@@ -26,3 +26,12 @@ export const WAL_HEADER_SIZE = 32;
 // Sorter & Query Optimization Limits
 export const MAX_TOPK_HEAP_LIMIT = 10000;
 export const MAX_IN_LIST_SIZE = 10000;
+
+// Reserved sub-field offsets within TableDescriptor (128B) and IndexDescriptor (128B)
+export const TABLE_DESCRIPTOR_OFFSET_PK_ROOT_PAGE_ID = 92;
+export const TABLE_DESCRIPTOR_OFFSET_PK_COLUMN_COUNT = 96;
+export const TABLE_DESCRIPTOR_OFFSET_PK_FLAGS = 97;
+export const TABLE_DESCRIPTOR_OFFSET_PK_COLUMN_INDICES = 98;
+export const TABLE_DESCRIPTOR_OFFSET_TAIL_PAGE_ID = 116;
+export const TABLE_DESCRIPTOR_OFFSET_PK_TAIL_PAGE_ID = 120;
+export const INDEX_DESCRIPTOR_OFFSET_TAIL_PAGE_ID = 100;
