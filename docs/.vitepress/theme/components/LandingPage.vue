@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { withBase } from "vitepress";
+import { searchInMemory } from "@ahmadmoussawi/webdb/search";
 import { SIZE_METRICS } from "../constants";
 
 type CodeTab = "quickstart" | "dualcore" | "customstorage" | "transactions";
@@ -9,38 +10,28 @@ const activeTab = ref<CodeTab>("quickstart");
 const codeSnippets: Record<CodeTab, string> = {
   quickstart: `import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
 
-// 1. Open an async database in the browser — zero server headers needed
-//    Swap IdbStorage for OpfsStorage or MemoryStorage anytime
+// 1. Open an async database (swap IdbStorage for OpfsStorage or MemoryStorage)
 const db = await WebDB.open({
   engine: new WasmEngine(),
   storage: new IdbStorage("shop_app"),
 });
 
-// 2. Define typed relational tables & indexes
+// 2. Define typed relational tables
 await db.createTable("orders", [
   { name: "id", type: "UUID", primaryKey: true },
-  { name: "customer_id", type: "UUID", notNull: true },
   { name: "status", type: "TEXT", notNull: true },
   { name: "total", type: "FLOAT64", notNull: true },
 ]);
-await db.createIndex("orders", ["status", "total"]);
 
-// 3. Fluent, type-safe queries with JOINs, aggregates & sorting
-const topCustomers = await db
+// 3. Query with fluent, type-safe filtering & sorting
+const paidOrders = await db
   .from("orders")
-  .join("customers", "orders.customer_id", "=", "customers.id")
-  .select("customers.name as customer")
-  .sum("orders.total", "lifetimeValue")
-  .count("*", "orderCount")
-  .where("orders.status", "=", "paid")
-  .groupBy("customers.name")
-  .having("lifetimeValue", ">=", 500)
-  .orderBy("lifetimeValue", "desc")
+  .where("status", "=", "paid")
+  .orderBy("total", "desc")
   .limit(10)
   .toArray();`,
 
-  dualcore: `// Tree-shakeable subpath imports keep your bundle ultra-small
-import { WebDB } from "@ahmadmoussawi/webdb/slim";
+  dualcore: `import { WebDB } from "@ahmadmoussawi/webdb/slim";
 import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";
 import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
 import { OpfsStorage } from "@ahmadmoussawi/webdb/storage/opfs";
@@ -51,8 +42,7 @@ const fastDb = await WebDB.open({
   storage: new OpfsStorage("app_data"),
 });
 
-// Option B: 100% Pure JS core — identical API and storage format
-// Ideal for strict CSP policies, browser extensions, or restricted WebViews
+// Option B: 100% Pure JS core for strict CSP or restricted WebViews
 const cspSafeDb = await WebDB.open({
   engine: new JsEngine(),
   storage: new OpfsStorage("app_data"),
@@ -60,57 +50,35 @@ const cspSafeDb = await WebDB.open({
 
   customstorage: `import { WebDB, WasmEngine, MemoryStorage } from "@ahmadmoussawi/webdb";
 
-// Extend MemoryStorage (or implement IVfsAdapter) to plug in any backend:
-// S3/CDN HTTP Range streaming, Electron fs, React Native, or Cloudflare KV
+// Extend MemoryStorage (or implement IVfsAdapter) for any custom backend
 class RemoteCatalogStorage extends MemoryStorage {
-  constructor(private url: string) {
-    super();
-  }
-
-  override async readPages(pageIds: number[]): Promise<Array<Uint8Array | null>> {
-    const cached = await super.readPages(pageIds);
-    const missing = pageIds.filter((_, i) => cached[i] === null);
-    if (missing.length === 0) return cached;
-
-    const fetched = await Promise.all(
-      missing.map(async (pageId) => {
-        const start = (pageId - 1) * 4096;
-        const res = await fetch(this.url, {
+  override async readPages(ids: number[]): Promise<Array<Uint8Array | null>> {
+    return Promise.all(
+      ids.map(async (id) => {
+        const start = (id - 1) * 4096;
+        const res = await fetch("https://cdn.example.com/catalog.webdb", {
           headers: { Range: \`bytes=\${start}-\${start + 4095}\` },
         });
-        return { pageId, data: new Uint8Array(await res.arrayBuffer()) };
+        return new Uint8Array(await res.arrayBuffer());
       }),
     );
-
-    await super.writePages(fetched);
-    return super.readPages(pageIds);
   }
 }
 
 const db = await WebDB.open({
   engine: new WasmEngine(),
-  storage: new RemoteCatalogStorage("https://cdn.example.com/catalog.webdb"),
-});
-
-// Queries fetch only the data they need — without downloading the whole file
-const products = await db
-  .from("products")
-  .where("category", "=", "Electronics")
-  .orderBy("rating", "desc")
-  .limit(10)
-  .toArray();`,
+  storage: new RemoteCatalogStorage(),
+});`,
 
   transactions: `// Crash-safe atomic transactions with nested savepoints
 await db.transaction(async (tx) => {
   await tx.insert("orders", {
     id: crypto.randomUUID(),
-    customer_id: "018d3e2a-1b4c-7000-8000-123456789abc",
     status: "paid",
     total: 249.0,
   });
 
-  // Nested transactions act as savepoints — rolling back an inner block
-  // restores state without aborting the outer transaction
+  // Inner savepoint rolls back without aborting the outer transaction
   await tx
     .transaction(async (savepoint) => {
       await savepoint.update("orders", { total: 9999.0 });
@@ -288,13 +256,13 @@ function highlightCode(code: string): string {
 
   // 5. Types
   html = html.replace(
-    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|WasmEngine|JsEngine|IdbStorage|OpfsStorage|MemoryStorage|RemoteCatalogStorage|IVfsAdapter|RequestInit|Array|URL|DataType|Intl|Promise|Uint8Array|Error|string|number|boolean)\b/g,
+    /\b(UUID|ULID|TEXT|INT32|INT64|FLOAT64|BLOB|WebDB|WasmEngine|JsEngine|IdbStorage|OpfsStorage|MemoryStorage|NodeFsStorage|RemoteCatalogStorage|CustomAdapter|IVfsAdapter|RequestInit|Array|URL|DataType|Intl|Promise|Uint8Array|Error|string|number|boolean)\b/g,
     (m) => saveToken(`<span class="hl-type">${m}</span>`),
   );
 
   // 6. Function calls
   html = html.replace(
-    /\b(createTable|createIndex|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|insertMany|update|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch|renderOrders|readPages|writePages|fetch|arrayBuffer|subarray|registerFunction|registerBatchedFunction|createSearchIndex|buildQuery|NumberFormat)\b(?=\()/g,
+    /\b(createTable|createIndex|alterTable|addColumn|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|insertMany|update|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch|renderOrders|readPages|writePages|fetch|arrayBuffer|subarray|registerFunction|registerBatchedFunction|createSearchIndex|buildQuery|NumberFormat|onBeforeCommit|coalesced|exportBinary|defineMigration)\b(?=\()/g,
     (m) => saveToken(`<span class="hl-fn">${m}</span>`),
   );
 
@@ -331,35 +299,28 @@ const copyFrameworkCode = () => {
   setTimeout(() => (copyFrameworkStatus.value = false), 2000);
 };
 
-const searchSnippet = `import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
-import { createSearchIndex } from "@ahmadmoussawi/webdb/search";
+const searchSnippet = `import { createSearchIndex } from "@ahmadmoussawi/webdb/search";
 import { useLiveQuery } from "@ahmadmoussawi/webdb/react"; // or vue, angular
 
-const db = await WebDB.open({
-  engine: new WasmEngine(),
-  storage: new IdbStorage("docs_app"),
-});
-
-// 1. Create a search index directly over your existing table (always in sync)
+// 1. Index your existing table directly (always in sync)
 const articleSearch = createSearchIndex(db, {
   table: "articles",
   fields: [
-    { name: "title", weight: 10, highlight: true }, // exact > prefix > typos
+    { name: "title", weight: 10, highlight: true },
     { name: "tags", weight: 5 },
-    { name: "body", weight: 1, snippet: true },     // extracts <mark> snippets
+    { name: "body", weight: 1, snippet: true },
   ],
 });
 
-// 2. Reactively search with typo tolerance and live query updates as you type
+// 2. Typo-tolerant live search that updates as data or input changes
 const { data: results } = useLiveQuery(
   () =>
     articleSearch.buildQuery(searchQuery.value, {
-      fuzzy: true,  // Typo tolerance ("reactve" -> "reactive")
-      prefix: true, // Auto-completes word prefixes ("persist" -> "persistence")
-      filter: (qb) => (category.value ? qb.where("category", "=", category.value) : qb),
+      fuzzy: true,  // "reactve" -> "reactive"
+      prefix: true, // "persist" -> "persistence"
       limit: 20,
     }),
-  [searchQuery, category],
+  [searchQuery],
   { db }
 );`;
 
@@ -373,6 +334,96 @@ const copySearchCode = () => {
   copySearchStatus.value = true;
   setTimeout(() => (copySearchStatus.value = false), 2000);
 };
+
+interface LandingSearchDoc {
+  id: number;
+  title: string;
+  category: string;
+  tags: string;
+  body: string;
+}
+
+const landingSearchDocs: LandingSearchDoc[] = [
+  {
+    id: 1,
+    title: "Reactive Live Queries for React, Vue & Angular",
+    category: "Reactivity",
+    tags: "reactive, live queries, react, vue, angular",
+    body: "Queries automatically track every table and join they read, refreshing UI components whenever local data changes.",
+  },
+  {
+    id: 2,
+    title: "Persistent Storage with IndexedDB & OPFS",
+    category: "Storage",
+    tags: "persistence, indexeddb, opfs, offline",
+    body: "Persist relational data across reloads and offline sessions in every modern browser without server configuration.",
+  },
+  {
+    id: 3,
+    title: "Café-Style Caching for Repeated Reads",
+    category: "Performance",
+    tags: "cache, accent-insensitive, fast, reads",
+    body: "Keep frequently queried records warm in memory with accent-insensitive matching across Unicode text.",
+  },
+  {
+    id: 4,
+    title: "Dual Core: WebAssembly Speed or Pure JS",
+    category: "Engines",
+    tags: "wasm, javascript, csp, extensions",
+    body: "Run with our 19 KB WebAssembly core by default, or switch to pure JS in strict CSP environments.",
+  },
+  {
+    id: 5,
+    title: "Cross-Tab Sync Without a Backend",
+    category: "Multi-Tab",
+    tags: "sync, tabs, broadcastchannel, web locks",
+    body: "Coordinate writes with Web Locks and broadcast commits across open tabs instantly via BroadcastChannel.",
+  },
+  {
+    id: 6,
+    title: "Deploy on Any Static Host With Zero Headers",
+    category: "Deployment",
+    tags: "static, cdn, coop, coep, zero-config",
+    body: "Ship on Vercel, Netlify, GitHub Pages, or S3 with zero COOP or COEP response header configuration.",
+  },
+];
+
+const liveSearchQuery = ref("reactve");
+const liveSearchFuzzy = ref(true);
+
+const liveSearchPresets = [
+  { query: "reactve", hint: "typo" },
+  { query: "persist", hint: "prefix" },
+  { query: "cafe", hint: "accent" },
+  { query: "sync tabs", hint: "2 words" },
+];
+
+const liveSearchResult = computed(() =>
+  searchInMemory(landingSearchDocs, liveSearchQuery.value, {
+    fields: [
+      { name: "title", weight: 10, highlight: true },
+      { name: "tags", weight: 5 },
+      { name: "body", weight: 1, snippet: { size: 105 } },
+    ],
+    fuzzy: liveSearchFuzzy.value,
+    prefix: true,
+    limit: 3,
+  }),
+);
+
+const liveSearchStatus = ref(
+  `${liveSearchResult.value.hits.length} matches found`,
+);
+let searchAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch([liveSearchQuery, liveSearchFuzzy], () => {
+  if (searchAnnounceTimer) clearTimeout(searchAnnounceTimer);
+  searchAnnounceTimer = setTimeout(() => {
+    const count = liveSearchResult.value.hits.length;
+    liveSearchStatus.value =
+      count === 1 ? "1 match found" : `${count} matches found`;
+  }, 180);
+});
 
 const udfSnippet = `import { WebDB, WasmEngine, IdbStorage, DataType } from "@ahmadmoussawi/webdb";
 
@@ -390,25 +441,51 @@ db.registerFunction("format_money", (amount, currency = "USD") => {
 // 2. Batch mode processes rows in chunks to keep large queries fast
 db.registerBatchedFunction(
   "calc_discount",
-  (argsBatch) => {
-    // Runs once per batch instead of once per row:
-    return argsBatch.map(([price, discountPercent]) =>
-      Number(price) * (1 - Number(discountPercent) / 100)
-    );
-  },
+  (argsBatch) =>
+    argsBatch.map(([price, pct]) => Number(price) * (1 - Number(pct) / 100)),
   { returnType: DataType.FLOAT64, deterministic: true }
 );
 
-// 3. Use seamlessly inside fluent queries: .select(), .where(), .orderBy()
+// 3. Call directly inside .select(), .where(), and .orderBy()
 const deals = await db
   .from("products")
-  .select([
-    "id",
-    "name",
-    "format_money(calc_discount(price, 20)) as discounted_price",
-  ])
-  .where("calc_discount(price, 20) < 50")
+  .select(["id", "name", "format_money(calc_discount(price, 20)) as deal"])
+  .where("calc_discount(price, 20) < 100")
   .toArray();`;
+
+type UdfCurrency = "USD" | "EUR" | "JPY";
+const udfCurrency = ref<UdfCurrency>("USD");
+const udfDiscount = ref<10 | 20 | 35>(20);
+
+const udfSampleProducts = [
+  { name: "Mechanical Keyboard", price: 140 },
+  { name: "USB-C Multiport Dock", price: 89 },
+  { name: "Studio Desk Lamp", price: 54 },
+];
+
+const udfCurrencyRates: Record<UdfCurrency, { rate: number; locale: string }> = {
+  USD: { rate: 1, locale: "en-US" },
+  EUR: { rate: 0.92, locale: "de-DE" },
+  JPY: { rate: 152, locale: "ja-JP" },
+};
+
+const formattedUdfRows = computed(() => {
+  const { rate, locale } = udfCurrencyRates[udfCurrency.value];
+  const fmt = new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: udfCurrency.value,
+    maximumFractionDigits: udfCurrency.value === "JPY" ? 0 : 2,
+  });
+  return udfSampleProducts.map((item) => {
+    const base = item.price * rate;
+    const discounted = base * (1 - udfDiscount.value / 100);
+    return {
+      name: item.name,
+      original: fmt.format(base),
+      deal: fmt.format(discounted),
+    };
+  });
+});
 
 const renderedUdfLines = computed(() =>
   highlightCode(udfSnippet).split("\n"),
@@ -685,87 +762,718 @@ const selectBenchSlide = (idx: number) => {
   startCarousel();
 };
 
+const heroRef = ref<HTMLElement | null>(null);
+let reducedMotionQuery: MediaQueryList | null = null;
+
+const onHeroPointerMove = (e: PointerEvent) => {
+  if (e.pointerType === "touch") return;
+  if (reducedMotionQuery?.matches) return;
+  const el = (e.currentTarget as HTMLElement | null) ?? heroRef.value;
+  if (!el) return;
+
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  el.style.setProperty("--hero-mouse-x", `${x.toFixed(1)}px`);
+  el.style.setProperty("--hero-mouse-y", `${y.toFixed(1)}px`);
+};
+
 onMounted(() => {
   setTimeout(() => {
     benchAnimated.value = true;
   }, 120);
   startCarousel();
+
+  reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+});
+
+// ============================================================================
+// 1. HERO INTERACTIVE BROWSER DB SHOWCASE
+// ============================================================================
+type HeroFilter = "all" | "paid" | "pending";
+type HeroStatus = "paid" | "pending";
+
+interface HeroOrderRow {
+  id: number;
+  customer: string;
+  total: number;
+  status: HeroStatus;
+}
+
+const heroFilter = ref<HeroFilter>("all");
+const heroRuntime = ref<"wasm-idb" | "js-opfs">("wasm-idb");
+const heroOrders = ref<HeroOrderRow[]>([
+  { id: 1042, customer: "Maya Lin", total: 420, status: "paid" },
+  { id: 1041, customer: "David Chen", total: 285, status: "paid" },
+  { id: 1040, customer: "Sara Patel", total: 190, status: "pending" },
+  { id: 1039, customer: "Alex Rivera", total: 540, status: "paid" },
+]);
+const heroNextId = ref(1043);
+const heroFlashId = ref<number | null>(null);
+const heroSyncPulse = ref(false);
+let heroFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+const heroSampleQueue = [
+  { customer: "Elena Rostova", total: 310 },
+  { customer: "Liam O'Connor", total: 640 },
+  { customer: "Noor Al-Mansoor", total: 275 },
+  { customer: "Kenji Sato", total: 490 },
+];
+let heroQueueIdx = 0;
+
+const triggerHeroSync = (flashId: number) => {
+  heroFlashId.value = flashId;
+  heroSyncPulse.value = true;
+  if (heroFlashTimer) clearTimeout(heroFlashTimer);
+  heroFlashTimer = setTimeout(() => {
+    heroFlashId.value = null;
+    heroSyncPulse.value = false;
+  }, 900);
+};
+
+const insertHeroOrder = () => {
+  const sample = heroSampleQueue[heroQueueIdx % heroSampleQueue.length];
+  heroQueueIdx++;
+  const status: HeroStatus =
+    heroFilter.value === "pending"
+      ? "pending"
+      : heroFilter.value === "paid"
+        ? "paid"
+        : heroQueueIdx % 2 === 0
+          ? "pending"
+          : "paid";
+  const newOrder: HeroOrderRow = {
+    id: heroNextId.value++,
+    customer: sample.customer,
+    total: sample.total,
+    status,
+  };
+  heroOrders.value = [newOrder, ...heroOrders.value].slice(0, 8);
+  triggerHeroSync(newOrder.id);
+};
+
+const toggleHeroOrderStatus = (id: number) => {
+  heroOrders.value = heroOrders.value.map((row) =>
+    row.id === id
+      ? { ...row, status: row.status === "paid" ? "pending" : "paid" }
+      : row,
+  );
+  triggerHeroSync(id);
+};
+
+const filteredHeroOrders = computed(() =>
+  (heroFilter.value === "all"
+    ? heroOrders.value
+    : heroOrders.value.filter((o) => o.status === heroFilter.value)
+  ).slice(0, 4),
+);
+
+const heroPaidCount = computed(
+  () => heroOrders.value.filter((o) => o.status === "paid").length,
+);
+
+const heroPaidTotal = computed(() => {
+  const sum = heroOrders.value
+    .filter((o) => o.status === "paid")
+    .reduce((acc, o) => acc + o.total, 0);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(sum);
+});
+
+const heroQueryHtml = computed(() => {
+  const code =
+    heroFilter.value === "all"
+      ? `db.from("orders").orderBy("id", "desc").live(render)`
+      : `db.from("orders").where("status", "=", "${heroFilter.value}").live(render)`;
+  return highlightCode(code);
 });
 
 onBeforeUnmount(() => {
   stopCarousel();
+  if (searchAnnounceTimer) clearTimeout(searchAnnounceTimer);
+  if (heroFlashTimer) clearTimeout(heroFlashTimer);
 });
+
+// ============================================================================
+// 4. INTERACTIVE FEATURE EXPLORER ("BUILT WITH THE BROWSER")
+// ============================================================================
+type FeatureId =
+  | "storage"
+  | "dualcore"
+  | "bundle"
+  | "offline"
+  | "snapshots"
+  | "schema";
+
+type FeatureAccent =
+  | "cyan"
+  | "emerald"
+  | "violet"
+  | "amber"
+  | "rose"
+  | "indigo";
+
+interface FeatureItem {
+  id: FeatureId;
+  eyebrow: string;
+  title: string;
+  teaser: string;
+  accent: FeatureAccent;
+}
+
+const featureItems: FeatureItem[] = [
+  {
+    id: "storage",
+    eyebrow: "PLUGGABLE ASYNC STORAGE",
+    title: "IndexedDB, OPFS, or Custom Storage",
+    teaser: "Zero COOP/COEP headers across every runtime",
+    accent: "cyan",
+  },
+  {
+    id: "dualcore",
+    eyebrow: "NATIVE WEB APIS & DUAL CORE",
+    title: "WASM Speed + 100% Pure JS Mode",
+    teaser: "Lean on browser APIs, swap engines in one line",
+    accent: "emerald",
+  },
+  {
+    id: "bundle",
+    eyebrow: "SMALL BUNDLE SIZE",
+    title: "Tiny & Tree-Shakeable Subpaths",
+    teaser: "Ship only the engine and adapters you import",
+    accent: "violet",
+  },
+  {
+    id: "offline",
+    eyebrow: "RELIABLE OFFLINE",
+    title: "Crash-Safe Transactions & Sync",
+    teaser: "Nested savepoints and coalesced sync changesets",
+    accent: "amber",
+  },
+  {
+    id: "snapshots",
+    eyebrow: "INSTANT HYDRATION & CLI",
+    title: "Compressed Snapshots & Terminal CLI",
+    teaser: "Hydrate .webdb.gz images and inspect via npx webdb",
+    accent: "rose",
+  },
+  {
+    id: "schema",
+    eyebrow: "SCHEMA & MIGRATIONS",
+    title: "Typed Schemas, Indexes & Versions",
+    teaser: "Composite indexes, ALTER TABLE, and clean upgrades",
+    accent: "indigo",
+  },
+];
+
+const activeFeature = ref<FeatureId>("storage");
+const featureTabRefs = ref<Record<string, HTMLButtonElement | null>>({});
+
+const selectFeature = (id: FeatureId, focusTab = false) => {
+  activeFeature.value = id;
+  const el = featureTabRefs.value[id];
+  if (el) {
+    el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (focusTab) el.focus();
+  }
+};
+
+const onFeatureTabKeydown = (event: KeyboardEvent, idx: number) => {
+  const len = featureItems.length;
+  let nextIdx: number | null = null;
+  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+    nextIdx = (idx + 1) % len;
+  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+    nextIdx = (idx - 1 + len) % len;
+  } else if (event.key === "Home") {
+    nextIdx = 0;
+  } else if (event.key === "End") {
+    nextIdx = len - 1;
+  }
+  if (nextIdx !== null) {
+    event.preventDefault();
+    selectFeature(featureItems[nextIdx].id, true);
+  }
+};
+
+const hiddenUntilFound = (isActive: boolean) =>
+  isActive ? undefined : ("until-found" as unknown as boolean);
+
+// Panel 1: Storage Picker
+type StorageChoice = "idb" | "opfs" | "memory" | "custom";
+const selectedStorage = ref<StorageChoice>("idb");
+
+const storageOptions: Record<
+  StorageChoice,
+  {
+    label: string;
+    headers: string;
+    runtime: string;
+    bestFor: string;
+    code: string;
+  }
+> = {
+  idb: {
+    label: "IndexedDB",
+    headers: "None required",
+    runtime: "Main thread & Workers",
+    bestFor: "All browsers, Safari & mobile WebViews",
+    code: `import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
+
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("app_production"),
+});`,
+  },
+  opfs: {
+    label: "OPFS",
+    headers: "None required",
+    runtime: "Dedicated Workers & modern browsers",
+    bestFor: "Heavy local writes & large datasets",
+    code: `import { WebDB, WasmEngine, OpfsStorage } from "@ahmadmoussawi/webdb";
+
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new OpfsStorage("analytics_local"),
+});`,
+  },
+  memory: {
+    label: "In-Memory",
+    headers: "None required",
+    runtime: "Browsers, Node 20+, Vitest & Edge",
+    bestFor: "Unit tests, SSR & ephemeral sessions",
+    code: `import { WebDB, WasmEngine, MemoryStorage } from "@ahmadmoussawi/webdb";
+
+const db = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new MemoryStorage(),
+});`,
+  },
+  custom: {
+    label: "Custom Adapter",
+    headers: "None required",
+    runtime: "S3 Range, Electron, React Native, KV",
+    bestFor: "Remote streaming or custom persistence",
+    code: `import { WebDB, WasmEngine, MemoryStorage } from "@ahmadmoussawi/webdb";
+
+class CustomAdapter extends MemoryStorage {
+  override async readPages(ids: number[]) { /* fetch from S3 / KV */ return super.readPages(ids); }
+}
+
+const db = await WebDB.open({ engine: new WasmEngine(), storage: new CustomAdapter() });`,
+  },
+};
+
+const renderedStorageCode = computed(() =>
+  highlightCode(storageOptions[selectedStorage.value].code).split("\n"),
+);
+
+// Panel 2: Dual Core Engine Toggle
+const selectedEngine = ref<"wasm" | "js">("wasm");
+
+const dualCoreMeta = computed(() =>
+  selectedEngine.value === "wasm"
+    ? {
+        name: "WasmEngine",
+        csp: "Standard WebAssembly",
+        format: "100% Identical",
+        footprint: `${SIZE_METRICS.wasmGzip} gzip`,
+        code: `import { WebDB, WasmEngine, IdbStorage } from "@ahmadmoussawi/webdb";
+
+const db = await WebDB.open({
+  engine: new WasmEngine(), // Default ultra-fast ~19 KB WASM core
+  storage: new IdbStorage("app_data"),
+});`,
+      }
+    : {
+        name: "JsEngine",
+        csp: "Strict CSP / No-WASM safe",
+        format: "100% Identical",
+        footprint: "Zero WASM bytes",
+        code: `import { WebDB } from "@ahmadmoussawi/webdb/slim";
+import { JsEngine } from "@ahmadmoussawi/webdb/core/js";
+import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";
+
+const db = await WebDB.open({
+  engine: new JsEngine(), // Pure JS fallback for strict CSP & extensions
+  storage: new IdbStorage("app_data"),
+});`,
+      },
+);
+
+const renderedDualCoreCode = computed(() =>
+  highlightCode(dualCoreMeta.value.code).split("\n"),
+);
+
+// Panel 3: Bundle Composer
+const bundleEngine = ref<"wasm" | "js">("wasm");
+const bundleReact = ref(true);
+const bundleSearch = ref(false);
+
+const bundleCode = computed(() => {
+  const lines = [
+    `import { WebDB } from "@ahmadmoussawi/webdb/slim";`,
+    bundleEngine.value === "wasm"
+      ? `import { WasmEngine } from "@ahmadmoussawi/webdb/core/wasm";`
+      : `import { JsEngine } from "@ahmadmoussawi/webdb/core/js";`,
+    `import { IdbStorage } from "@ahmadmoussawi/webdb/storage/idb";`,
+  ];
+  if (bundleReact.value) {
+    lines.push(`import { useLiveQuery } from "@ahmadmoussawi/webdb/react";`);
+  }
+  if (bundleSearch.value) {
+    lines.push(
+      `import { createSearchIndex } from "@ahmadmoussawi/webdb/search";`,
+    );
+  }
+  return highlightCode(lines.join("\n")).split("\n");
+});
+
+const bundleSummary = computed(() => {
+  const parts = ["Slim Core", bundleEngine.value === "wasm" ? "WASM (~19 KB)" : "Pure JS", "IDB"];
+  if (bundleReact.value) parts.push("React (<1 KB)");
+  if (bundleSearch.value) parts.push("Search");
+  const pct =
+    (bundleEngine.value === "wasm" ? 12 : 10) +
+    (bundleReact.value ? 2 : 0) +
+    (bundleSearch.value ? 3 : 0);
+  return { parts, pct };
+});
+
+// Panel 4: Offline & Transactions Toggle
+const selectedOfflineMode = ref<"savepoints" | "sync">("savepoints");
+
+const offlineCode = computed(() =>
+  highlightCode(
+    selectedOfflineMode.value === "savepoints"
+      ? `await db.transaction(async (tx) => {
+  await tx.insert("invoices", { id, status: "sent", total: 120 });
+
+  // Inner savepoint rolls back cleanly without aborting the outer write
+  await tx.transaction(async (inner) => {
+    await inner.update("invoices", { total: -1 });
+    throw new Error("Undo inner edit only");
+  }).catch(() => {});
+});`
+      : `// Capture minimal net changes per row before committing offline edits
+db.onBeforeCommit((changeset) => {
+  const netMutations = changeset.coalesced();
+  syncQueue.enqueue(netMutations);
+});`,
+  ).split("\n"),
+);
+
+// Panel 5: Snapshots & CLI Toggle
+const selectedSnapshotMode = ref<"snapshot" | "cli">("snapshot");
+
+const snapshotCode = computed(() =>
+  highlightCode(
+    selectedSnapshotMode.value === "snapshot"
+      ? `// Build time or server: export full indexed database snapshot
+const bytes = await db.exportBinary();
+
+// Client cold start: hydrate instantly from Uint8Array or .webdb.gz
+const clientDb = await WebDB.open({
+  engine: new WasmEngine(),
+  storage: new IdbStorage("catalog"),
+  initialData: bytes,
+});`
+      : `// Inspect, query & verify .db files right from your terminal
+// $ npx webdb info app.db
+// $ npx webdb tables app.db --exact-count
+// $ npx webdb query app.db orders -w "status = 'paid'" -l 10
+// $ npx webdb verify app.db`,
+  ).split("\n"),
+);
+
+// Panel 6: Schema & Migrations Stepper
+const selectedMigrationStep = ref<0 | 1 | 2>(0);
+
+const migrationSteps = [
+  {
+    label: "1. Typed Schema",
+    code: `await db.createTable("tasks", [
+  { name: "id", type: "UUID", primaryKey: true },
+  { name: "title", type: "TEXT", notNull: true },
+  { name: "priority", type: "INT32" },
+  { name: "score", type: "FLOAT64" },
+]);`,
+  },
+  {
+    label: "2. Composite Index",
+    code: `// Speed up filtered & sorted queries across multiple columns
+await db.createIndex("tasks", ["priority", "score"]);
+
+const topTasks = await db
+  .from("tasks")
+  .where("priority", ">=", 2)
+  .orderBy("score", "desc")
+  .toArray();`,
+  },
+  {
+    label: "3. Safe Migrations",
+    code: `// Evolve tables safely across app versions
+await db.alterTable("tasks", (table) => {
+  table.addColumn({ name: "due_date", type: "TEXT" });
+});`,
+  },
+];
+
+const renderedMigrationCode = computed(() =>
+  highlightCode(migrationSteps[selectedMigrationStep.value].code).split("\n"),
+);
 </script>
 
 <template>
   <div class="webdb-landing">
     <!-- ======================================================================
-         1. FOCUSED HERO SECTION
+         1. SPLIT VISUAL HERO SECTION
          ====================================================================== -->
-    <header class="hero-section">
+    <header
+      ref="heroRef"
+      class="hero-section"
+      @pointermove="onHeroPointerMove"
+    >
+      <div class="hero-grid-bg" aria-hidden="true"></div>
       <div class="hero-glow" aria-hidden="true"></div>
+      <div class="hero-torch-grid" aria-hidden="true"></div>
+      <div class="hero-torch-beam" aria-hidden="true"></div>
 
-      <div class="hero-eyebrow">
-        <span class="status-dot"></span>
-        <span class="eyebrow-tag"
-          >{{ SIZE_METRICS.wasmGzip }} GZIPPED WASM CORE</span
-        >
-        <span class="eyebrow-sep">•</span>
-        <span class="eyebrow-text">WASM &amp; Pure JS</span>
-        <span class="eyebrow-sep">•</span>
-        <span class="eyebrow-text">Zero Server Headers</span>
-      </div>
+      <div class="hero-inner">
+        <div class="hero-split">
+        <!-- LEFT COLUMN: VALUE PROPOSITION & PRIMARY CTAS -->
+        <div class="hero-copy">
+          <div class="hero-eyebrow">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="eyebrow-tag"
+              >{{ SIZE_METRICS.wasmGzip }} GZIPPED WASM CORE</span
+            >
+            <span class="eyebrow-sep">•</span>
+            <span class="eyebrow-text">WASM &amp; Pure JS</span>
+            <span class="eyebrow-sep">•</span>
+            <span class="eyebrow-text">Zero Server Headers</span>
+          </div>
 
-      <h1 class="hero-title">
-        The Relational Database<br />
-        <span class="hero-gradient">Built Native for the Browser.</span>
-      </h1>
+          <h1 class="hero-title">
+            The Relational Database<br />
+            <span class="hero-gradient">Built Native for the Browser.</span>
+          </h1>
 
-      <p class="hero-lead">
-        Type-safe relational queries, reactive <strong>Live Queries</strong>,
-        and typo-tolerant search over IndexedDB &amp; OPFS. Tiny bundle, dual
-        WASM/JS core, and zero <code>COOP/COEP</code> server headers.
-      </p>
+          <p class="hero-lead">
+            Type-safe relational queries, reactive <strong>Live Queries</strong>,
+            and typo-tolerant search over IndexedDB &amp; OPFS. Tiny bundle,
+            dual WASM/JS core, and zero <code>COOP/COEP</code> server headers.
+          </p>
 
-      <div class="hero-actions">
-        <a :href="withBase('/getting-started')" class="btn btn-primary">
-          <span>Get Started</span>
-          <span class="btn-arrow">→</span>
-        </a>
+          <div class="hero-actions">
+            <a :href="withBase('/getting-started')" class="btn btn-primary">
+              <span>Get Started</span>
+              <span class="btn-arrow">→</span>
+            </a>
 
-        <a :href="withBase('/demos/')" class="btn btn-secondary">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-          >
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-          <span>Try Live Demos</span>
-        </a>
-      </div>
+            <a :href="withBase('/demos/')" class="btn btn-secondary">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              <span>Try Live Demos</span>
+            </a>
+          </div>
 
-      <!-- ONE-CLICK INSTALL COMMAND PILL -->
-      <div class="hero-install-wrap">
-        <button
-          class="install-pill"
-          title="Click to copy install command"
-          @click="copyInstallCmd"
-        >
-          <span class="install-prompt">$</span>
-          <code>npm install @ahmadmoussawi/webdb</code>
-          <span class="install-copy-badge">
-            {{ installCopied ? "Copied ✓" : "Copy" }}
-          </span>
-        </button>
+          <!-- ONE-CLICK INSTALL COMMAND PILL -->
+          <div class="hero-install-wrap">
+            <button
+              type="button"
+              class="install-pill"
+              title="Click to copy install command"
+              @click="copyInstallCmd"
+            >
+              <span class="install-prompt">$</span>
+              <code>npm install @ahmadmoussawi/webdb</code>
+              <span class="install-copy-badge">
+                {{ installCopied ? "Copied ✓" : "Copy" }}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- RIGHT COLUMN: INTERACTIVE BROWSER DB SHOWCASE -->
+        <div class="hero-visual-stage">
+          <div class="hero-stage-aura" aria-hidden="true"></div>
+
+          <div class="hero-window-shell">
+            <!-- WINDOW CHROME -->
+            <div class="hw-chrome">
+              <div class="hw-chrome-left">
+                <div class="terminal-dots" aria-hidden="true">
+                  <span class="tdot tdot-red"></span>
+                  <span class="tdot tdot-amber"></span>
+                  <span class="tdot tdot-green"></span>
+                </div>
+                <span class="hw-brand-chip">
+                  <svg
+                    viewBox="0 0 100 100"
+                    width="14"
+                    height="14"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <rect width="100" height="100" rx="22" fill="#3B82F6" />
+                    <path
+                      d="M25 36L50 22L75 36L50 50L25 36Z"
+                      fill="#ffffff"
+                      fill-opacity="0.92"
+                    />
+                    <path
+                      d="M25 52L50 66L75 52"
+                      stroke="#ffffff"
+                      stroke-width="7"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                    <path
+                      d="M25 67L50 81L75 67"
+                      stroke="#ffffff"
+                      stroke-width="7"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <span>webdb://shop_app</span>
+                </span>
+              </div>
+
+              <button
+                type="button"
+                class="hw-runtime-toggle"
+                :aria-pressed="heroRuntime === 'js-opfs'"
+                title="Switch WebDB engine & storage mode"
+                @click="
+                  heroRuntime =
+                    heroRuntime === 'wasm-idb' ? 'js-opfs' : 'wasm-idb'
+                "
+              >
+                <span class="hw-runtime-dot" aria-hidden="true"></span>
+                <span>{{
+                  heroRuntime === "wasm-idb"
+                    ? "WASM • IndexedDB"
+                    : "Pure JS • OPFS"
+                }}</span>
+              </button>
+            </div>
+
+            <!-- LIVE QUERY BAR + CONTROLS -->
+            <div class="hw-toolbar">
+              <div class="hw-query-line" aria-label="Active live query">
+                <span class="hw-query-prompt" aria-hidden="true">›</span>
+                <code v-html="heroQueryHtml"></code>
+              </div>
+
+              <div class="hw-controls">
+                <div class="hw-filter-group" role="group" aria-label="Filter orders">
+                  <button
+                    v-for="f in (['all', 'paid', 'pending'] as const)"
+                    :key="f"
+                    type="button"
+                    :aria-pressed="heroFilter === f"
+                    :class="['hw-filter-btn', { active: heroFilter === f }]"
+                    @click="heroFilter = f"
+                  >
+                    {{ f === "all" ? "All" : f === "paid" ? "Paid" : "Pending" }}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  class="hw-insert-btn"
+                  @click="insertHeroOrder"
+                >
+                  <span>+ Insert Order</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- LIVE ORDERS TABLE -->
+            <div class="hw-table">
+              <div class="hw-table-head" aria-hidden="true">
+                <span class="hw-col-id">ID</span>
+                <span>Customer</span>
+                <span>Total</span>
+                <span>Status (click to toggle)</span>
+              </div>
+
+              <div
+                v-for="row in filteredHeroOrders"
+                :key="row.id"
+                :class="[
+                  'hw-table-row',
+                  { 'row-flash': heroFlashId === row.id },
+                ]"
+              >
+                <span class="hw-col-id hw-cell-id">#{{ row.id }}</span>
+                <span class="hw-cell-name">{{ row.customer }}</span>
+                <span class="hw-cell-total">${{ row.total }}</span>
+                <button
+                  type="button"
+                  :class="[
+                    'hw-status-pill',
+                    row.status === 'paid' ? 'status-paid' : 'status-pending',
+                  ]"
+                  :aria-label="`Toggle order ${row.id} status, currently ${row.status}`"
+                  @click="toggleHeroOrderStatus(row.id)"
+                >
+                  <span aria-hidden="true">{{
+                    row.status === "paid" ? "✓" : "◔"
+                  }}</span>
+                  <span>{{ row.status === "paid" ? "Paid" : "Pending" }}</span>
+                </button>
+              </div>
+
+              <div v-if="filteredHeroOrders.length === 0" class="hw-table-empty">
+                No {{ heroFilter }} orders — click <strong>+ Insert Order</strong>
+                or switch to <strong>All</strong>.
+              </div>
+            </div>
+          </div>
+
+          <!-- DOCKED TAB 2 LIVE SYNC CARD -->
+          <div :class="['hero-sync-card', { 'sync-pulse': heroSyncPulse }]">
+            <div class="sync-card-head">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>Tab 2 · Live Sync</span>
+            </div>
+            <div class="sync-card-body">
+              <div class="sync-metric-val">{{ heroPaidTotal }}</div>
+              <div class="sync-metric-meta">
+                {{ heroPaidCount }} paid • {{ heroOrders.length }} orders
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- 4-CARD VALUE STRIP -->
       <div class="hero-metrics">
-        <div class="metric-card">
-          <span class="metric-pill pill-emerald">SMALL BUNDLE</span>
+        <div class="metric-card metric-emerald">
+          <div class="metric-head-row">
+            <span class="metric-pill pill-emerald">SMALL BUNDLE</span>
+            <span class="metric-icon-box icon-emerald" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+              </svg>
+            </span>
+          </div>
           <div class="metric-val">{{ SIZE_METRICS.wasmGzip }}</div>
           <div class="metric-label">Gzipped WASM Core</div>
           <div class="metric-desc">
@@ -774,8 +1482,16 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="metric-card">
-          <span class="metric-pill pill-cyan">ZERO SERVER CONFIG</span>
+        <div class="metric-card metric-cyan">
+          <div class="metric-head-row">
+            <span class="metric-pill pill-cyan">ZERO SERVER CONFIG</span>
+            <span class="metric-icon-box icon-cyan" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <ellipse cx="12" cy="5" rx="9" ry="3" />
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+              </svg>
+            </span>
+          </div>
           <div class="metric-val">IDB + OPFS</div>
           <div class="metric-label">Async Storage Anywhere</div>
           <div class="metric-desc">
@@ -784,8 +1500,16 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="metric-card">
-          <span class="metric-pill pill-violet">DUAL CORE</span>
+        <div class="metric-card metric-violet">
+          <div class="metric-head-row">
+            <span class="metric-pill pill-violet">DUAL CORE</span>
+            <span class="metric-icon-box icon-violet" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+              </svg>
+            </span>
+          </div>
           <div class="metric-val">WASM + JS</div>
           <div class="metric-label">Works in Restricted CSP</div>
           <div class="metric-desc">
@@ -794,8 +1518,15 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="metric-card">
-          <span class="metric-pill pill-rose">REACTIVE UI</span>
+        <div class="metric-card metric-rose">
+          <div class="metric-head-row">
+            <span class="metric-pill pill-rose">REACTIVE UI</span>
+            <span class="metric-icon-box icon-rose" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+            </span>
+          </div>
           <div class="metric-val">Live Queries</div>
           <div class="metric-label">Auto-Updating Components</div>
           <div class="metric-desc">
@@ -804,8 +1535,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+      </div>
     </header>
 
+    <div class="landing-content">
     <!-- ======================================================================
          2. DEVELOPER EXPERIENCE CODE SHOWCASE
          ====================================================================== -->
@@ -820,7 +1553,7 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <div class="terminal-window">
+      <div class="terminal-window term-brand">
         <div class="terminal-header">
           <div class="terminal-dots" aria-hidden="true">
             <span class="tdot tdot-red"></span>
@@ -1125,7 +1858,7 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- ======================================================================
-         4. BUILT WITH THE BROWSER (6-CARD BENTO GRID)
+         4. BUILT WITH THE BROWSER — INTERACTIVE FEATURE EXPLORER
          ====================================================================== -->
     <section class="section-block">
       <div class="section-header-center">
@@ -1140,106 +1873,715 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <div class="bento-grid">
-        <!-- BENTO 1 (WIDE): PLUGGABLE ASYNC STORAGE -->
-        <div class="bento-card bento-wide">
-          <div class="bento-tag tag-cyan">PLUGGABLE ASYNC STORAGE</div>
-          <h3 class="bento-title">
-            IndexedDB, OPFS, or Custom Storage
-          </h3>
-          <p class="bento-desc">
-            Runs natively on the main thread or in Web Workers with zero
-            <code>COOP/COEP</code> server headers. Pick built-in
-            <strong>IdbStorage</strong>, <strong>OpfsStorage</strong>,
-            <strong>MemoryStorage</strong>, or <strong>NodeFsStorage</strong>—or
-            plug in your own adapter for S3 HTTP Range streaming, Electron,
-            React Native, or KV stores in a few lines.
-          </p>
-          <div class="bento-pills">
-            <span class="bento-chip">IdbStorage</span>
-            <span class="bento-chip">OpfsStorage</span>
-            <span class="bento-chip">MemoryStorage</span>
-            <span class="bento-chip">Custom Adapters</span>
-            <span class="bento-chip">Zero COOP/COEP</span>
+      <div class="feature-explorer">
+        <!-- LEFT RAIL (DESKTOP) / SINGLE-ROW SCROLLER (MOBILE): TABLIST -->
+        <div
+          class="feature-tablist"
+          role="tablist"
+          aria-label="Core browser-native capabilities"
+        >
+          <button
+            v-for="(item, idx) in featureItems"
+            :key="item.id"
+            :id="`feature-tab-${item.id}`"
+            :ref="
+              (el) => {
+                featureTabRefs[item.id] = el as HTMLButtonElement | null;
+              }
+            "
+            type="button"
+            role="tab"
+            :aria-selected="activeFeature === item.id"
+            :tabindex="activeFeature === item.id ? 0 : -1"
+            :class="['feature-tab', `accent-${item.accent}`]"
+            @click="selectFeature(item.id)"
+            @keydown="onFeatureTabKeydown($event, idx)"
+          >
+            <span class="feature-tab-icon" aria-hidden="true">
+              <svg
+                v-if="item.id === 'storage'"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <ellipse cx="12" cy="5" rx="9" ry="3" />
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
+              </svg>
+              <svg
+                v-else-if="item.id === 'dualcore'"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+                <path d="M15 2v2M9 2v2M15 20v2M9 20v2M2 9h2M2 15h2M20 9h2M20 15h2" />
+              </svg>
+              <svg
+                v-else-if="item.id === 'bundle'"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
+              <svg
+                v-else-if="item.id === 'offline'"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <path d="m9 12 2 2 4-4" />
+              </svg>
+              <svg
+                v-else-if="item.id === 'snapshots'"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="4 17 10 11 4 5" />
+                <line x1="12" y1="19" x2="20" y2="19" />
+              </svg>
+              <svg
+                v-else
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18M9 21V9" />
+              </svg>
+            </span>
+
+            <span class="feature-tab-copy">
+              <span class="feature-tab-title">{{ item.title }}</span>
+              <span class="feature-tab-teaser">{{ item.teaser }}</span>
+            </span>
+          </button>
+        </div>
+
+        <!-- RIGHT STAGE: ALL 6 PANELS IN ONE GRID CELL -->
+        <div class="feature-stage">
+          <!-- PANEL 1: PLUGGABLE ASYNC STORAGE -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-storage"
+            :tabindex="activeFeature === 'storage' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'storage')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('storage')"
+          >
+            <article class="feature-stage-card stage-accent-cyan">
+              <header class="stage-header">
+                <span class="stage-tag tag-cyan">PLUGGABLE ASYNC STORAGE</span>
+                <h3 class="stage-title">IndexedDB, OPFS, or Custom Storage</h3>
+                <p class="stage-desc">
+                  Runs natively on the main thread or in Web Workers with zero
+                  <code>COOP/COEP</code> server headers. Swap built-in storage
+                  adapters in one line—or extend <code>MemoryStorage</code> for
+                  S3 HTTP Range streaming, Electron, React Native, or KV stores.
+                </p>
+              </header>
+
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Choose a storage backend"
+                >
+                  <button
+                    v-for="(opt, key) in storageOptions"
+                    :key="key"
+                    type="button"
+                    :aria-pressed="selectedStorage === key"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedStorage === key },
+                    ]"
+                    @click="selectedStorage = key as StorageChoice"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
+
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in renderedStorageCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
+
+                <div class="mini-facts-grid">
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Server Headers</span>
+                    <span class="mini-fact-value">{{
+                      storageOptions[selectedStorage].headers
+                    }}</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Runs In</span>
+                    <span class="mini-fact-value">{{
+                      storageOptions[selectedStorage].runtime
+                    }}</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Best For</span>
+                    <span class="mini-fact-value">{{
+                      storageOptions[selectedStorage].bestFor
+                    }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a
+                  :href="withBase('/guides/storage-and-configuration')"
+                  class="stage-footer-link"
+                >
+                  <span>Read Storage &amp; Custom Adapters Guide</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
           </div>
-        </div>
 
-        <!-- BENTO 2 (WIDE): EMBRACE WEB APIS & DUAL CORE -->
-        <div class="bento-card bento-wide">
-          <div class="bento-tag tag-emerald">EMBRACE WEB APIS &amp; DUAL CORE</div>
-          <h3 class="bento-title">
-            Native Browser APIs + WASM &amp; Pure JS
-          </h3>
-          <p class="bento-desc">
-            Instead of shipping megabytes of duplicate C libraries, WebDB leans
-            on native <code>Web Locks</code>, <code>BroadcastChannel</code>,
-            <code>Intl</code>, <code>RegExp</code>, and <code>crypto</code>.
-            Need to run in a strict-CSP enterprise app or browser extension
-            where WebAssembly is disabled? Switch from
-            <code>WasmEngine</code> to <code>JsEngine</code> in one line.
-          </p>
-          <div class="bento-pills">
-            <span class="bento-chip"
-              >WasmEngine ({{ SIZE_METRICS.wasmGzip }})</span
-            >
-            <span class="bento-chip">JsEngine (Pure JS)</span>
-            <span class="bento-chip">Web Locks</span>
-            <span class="bento-chip">BroadcastChannel</span>
-            <span class="bento-chip">Intl &amp; crypto</span>
+          <!-- PANEL 2: NATIVE WEB APIS & DUAL CORE -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-dualcore"
+            :tabindex="activeFeature === 'dualcore' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'dualcore')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('dualcore')"
+          >
+            <article class="feature-stage-card stage-accent-emerald">
+              <header class="stage-header">
+                <span class="stage-tag tag-emerald">
+                  NATIVE WEB APIS &amp; DUAL CORE
+                </span>
+                <h3 class="stage-title">
+                  WASM Speed + 100% Pure JS Fallback
+                </h3>
+                <p class="stage-desc">
+                  Instead of shipping megabytes of duplicate C libraries, WebDB
+                  leans on native browser APIs. Running inside a strict-CSP
+                  enterprise app or browser extension where WebAssembly is
+                  disallowed? Switch to <code>JsEngine</code> in one line.
+                </p>
+              </header>
+
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Choose an execution engine"
+                >
+                  <button
+                    type="button"
+                    :aria-pressed="selectedEngine === 'wasm'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedEngine === 'wasm' },
+                    ]"
+                    @click="selectedEngine = 'wasm'"
+                  >
+                    WasmEngine (Default)
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="selectedEngine === 'js'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedEngine === 'js' },
+                    ]"
+                    @click="selectedEngine = 'js'"
+                  >
+                    JsEngine (Pure JS / Strict CSP)
+                  </button>
+                </div>
+
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in renderedDualCoreCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
+
+                <div class="mini-facts-grid">
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">CSP Support</span>
+                    <span class="mini-fact-value">{{ dualCoreMeta.csp }}</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Storage Format</span>
+                    <span class="mini-fact-value">{{
+                      dualCoreMeta.format
+                    }}</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Engine Size</span>
+                    <span class="mini-fact-value">{{
+                      dualCoreMeta.footprint
+                    }}</span>
+                  </div>
+                </div>
+
+                <div class="mini-api-row">
+                  <span class="mini-api-label">Built on Web APIs:</span>
+                  <div class="mini-api-pills">
+                    <span class="mini-api-chip">Web Locks</span>
+                    <span class="mini-api-chip">BroadcastChannel</span>
+                    <span class="mini-api-chip">Intl</span>
+                    <span class="mini-api-chip">RegExp</span>
+                    <span class="mini-api-chip">crypto</span>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a
+                  :href="withBase('/guides/storage-and-configuration')"
+                  class="stage-footer-link"
+                >
+                  <span>Compare WASM &amp; Pure JS Engines</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
           </div>
-        </div>
 
-        <!-- BENTO 3: SMALL BUNDLE SIZE -->
-        <div class="bento-card">
-          <div class="bento-tag tag-violet">SMALL BUNDLE SIZE</div>
-          <h3 class="bento-title">Tree-Shakeable Subpath Imports</h3>
-          <p class="bento-desc">
-            Import only what you use (<code>/slim</code>,
-            <code>/core/wasm</code>, <code>/core/js</code>,
-            <code>/storage/*</code>, <code>/react</code>) so unused engines and
-            adapters stay completely out of your production bundle.
-          </p>
-        </div>
+          <!-- PANEL 3: TINY & TREE-SHAKEABLE -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-bundle"
+            :tabindex="activeFeature === 'bundle' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'bundle')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('bundle')"
+          >
+            <article class="feature-stage-card stage-accent-violet">
+              <header class="stage-header">
+                <span class="stage-tag tag-violet">SMALL BUNDLE SIZE</span>
+                <h3 class="stage-title">Tiny &amp; Tree-Shakeable Subpaths</h3>
+                <p class="stage-desc">
+                  Compose your exact imports with <code>/slim</code>,
+                  <code>/core/*</code>, and <code>/storage/*</code> so unused
+                  engines, adapters, and framework hooks never reach your
+                  production bundle.
+                </p>
+              </header>
 
-        <!-- BENTO 4: RELIABLE OFFLINE -->
-        <div class="bento-card">
-          <div class="bento-tag tag-amber">RELIABLE OFFLINE</div>
-          <h3 class="bento-title">Crash-Safe Transactions &amp; Sync</h3>
-          <p class="bento-desc">
-            Atomic transactions with nested savepoints survive sudden tab
-            closes, while commit hooks and coalesced changesets make syncing
-            offline writes back to your server straightforward.
-          </p>
-        </div>
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Toggle optional bundle modules"
+                >
+                  <button
+                    type="button"
+                    :aria-pressed="bundleEngine === 'wasm'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: bundleEngine === 'wasm' },
+                    ]"
+                    @click="bundleEngine = 'wasm'"
+                  >
+                    WASM Core
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="bundleEngine === 'js'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: bundleEngine === 'js' },
+                    ]"
+                    @click="bundleEngine = 'js'"
+                  >
+                    Pure JS Core
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="bundleReact"
+                    :class="['mini-pill-btn', { active: bundleReact }]"
+                    @click="bundleReact = !bundleReact"
+                  >
+                    {{ bundleReact ? "✓ React (<1 KB)" : "+ React (<1 KB)" }}
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="bundleSearch"
+                    :class="['mini-pill-btn', { active: bundleSearch }]"
+                    @click="bundleSearch = !bundleSearch"
+                  >
+                    {{ bundleSearch ? "✓ Search" : "+ Search" }}
+                  </button>
+                </div>
 
-        <!-- BENTO 5: INSTANT HYDRATION -->
-        <div class="bento-card">
-          <div class="bento-tag tag-rose">INSTANT HYDRATION</div>
-          <h3 class="bento-title">Compressed Snapshots &amp; CLI</h3>
-          <p class="bento-desc">
-            Export and restore full databases as compressed
-            <code>.webdb.gz</code> snapshots in milliseconds, and inspect or
-            query local database files from your terminal with
-            <code>npx webdb</code>.
-          </p>
-        </div>
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in bundleCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
 
-        <!-- BENTO 6: SCHEMA & MIGRATIONS -->
-        <div class="bento-card">
-          <div class="bento-tag tag-indigo">SCHEMA &amp; MIGRATIONS</div>
-          <h3 class="bento-title">Typed Schemas, Indexes &amp; Migrations</h3>
-          <p class="bento-desc">
-            Define typed columns (<code>UUID</code>, <code>TEXT</code>,
-            <code>INT32</code>, <code>FLOAT64</code>, <code>BLOB</code>),
-            composite indexes, <code>ALTER TABLE</code> updates, and versioned
-            migrations out of the box.
-          </p>
+                <div class="mini-bundle-compare">
+                  <div class="bundle-row">
+                    <span class="bundle-label"
+                      >Your WebDB selection ({{
+                        bundleSummary.parts.join(" + ")
+                      }})</span
+                    >
+                    <span class="bundle-val bundle-val-win"
+                      >{{
+                        bundleEngine === "wasm"
+                          ? SIZE_METRICS.wasmGzip
+                          : "Zero WASM"
+                      }}
+                      core</span
+                    >
+                  </div>
+                  <div class="bundle-track">
+                    <div
+                      class="bundle-fill bundle-fill-webdb"
+                      :style="{ width: `${bundleSummary.pct}%` }"
+                    ></div>
+                  </div>
+                  <div class="bundle-row bundle-row-muted">
+                    <span class="bundle-label"
+                      >Typical ported desktop WASM DB</span
+                    >
+                    <span class="bundle-val">1 MB – 5 MB+</span>
+                  </div>
+                  <div class="bundle-track">
+                    <div
+                      class="bundle-fill bundle-fill-legacy"
+                      style="width: 100%"
+                    ></div>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a
+                  :href="withBase('/guides/storage-and-configuration')"
+                  class="stage-footer-link"
+                >
+                  <span>Explore Modular Subpath Exports</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
+          </div>
+
+          <!-- PANEL 4: CRASH-SAFE TRANSACTIONS & OFFLINE SYNC -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-offline"
+            :tabindex="activeFeature === 'offline' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'offline')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('offline')"
+          >
+            <article class="feature-stage-card stage-accent-amber">
+              <header class="stage-header">
+                <span class="stage-tag tag-amber">RELIABLE OFFLINE</span>
+                <h3 class="stage-title">Crash-Safe Transactions &amp; Sync</h3>
+                <p class="stage-desc">
+                  Atomic transactions with nested savepoints protect your local
+                  state across sudden tab closes, while commit hooks let you
+                  collect compact net changesets for background sync.
+                </p>
+              </header>
+
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Choose offline reliability feature"
+                >
+                  <button
+                    type="button"
+                    :aria-pressed="selectedOfflineMode === 'savepoints'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedOfflineMode === 'savepoints' },
+                    ]"
+                    @click="selectedOfflineMode = 'savepoints'"
+                  >
+                    Nested Savepoints
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="selectedOfflineMode === 'sync'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedOfflineMode === 'sync' },
+                    ]"
+                    @click="selectedOfflineMode = 'sync'"
+                  >
+                    Coalesced Offline Sync
+                  </button>
+                </div>
+
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in offlineCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
+
+                <div class="mini-facts-grid">
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Multi-Tab Locks</span>
+                    <span class="mini-fact-value">Automatic via Web Locks</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Tab Crash Safety</span>
+                    <span class="mini-fact-value">Atomic commit &amp; rollback</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Sync Payloads</span>
+                    <span class="mini-fact-value">Coalesced net row diffs</span>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a
+                  :href="withBase('/offline-sync')"
+                  class="stage-footer-link"
+                >
+                  <span>Read Transactions &amp; Offline Sync Guide</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
+          </div>
+
+          <!-- PANEL 5: SNAPSHOTS & TERMINAL CLI -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-snapshots"
+            :tabindex="activeFeature === 'snapshots' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'snapshots')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('snapshots')"
+          >
+            <article class="feature-stage-card stage-accent-rose">
+              <header class="stage-header">
+                <span class="stage-tag tag-rose">INSTANT HYDRATION &amp; CLI</span>
+                <h3 class="stage-title">Compressed Snapshots &amp; CLI</h3>
+                <p class="stage-desc">
+                  Pre-seed an indexed database at build time, ship it as a
+                  compact <code>.webdb.gz</code> snapshot for instant browser
+                  cold starts, and inspect or query local files with
+                  <code>npx webdb</code>.
+                </p>
+              </header>
+
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Choose snapshots or CLI workflow"
+                >
+                  <button
+                    type="button"
+                    :aria-pressed="selectedSnapshotMode === 'snapshot'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedSnapshotMode === 'snapshot' },
+                    ]"
+                    @click="selectedSnapshotMode = 'snapshot'"
+                  >
+                    Instant .webdb.gz Hydration
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="selectedSnapshotMode === 'cli'"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedSnapshotMode === 'cli' },
+                    ]"
+                    @click="selectedSnapshotMode = 'cli'"
+                  >
+                    Terminal CLI (npx webdb)
+                  </button>
+                </div>
+
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in snapshotCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
+
+                <div class="mini-facts-grid">
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Cold Start</span>
+                    <span class="mini-fact-value">Zero JSON parsing overhead</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Inspection</span>
+                    <span class="mini-fact-value">Read-only CLI verification</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Portability</span>
+                    <span class="mini-fact-value">Shareable URLs in Studio</span>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a :href="withBase('/guides/cli')" class="stage-footer-link">
+                  <span>Explore Snapshots &amp; CLI Guide</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
+          </div>
+
+          <!-- PANEL 6: TYPED SCHEMAS & MIGRATIONS -->
+          <div
+            role="tabpanel"
+            aria-labelledby="feature-tab-schema"
+            :tabindex="activeFeature === 'schema' ? 0 : undefined"
+            :hidden="hiddenUntilFound(activeFeature === 'schema')"
+            class="feature-panel-slot"
+            @beforematch="selectFeature('schema')"
+          >
+            <article class="feature-stage-card stage-accent-indigo">
+              <header class="stage-header">
+                <span class="stage-tag tag-indigo">SCHEMA &amp; MIGRATIONS</span>
+                <h3 class="stage-title">Typed Schemas, Indexes &amp; Migrations</h3>
+                <p class="stage-desc">
+                  Model relational tables with strongly typed columns
+                  (<code>UUID</code>, <code>ULID</code>, <code>TEXT</code>,
+                  <code>INT32</code>, <code>FLOAT64</code>, <code>BLOB</code>),
+                  composite indexes, and clean schema evolution as your app
+                  grows.
+                </p>
+              </header>
+
+              <div class="stage-widget">
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Step through schema evolution"
+                >
+                  <button
+                    v-for="(step, idx) in migrationSteps"
+                    :key="step.label"
+                    type="button"
+                    :aria-pressed="selectedMigrationStep === idx"
+                    :class="[
+                      'mini-pill-btn',
+                      { active: selectedMigrationStep === idx },
+                    ]"
+                    @click="selectedMigrationStep = idx as 0 | 1 | 2"
+                  >
+                    {{ step.label }}
+                  </button>
+                </div>
+
+                <div class="mini-code-box">
+                  <div
+                    v-for="(line, i) in renderedMigrationCode"
+                    :key="i"
+                    class="code-line"
+                  >
+                    <span class="line-num">{{ i + 1 }}</span>
+                    <span class="line-content" v-html="line || '&nbsp;'"></span>
+                  </div>
+                </div>
+
+                <div class="mini-facts-grid">
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Column Types</span>
+                    <span class="mini-fact-value">UUID, ULID, TEXT, INT, FLOAT, BLOB</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Constraints</span>
+                    <span class="mini-fact-value">Primary Keys &amp; Unique Indexes</span>
+                  </div>
+                  <div class="mini-fact">
+                    <span class="mini-fact-label">Evolution</span>
+                    <span class="mini-fact-value">ALTER TABLE &amp; versioned runners</span>
+                  </div>
+                </div>
+              </div>
+
+              <footer class="stage-footer">
+                <a
+                  :href="withBase('/guides/migrations')"
+                  class="stage-footer-link"
+                >
+                  <span>Read Schema &amp; Migrations Guide</span>
+                  <span class="btn-arrow">→</span>
+                </a>
+              </footer>
+            </article>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- ======================================================================
-         5A. BUILT-IN TEXT SEARCH
+         5A. BUILT-IN TEXT SEARCH — SPLIT LAYOUT WITH LIVE SEARCH WIDGET
          ====================================================================== -->
     <section class="section-block search-section">
       <div class="section-header-center">
@@ -1254,119 +2596,307 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <div class="live-showcase-stack">
-        <div class="terminal-window fw-code-window">
-          <div class="terminal-header">
-            <div class="terminal-dots" aria-hidden="true">
-              <span class="tdot tdot-red"></span>
-              <span class="tdot tdot-amber"></span>
-              <span class="tdot tdot-green"></span>
-            </div>
-            <div class="fw-window-title">
-              <span class="fw-file-name">SearchComponent.tsx</span>
-              <span
-                class="fw-badge-pill"
-                style="color: #f59e0b; background: rgba(245, 158, 11, 0.14)"
+      <div class="split-feature-grid">
+        <!-- LEFT: REAL INLINE LIVE SEARCH WIDGET -->
+        <div class="live-search-card">
+          <div class="live-card-topbar">
+            <span class="live-pulse-pill">
+              <span class="status-dot" aria-hidden="true"></span>
+              LIVE IN YOUR BROWSER
+            </span>
+            <span class="live-pkg-tag">@ahmadmoussawi/webdb/search</span>
+          </div>
+
+          <div class="live-search-field">
+            <label for="landing-search-input" class="live-search-label">
+              Try typo-tolerant search
+            </label>
+            <div class="live-search-input-wrap">
+              <svg
+                class="live-search-icon"
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
               >
-                @ahmadmoussawi/webdb/search
-              </span>
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.3-4.3" />
+              </svg>
+              <input
+                id="landing-search-input"
+                v-model="liveSearchQuery"
+                type="search"
+                class="live-search-input"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Type 'reactve', 'cafe', or 'persist'..."
+              />
             </div>
-            <button class="terminal-copy" @click="copySearchCode">
-              {{ copySearchStatus ? "Copied ✓" : "Copy" }}
+          </div>
+
+          <div class="live-search-controls">
+            <div class="live-presets" role="group" aria-label="Sample queries">
+              <button
+                v-for="preset in liveSearchPresets"
+                :key="preset.query"
+                type="button"
+                :class="[
+                  'preset-chip',
+                  { active: liveSearchQuery === preset.query },
+                ]"
+                @click="liveSearchQuery = preset.query"
+              >
+                <span>{{ preset.query }}</span>
+                <small>{{ preset.hint }}</small>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              :aria-pressed="liveSearchFuzzy"
+              :class="['fuzzy-toggle-btn', { active: liveSearchFuzzy }]"
+              @click="liveSearchFuzzy = !liveSearchFuzzy"
+            >
+              Typo tolerance: {{ liveSearchFuzzy ? "On" : "Off" }}
             </button>
           </div>
 
-          <div class="terminal-body">
-            <div
-              v-for="(line, index) in renderedSearchLines"
-              :key="index"
-              class="code-line"
+          <div class="live-search-status-bar">
+            <span class="live-search-count" aria-live="polite">
+              {{ liveSearchStatus }}
+            </span>
+            <span class="live-timing-pill">Zero external deps</span>
+          </div>
+
+          <ul v-if="liveSearchResult.hits.length" class="live-search-list">
+            <li
+              v-for="hit in liveSearchResult.hits"
+              :key="hit.row.id"
+              class="live-search-item"
             >
-              <span class="line-num">{{ index + 1 }}</span>
-              <span class="line-content" v-html="line || '&nbsp;'"></span>
-            </div>
+              <div class="live-hit-head">
+                <h4
+                  class="live-hit-title"
+                  v-html="hit.highlights.title || hit.row.title"
+                ></h4>
+                <span class="live-hit-cat">{{ hit.row.category }}</span>
+              </div>
+              <p
+                class="live-hit-snippet"
+                v-html="hit.snippets.body || hit.row.body"
+              ></p>
+            </li>
+          </ul>
+          <div v-else class="live-search-empty">
+            No matches for <strong>{{ liveSearchQuery }}</strong
+            >.
+            <template v-if="!liveSearchFuzzy">
+              Turn on typo tolerance or try <code>reactve</code>.
+            </template>
+            <template v-else>Try <code>reactve</code> or <code>cafe</code>.</template>
           </div>
         </div>
 
-        <div class="live-highlights-grid">
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #f59e0b; background: rgba(245, 158, 11, 0.12)"
-            >
-              ALWAYS IN SYNC
+        <!-- RIGHT: COMPACT CODE + KEY ADVANTAGES -->
+        <div class="split-code-col">
+          <div class="terminal-window term-amber">
+            <div class="terminal-header">
+              <div class="terminal-dots" aria-hidden="true">
+                <span class="tdot tdot-red"></span>
+                <span class="tdot tdot-amber"></span>
+                <span class="tdot tdot-green"></span>
+              </div>
+              <div class="fw-window-title">
+                <span class="fw-file-name">SearchComponent.tsx</span>
+                <span
+                  class="fw-badge-pill"
+                  style="color: #f59e0b; background: rgba(245, 158, 11, 0.14)"
+                >
+                  SearchIndex
+                </span>
+              </div>
+              <button
+                type="button"
+                class="terminal-copy"
+                @click="copySearchCode"
+              >
+                {{ copySearchStatus ? "Copied ✓" : "Copy" }}
+              </button>
             </div>
-            <h4 class="lh-title">Zero Duplicate Sync Tables</h4>
-            <p class="lh-desc">
-              Queries your existing tables directly—so search results are always
-              up to date after every insert, update, or delete.
-            </p>
+
+            <div class="terminal-body">
+              <div
+                v-for="(line, index) in renderedSearchLines"
+                :key="index"
+                class="code-line"
+              >
+                <span class="line-num">{{ index + 1 }}</span>
+                <span class="line-content" v-html="line || '&nbsp;'"></span>
+              </div>
+            </div>
           </div>
 
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #10b981; background: rgba(16, 185, 129, 0.12)"
-            >
-              SMART RANKING
-            </div>
-            <h4 class="lh-title">Typo Tolerance &amp; Relevance</h4>
-            <p class="lh-desc">
-              Weighted multi-field scoring, prefix matching, and typo tolerance
-              powered by native browser APIs with zero external dependencies.
-            </p>
-          </div>
+          <ul class="split-points-list">
+            <li class="split-point">
+              <span class="point-badge badge-amber" aria-hidden="true">✓</span>
+              <div>
+                <strong>Always in sync:</strong> queries your existing tables
+                directly with zero duplicate sync tables.
+              </div>
+            </li>
+            <li class="split-point">
+              <span class="point-badge badge-amber" aria-hidden="true">✓</span>
+              <div>
+                <strong>Typo &amp; accent tolerant:</strong> weighted field
+                ranking, prefix autocomplete, and safe <code>&lt;mark&gt;</code>
+                snippets.
+              </div>
+            </li>
+          </ul>
 
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #06b6d4; background: rgba(6, 182, 212, 0.12)"
+          <div class="split-actions">
+            <a :href="withBase('/demos/search')" class="btn btn-primary">
+              <span>Open Full Search Demo</span>
+              <span class="btn-arrow">→</span>
+            </a>
+            <a
+              :href="withBase('/guides/fuzzy-search')"
+              class="btn btn-secondary"
             >
-              UI-READY
-            </div>
-            <h4 class="lh-title">Hit Highlights &amp; Snippets</h4>
-            <p class="lh-desc">
-              Automatically wraps matched keywords in safe
-              <code>&lt;mark&gt;</code> tags and extracts contextual snippets
-              ready to render in your UI.
-            </p>
+              <span>Search Guide</span>
+            </a>
           </div>
-        </div>
-
-        <div class="fw-guide-row">
-          <a :href="withBase('/demos/search')" class="btn btn-primary">
-            <span>Try Interactive Live Search Demo</span>
-            <span class="btn-arrow">→</span>
-          </a>
-          <a :href="withBase('/guides/fuzzy-search')" class="btn btn-secondary">
-            <span>Explore Fuzzy Search Guide</span>
-            <span class="btn-arrow">→</span>
-          </a>
         </div>
       </div>
     </section>
 
     <!-- ======================================================================
-         5B. JAVASCRIPT UDFs
+         5B. JAVASCRIPT UDFs — ALTERNATING SPLIT LAYOUT
          ====================================================================== -->
     <section class="section-block udf-section">
-      <div class="section-header-center">
-        <span class="section-eyebrow eyebrow-rose">
-          CUSTOM JAVASCRIPT FUNCTIONS
-        </span>
-        <h2 class="section-title">
-          Run Any JavaScript or Browser API Inside Queries
-        </h2>
-        <p class="section-subtitle">
-          Register plain JavaScript functions to format dates and currency with
-          <code>Intl</code>, match patterns with <code>RegExp</code>, or run
-          custom business logic right inside <code>.select()</code>,
-          <code>.where()</code>, and <code>.orderBy()</code>.
-        </p>
-      </div>
+      <div class="split-feature-grid split-udf">
+        <!-- LEFT: NARRATIVE + LIVE UDF PREVIEW -->
+        <div class="split-udf-info">
+          <div class="split-header-left">
+            <span class="section-eyebrow eyebrow-rose">
+              CUSTOM JAVASCRIPT FUNCTIONS
+            </span>
+            <h2 class="section-title split-title">
+              Run Any JavaScript or Browser API Inside Queries
+            </h2>
+            <p class="section-subtitle">
+              Register plain JavaScript functions to format dates and currency
+              with <code>Intl</code>, match patterns with <code>RegExp</code>,
+              or run custom business logic right inside <code>.select()</code>,
+              <code>.where()</code>, and <code>.orderBy()</code>.
+            </p>
+          </div>
 
-      <div class="live-showcase-stack">
-        <div class="terminal-window fw-code-window">
+          <!-- INTERACTIVE UDF OUTPUT PREVIEW -->
+          <div class="live-udf-card">
+            <div class="live-card-topbar">
+              <span class="live-pulse-pill pill-rose-soft">
+                <span class="status-dot dot-rose" aria-hidden="true"></span>
+                LIVE INTL + BATCH UDF PREVIEW
+              </span>
+            </div>
+
+            <div class="udf-controls-row">
+              <div class="udf-control-group">
+                <span class="udf-control-label">Currency</span>
+                <div class="mini-switcher" role="group" aria-label="Currency">
+                  <button
+                    v-for="cur in ['USD', 'EUR', 'JPY'] as const"
+                    :key="cur"
+                    type="button"
+                    :aria-pressed="udfCurrency === cur"
+                    :class="['mini-pill-btn', { active: udfCurrency === cur }]"
+                    @click="udfCurrency = cur"
+                  >
+                    {{ cur }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="udf-control-group">
+                <span class="udf-control-label">Discount</span>
+                <div
+                  class="mini-switcher"
+                  role="group"
+                  aria-label="Discount percentage"
+                >
+                  <button
+                    v-for="pct in [10, 20, 35] as const"
+                    :key="pct"
+                    type="button"
+                    :aria-pressed="udfDiscount === pct"
+                    :class="['mini-pill-btn', { active: udfDiscount === pct }]"
+                    @click="udfDiscount = pct"
+                  >
+                    {{ pct }}% off
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="udf-preview-table">
+              <div class="udf-preview-head">
+                <span>Product</span>
+                <span>Original</span>
+                <span>format_money(calc_discount)</span>
+              </div>
+              <div
+                v-for="row in formattedUdfRows"
+                :key="row.name"
+                class="udf-preview-row"
+              >
+                <span class="udf-prod-name">{{ row.name }}</span>
+                <span class="udf-prod-orig">{{ row.original }}</span>
+                <span class="udf-prod-deal">{{ row.deal }}</span>
+              </div>
+            </div>
+          </div>
+
+          <ul class="split-points-list">
+            <li class="split-point">
+              <span class="point-badge badge-rose" aria-hidden="true">✓</span>
+              <div>
+                <strong>Native Web APIs built in:</strong> use
+                <code>Intl</code>, <code>RegExp</code>, and
+                <code>crypto</code> without bundling heavy C libraries.
+              </div>
+            </li>
+            <li class="split-point">
+              <span class="point-badge badge-rose" aria-hidden="true">✓</span>
+              <div>
+                <strong>Smooth batch execution:</strong>
+                <code>registerBatchedFunction</code> processes rows in chunks to
+                keep large queries fast.
+              </div>
+            </li>
+          </ul>
+
+          <div class="split-actions">
+            <a
+              :href="withBase('/guides/expressions-and-functions')"
+              class="btn btn-primary"
+            >
+              <span>Read UDFs Guide</span>
+              <span class="btn-arrow">→</span>
+            </a>
+            <a :href="withBase('/demos/search')" class="btn btn-secondary">
+              <span>See UDFs in Live Demo</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- RIGHT: UDF CODE TERMINAL -->
+        <div class="terminal-window term-rose">
           <div class="terminal-header">
             <div class="terminal-dots" aria-hidden="true">
               <span class="tdot tdot-red"></span>
@@ -1382,7 +2912,7 @@ onBeforeUnmount(() => {
                 db.registerFunction()
               </span>
             </div>
-            <button class="terminal-copy" @click="copyUdfCode">
+            <button type="button" class="terminal-copy" @click="copyUdfCode">
               {{ copyUdfStatus ? "Copied ✓" : "Copy" }}
             </button>
           </div>
@@ -1397,66 +2927,6 @@ onBeforeUnmount(() => {
               <span class="line-content" v-html="line || '&nbsp;'"></span>
             </div>
           </div>
-        </div>
-
-        <div class="live-highlights-grid">
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #f43f5e; background: rgba(244, 63, 94, 0.12)"
-            >
-              BROWSER APIS BUILT IN
-            </div>
-            <h4 class="lh-title">Use Native Web APIs</h4>
-            <p class="lh-desc">
-              Call <code>Intl.DateTimeFormat</code>,
-              <code>Intl.NumberFormat</code>, and <code>RegExp</code> directly
-              inside queries without bundling heavy C libraries.
-            </p>
-          </div>
-
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #10b981; background: rgba(16, 185, 129, 0.12)"
-            >
-              FAST BATCH EXECUTION
-            </div>
-            <h4 class="lh-title">Automatic Chunked Batching</h4>
-            <p class="lh-desc">
-              <code>registerBatchedFunction</code> processes rows in batches
-              rather than one call per row, keeping large filter and sort
-              queries smooth.
-            </p>
-          </div>
-
-          <div class="live-highlight-card">
-            <div
-              class="lh-badge"
-              style="color: #8b5cf6; background: rgba(139, 92, 246, 0.12)"
-            >
-              SEAMLESS INTEGRATION
-            </div>
-            <h4 class="lh-title">Works Across Your Queries</h4>
-            <p class="lh-desc">
-              Use custom functions cleanly in projections, filters, and sorting,
-              with optional return types for predictable TypeScript results.
-            </p>
-          </div>
-        </div>
-
-        <div class="fw-guide-row">
-          <a
-            :href="withBase('/guides/expressions-and-functions')"
-            class="btn btn-primary"
-          >
-            <span>Read Expressions &amp; UDFs Guide</span>
-            <span class="btn-arrow">→</span>
-          </a>
-          <a :href="withBase('/demos/search')" class="btn btn-secondary">
-            <span>See UDFs in Live Demo</span>
-            <span class="btn-arrow">→</span>
-          </a>
         </div>
       </div>
     </section>
@@ -1689,10 +3159,10 @@ onBeforeUnmount(() => {
         <table class="compare-table">
           <thead>
             <tr>
-              <th>Capability</th>
-              <th>Raw IndexedDB / Wrappers</th>
-              <th>Ported Desktop WASM (SQLite / PGlite)</th>
-              <th class="col-webdb-head">
+              <th scope="col">Capability</th>
+              <th scope="col">Raw IndexedDB / Wrappers</th>
+              <th scope="col">Ported Desktop WASM (SQLite / PGlite)</th>
+              <th scope="col" class="col-webdb-head">
                 <div class="webdb-th-inner">
                   <span>WebDB</span>
                   <span class="webdb-th-badge">Browser-Native</span>
@@ -1702,65 +3172,182 @@ onBeforeUnmount(() => {
           </thead>
           <tbody>
             <tr>
-              <td class="td-feature">Bundle Size</td>
-              <td class="td-neutral">~15–40 KB (No query engine)</td>
-              <td class="td-bad">1 MB – 5 MB+ WASM binary</td>
-              <td class="td-good">
-                <strong>{{ SIZE_METRICS.wasmGzip }} Gzipped WASM Core</strong>
-                ({{ SIZE_METRICS.wasmRaw }} raw, tree-shakeable)
+              <th scope="row" class="td-feature">Bundle Size</th>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-neutral" aria-hidden="true">•</span>
+                  <span>~15–40 KB (No query engine)</span>
+                </span>
               </td>
-            </tr>
-            <tr>
-              <td class="td-feature">Server Configuration</td>
-              <td class="td-neutral">None required</td>
               <td class="td-bad">
-                Often needs <code>COOP/COEP</code> headers &amp; worker proxies
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>1 MB – 5 MB+ WASM binary</span>
+                </span>
               </td>
               <td class="td-good">
-                <strong>Zero Headers</strong> — runs on any static host or CDN
-              </td>
-            </tr>
-            <tr>
-              <td class="td-feature">Strict CSP / Restricted Environments</td>
-              <td class="td-neutral">Pure JS (works)</td>
-              <td class="td-bad">Blocked if WASM is disallowed</td>
-              <td class="td-good">
-                <strong>Dual Core (WASM + Pure JS)</strong> — swap in one line
-              </td>
-            </tr>
-            <tr>
-              <td class="td-feature">Async Storage &amp; Custom Adapters</td>
-              <td class="td-bad">IndexedDB only</td>
-              <td class="td-warn">Complex C VFS / async shims</td>
-              <td class="td-good">
-                <strong>OPFS, IDB, Memory, Node, or Custom</strong> — clean
-                async adapters
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>{{ SIZE_METRICS.wasmGzip }} Gzipped WASM Core</strong>
+                    ({{ SIZE_METRICS.wasmRaw }} raw, tree-shakeable)
+                  </span>
+                </span>
               </td>
             </tr>
             <tr>
-              <td class="td-feature">Relational Queries</td>
-              <td class="td-bad">Manual JS loops &amp; cursor code</td>
-              <td class="td-neutral">Full SQL text parser</td>
+              <th scope="row" class="td-feature">Server Configuration</th>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>None required</span>
+                </span>
+              </td>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>
+                    Often needs <code>COOP/COEP</code> headers &amp; worker
+                    proxies
+                  </span>
+                </span>
+              </td>
               <td class="td-good">
-                <strong>Fluent TypeScript</strong> JOINs, GROUP BY &amp;
-                subqueries
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>Zero Headers</strong> — runs on any static host or
+                    CDN
+                  </span>
+                </span>
               </td>
             </tr>
             <tr>
-              <td class="td-feature">Reactive UI &amp; Multi-Tab Sync</td>
-              <td class="td-neutral">Basic table hooks / polling</td>
-              <td class="td-bad">DIY wrappers / manual invalidation</td>
+              <th scope="row" class="td-feature">
+                Strict CSP / Restricted Environments
+              </th>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>Pure JS (works)</span>
+                </span>
+              </td>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>Blocked if WASM is disallowed</span>
+                </span>
+              </td>
               <td class="td-good">
-                <strong>&lt;1 KB Adapters</strong> for React, Vue, Angular &amp;
-                JS with cross-tab sync
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>Dual Core (WASM + Pure JS)</strong> — swap in one
+                    line
+                  </span>
+                </span>
               </td>
             </tr>
             <tr>
-              <td class="td-feature">Full-Text Search &amp; Custom UDFs</td>
-              <td class="td-bad">External packages required</td>
-              <td class="td-neutral">Heavy extensions &amp; sync tables</td>
+              <th scope="row" class="td-feature">
+                Async Storage &amp; Custom Adapters
+              </th>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>IndexedDB only</span>
+                </span>
+              </td>
+              <td class="td-warn">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-warn" aria-hidden="true">!</span>
+                  <span>Complex C VFS / async shims</span>
+                </span>
+              </td>
               <td class="td-good">
-                <strong>Zero-Dependency Fuzzy Search</strong> + native JS UDFs
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>OPFS, IDB, Memory, Node, or Custom</strong> — clean
+                    async adapters
+                  </span>
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" class="td-feature">Relational Queries</th>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>Manual JS loops &amp; cursor code</span>
+                </span>
+              </td>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>Full SQL text parser</span>
+                </span>
+              </td>
+              <td class="td-good">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>Fluent TypeScript</strong> JOINs, GROUP BY &amp;
+                    subqueries
+                  </span>
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" class="td-feature">
+                Reactive UI &amp; Multi-Tab Sync
+              </th>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-warn" aria-hidden="true">!</span>
+                  <span>Basic table hooks / polling</span>
+                </span>
+              </td>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>DIY wrappers / manual invalidation</span>
+                </span>
+              </td>
+              <td class="td-good">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>&lt;1 KB Adapters</strong> for React, Vue, Angular
+                    &amp; JS with cross-tab sync
+                  </span>
+                </span>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" class="td-feature">
+                Full-Text Search &amp; Custom UDFs
+              </th>
+              <td class="td-bad">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-bad" aria-hidden="true">✕</span>
+                  <span>External packages required</span>
+                </span>
+              </td>
+              <td class="td-neutral">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-warn" aria-hidden="true">!</span>
+                  <span>Heavy extensions &amp; sync tables</span>
+                </span>
+              </td>
+              <td class="td-good">
+                <span class="cmp-cell">
+                  <span class="cmp-icon cmp-good" aria-hidden="true">✓</span>
+                  <span>
+                    <strong>Zero-Dependency Fuzzy Search</strong> + native JS
+                    UDFs
+                  </span>
+                </span>
               </td>
             </tr>
           </tbody>
@@ -1769,7 +3356,7 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- ======================================================================
-         7. TRY IT LIVE: INTERACTIVE DEMOS, STUDIO IDE & BENCHMARKS
+         7. TRY IT LIVE: INTERACTIVE DEMOS, STUDIO IDE & CLOSING CTA
          ====================================================================== -->
     <section class="section-block">
       <div class="section-header-center">
@@ -1783,6 +3370,19 @@ onBeforeUnmount(() => {
 
       <div class="demos-strip">
         <a :href="withBase('/demos/multi-tab')" class="demo-preview-card">
+          <div class="demo-thumb thumb-tabs" aria-hidden="true">
+            <div class="mini-win">
+              <span class="mini-win-bar"></span>
+              <span class="mini-win-line w-70"></span>
+              <span class="mini-win-line w-50"></span>
+            </div>
+            <span class="mini-sync-beam">⇄</span>
+            <div class="mini-win">
+              <span class="mini-win-bar bar-emerald"></span>
+              <span class="mini-win-line w-70"></span>
+              <span class="mini-win-line w-50"></span>
+            </div>
+          </div>
           <span class="demo-preview-tag tag-emerald">MULTI-TAB SYNC</span>
           <h3 class="demo-preview-title">Two Tabs, One Database</h3>
           <p class="demo-preview-desc">
@@ -1793,6 +3393,19 @@ onBeforeUnmount(() => {
         </a>
 
         <a :href="withBase('/demos/kanban')" class="demo-preview-card">
+          <div class="demo-thumb thumb-kanban" aria-hidden="true">
+            <div class="mini-kcol">
+              <span class="mini-kcard"></span>
+              <span class="mini-kcard"></span>
+            </div>
+            <div class="mini-kcol">
+              <span class="mini-kcard kcard-active"></span>
+            </div>
+            <div class="mini-kcol">
+              <span class="mini-kcard kcard-done"></span>
+              <span class="mini-kcard kcard-done"></span>
+            </div>
+          </div>
           <span class="demo-preview-tag tag-cyan">ATOMIC TRANSACTIONS</span>
           <h3 class="demo-preview-title">Kanban Board</h3>
           <p class="demo-preview-desc">
@@ -1803,6 +3416,18 @@ onBeforeUnmount(() => {
         </a>
 
         <a :href="withBase('/demos/search')" class="demo-preview-card">
+          <div class="demo-thumb thumb-search" aria-hidden="true">
+            <div class="mini-sbar">
+              <span>reactve</span>
+              <span class="mini-smatch">typo ok</span>
+            </div>
+            <div class="mini-srow">
+              <span class="mini-smark">React</span>ive Live Queries
+            </div>
+            <div class="mini-srow">
+              <span class="mini-smark">React</span> + Vue Adapters
+            </div>
+          </div>
           <span class="demo-preview-tag tag-amber">FUZZY SEARCH + UDFS</span>
           <h3 class="demo-preview-title">Typo-Tolerant Search</h3>
           <p class="demo-preview-desc">
@@ -1862,18 +3487,67 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+
+      <!-- CLOSING CTA BANNER -->
+      <div class="closing-cta-banner">
+        <div class="closing-cta-grid" aria-hidden="true"></div>
+        <div class="closing-cta-inner">
+          <span class="section-eyebrow eyebrow-emerald">START IN SECONDS</span>
+          <h2 class="closing-cta-title">
+            Ready to build your next local-first web app?
+          </h2>
+          <p class="closing-cta-subtitle">
+            Relational queries, reactive UI updates, and reliable offline
+            storage—in a tiny bundle with zero server headers.
+          </p>
+          <div class="closing-cta-actions">
+            <a :href="withBase('/getting-started')" class="btn btn-primary">
+              <span>Get Started</span>
+              <span class="btn-arrow">→</span>
+            </a>
+            <a href="https://studio.webdb.dev/" class="btn btn-secondary">
+              <span>Launch Studio IDE</span>
+            </a>
+          </div>
+          <button
+            type="button"
+            class="install-pill closing-install-pill"
+            title="Click to copy install command"
+            @click="copyInstallCmd"
+          >
+            <span class="install-prompt">$</span>
+            <code>npm install @ahmadmoussawi/webdb</code>
+            <span class="install-copy-badge">
+              {{ installCopied ? "Copied ✓" : "Copy" }}
+            </span>
+          </button>
+        </div>
+      </div>
     </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .webdb-landing {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 2.5rem 1.75rem 6rem;
+  width: 100%;
+  max-width: none;
+  padding: 0 0 6rem;
   font-family: var(--vp-font-family-base);
   color: var(--vp-c-text-1);
   overflow-x: clip;
+}
+
+.hero-inner,
+.landing-content {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-inline: 1.75rem;
+}
+
+.hero-inner {
+  position: relative;
+  z-index: 1;
 }
 
 code {
@@ -1881,27 +3555,163 @@ code {
 }
 
 /* ============================================================================
-   1. HERO SECTION
+   1. SPLIT VISUAL HERO SECTION
    ============================================================================ */
 .hero-section {
   position: relative;
-  text-align: center;
-  padding: 3.25rem 1rem 4.25rem;
-  max-width: 980px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  text-align: left;
+  padding: 4rem 0 4.5rem;
+  overflow: clip;
+  --hero-mouse-x: 50%;
+  --hero-mouse-y: 35%;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .hero-section:hover {
+    --hero-torch-inner: 72px;
+    --hero-torch-outer: 300px;
+  }
+}
+
+.hero-grid-bg {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--vp-c-text-1) 14%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 24px 24px;
+  mask-image: linear-gradient(
+    to bottom,
+    black 0%,
+    black 75%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black 0%,
+    black 75%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hero-torch-grid,
+.hero-torch-beam {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  -webkit-mask-image: radial-gradient(
+    circle at var(--hero-mouse-x, 50%) var(--hero-mouse-y, 35%),
+    black var(--hero-torch-inner, 0px),
+    transparent var(--hero-torch-outer, 0px)
+  );
+  mask-image: radial-gradient(
+    circle at var(--hero-mouse-x, 50%) var(--hero-mouse-y, 35%),
+    black var(--hero-torch-inner, 0px),
+    transparent var(--hero-torch-outer, 0px)
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  transition:
+    --hero-torch-inner 0.22s ease-out,
+    --hero-torch-outer 0.22s ease-out;
+}
+
+.hero-torch-grid {
+  background-image:
+    radial-gradient(rgba(37, 99, 235, 0.52) 1.5px, transparent 1.5px),
+    linear-gradient(to right, rgba(37, 99, 235, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(16, 185, 129, 0.08) 1px, transparent 1px);
+  background-size:
+    24px 24px,
+    48px 48px,
+    48px 48px;
+}
+
+:global(.dark) .hero-torch-grid {
+  background-image:
+    radial-gradient(rgba(56, 189, 248, 0.62) 1.5px, transparent 1.5px),
+    linear-gradient(to right, rgba(56, 189, 248, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(16, 185, 129, 0.12) 1px, transparent 1px);
+}
+
+.hero-torch-beam {
+  background: radial-gradient(
+    circle 300px at var(--hero-mouse-x, 50%) var(--hero-mouse-y, 35%),
+    rgba(37, 99, 235, 0.14) 0%,
+    rgba(139, 92, 246, 0.09) 42%,
+    rgba(16, 185, 129, 0.08) 72%,
+    transparent 100%
+  );
+}
+
+:global(.dark) .hero-torch-beam {
+  background: radial-gradient(
+    circle 300px at var(--hero-mouse-x, 50%) var(--hero-mouse-y, 35%),
+    rgba(56, 189, 248, 0.2) 0%,
+    rgba(139, 92, 246, 0.14) 45%,
+    rgba(16, 185, 129, 0.11) 75%,
+    transparent 100%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-torch-grid,
+  .hero-torch-beam {
+    transition: none !important;
+    display: none;
+  }
 }
 
 .hero-glow {
   position: absolute;
-  top: -40px;
-  left: 50%;
+  top: -72px;
+  left: 55%;
   transform: translateX(-50%);
-  width: min(680px, 100vw);
-  height: 320px;
-  background: var(--webdb-hero-glow);
+  width: min(1040px, 100vw);
+  height: 440px;
+  background: radial-gradient(
+    ellipse at 55% 40%,
+    rgba(37, 99, 235, 0.22) 0%,
+    rgba(139, 92, 246, 0.14) 36%,
+    rgba(16, 185, 129, 0.12) 64%,
+    transparent 80%
+  );
   pointer-events: none;
   z-index: 0;
-  filter: blur(24px);
+  filter: blur(34px);
+}
+
+:global(.dark) .hero-glow {
+  background: radial-gradient(
+    ellipse at 55% 40%,
+    rgba(56, 189, 248, 0.22) 0%,
+    rgba(139, 92, 246, 0.16) 38%,
+    rgba(16, 185, 129, 0.14) 66%,
+    transparent 82%
+  );
+}
+
+.hero-split {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(0, 1.08fr);
+  gap: 2.75rem;
+  align-items: center;
+  margin-bottom: 3.25rem;
+}
+
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
 }
 
 .hero-eyebrow {
@@ -1910,15 +3720,15 @@ code {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.55rem;
-  padding: 0.4rem 1rem;
+  justify-content: flex-start;
+  gap: 0.5rem;
+  padding: 0.38rem 0.9rem;
   border-radius: 999px;
   border: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
   font-family: var(--vp-font-family-mono);
-  font-size: 0.76rem;
-  margin-bottom: 1.75rem;
+  font-size: 0.72rem;
+  margin-bottom: 1.45rem;
 }
 
 .status-dot {
@@ -1946,16 +3756,23 @@ code {
 .hero-title {
   position: relative;
   z-index: 1;
-  font-size: 3.75rem;
+  font-size: 3.35rem;
   font-weight: 800;
-  letter-spacing: -1.8px;
-  line-height: 1.12;
-  margin: 0 0 1.35rem;
+  letter-spacing: -1.6px;
+  line-height: 1.08;
+  margin: 0 0 1.2rem;
   color: var(--vp-c-text-1);
 }
 
 .hero-gradient {
-  background: linear-gradient(135deg, var(--vp-c-brand-1) 0%, #10b981 100%);
+  background: linear-gradient(125deg, #2563eb 0%, #7c3aed 52%, #10b981 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+:global(.dark) .hero-gradient {
+  background: linear-gradient(125deg, #38bdf8 0%, #a78bfa 52%, #34d399 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -1964,11 +3781,11 @@ code {
 .hero-lead {
   position: relative;
   z-index: 1;
-  font-size: 1.18rem;
+  font-size: 1.12rem;
   line-height: 1.65;
   color: var(--vp-c-text-2);
-  max-width: 720px;
-  margin: 0 auto 2.25rem;
+  max-width: 540px;
+  margin: 0 0 1.9rem;
 }
 
 .hero-lead code {
@@ -1983,10 +3800,11 @@ code {
   position: relative;
   z-index: 1;
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
-  gap: 1rem;
-  margin-bottom: 1.35rem;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-bottom: 1.2rem;
 }
 
 .btn {
@@ -2041,8 +3859,384 @@ code {
   position: relative;
   z-index: 1;
   display: flex;
+  justify-content: flex-start;
+  margin-bottom: 0;
+}
+
+/* RIGHT COLUMN: INTERACTIVE BROWSER DB SHOWCASE */
+.hero-visual-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.hero-stage-aura {
+  position: absolute;
+  inset: -16px -14px;
+  border-radius: 26px;
+  background: radial-gradient(
+    circle at 30% 25%,
+    rgba(59, 130, 246, 0.28),
+    rgba(139, 92, 246, 0.2) 45%,
+    rgba(16, 185, 129, 0.2) 85%,
+    transparent 100%
+  );
+  filter: blur(26px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hero-window-shell {
+  position: relative;
+  z-index: 1;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #0b1120;
+  color: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  box-shadow:
+    0 24px 54px rgba(15, 23, 42, 0.28),
+    0 0 0 1px rgba(56, 189, 248, 0.12);
+}
+
+.hw-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.72rem 1rem;
+  background: #131c31;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.hw-chrome-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.hw-brand-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+
+.hw-runtime-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.26rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.hw-runtime-toggle:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.7);
+}
+
+.hw-runtime-toggle:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.hw-runtime-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 8px #38bdf8;
+}
+
+.hw-toolbar {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  background: #0f172a;
+}
+
+.hw-query-line {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.48rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.74rem;
+  color: #e2e8f0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.hw-query-line :deep(.hl-str) {
+  color: #34d399;
+}
+.hw-query-line :deep(.hl-fn) {
+  color: #60a5fa;
+}
+.hw-query-line :deep(.hl-kw) {
+  color: #c084fc;
+}
+
+.hw-query-prompt {
+  color: #34d399;
+  font-weight: 800;
+}
+
+.hw-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.hw-filter-group {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.hw-filter-btn {
+  padding: 0.28rem 0.65rem;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(30, 41, 59, 0.75);
+  color: #cbd5e1;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.hw-filter-btn:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #ffffff;
+}
+
+.hw-filter-btn.active {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: #38bdf8;
+  color: #e0f2fe;
+}
+
+.hw-filter-btn:focus-visible,
+.hw-insert-btn:focus-visible,
+.hw-status-pill:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.hw-insert-btn {
+  padding: 0.3rem 0.75rem;
+  border-radius: 7px;
+  border: 1px solid rgba(16, 185, 129, 0.55);
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.71rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.hw-insert-btn:hover {
+  background: rgba(16, 185, 129, 0.28);
+  border-color: #34d399;
+  color: #ecfdf5;
+}
+
+.hw-table {
+  display: flex;
+  flex-direction: column;
+  padding: 0.35rem 0 0.85rem;
+  min-height: 236px;
+  height: 236px;
+  box-sizing: border-box;
+}
+
+.hw-table-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
   justify-content: center;
-  margin-bottom: 3.25rem;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  padding: 1rem;
+  font-size: 0.82rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.hw-table-empty strong {
+  color: #e2e8f0;
+}
+
+.hw-table-head,
+.hw-table-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 72px 116px;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1rem;
+}
+
+.hw-table-head {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.hw-table-row {
+  font-size: 0.82rem;
+  color: #e2e8f0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  transition: background-color 0.25s ease;
+}
+
+.hw-table-row:last-child {
+  border-bottom: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hw-table-row.row-flash {
+    background: rgba(16, 185, 129, 0.18);
+  }
+}
+
+.hw-cell-id {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.74rem;
+  color: #94a3b8;
+}
+
+.hw-cell-name {
+  font-weight: 600;
+  color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hw-cell-total {
+  font-family: var(--vp-font-family-mono);
+  font-weight: 700;
+  color: #cbd5e1;
+}
+
+.hw-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 999px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.69rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.status-paid {
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.status-pending {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+/* FLOATING DOCKED TAB 2 SYNC CARD */
+.hero-sync-card {
+  position: relative;
+  z-index: 2;
+  align-self: flex-end;
+  margin: -1.15rem 1rem 0 auto;
+  min-width: 215px;
+  padding: 0.85rem 1.05rem;
+  border-radius: 13px;
+  background: #111a2e;
+  color: #f8fafc;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.34);
+  transition: border-color 0.2s ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-sync-card.sync-pulse {
+    border-color: #34d399;
+    transform: translateY(-2px);
+  }
+}
+
+.sync-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6ee7b7;
+  margin-bottom: 0.32rem;
+}
+
+.sync-card-body {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.85rem;
+}
+
+.sync-metric-val {
+  font-family: var(--vp-font-family-mono);
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #ffffff;
+}
+
+.sync-metric-meta {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.7rem;
+  color: #94a3b8;
 }
 
 .install-pill {
@@ -2099,21 +4293,106 @@ code {
 }
 
 .metric-card {
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 1.35rem 1.25rem;
+  --metric-accent: var(--vp-c-brand-1);
   transition:
     border-color 0.2s ease,
+    box-shadow 0.2s ease,
     transform 0.2s ease;
 }
 
+.metric-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--metric-accent),
+    transparent
+  );
+  opacity: 0.7;
+}
+
+.metric-emerald {
+  --metric-accent: #10b981;
+}
+.metric-cyan {
+  --metric-accent: #0ea5e9;
+}
+.metric-violet {
+  --metric-accent: #8b5cf6;
+}
+.metric-rose {
+  --metric-accent: #f43f5e;
+}
+
 .metric-card:hover {
-  border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--metric-accent) 55%, var(--vp-c-divider));
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--metric-accent) 10%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .metric-card:hover {
+    transform: translateY(-2px);
+  }
+}
+
+.metric-head-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.metric-head-row .metric-pill {
+  margin-bottom: 0;
+}
+
+.metric-icon-box {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+
+.icon-emerald {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.icon-cyan {
+  color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.12);
+  border-color: rgba(14, 165, 233, 0.25);
+}
+
+.icon-violet {
+  color: #8b5cf6;
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.25);
+}
+
+.icon-rose {
+  color: #f43f5e;
+  background: rgba(244, 63, 94, 0.12);
+  border-color: rgba(244, 63, 94, 0.25);
 }
 
 .metric-val {
@@ -2260,7 +4539,29 @@ code {
   box-shadow: var(--webdb-term-shadow);
   transition:
     background-color 0.2s ease,
-    border-color 0.2s ease;
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.term-brand {
+  border-color: color-mix(in srgb, var(--vp-c-brand-1) 28%, var(--webdb-term-border));
+  box-shadow:
+    var(--webdb-term-shadow),
+    0 12px 36px rgba(37, 99, 235, 0.08);
+}
+
+.term-amber {
+  border-color: rgba(245, 158, 11, 0.32);
+  box-shadow:
+    var(--webdb-term-shadow),
+    0 12px 32px rgba(245, 158, 11, 0.08);
+}
+
+.term-rose {
+  border-color: rgba(244, 63, 94, 0.32);
+  box-shadow:
+    var(--webdb-term-shadow),
+    0 12px 32px rgba(244, 63, 94, 0.08);
 }
 
 .terminal-header {
@@ -2588,49 +4889,8 @@ code {
 }
 
 /* ============================================================================
-   4. BENTO GRID
+   4. BUILT WITH THE BROWSER — INTERACTIVE FEATURE EXPLORER
    ============================================================================ */
-.bento-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1.15rem;
-}
-
-.bento-card {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 14px;
-  padding: 1.65rem 1.5rem;
-  display: flex;
-  flex-direction: column;
-  transition:
-    border-color 0.2s ease,
-    transform 0.2s ease;
-}
-
-.bento-card:hover {
-  border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
-}
-
-.bento-wide {
-  grid-column: span 2;
-}
-
-.bento-tag {
-  display: inline-block;
-  align-self: flex-start;
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  margin-bottom: 0.85rem;
-}
-
 .tag-cyan {
   color: #0ea5e9;
   background: rgba(14, 165, 233, 0.12);
@@ -2656,37 +4916,917 @@ code {
   background: rgba(99, 102, 241, 0.12);
 }
 
-.bento-title {
-  font-size: 1.15rem;
-  font-weight: 800;
-  color: var(--vp-c-text-1);
-  margin: 0 0 0.6rem;
+.feature-explorer {
+  display: grid;
+  grid-template-columns: minmax(270px, 340px) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
 }
 
-.bento-desc {
-  font-size: 0.88rem;
-  line-height: 1.6;
+.feature-tablist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.feature-tab {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.95rem 1.05rem;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--vp-c-text-2);
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
+  --feature-accent: var(--vp-c-brand-1);
+}
+
+.feature-tab.accent-cyan {
+  --feature-accent: #0ea5e9;
+}
+.feature-tab.accent-emerald {
+  --feature-accent: #10b981;
+}
+.feature-tab.accent-violet {
+  --feature-accent: #8b5cf6;
+}
+.feature-tab.accent-amber {
+  --feature-accent: #f59e0b;
+}
+.feature-tab.accent-rose {
+  --feature-accent: #f43f5e;
+}
+.feature-tab.accent-indigo {
+  --feature-accent: #6366f1;
+}
+
+.feature-tab:hover {
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+}
+
+.feature-tab:focus-visible {
+  outline: 2px solid var(--feature-accent);
+  outline-offset: 2px;
+}
+
+.feature-tab[aria-selected="true"] {
+  background: var(--vp-c-bg-soft);
+  border-color: var(--vp-c-divider);
+  color: var(--vp-c-text-1);
+}
+
+/* Non-color selection indicator using border on ::after (no layout shift) */
+.feature-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 10px auto 10px 0;
+  border-inline-start: 3px solid var(--feature-accent);
+  border-radius: 2px;
+}
+
+.feature-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-2);
+  transition:
+    color 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.feature-tab[aria-selected="true"] .feature-tab-icon {
+  color: var(--feature-accent);
+  border-color: color-mix(in srgb, var(--feature-accent) 45%, var(--vp-c-divider));
+  background: color-mix(in srgb, var(--feature-accent) 12%, var(--vp-c-bg));
+}
+
+.feature-tab-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.feature-tab-title {
+  font-size: 0.94rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--vp-c-text-1);
+}
+
+.feature-tab-teaser {
+  font-size: 0.79rem;
+  line-height: 1.4;
+  color: var(--vp-c-text-2);
+}
+
+/* Stack all tabpanels in one grid cell with zero gap */
+.feature-stage {
+  display: grid;
+  min-width: 0;
+}
+
+.feature-panel-slot {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.feature-panel-slot[hidden] {
+  pointer-events: none;
+  align-self: start;
+}
+
+.feature-panel-slot:not([hidden]) {
+  position: relative;
+  z-index: 1;
+}
+
+.feature-panel-slot:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 4px;
+  border-radius: 16px;
+}
+
+.feature-stage-card {
+  position: relative;
+  overflow: hidden;
+  container-type: inline-size;
+  --stage-accent: var(--vp-c-brand-1);
+  background:
+    radial-gradient(
+      ellipse 80% 45% at 50% 0%,
+      color-mix(in srgb, var(--stage-accent) 9%, transparent),
+      transparent 70%
+    ),
+    var(--vp-c-bg-soft);
+  border: 1px solid color-mix(in srgb, var(--stage-accent) 26%, var(--vp-c-divider));
+  border-radius: 16px;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.feature-stage-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--stage-accent),
+    transparent
+  );
+  opacity: 0.85;
+}
+
+.stage-accent-cyan {
+  --stage-accent: #0ea5e9;
+}
+.stage-accent-emerald {
+  --stage-accent: #10b981;
+}
+.stage-accent-violet {
+  --stage-accent: #8b5cf6;
+}
+.stage-accent-amber {
+  --stage-accent: #f59e0b;
+}
+.stage-accent-rose {
+  --stage-accent: #f43f5e;
+}
+.stage-accent-indigo {
+  --stage-accent: #6366f1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .feature-panel-slot:not([hidden]) .feature-stage-card {
+    animation: featurePanelReveal 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+@keyframes featurePanelReveal {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.stage-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.stage-tag {
+  align-self: flex-start;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.24rem 0.65rem;
+  border-radius: 999px;
+}
+
+.stage-title {
+  font-size: 1.42rem;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  color: var(--vp-c-text-1);
+  margin: 0;
+}
+
+.stage-desc {
+  font-size: 0.94rem;
+  line-height: 1.65;
   color: var(--vp-c-text-2);
   margin: 0;
-  flex: 1;
 }
 
-.bento-pills {
+.stage-desc code {
+  font-size: 0.88em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 5px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+}
+
+.stage-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem;
+  border-radius: 12px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+}
+
+.mini-switcher {
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem;
-  margin-top: 1.25rem;
 }
 
-.bento-chip {
+.mini-pill-btn {
+  padding: 0.42rem 0.82rem;
+  border-radius: 999px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-2);
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.mini-pill-btn:hover {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
+}
+
+.mini-pill-btn:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+}
+
+.mini-pill-btn.active {
+  background: var(--vp-c-brand-soft);
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+.mini-code-box {
+  padding: 0.95rem 0.9rem;
+  border-radius: 10px;
+  background: var(--webdb-term-bg);
+  border: 1px solid var(--webdb-term-border);
+  overflow-x: auto;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.79rem;
+  line-height: 1.62;
+  color: var(--webdb-term-text);
+}
+
+.mini-facts-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+@container (min-width: 480px) {
+  .mini-facts-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.mini-fact {
+  padding: 0.75rem 0.85rem;
+  border-radius: 9px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.mini-fact-label {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vp-c-text-3);
+}
+
+.mini-fact-value {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  line-height: 1.35;
+}
+
+.mini-api-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mini-api-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+}
+
+.mini-api-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.mini-api-chip {
   font-family: var(--vp-font-family-mono);
   font-size: 0.7rem;
   font-weight: 600;
-  padding: 0.22rem 0.6rem;
+  padding: 0.2rem 0.55rem;
   border-radius: 6px;
-  background: var(--vp-c-bg);
+  background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
   color: var(--vp-c-text-2);
+}
+
+.mini-bundle-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.bundle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.bundle-row-muted {
+  margin-top: 0.35rem;
+  color: var(--vp-c-text-3);
+}
+
+.bundle-label {
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+}
+
+.bundle-val {
+  font-family: var(--vp-font-family-mono);
+  font-weight: 700;
+  color: var(--vp-c-text-2);
+}
+
+.bundle-val-win {
+  color: var(--webdb-badge-green-text);
+}
+
+.bundle-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  overflow: hidden;
+}
+
+.bundle-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.bundle-fill-webdb {
+  background: linear-gradient(90deg, #8b5cf6, #10b981);
+}
+
+.bundle-fill-legacy {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+.stage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 0.25rem;
+}
+
+.stage-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.stage-footer-link:hover {
+  text-decoration: underline;
+}
+
+.stage-footer-link:hover .btn-arrow {
+  transform: translateX(3px);
+}
+
+/* ============================================================================
+   5. SPLIT SEARCH & UDF LIVE SHOWCASES
+   ============================================================================ */
+.split-feature-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.split-code-col,
+.split-udf-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+  min-width: 0;
+}
+
+.split-header-left {
+  text-align: left;
+}
+
+.split-title {
+  font-size: 1.95rem;
+}
+
+.split-points-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.split-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--vp-c-text-2);
+}
+
+.split-point strong {
+  color: var(--vp-c-text-1);
+}
+
+.point-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.badge-amber {
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+:global(.dark) .badge-amber {
+  color: #fbbf24;
+}
+
+.badge-rose {
+  color: #e11d48;
+  background: rgba(244, 63, 94, 0.15);
+}
+
+:global(.dark) .badge-rose {
+  color: #fb7185;
+}
+
+.split-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+/* LIVE SEARCH INTERACTIVE CARD */
+.live-search-card,
+.live-udf-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px;
+  padding: 1.35rem;
+  background:
+    radial-gradient(
+      ellipse 90% 45% at 50% 0%,
+      rgba(245, 158, 11, 0.1),
+      transparent 72%
+    ),
+    var(--vp-c-bg-soft);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+  min-width: 0;
+}
+
+.live-udf-card {
+  background:
+    radial-gradient(
+      ellipse 90% 45% at 50% 0%,
+      rgba(244, 63, 94, 0.09),
+      transparent 72%
+    ),
+    var(--vp-c-bg-soft);
+  border-color: rgba(244, 63, 94, 0.32);
+}
+
+.live-card-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.live-pulse-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+  padding: 0.24rem 0.6rem;
+  border-radius: 999px;
+}
+
+:global(.dark) .live-pulse-pill {
+  color: #fbbf24;
+}
+
+.pill-rose-soft {
+  color: #be123c;
+  background: rgba(244, 63, 94, 0.14);
+}
+
+:global(.dark) .pill-rose-soft {
+  color: #fb7185;
+}
+
+.dot-rose {
+  background-color: #f43f5e;
+  box-shadow: 0 0 8px #f43f5e;
+}
+
+.live-pkg-tag {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.7rem;
+  color: var(--vp-c-text-3);
+}
+
+.live-search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.live-search-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+}
+
+.live-search-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.live-search-icon {
+  position: absolute;
+  left: 0.85rem;
+  color: var(--vp-c-text-3);
+  pointer-events: none;
+}
+
+.live-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.68rem 0.9rem 0.68rem 2.45rem;
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-base);
+  font-size: 0.92rem;
+  transition: border-color 0.16s ease;
+}
+
+.live-search-input:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 1px;
+  border-color: #f59e0b;
+}
+
+.live-search-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.live-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.28rem 0.58rem;
+  border-radius: 999px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.71rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.preset-chip small {
+  font-size: 0.64rem;
+  color: var(--vp-c-text-3);
+}
+
+.preset-chip:hover {
+  border-color: #f59e0b;
+  color: var(--vp-c-text-1);
+}
+
+.preset-chip.active {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+:global(.dark) .preset-chip.active {
+  color: #fbbf24;
+}
+
+.fuzzy-toggle-btn {
+  padding: 0.28rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.fuzzy-toggle-btn.active {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--webdb-badge-green-text);
+}
+
+.live-search-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.72rem;
+  color: var(--vp-c-text-3);
+}
+
+.live-timing-pill {
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+}
+
+.live-search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.live-search-item {
+  padding: 0.82rem 0.95rem;
+  border-radius: 10px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.live-hit-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.live-hit-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+  margin: 0;
+  line-height: 1.35;
+}
+
+.live-hit-cat {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.64rem;
+  font-weight: 700;
+  padding: 0.14rem 0.48rem;
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-2);
+  white-space: nowrap;
+}
+
+.live-hit-snippet {
+  font-size: 0.81rem;
+  line-height: 1.48;
+  color: var(--vp-c-text-2);
+  margin: 0;
+}
+
+.live-hit-title :deep(mark),
+.live-hit-snippet :deep(mark) {
+  background: rgba(245, 158, 11, 0.28);
+  color: inherit;
+  padding: 0.04rem 0.2rem;
+  border-radius: 4px;
+  font-weight: 700;
+}
+
+:global(.dark) .live-hit-title :deep(mark),
+:global(.dark) .live-hit-snippet :deep(mark) {
+  background: rgba(251, 191, 36, 0.28);
+  color: #fef3c7;
+}
+
+.live-search-empty {
+  padding: 1rem;
+  border-radius: 10px;
+  background: var(--vp-c-bg);
+  border: 1px dashed var(--vp-c-divider);
+  font-size: 0.84rem;
+  color: var(--vp-c-text-2);
+  text-align: center;
+}
+
+/* LIVE UDF OUTPUT PREVIEW */
+.udf-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.udf-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.udf-control-label {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vp-c-text-3);
+}
+
+.udf-preview-table {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+}
+
+.udf-preview-head,
+.udf-preview-row {
+  display: grid;
+  grid-template-columns: 1.3fr 0.7fr 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.58rem 0.85rem;
+  font-size: 0.8rem;
+}
+
+.udf-preview-head {
+  background: var(--vp-c-bg-mute);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--vp-c-text-3);
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.udf-preview-row + .udf-preview-row {
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.udf-prod-name {
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.udf-prod-orig {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.76rem;
+  color: var(--vp-c-text-3);
+  text-decoration: line-through;
+}
+
+.udf-prod-deal {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: var(--webdb-badge-green-text);
 }
 
 /* ============================================================================
@@ -3115,8 +6255,59 @@ code {
   background: rgba(16, 185, 129, 0.05);
 }
 
+.cmp-cell {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.cmp-icon {
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.68rem;
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 0.12rem;
+}
+
+.cmp-good {
+  color: #059669;
+  background: rgba(16, 185, 129, 0.16);
+}
+
+:global(.dark) .cmp-good {
+  color: #34d399;
+}
+
+.cmp-bad {
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.14);
+}
+
+:global(.dark) .cmp-bad {
+  color: #f87171;
+}
+
+.cmp-warn {
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+:global(.dark) .cmp-warn {
+  color: #fbbf24;
+}
+
+.cmp-neutral {
+  color: var(--vp-c-text-3);
+  background: var(--vp-c-bg-mute);
+}
+
 /* ============================================================================
-   7. LIVE DEMOS STRIP & TOOLS SHOWCASE
+   7. LIVE DEMOS STRIP, TOOLS SHOWCASE & CLOSING CTA BANNER
    ============================================================================ */
 .demos-strip {
   display: grid;
@@ -3128,7 +6319,7 @@ code {
 .demo-preview-card {
   display: flex;
   flex-direction: column;
-  padding: 1.5rem;
+  padding: 1.35rem;
   border-radius: 14px;
   background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
@@ -3136,12 +6327,168 @@ code {
   color: var(--vp-c-text-1);
   transition:
     border-color 0.2s ease,
+    box-shadow 0.2s ease,
     transform 0.2s ease;
 }
 
 .demo-preview-card:hover {
   border-color: var(--vp-c-brand-1);
-  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .demo-preview-card:hover {
+    transform: translateY(-2px);
+  }
+}
+
+.demo-thumb {
+  height: 76px;
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  margin-bottom: 1rem;
+  padding: 0.65rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* Mini Two-Tabs Thumbnail */
+.thumb-tabs {
+  gap: 0.45rem;
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(16, 185, 129, 0.1),
+    var(--vp-c-bg) 75%
+  );
+}
+
+.mini-win {
+  flex: 1;
+  height: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  padding: 0.35rem 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.mini-win-bar {
+  height: 5px;
+  width: 55%;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.55);
+}
+
+.bar-emerald {
+  background: rgba(16, 185, 129, 0.7);
+}
+
+.mini-win-line {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--vp-c-divider);
+}
+
+.w-70 {
+  width: 72%;
+}
+.w-50 {
+  width: 52%;
+}
+
+.mini-sync-beam {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #10b981;
+}
+
+/* Mini Kanban Thumbnail */
+.thumb-kanban {
+  gap: 0.45rem;
+  align-items: stretch;
+  background: radial-gradient(
+    circle at 50% 20%,
+    rgba(14, 165, 233, 0.1),
+    var(--vp-c-bg) 75%
+  );
+}
+
+.mini-kcol {
+  flex: 1;
+  border-radius: 6px;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.mini-kcard {
+  height: 12px;
+  border-radius: 4px;
+  background: var(--vp-c-divider);
+}
+
+.kcard-active {
+  background: rgba(14, 165, 233, 0.42);
+  border: 1px solid rgba(14, 165, 233, 0.65);
+}
+
+.kcard-done {
+  background: rgba(16, 185, 129, 0.3);
+}
+
+/* Mini Search Thumbnail */
+.thumb-search {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 0.25rem;
+  background: radial-gradient(
+    circle at 50% 0%,
+    rgba(245, 158, 11, 0.1),
+    var(--vp-c-bg) 78%
+  );
+}
+
+.mini-sbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.16rem 0.45rem;
+  border-radius: 5px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: var(--vp-c-bg-soft);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.62rem;
+  color: var(--vp-c-text-1);
+}
+
+.mini-smatch {
+  color: #10b981;
+  font-weight: 700;
+}
+
+.mini-srow {
+  font-size: 0.66rem;
+  color: var(--vp-c-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-smark {
+  background: rgba(245, 158, 11, 0.25);
+  color: var(--vp-c-text-1);
+  padding: 0 0.15rem;
+  border-radius: 3px;
+  font-weight: 700;
 }
 
 .demo-preview-tag {
@@ -3264,12 +6611,110 @@ code {
   display: flex;
 }
 
+/* CLOSING CTA BANNER */
+.closing-cta-banner {
+  position: relative;
+  overflow: hidden;
+  margin-top: 3rem;
+  padding: 3.25rem 2rem;
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 32%, var(--vp-c-divider));
+  background:
+    radial-gradient(
+      ellipse 70% 80% at 20% 0%,
+      rgba(37, 99, 235, 0.14),
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 65% 80% at 85% 100%,
+      rgba(16, 185, 129, 0.14),
+      transparent 70%
+    ),
+    var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.closing-cta-grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--vp-c-text-1) 12%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, black 20%, transparent 85%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, black 20%, transparent 85%);
+  pointer-events: none;
+}
+
+.closing-cta-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.closing-cta-title {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.7px;
+  line-height: 1.2;
+  color: var(--vp-c-text-1);
+  margin: 0 0 0.75rem;
+}
+
+.closing-cta-subtitle {
+  font-size: 1.02rem;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+  margin: 0 0 1.75rem;
+}
+
+.closing-cta-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-bottom: 1.25rem;
+}
+
+.closing-install-pill {
+  background: var(--vp-c-bg);
+}
+
 /* ============================================================================
    RESPONSIVE BREAKPOINTS
    ============================================================================ */
 @media (max-width: 1100px) {
   .hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
+  .hero-split {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2.25rem;
+  }
+  .hero-copy {
+    align-items: center;
+    text-align: center;
+  }
+  .hero-eyebrow,
+  .hero-actions,
+  .hero-install-wrap {
+    justify-content: center;
+  }
+  .hero-lead {
+    margin-inline: auto;
+  }
+  .hero-visual-stage {
+    max-width: 600px;
+    width: 100%;
+    margin: 0 auto;
   }
 }
 
@@ -3293,8 +6738,60 @@ code {
   .live-highlights-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-  .bento-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .split-feature-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .split-title {
+    font-size: 1.65rem;
+  }
+  .feature-explorer {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+  .feature-tablist {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.5rem;
+    padding-block-end: 0.35rem;
+    scroll-snap-type: inline proximity;
+    scroll-padding-inline: 2.5rem;
+    scrollbar-width: none;
+    --fade-size: 2.5rem;
+    --fade-dir: right;
+    --fade-start-pos: 0;
+    --fade-end-pos: 100%;
+    mask:
+      linear-gradient(black, black) no-clip subtract,
+      linear-gradient(to var(--fade-dir), black, transparent) var(--fade-start-pos) 0 / var(--webdb-fade-start) 100% no-repeat no-clip,
+      linear-gradient(to var(--fade-dir), transparent, black) var(--fade-end-pos) 0 / var(--webdb-fade-end) 100% no-repeat no-clip;
+    animation: reveal-fade-start linear both, hide-fade-end linear both;
+    animation-timeline: scroll(self inline);
+    animation-range: 0 var(--fade-size), calc(100% - var(--fade-size)) 100%;
+  }
+  .feature-tablist:dir(rtl) {
+    --fade-dir: left;
+    --fade-start-pos: 100%;
+    --fade-end-pos: 0;
+  }
+  .feature-tablist::-webkit-scrollbar {
+    display: none;
+  }
+  .feature-tab {
+    flex: none;
+    width: auto;
+    align-items: center;
+    padding: 0.72rem 1rem;
+    scroll-snap-align: start;
+    border: 1px solid var(--vp-c-divider);
+    background: var(--vp-c-bg-soft);
+  }
+  .feature-tab-teaser {
+    display: none;
+  }
+  .feature-tab[aria-selected="true"]::after {
+    inset: auto 10px 0 10px;
+    border-inline-start: none;
+    border-block-end: 3px solid var(--feature-accent);
   }
   .demos-strip {
     grid-template-columns: minmax(0, 1fr);
@@ -3304,13 +6801,49 @@ code {
   }
 }
 
+@keyframes reveal-fade-start {
+  to {
+    --webdb-fade-start: var(--fade-size);
+  }
+}
+
+@keyframes hide-fade-end {
+  from {
+    --webdb-fade-end: var(--fade-size);
+  }
+}
+
 @media (max-width: 640px) {
   .webdb-landing {
-    padding: 1.5rem 1rem 4rem;
+    padding: 0 0 4rem;
+  }
+  .hero-inner,
+  .landing-content {
+    padding-inline: 1rem;
+  }
+  .hero-section {
+    padding: 2.25rem 0 3.25rem;
   }
   .hero-title {
     font-size: 2.1rem;
     letter-spacing: -1px;
+  }
+  .hero-sync-card {
+    margin: 0.75rem 0 0;
+    width: 100%;
+    align-self: stretch;
+  }
+  .hw-col-id {
+    display: none;
+  }
+  .hw-table {
+    height: auto;
+    min-height: 220px;
+  }
+  .hw-table-head,
+  .hw-table-row {
+    grid-template-columns: 1fr 64px 104px;
+    padding: 0.5rem 0.75rem;
   }
   .hero-actions {
     flex-direction: column;
@@ -3320,25 +6853,61 @@ code {
     width: 100%;
     justify-content: center;
   }
-  .fw-guide-row {
+  .fw-guide-row,
+  .split-actions,
+  .closing-cta-actions {
     flex-direction: column;
     width: 100%;
   }
-  .fw-guide-row .btn {
+  .fw-guide-row .btn,
+  .split-actions .btn,
+  .closing-cta-actions .btn {
     width: 100%;
     justify-content: center;
+  }
+  .closing-cta-banner {
+    padding: 2.25rem 1.25rem;
+  }
+  .closing-cta-title {
+    font-size: 1.55rem;
   }
   .hero-metrics {
     grid-template-columns: minmax(0, 1fr);
   }
-  .bento-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .feature-stage-card {
+    padding: 1.35rem;
   }
-  .bento-wide {
-    grid-column: span 1;
+  .stage-widget {
+    padding: 1rem;
   }
   .fw-selector-bar {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+</style>
+
+<style>
+@property --webdb-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --webdb-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --hero-torch-inner {
+  syntax: "<length-percentage>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+@property --hero-torch-outer {
+  syntax: "<length-percentage>";
+  inherits: true;
+  initial-value: 0px;
 }
 </style>
