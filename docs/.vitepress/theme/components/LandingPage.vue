@@ -100,120 +100,73 @@ const frameworkMeta: Record<
     badge: "Hooks + Context",
     pkg: "@ahmadmoussawi/webdb/react",
     size: "0.72 KB gzip",
-    file: "OrderDashboard.tsx",
+    file: "OrderCounter.tsx",
   },
   vue: {
     label: "Vue 3",
     badge: "Composition API",
     pkg: "@ahmadmoussawi/webdb/vue",
     size: "0.93 KB gzip",
-    file: "OrderDashboard.vue",
+    file: "OrderCounter.vue",
   },
   angular: {
     label: "Angular",
     badge: "Signals + RxJS",
     pkg: "@ahmadmoussawi/webdb/angular",
     size: "0.96 KB gzip",
-    file: "orders.component.ts",
+    file: "order-counter.component.ts",
   },
   vanilla: {
     label: "Plain JS / TS",
     badge: "Zero Dependencies",
     pkg: "@ahmadmoussawi/webdb",
     size: "",
-    file: "live-query.ts",
+    file: "live-count.ts",
   },
 };
 
 const frameworkSnippets: Record<FrameworkTab, string> = {
   react: `import { useLiveQuery } from "@ahmadmoussawi/webdb/react";
 
-export function OrderDashboard({ status }: { status: string }) {
-  // Automatically tracks 'orders' AND joined 'customers' table!
-  const { data: orders, isLoading } = useLiveQuery(
-    () =>
-      db
-        .from("orders")
-        .join("customers", "orders.customer_id", "=", "customers.id")
-        .where("orders.status", "=", status)
-        .orderBy("orders.id", "desc"),
-    [status],
-    { initialData: [] }
-  );
+export function OrderCounter() {
+  // Auto-updates when 'orders' changes (even in another tab)
+  const { data } = useLiveQuery(() => db.from("orders").count("*", "total").first());
 
-  // Mutating 'orders' (here or in another tab) automatically updates 'orders' & re-renders!
-  const markPaid = (id: string) =>
-    db.from("orders").where("id", "=", id).update({ status: "paid" });
-
-  if (isLoading) return <p>Loading live orders...</p>;
-  return <OrderTable rows={orders} onMarkPaid={markPaid} />;
+  return <span>{data?.total ?? 0} orders</span>;
 }`,
 
   vue: `<script setup lang="ts">
-import { ref } from "vue";
 import { useLiveQuery } from "@ahmadmoussawi/webdb/vue";
 
-const statusFilter = ref("paid");
+// Returns a reactive Ref & cleans up automatically on unmount
+const { data } = useLiveQuery(() => db.from("orders").count("*", "total").first());
+<\/script>
 
-// Returns reactive Vue Refs & cleans up automatically onScopeDispose
-const { data: orders, isLoading } = useLiveQuery(
-  () =>
-    db
-      .from("orders")
-      .join("customers", "orders.customer_id", "=", "customers.id")
-      .where("orders.status", "=", statusFilter.value)
-      .orderBy("orders.id", "desc"),
-  [statusFilter], // Re-runs when statusFilter Ref or watched tables mutate
-  { initialData: [] }
-);
+<template>
+  <span>{{ data?.total ?? 0 }} orders</span>
+<\/template>`,
 
-// Inserting or updating a row automatically refreshes the 'orders' Ref!
-const addOrder = (customerId: string, total: number) =>
-  db.insert("orders", { id: crypto.randomUUID(), customer_id: customerId, status: "paid", total });
-<\/script>`,
-
-  angular: `import { Component, signal } from "@angular/core";
+  angular: `import { Component } from "@angular/core";
 import { injectWebDB, liveQuerySignal } from "@ahmadmoussawi/webdb/angular";
 
 @Component({
-  selector: "app-orders",
-  template: \`
-    @for (order of orders.data(); track order.id) {
-      <div>{{ order.customer }} — \${{ order.total }}</div>
-    }
-  \`,
+  selector: "app-order-counter",
+  template: \`<span>{{ count.data()?.total ?? 0 }} orders</span>\`,
 })
-export class OrdersComponent {
+export class OrderCounterComponent {
   private db = injectWebDB();
-  status = signal("paid");
 
-  // Automatically tracks Angular Signals + WebDB tables & cleans up via DestroyRef
-  orders = liveQuerySignal(
-    () => this.db.from("orders").where("status", "=", this.status()),
-    { initialData: [] }
-  );
-
-  // Any insert/update to 'orders' automatically pushes a new value to the 'orders' Signal!
-  markPaid(id: string) {
-    return this.db.from("orders").where("id", "=", id).update({ status: "paid" });
-  }
+  // Tracks WebDB tables & cleans up via DestroyRef
+  count = liveQuerySignal(() => this.db.from("orders").count("*", "total").first());
 }`,
 
-  vanilla: `import { WebDB } from "@ahmadmoussawi/webdb";
+  vanilla: `// Chain .live() onto any query — re-runs on every table write
+const sub = db.from("orders").count("*", "total").live(([row]) => {
+  badge.textContent = \`\${row.total} orders\`;
+});
 
-// 1. Chain .live() directly onto any QueryBuilder
-const sub = db
-  .from("orders")
-  .where("status", "=", "paid")
-  .orderBy("id", "desc")
-  .live((rows) => renderOrders(rows));
-
-// 2. Inserting or modifying a record in 'orders' automatically triggers the live callback!
-await db.insert("orders", {
-  id: crypto.randomUUID(),
-  status: "paid",
-  total: 149.99,
-});`,
+// Any insert into 'orders' triggers the callback automatically
+await db.insert("orders", { id: 1043, status: "paid", total: 149 });`,
 };
 
 function highlightCode(code: string): string {
@@ -262,7 +215,7 @@ function highlightCode(code: string): string {
 
   // 6. Function calls
   html = html.replace(
-    /\b(createTable|createIndex|alterTable|addColumn|from|where|whereNotNull|orderBy|limit|toArray|transaction|insert|insertMany|update|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch|renderOrders|readPages|writePages|fetch|arrayBuffer|subarray|registerFunction|registerBatchedFunction|createSearchIndex|buildQuery|NumberFormat|onBeforeCommit|coalesced|exportBinary|defineMigration)\b(?=\()/g,
+    /\b(createTable|createIndex|alterTable|addColumn|from|where|whereNotNull|orderBy|limit|toArray|first|transaction|insert|insertMany|update|open|useLiveQuery|useLiveQueryData|liveQuerySignal|liveQuery\$|liveQuery|live|join|select|sum|count|groupBy|having|ref|signal|injectWebDB|useWebDB|provideWebDB|randomUUID|catch|renderOrders|readPages|writePages|fetch|arrayBuffer|subarray|registerFunction|registerBatchedFunction|createSearchIndex|buildQuery|NumberFormat|onBeforeCommit|coalesced|exportBinary|defineMigration)\b(?=\()/g,
     (m) => saveToken(`<span class="hl-fn">${m}</span>`),
   );
 
