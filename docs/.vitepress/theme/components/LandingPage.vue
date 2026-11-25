@@ -922,6 +922,7 @@ interface FeatureItem {
   id: FeatureId;
   eyebrow: string;
   title: string;
+  shortTitle: string;
   teaser: string;
   accent: FeatureAccent;
 }
@@ -931,6 +932,7 @@ const featureItems: FeatureItem[] = [
     id: "storage",
     eyebrow: "PLUGGABLE ASYNC STORAGE",
     title: "IndexedDB, OPFS, or Custom Storage",
+    shortTitle: "Storage",
     teaser: "Zero COOP/COEP headers across every runtime",
     accent: "cyan",
   },
@@ -938,6 +940,7 @@ const featureItems: FeatureItem[] = [
     id: "dualcore",
     eyebrow: "NATIVE WEB APIS & DUAL CORE",
     title: "WASM Speed + 100% Pure JS Mode",
+    shortTitle: "WASM + JS",
     teaser: "Lean on browser APIs, swap engines in one line",
     accent: "emerald",
   },
@@ -945,6 +948,7 @@ const featureItems: FeatureItem[] = [
     id: "bundle",
     eyebrow: "SMALL BUNDLE SIZE",
     title: "Tiny & Tree-Shakeable Subpaths",
+    shortTitle: "Bundle Size",
     teaser: "Ship only the engine and adapters you import",
     accent: "violet",
   },
@@ -952,6 +956,7 @@ const featureItems: FeatureItem[] = [
     id: "offline",
     eyebrow: "RELIABLE OFFLINE",
     title: "Crash-Safe Transactions & Sync",
+    shortTitle: "Offline & Sync",
     teaser: "Nested savepoints and coalesced sync changesets",
     accent: "amber",
   },
@@ -959,6 +964,7 @@ const featureItems: FeatureItem[] = [
     id: "snapshots",
     eyebrow: "INSTANT HYDRATION & CLI",
     title: "Compressed Snapshots & Terminal CLI",
+    shortTitle: "Snapshots & CLI",
     teaser: "Hydrate .webdb.gz images and inspect via npx webdb",
     accent: "rose",
   },
@@ -966,6 +972,7 @@ const featureItems: FeatureItem[] = [
     id: "schema",
     eyebrow: "SCHEMA & MIGRATIONS",
     title: "Typed Schemas, Indexes & Versions",
+    shortTitle: "Schemas",
     teaser: "Composite indexes, ALTER TABLE, and clean upgrades",
     accent: "indigo",
   },
@@ -1988,7 +1995,8 @@ const renderedMigrationCode = computed(() =>
             </span>
 
             <span class="feature-tab-copy">
-              <span class="feature-tab-title">{{ item.title }}</span>
+              <span class="feature-tab-title feature-tab-title-full">{{ item.title }}</span>
+              <span class="feature-tab-title feature-tab-title-short">{{ item.shortTitle }}</span>
               <span class="feature-tab-teaser">{{ item.teaser }}</span>
             </span>
           </button>
@@ -2662,7 +2670,12 @@ const renderedMigrationCode = computed(() =>
               :class="['fuzzy-toggle-btn', { active: liveSearchFuzzy }]"
               @click="liveSearchFuzzy = !liveSearchFuzzy"
             >
-              Typo tolerance: {{ liveSearchFuzzy ? "On" : "Off" }}
+              <span class="fuzzy-label-full"
+                >Typo tolerance: {{ liveSearchFuzzy ? "On" : "Off" }}</span
+              >
+              <span class="fuzzy-label-short"
+                >Typos: {{ liveSearchFuzzy ? "On" : "Off" }}</span
+              >
             </button>
           </div>
 
@@ -3060,6 +3073,17 @@ const renderedMigrationCode = computed(() =>
         </div>
       </div>
 
+      <div class="bench-mobile-cta">
+        <a
+          :href="withBase('/benchmark/')"
+          target="_self"
+          class="btn btn-secondary"
+        >
+          <span>Run this benchmark live on your machine</span>
+          <span class="btn-arrow">→</span>
+        </a>
+      </div>
+
       <!-- FULL BENCHMARK RESULTS TABLE -->
       <div class="compare-table-wrap bench-table-wrap">
         <table class="compare-table bench-table">
@@ -3145,7 +3169,7 @@ const renderedMigrationCode = computed(() =>
     <!-- ======================================================================
          6B. 3-WAY COMPARISON TABLE
          ====================================================================== -->
-    <section class="section-block">
+    <section class="section-block compare-section">
       <div class="section-header-center">
         <span class="section-eyebrow">ARCHITECTURAL COMPARISON</span>
         <h2 class="section-title">How WebDB Compares</h2>
@@ -3536,6 +3560,11 @@ const renderedMigrationCode = computed(() =>
   font-family: var(--vp-font-family-base);
   color: var(--vp-c-text-1);
   overflow-x: clip;
+  overflow-wrap: break-word;
+}
+
+.webdb-landing :where(code) {
+  overflow-wrap: anywhere;
 }
 
 .hero-inner,
@@ -3660,6 +3689,36 @@ code {
   );
 }
 
+@media (pointer: coarse), (hover: none), (max-width: 768px) {
+  .hero-torch-grid,
+  .hero-torch-beam {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .ttab,
+  .terminal-copy,
+  .fw-selector-card,
+  .feature-tab,
+  .preset-chip,
+  .fuzzy-toggle-btn {
+    min-block-size: 44px;
+  }
+  .hero-carousel-dots {
+    gap: 0.95rem;
+    padding-block: 1rem;
+  }
+  .carousel-dot {
+    position: relative;
+  }
+  .carousel-dot::after {
+    content: "";
+    position: absolute;
+    inset: -14px -5px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-torch-grid,
   .hero-torch-beam {
@@ -3756,10 +3815,11 @@ code {
 .hero-title {
   position: relative;
   z-index: 1;
-  font-size: 3.35rem;
+  font-size: clamp(2rem, 1.35rem + 2.6vw, 3.35rem);
   font-weight: 800;
   letter-spacing: -1.6px;
   line-height: 1.08;
+  text-wrap: balance;
   margin: 0 0 1.2rem;
   color: var(--vp-c-text-1);
 }
@@ -3783,6 +3843,7 @@ code {
   z-index: 1;
   font-size: 1.12rem;
   line-height: 1.65;
+  text-wrap: pretty;
   color: var(--vp-c-text-2);
   max-width: 540px;
   margin: 0 0 1.9rem;
@@ -4499,9 +4560,10 @@ code {
 }
 
 .section-title {
-  font-size: 2.2rem;
+  font-size: clamp(1.45rem, 1.15rem + 1.3vw, 2.2rem);
   font-weight: 800;
   letter-spacing: -0.8px;
+  text-wrap: balance;
   margin: 0 0 0.85rem;
   color: var(--vp-c-text-1);
 }
@@ -4509,6 +4571,7 @@ code {
 .section-subtitle {
   font-size: 1.05rem;
   line-height: 1.65;
+  text-wrap: pretty;
   color: var(--vp-c-text-2);
   margin: 0;
 }
@@ -4984,13 +5047,14 @@ code {
   color: var(--vp-c-text-1);
 }
 
-/* Non-color selection indicator using border on ::after (no layout shift) */
+/* Non-color selection indicator bar on ::after (no layout shift) */
 .feature-tab[aria-selected="true"]::after {
   content: "";
   position: absolute;
   inset: 10px auto 10px 0;
-  border-inline-start: 3px solid var(--feature-accent);
-  border-radius: 2px;
+  width: 3px;
+  background: var(--feature-accent);
+  border-radius: 999px;
 }
 
 .feature-tab-icon {
@@ -5028,6 +5092,10 @@ code {
   font-weight: 700;
   line-height: 1.3;
   color: var(--vp-c-text-1);
+}
+
+.feature-tab-title-short {
+  display: none;
 }
 
 .feature-tab-teaser {
@@ -5154,6 +5222,7 @@ code {
   font-size: 1.42rem;
   font-weight: 800;
   letter-spacing: -0.4px;
+  text-wrap: balance;
   color: var(--vp-c-text-1);
   margin: 0;
 }
@@ -5161,6 +5230,7 @@ code {
 .stage-desc {
   font-size: 0.94rem;
   line-height: 1.65;
+  text-wrap: pretty;
   color: var(--vp-c-text-2);
   margin: 0;
 }
@@ -5657,6 +5727,10 @@ code {
   cursor: pointer;
 }
 
+.fuzzy-label-short {
+  display: none;
+}
+
 .fuzzy-toggle-btn.active {
   border-color: rgba(16, 185, 129, 0.45);
   background: rgba(16, 185, 129, 0.12);
@@ -6110,6 +6184,10 @@ code {
 .carousel-dot.active {
   width: 26px;
   background: linear-gradient(90deg, #10b981, #06b6d4);
+}
+
+.bench-mobile-cta {
+  display: none;
 }
 
 .bench-table-wrap {
@@ -6569,6 +6647,7 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 1rem;
 }
@@ -6577,6 +6656,8 @@ code {
   font-family: var(--vp-font-family-mono);
   font-size: 0.68rem;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
   padding: 0.22rem 0.6rem;
   border-radius: 999px;
 }
@@ -6658,10 +6739,11 @@ code {
 }
 
 .closing-cta-title {
-  font-size: 2rem;
+  font-size: clamp(1.45rem, 1.2rem + 1vw, 2rem);
   font-weight: 800;
   letter-spacing: -0.7px;
   line-height: 1.2;
+  text-wrap: balance;
   color: var(--vp-c-text-1);
   margin: 0 0 0.75rem;
 }
@@ -6719,9 +6801,6 @@ code {
 }
 
 @media (max-width: 960px) {
-  .hero-title {
-    font-size: 2.65rem;
-  }
   .hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -6780,18 +6859,39 @@ code {
     flex: none;
     width: auto;
     align-items: center;
-    padding: 0.72rem 1rem;
+    gap: 0.5rem;
+    padding: 0.55rem 0.85rem;
     scroll-snap-align: start;
     border: 1px solid var(--vp-c-divider);
     background: var(--vp-c-bg-soft);
   }
+  .feature-tab-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+  }
+  .feature-tab-icon svg {
+    width: 15px;
+    height: 15px;
+  }
+  .feature-tab-title-full {
+    display: none;
+  }
+  .feature-tab-title-short {
+    display: inline;
+    white-space: nowrap;
+    font-size: 0.86rem;
+  }
   .feature-tab-teaser {
     display: none;
   }
+  .feature-tab[aria-selected="true"] {
+    border-color: var(--feature-accent);
+    background: color-mix(in srgb, var(--feature-accent) 11%, var(--vp-c-bg));
+    box-shadow: 0 2px 10px color-mix(in srgb, var(--feature-accent) 14%, transparent);
+  }
   .feature-tab[aria-selected="true"]::after {
-    inset: auto 10px 0 10px;
-    border-inline-start: none;
-    border-block-end: 3px solid var(--feature-accent);
+    display: none;
   }
   .demos-strip {
     grid-template-columns: minmax(0, 1fr);
@@ -6813,6 +6913,224 @@ code {
   }
 }
 
+@media (max-width: 768px) {
+  .hero-section {
+    padding: 2.5rem 0 5rem;
+  }
+  .hero-split {
+    margin-bottom: 0;
+  }
+  .hero-eyebrow {
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    font-size: 0.68rem;
+    padding: 0.34rem 0.78rem;
+    max-width: 100%;
+  }
+  .hero-eyebrow .eyebrow-sep,
+  .hero-eyebrow .eyebrow-text {
+    display: none;
+  }
+  .hero-visual-stage,
+  .hero-install-wrap {
+    display: none;
+  }
+  .hero-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-top: 2rem;
+  }
+  .metric-card {
+    padding: 0.95rem 0.9rem;
+  }
+  .metric-head-row {
+    margin-bottom: 0.5rem;
+  }
+  .metric-pill,
+  .metric-desc {
+    display: none;
+  }
+  .metric-val {
+    font-size: 1.18rem;
+    margin-bottom: 0.2rem;
+  }
+  .metric-label {
+    font-size: 0.8rem;
+    margin-bottom: 0;
+  }
+
+  .section-block {
+    margin-bottom: 6.25rem;
+  }
+  .section-header-center {
+    margin-bottom: 2.25rem;
+  }
+  .section-subtitle {
+    font-size: 0.94rem;
+    line-height: 1.55;
+  }
+
+  .terminal-dots,
+  .terminal-copy,
+  .line-num {
+    display: none;
+  }
+  .terminal-header {
+    padding: 0.55rem 0.75rem;
+    gap: 0.5rem;
+  }
+  .terminal-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    min-width: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+  .terminal-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .ttab {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.35rem 0.65rem;
+    font-size: 0.74rem;
+  }
+  .terminal-body {
+    padding: 0.95rem 0.85rem;
+    font-size: 0.76rem;
+    line-height: 1.6;
+  }
+
+  .fw-selector-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+  .fw-selector-card {
+    padding: 0.65rem 0.75rem;
+    border-radius: 12px;
+  }
+  .fw-selector-top {
+    margin-bottom: 0;
+  }
+  .fw-brand-group {
+    gap: 0.55rem;
+  }
+  .fw-logo-box {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+  .fw-logo-box svg {
+    width: 18px;
+    height: 18px;
+  }
+  .fw-selector-name {
+    font-size: 0.88rem;
+  }
+  .fw-selector-pkg,
+  .fw-selector-size,
+  .live-highlights-grid {
+    display: none;
+  }
+
+  .stage-widget {
+    display: none;
+  }
+  .feature-stage-card {
+    padding: 1.25rem;
+  }
+  .stage-header {
+    margin-bottom: 1rem;
+  }
+  .stage-desc {
+    font-size: 0.92rem;
+  }
+
+  .search-section .split-code-col .terminal-window {
+    display: none;
+  }
+  .live-search-card {
+    padding: 1.1rem;
+  }
+  .live-card-topbar {
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+  .live-search-controls {
+    flex-wrap: nowrap;
+    gap: 0.45rem;
+  }
+  .live-presets {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    min-width: 0;
+    gap: 0.3rem;
+  }
+  .live-presets::-webkit-scrollbar {
+    display: none;
+  }
+  .preset-chip {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.25rem 0.55rem;
+  }
+  .preset-chip small,
+  .preset-chip:nth-child(n + 4) {
+    display: none;
+  }
+  .fuzzy-toggle-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.25rem 0.58rem;
+  }
+  .fuzzy-label-full {
+    display: none;
+  }
+  .fuzzy-label-short {
+    display: inline;
+  }
+
+  .live-udf-card {
+    display: none;
+  }
+
+  .bench-table-wrap {
+    display: none;
+  }
+  .bench-mobile-cta {
+    display: flex;
+    justify-content: center;
+    margin-top: 1.15rem;
+  }
+  .bench-mobile-cta .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .compare-section {
+    display: none;
+  }
+
+  .demo-thumb,
+  .tool-sub {
+    display: none;
+  }
+  .demo-preview-card,
+  .tool-card {
+    padding: 1.25rem;
+  }
+  .closing-cta-banner {
+    margin-top: 4.5rem;
+  }
+  .closing-install-pill {
+    display: none;
+  }
+  .closing-cta-actions {
+    margin-bottom: 0;
+  }
+}
+
 @media (max-width: 640px) {
   .webdb-landing {
     padding: 0 0 4rem;
@@ -6820,30 +7138,6 @@ code {
   .hero-inner,
   .landing-content {
     padding-inline: 1rem;
-  }
-  .hero-section {
-    padding: 2.25rem 0 3.25rem;
-  }
-  .hero-title {
-    font-size: 2.1rem;
-    letter-spacing: -1px;
-  }
-  .hero-sync-card {
-    margin: 0.75rem 0 0;
-    width: 100%;
-    align-self: stretch;
-  }
-  .hw-col-id {
-    display: none;
-  }
-  .hw-table {
-    height: auto;
-    min-height: 220px;
-  }
-  .hw-table-head,
-  .hw-table-row {
-    grid-template-columns: 1fr 64px 104px;
-    padding: 0.5rem 0.75rem;
   }
   .hero-actions {
     flex-direction: column;
@@ -6867,21 +7161,6 @@ code {
   }
   .closing-cta-banner {
     padding: 2.25rem 1.25rem;
-  }
-  .closing-cta-title {
-    font-size: 1.55rem;
-  }
-  .hero-metrics {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .feature-stage-card {
-    padding: 1.35rem;
-  }
-  .stage-widget {
-    padding: 1rem;
-  }
-  .fw-selector-bar {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
